@@ -23,11 +23,12 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "base_url": "https://example.invalid/v1",
         "api_key": "synthetic",
         "supports_websockets": False,
-        "response_mode": sys.argv[1],
         "auth": None,
+        "response_mode": sys.argv[1],
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected
+    assert list(asdict(provider)) == list(expected)
     assert repr(provider) == (
         f"NativeProvider(supports_websockets=False, response_mode={provider.response_mode!r})"
     )

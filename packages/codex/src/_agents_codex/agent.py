@@ -188,8 +188,8 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
-    response_mode: Literal["streaming", "buffered"] = "streaming"
     auth: CodexLogin | None = field(default=None, repr=False)
+    response_mode: Literal["streaming", "buffered"] = "streaming"
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
