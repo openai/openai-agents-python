@@ -158,6 +158,48 @@ CASES = [
 ]
 
 
+@pytest.mark.parametrize("container", ["cntr_existing", {"type": "auto"}])
+@pytest.mark.parametrize(
+    "options,expected_callers",
+    [
+        pytest.param({}, None, id="default"),
+        pytest.param({"allowed_callers": None}, None, id="none"),
+        pytest.param({"allowed_callers": ["direct"]}, ["direct"], id="direct"),
+        pytest.param({"allowed_callers": ["programmatic"]}, ["programmatic"], id="programmatic"),
+        pytest.param(
+            {"allowed_callers": ("direct", "programmatic")},
+            ["direct", "programmatic"],
+            id="both",
+        ),
+    ],
+)
+async def test_code_interpreter_allowed_callers_reach_native_request(
+    responses, container, options, expected_callers
+):
+    responses.respond(assistant_output("Done."))
+    borrowed = provider(responses)
+    async with (
+        timeout(20),
+        borrowed,
+        Agent(
+            instructions="Use the hosted tool.",
+            model="gpt-5.2",
+            provider=borrowed,
+            tools=[CodeInterpreter(container=container, **options)],
+        ).session() as session,
+    ):
+        assert (await (await session.submit("Run the task.")).get_result()).final_output == "Done."
+
+    assert len(responses.requests) == 1
+    expected = {"type": "code_interpreter", "container": container}
+    if expected_callers is not None:
+        expected["allowed_callers"] = expected_callers
+    assert (
+        next(tool for tool in responses.requests[0]["tools"] if tool["type"] == "code_interpreter")
+        == expected
+    )
+
+
 @pytest.mark.parametrize("tool,wire,raw,fields,include", CASES)
 async def test_config_completion_and_portable_history(responses, tool, wire, raw, fields, include):
     responses.respond(completed(raw), assistant_output("Provider finished."))

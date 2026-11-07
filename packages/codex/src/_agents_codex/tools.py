@@ -173,6 +173,8 @@ class CodeInterpreter:
     """
 
     container: str | CodeInterpreterAutoContainer
+    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
+    """Caller modes the provider permits; None retains the provider default."""
 
 
 @dataclass(frozen=True, kw_only=True)
