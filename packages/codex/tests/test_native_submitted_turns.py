@@ -30,6 +30,51 @@ from tests.test_native_mcp_tools import declarations
 from tests.test_review_ii_steering_tail import InjectFirstFrozenTail, ProjectContinuation
 
 
+@pytest.mark.parametrize("mode", ["force", "graceful"])
+async def test_callback_can_cancel_settled_root_but_not_active_or_queued_work(responses, mode):
+    entered, release = asyncio.Event(), asyncio.Event()
+    settled = current = queued = None
+
+    @function_tool
+    async def release_previous() -> str:
+        """Release a previous task without interrupting this callback's work."""
+        entered.set()
+        await release.wait()
+        assert settled is not None and current is not None and queued is not None
+        await settled.cancel(mode=mode)
+        for owned in (current, queued):
+            with pytest.raises(RuntimeError, match="A tool callback cannot interrupt"):
+                await owned.cancel(mode=mode)
+        return "previous task released"
+
+    responses.respond(assistant_output("first done"))
+    responses.respond(function_call("release_previous", {}, "release-previous"))
+    responses.respond(assistant_output("second done"))
+    responses.respond(assistant_output("queued done"))
+    borrowed = provider(responses)
+    try:
+        agent = Agent(
+            instructions="Release previous work.", tools=[release_previous], provider=borrowed
+        )
+        async with timeout(20), agent.session() as session:
+            settled = await session.submit("First task")
+            first = await settled.get_result()
+            assert first.final_output == "first done"
+            current = await session.submit("Release the previous task and finish")
+            try:
+                await entered.wait()
+                queued = await session.submit("Next task", if_busy="queue")
+            finally:
+                release.set()
+            assert (await current.get_result()).final_output == "second done"
+            assert (await queued.get_result()).final_output == "queued done"
+            assert await settled.get_result() is first
+        assert len(responses.requests) == 4
+    finally:
+        release.set()
+        await borrowed.aclose()
+
+
 async def test_busy_submit_is_not_a_steer_and_delayed_controls_cannot_reach_later_work(responses):
     entered, release = asyncio.Event(), asyncio.Event()
     effects = []

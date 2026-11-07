@@ -355,6 +355,9 @@ async def test_storage_cannot_export_even_when_manual_turn_would_otherwise_be_su
     ):
         report = check_all(session.capabilities)
         assert report["manual_suspend"].status == "unsupported"
+        assert report["native_output_manual_restore"].status == "unsupported"
+        with pytest.raises(CapabilityError, match="LocalStorage cannot export SessionState"):
+            session.capabilities.require("native_output_manual_restore")
         with pytest.raises(ValueError, match="LocalStorage|local storage"):
             await session.suspend()
     await borrowed.aclose()

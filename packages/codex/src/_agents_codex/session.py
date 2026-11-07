@@ -387,6 +387,12 @@ class Capabilities:
                 "New root Turns and their automatic successors",
             )
         if feature == "native_output_manual_restore":
+            if s._storage is not None:
+                return FeatureSupport(
+                    "unsupported",
+                    "LocalStorage cannot export SessionState",
+                    "Use the existing local storage profile",
+                )
             return FeatureSupport(
                 "supported",
                 "Settled manual restore preserves the captured native schema",
@@ -5454,7 +5460,6 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _cancel_turn(self, turn: Turn[Any], mode: Literal["graceful", "force"]) -> None:
         self._check_owner(turn)
-        self._check_callback_operation("interrupt its own Session")
         if turn.child_id is not None:
             raise CapabilityError("Use Subagent.try_cancel for a child Turn")
         if mode not in ("graceful", "force"):
@@ -5462,6 +5467,7 @@ class Session(Generic[ContextT, OutputT]):
         for entry in self._pending:
             queued, _ = entry
             if queued.issued is turn:
+                self._check_callback_operation("interrupt its own Session")
                 self._pending.remove(entry)
                 error = TurnStoppedError("Queued work cancelled before admission")
                 if queued.tracing is not None:
@@ -5474,6 +5480,7 @@ class Session(Generic[ContextT, OutputT]):
         # A settled or superseded root owns neither the new turn nor its cells.
         if state is None:
             return
+        self._check_callback_operation("interrupt its own Session")
         self._check_open()
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
