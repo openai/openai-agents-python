@@ -86,6 +86,8 @@ pub struct ThreadOptions {
     session_source: Option<SessionSource>,
     thread_source: Option<ThreadSource>,
     dynamic_tools: Vec<DynamicToolSpec>,
+    #[serde(rename = "_hosted_tools")]
+    hosted_tools: Vec<codex_tools::HostedToolSpec>,
     metrics_service_name: Option<String>,
     parent_trace: Option<W3cTraceContext>,
     environments: Option<Value>,
@@ -201,6 +203,11 @@ impl ThreadOptions {
             self.share_instructions_with_subagents,
         ));
         let mut options = StartThreadOptions::new(configuration);
+        options
+            .thread_extension_init
+            .insert(codex_extension_api::HostedModelTools {
+                tools: self.hosted_tools,
+            });
         anyhow::ensure!(
             self.hosted_verification.is_none() || self.chatgpt_apps.is_none(),
             "Select one explicit Apps declaration"

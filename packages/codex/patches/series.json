@@ -263,7 +263,11 @@
     {
       "path": "0059-preserve-canonical-turn-error.patch",
       "sha256": "67d6e2be6322bf5851f24fd33a0173e2a060edfe1465d943eaac35d79ebd6b42"
+    },
+    {
+      "path": "0060-provider-hosted-tools.patch",
+      "sha256": "6d248c094770df64ffd2c7268ed2a8dfacc50c171c25852466ca79bc6c7df710"
     }
   ],
-  "result_tree": "166743702d52bd12853d25873e44046b37a5bfbc"
+  "result_tree": "7e76aee7eea330ecc21863a5344b5e40ddbcdab3"
 }

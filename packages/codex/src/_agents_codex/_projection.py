@@ -204,9 +204,46 @@ def project_execution_completion(
     return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
 
 
+def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> dict[str, Any] | None:
+    """Keep the complete provider payload alongside its public typed fields."""
+    raw = {
+        key: value
+        for key, value in raw.items()
+        if key != "internal_chat_message_metadata_passthrough"
+    }
+    fields = {
+        "file_search_call": ("queries", "results"),
+        "code_interpreter_call": ("container_id", "code", "outputs"),
+        "image_generation_call": ("result", "revised_prompt"),
+    }.get(raw.get("type", ""))
+    if fields is None or not raw.get("id"):
+        return None
+    return {
+        "type": raw["type"],
+        "id": raw["id"],
+        "turn_id": turn_id,
+        "status": raw["status"],
+        "provider_data": raw,
+        **{key: raw.get(key) for key in fields},
+    }
+
+
 def project_model_output_item(
     native: dict[str, Any], done: bool, turn_id: str | None
 ) -> dict[str, Any] | None:
+    if native["type"] == "hosted_tool_call":
+        return project_hosted_response_item(native["item"], turn_id)
+    if native["type"] == "ImageGeneration":
+        raw = native.get("provider_data")
+        if not isinstance(raw, dict):
+            # Historical Core events predate the complete provider payload.
+            raw = {
+                key: value
+                for key, value in native.items()
+                if key not in {"saved_path", "provider_data"}
+            }
+            raw["type"] = "image_generation_call"
+        return project_hosted_response_item(raw, turn_id)
     if native["type"] != "AgentMessage":
         return project_web_search_item(native, done, turn_id)
     content = []

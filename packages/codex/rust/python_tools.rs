@@ -2919,6 +2919,12 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                 input.thread_store.get_or_init(|| {
                     PythonTools::descendant(&parent_tools, control.incarnation.clone())
                 });
+                if let Some(hosted) = parent
+                    .thread_extension_data()
+                    .get::<codex_extension_api::HostedModelTools>()
+                {
+                    input.thread_store.insert((*hosted).clone());
+                }
             }
             if let Some(tools) = input.thread_store.get::<PythonTools>() {
                 if let Some(control) = input

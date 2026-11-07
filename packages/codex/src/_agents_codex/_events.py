@@ -568,6 +568,33 @@ class WebSearchCallItem(TypedDict):
     action: WebSearchAction | None
 
 
+class _HostedCallItem(TypedDict):
+    id: str
+    turn_id: str
+    status: str
+    provider_data: dict[str, JsonValue]
+    """The complete provider item, including fields unknown to this SDK."""
+
+
+class FileSearchCallItem(_HostedCallItem):
+    type: Literal["file_search_call"]
+    queries: list[str]
+    results: list[dict[str, JsonValue]] | None
+
+
+class CodeInterpreterCallItem(_HostedCallItem):
+    type: Literal["code_interpreter_call"]
+    container_id: str
+    code: str | None
+    outputs: list[dict[str, JsonValue]] | None
+
+
+class ImageGenerationCallItem(_HostedCallItem):
+    type: Literal["image_generation_call"]
+    result: str | None
+    revised_prompt: str | None
+
+
 class FunctionCallItem(TypedDict):
     type: Literal["function_call"]
     id: str
@@ -694,6 +721,9 @@ OutputItem = _PublicTypeAliasType(
         | CloseSubagentCallItem
         | WaitForSubagentsCallItem
         | WebSearchCallItem
+        | FileSearchCallItem
+        | CodeInterpreterCallItem
+        | ImageGenerationCallItem
     ),
 )
 
