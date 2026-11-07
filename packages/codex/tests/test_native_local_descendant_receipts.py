@@ -242,7 +242,7 @@ async def start(
     identity="",
     no_children=False,
     model=DESCENDANT_MODEL,
-    write_policy="strict",
+    write_policy="legacy" if sys.platform == "win32" else "strict",
 ):
     request = {
         "path": str(directory),

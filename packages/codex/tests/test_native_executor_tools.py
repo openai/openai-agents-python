@@ -303,7 +303,10 @@ async def test_current_credentials_roots_and_restored_authority(
         roots.write_bytes(one.ca.read_bytes() + two.ca.read_bytes())
         monkeypatch.setenv("SSL_CERT_FILE", str(roots))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
-        first, second = declaration(one), declaration(two)
+        first, second = (
+            declaration(one, write_policy="legacy"),
+            declaration(two, write_policy="legacy"),
+        )
         agent = Agent(instructions="Use current tools.", provider=provider(responses))
         async with agent.session(environment=first) as a, agent.session(environment=second) as b:
             for session, peer, call_id in ((a, one, "one"), (b, two, "two")):

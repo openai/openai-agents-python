@@ -704,14 +704,26 @@ async def test_executor_example_using_installed_client_surface(
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
-        assert process.returncode == 0, stderr.decode()
-        assert stdout.decode().splitlines() == ["example complete", "completed: Inspect example"]
-        assert "RECIPE_ROOT_VIOLET" in json.dumps(responses.requests[0])
-        offered = declarations(responses.requests[0])
-        assert set(offered) >= {
-            ("functions", "exec_command"),
-            ("functions", "write_stdin"),
-            ("functions", "update_plan"),
-        }
+        if sys.platform == "win32":
+            assert process.returncode != 0
+            assert (
+                "strict executor write policy requires a Linux or macOS executor "
+                "with sandboxed file access"
+            ) in stderr.decode()
+            assert not responses.requests
+            assert not any(request.get("method") == "process/start" for request in peer.requests)
+        else:
+            assert process.returncode == 0, stderr.decode()
+            assert stdout.decode().splitlines() == [
+                "example complete",
+                "completed: Inspect example",
+            ]
+            assert "RECIPE_ROOT_VIOLET" in json.dumps(responses.requests[0])
+            offered = declarations(responses.requests[0])
+            assert set(offered) >= {
+                ("functions", "exec_command"),
+                ("functions", "write_stdin"),
+                ("functions", "update_plan"),
+            }
         assert peer.token not in stdout.decode()
         await peer.wait_disconnected()

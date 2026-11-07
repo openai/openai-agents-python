@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,10 @@ from tests.native_fixtures import (
 
 _FIXTURES = Path(__file__).parent / "fixtures/checkpoint_upgrades"
 _PRODUCER = _FIXTURES / "e283d9a5"
+_POSIX_CAPTURE = pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="Linux captures require compatible POSIX native paths",
+)
 
 
 def checkpoint(name: str) -> SessionState:
@@ -58,6 +63,7 @@ def test_checkpoint_capture_manifest_has_original_producer_identity():
         checkpoint(name)
 
 
+@_POSIX_CAPTURE
 async def test_older_idle_checkpoint_continues_original_history(responses: ResponsesFixture):
     saved = checkpoint("idle")
     original = saved.to_json()
@@ -84,6 +90,7 @@ class LookupArgs(BaseModel):
     key: str
 
 
+@_POSIX_CAPTURE
 async def test_older_manual_checkpoint_preserves_accepted_effect_and_output_contract(
     responses: ResponsesFixture,
 ):
@@ -126,6 +133,7 @@ async def test_older_manual_checkpoint_preserves_accepted_effect_and_output_cont
     assert tool_output(responses.requests[0], "pending-lookup") == "fresh-after-upgrade"
 
 
+@_POSIX_CAPTURE
 async def test_older_code_checkpoint_retains_native_values(responses: ResponsesFixture):
     saved = checkpoint("code")
     responses.respond(
@@ -158,12 +166,17 @@ async def test_older_code_checkpoint_retains_native_values(responses: ResponsesF
     assert len(responses.requests) == 2
 
 
-async def test_checkpoint_upgrade_does_not_relax_format_revision_or_output_checks(
-    responses: ResponsesFixture,
-):
+def test_checkpoint_upgrade_rejects_unknown_envelope_format():
     raw = json.loads((_PRODUCER / "idle.json").read_text())
     with pytest.raises(ValidationError):
         SessionState.from_json(json.dumps({**raw, "format_version": 999}))
+
+
+@_POSIX_CAPTURE
+async def test_checkpoint_upgrade_does_not_relax_revision_or_output_checks(
+    responses: ResponsesFixture,
+):
+    raw = json.loads((_PRODUCER / "idle.json").read_text())
     async with provider(responses) as current:
         agent = Agent(
             instructions="Remember checkpoint history.", model="gpt-5.5", provider=current
@@ -183,3 +196,20 @@ async def test_checkpoint_upgrade_does_not_relax_format_revision_or_output_check
             async with manual.session(state=checkpoint("manual")):
                 pytest.fail("Changed output contract opened")
     assert responses.requests == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native path validation")
+async def test_windows_refuses_original_posix_checkpoint_before_model_work(
+    responses: ResponsesFixture,
+):
+    saved = checkpoint("idle")
+    original = saved.to_json()
+    async with provider(responses) as current:
+        agent = Agent(
+            instructions="Remember checkpoint history.", model="gpt-5.5", provider=current
+        )
+        with pytest.raises(RuntimeError, match="AbsolutePathBuf deserialized without a base path"):
+            async with agent.session(state=saved):
+                pytest.fail("POSIX checkpoint opened on Windows")
+    assert responses.requests == []
+    assert saved.to_json() == original

@@ -319,7 +319,9 @@ async def test_manual_checkpoint_keeps_completed_executor_result_with_current_re
             ],
             provider=provider(responses),
         )
-        async with original_agent.session(environment=declaration(old)) as session:
+        async with original_agent.session(
+            environment=declaration(old, write_policy="legacy")
+        ) as session:
             original = await session.submit("Read and record")
             await next_request(session.interactions(), manual)
             # Executor calls have no public ToolFinished event. Each capture
@@ -351,7 +353,7 @@ async def test_manual_checkpoint_keeps_completed_executor_result_with_current_re
         )
         async with restored_agent.session(
             state=SessionState.from_json(encoded),
-            environment=declaration(current),
+            environment=declaration(current, write_policy="legacy"),
         ) as restored:
             request = await next_request(restored.interactions(), manual)
             assert request.call_id == "manual" and request.arguments.key == "pending"
@@ -483,7 +485,9 @@ async def test_manual_checkpoint_keeps_completed_custom_patch_without_repeating_
             ],
             provider=provider(responses),
         )
-        async with original_agent.session(environment=declaration(old)) as session:
+        async with original_agent.session(
+            environment=declaration(old, write_policy="legacy")
+        ) as session:
             original = await session.submit("Read and write")
             await next_request(session.interactions(), manual)
             assert len(responses.requests) == 2
@@ -508,7 +512,7 @@ async def test_manual_checkpoint_keeps_completed_custom_patch_without_repeating_
         )
         async with restored_agent.session(
             state=SessionState.from_json(encoded),
-            environment=declaration(current),
+            environment=declaration(current, write_policy="legacy"),
         ) as restored:
             request = await next_request(restored.interactions(), manual)
             assert request.call_id == "manual"
