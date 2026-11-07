@@ -167,7 +167,9 @@ async def test_url_consent_waits_for_exact_peer_completion(responses: ResponsesF
             peer.finish.set()
 
 
-async def test_url_completion_timeout_retires_the_issued_request(responses: ResponsesFixture):
+async def test_url_completion_timeout_is_passive_and_expiry_is_explicit(
+    responses: ResponsesFixture,
+):
     peer = CompletionPeer()
     async with timeout(18), peer.serve() as url:
         responses.respond(selected("url-expiry", "ordinary"))
@@ -180,7 +182,13 @@ async def test_url_completion_timeout_retires_the_issued_request(responses: Resp
                 await question.accept_url()
                 with pytest.raises(TimeoutError):
                     await question.wait_url_completion(timeout=0.05)
+                longer = asyncio.create_task(question.wait_url_completion(timeout=8))
+                await asyncio.sleep(0)
+                assert not longer.done()
+                await question.cancel_url_completion()
                 peer.finish.set()
+                with pytest.raises(InteractionExpiredError):
+                    await longer
                 with pytest.raises(InteractionExpiredError):
                     await question.wait_url_completion(timeout=1)
                 assert (await turn.get_result()).final_output == "done"

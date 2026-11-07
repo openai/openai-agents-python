@@ -43,7 +43,9 @@ if TYPE_CHECKING:
         ActionRequested as ActionRequested,
         ApprovalRequest as ApprovalRequest,
         ElicitationRequest as ElicitationRequest,
+        FormRequest as FormRequest,
         Interaction as Interaction,
+        UrlRequest as UrlRequest,
         VerificationProof as VerificationProof,
         VerificationRequest as VerificationRequest,
     )
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
     )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
+        ChildStepContext as ChildStepContext,
         NativeAgents as NativeAgents,
         NativeRole as NativeRole,
     )
@@ -129,6 +132,7 @@ if TYPE_CHECKING:
         WebSearch as WebSearch,
     )
     from .turn import (
+        ChildTurn as ChildTurn,
         PendingRequests as PendingRequests,
         SteeringReceipt as SteeringReceipt,
         Turn as Turn,
@@ -159,6 +163,7 @@ _MODULES = {
     "StopTurn": ".native_interception",
     "ExecutorContext": ".executor",
     "ChildInvocation": ".native_agents",
+    "ChildStepContext": ".native_agents",
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
     "Environment": ".executor",
@@ -178,6 +183,8 @@ _MODULES = {
     "ActionReply": ".manual",
     "ActionRequested": ".manual",
     "ApprovalRequest": ".manual",
+    "FormRequest": ".manual",
+    "UrlRequest": ".manual",
     "ElicitationRequest": ".manual",
     "VerificationRequest": ".manual",
     "VerificationProof": ".manual",
@@ -235,6 +242,7 @@ _MODULES = {
     "Session": ".session",
     "SessionBusyError": ".session",
     "Turn": ".turn",
+    "ChildTurn": ".turn",
     "PendingRequests": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",

@@ -65,6 +65,7 @@ from ._lifecycle import (
     _error_contexts as _error_contexts,
     _join as _join,
     _retain_cleanup_error as _retain_cleanup_error,
+    _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
 from ._native_async import _NativeCompletionError as _NativeCompletionError
@@ -105,7 +106,9 @@ from .manual import (
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
     ElicitationRequest as ElicitationRequest,
+    FormRequest as FormRequest,
     Interaction as Interaction,
+    UrlRequest as UrlRequest,
     VerificationRequest as VerificationRequest,
     _CapturedManual as _CapturedManual,
     _NativeQuestion as _NativeQuestion,
@@ -127,6 +130,7 @@ from .model_context import ModelContextSnapshot, ModelRequestContext
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
+    ChildStepContext as ChildStepContext,
     NativeAgents as NativeAgents,
 )
 from .native_interception import (
@@ -211,6 +215,7 @@ from .turn import (
     PendingRequests as PendingRequests,
     SteeringReceipt as SteeringReceipt,
     Turn as Turn,
+    TurnT as TurnT,
     _child_turn as _child_turn,
     _root_turn as _root_turn,
 )
@@ -687,7 +692,7 @@ class _ManualBoundaryLost(RuntimeError):
 
 
 @dataclass(frozen=True)
-class Completed(Generic[OutputT]):
+class Completed(Generic[OutputT, TurnT]):
     """One completed root or captured child turn.
 
     thread_usage is None when the native runtime has no usage information. It is a
@@ -707,7 +712,7 @@ class Completed(Generic[OutputT]):
     Existing native checkpoint restrictions still apply.
     """
 
-    turn: Turn[OutputT]
+    turn: TurnT
     final_output: OutputT
     thread_usage: TokenUsageInfo | None = None
     state: SessionState | None = field(default=None, repr=False)
@@ -2696,6 +2701,14 @@ class Session(Generic[ContextT, OutputT]):
                         # The manager may have exited while orphan home cleanup
                         # still needs the implicit provider's supported aclose().
                         cast(Any, error).provider = provider
+            if (
+                provider is not None
+                and not vars(provider).get("_closed", False)
+                and (owned_provider or opening.lease is not None)
+            ):
+                cast(Any, error).cleanup = provider
+                if owned_provider:
+                    cast(Any, error).provider = provider
             raise
 
     def __init__(
@@ -2788,6 +2801,11 @@ class Session(Generic[ContextT, OutputT]):
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
+        self._scope_close_task: asyncio.Task[None] | None = None
+        self._interaction_handler: _InteractionHandler | None = None
+        self._interaction_error: BaseException | None = None
+        self._sync_cleanup_owner = _sync_run.get()
+        self._sync_cleanup_deferred = False
         self._observations = _ObservationBuffer(self.id)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
@@ -2838,6 +2856,37 @@ class Session(Generic[ContextT, OutputT]):
         return EventStream(
             self._observations, after=after, _include_execution_details=include_execution_details
         )
+
+    async def respond(self, reply: ActionReply[Any]) -> None:
+        """Deliver a prepared reply to its exact still-live request in this Session.
+
+        Preparing a reply does not reserve its request. Another responder can
+        consume the grant first; delivery then raises InteractionExpiredError.
+        """
+        self._check_open()
+        self._check_callback_operation("respond to its own Session")
+        if not isinstance(reply, ActionReply):
+            raise TypeError("respond requires a live request.reply(value)")
+        request = reply._request
+        if request._session() is not self:
+            raise InteractionExpiredError("Reply belongs to a different Session")
+        if isinstance(request, UrlRequest):
+            if reply._value is _URL_ACCEPT:
+                await request.accept_url()
+            elif reply._value is None:
+                await request.decline()
+            else:
+                raise TypeError("URL requests accept consent or decline, not form values")
+        elif isinstance(request, FormRequest):
+            if reply._value is None:
+                await request.decline()
+            else:
+                # reply() captured and validated detached JSON; enqueue rechecks authority.
+                await request._enqueue_form(reply._value)
+        elif isinstance(request, VerificationRequest) and reply._value is None:
+            await request.decline()
+        else:
+            await request.respond(reply._value)
 
     async def pending_interactions(self) -> tuple[Interaction, ...]:
         """Read fresh, still-live requests from this Session and its children."""
@@ -2926,11 +2975,6 @@ class Session(Generic[ContextT, OutputT]):
                 if future.result():
                     return
                 raise InteractionExpiredError("URL request is expired") from None
-            key = (question._message["server_name"], question._message["id"])
-            if self._url_completions.get(key) is question and not future.done():
-                self._settle_url_completion(question, False)
-                # Own cancellation through its receipt, even if this waiter is cancelled.
-                await _join(asyncio.create_task(self._cancel_url_completion(question)))
             raise TimeoutError from None
         if not completed:
             raise InteractionExpiredError("URL request is expired")
@@ -3083,6 +3127,8 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_open(self) -> None:
         self._check_loop()
+        if self._interaction_error is not None:
+            raise self._interaction_error
         if (
             self._closing
             or self._closed
@@ -3636,7 +3682,8 @@ class Session(Generic[ContextT, OutputT]):
                     and state.tracing is not None
                 ):
                     tracing_context = state.tracing.context
-                if invocation not in state.manual_inputs:
+                new_input = invocation not in state.manual_inputs
+                if new_input:
                     with (
                         _clear_current(),
                         _owned_span("manual input validation", "validation", tracing_context),
@@ -3661,7 +3708,7 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     state.manual_inputs.pop(invocation, None)
                     continue
-                return entry.request(
+                request = entry.request(
                     grant,
                     invocation,
                     marker["slot"],
@@ -3673,6 +3720,9 @@ class Session(Generic[ContextT, OutputT]):
                     model=message.get("_sdk_model"),
                     tracing_context=tracing_context,
                 )
+                if new_input:
+                    self._dispatch_interaction(request, state)
+                return request
         except BaseException:
             # Do not retain validator frames or private native arguments.
             if state is not None and not state.stopping and not state.failure.done():
@@ -4167,6 +4217,200 @@ class Session(Generic[ContextT, OutputT]):
             self._sealing = False
             change.release()
 
+    async def _answer_interaction(
+        self,
+        event: Interaction,
+        owner: _CallbackState,
+        tracing_owner: SpanContext | None,
+        handler: _InteractionHandler,
+        *,
+        stopping: Callable[[], bool],
+        failure: asyncio.Future[BaseException] | None = None,
+        session_lifetime: bool = False,
+    ) -> None:
+        # Register this task with its exact owner before an eager factory can
+        # enter application code or allow native terminal settlement.
+        await asyncio.sleep(0)
+        skipped = False
+
+        def admitted() -> bool:
+            nonlocal skipped
+            allowed = (
+                not stopping()
+                and not self._closing
+                and not owner.stopping
+                and not owner.failure.done()
+                and not owner.terminal.done()
+                and (
+                    self._native._check_manual_tool(event._grant)
+                    if isinstance(event, ActionRequested)
+                    else owner.questions.get(id(event)) is event
+                )
+            )
+            if allowed and isinstance(event, VerificationRequest):
+                allowed = event._registration is self._hosted_verification and (
+                    event.subagent_id is not None
+                    or self._native._check_elicitation_pending(
+                        event.server_name, event._message["id"]
+                    )
+                )
+            # _call_callback can refuse entry before a queued worker or
+            # its returned awaitable starts. That is not a handler result.
+            if not allowed:
+                skipped = True
+            return allowed
+
+        async def invoke_body() -> None:
+            try:
+                assert handler is not None
+                if not admitted():
+                    return
+                if event.subagent_id is not None and not isinstance(event, ActionRequested):
+                    if (
+                        not await self._native._child_question_pending(
+                            event._message["_sdk_question_id"]
+                        )
+                        or not admitted()
+                    ):
+                        return
+                scope = _Invocation(self)
+                token = _invocation.set(scope)
+                try:
+                    if isinstance(event, VerificationRequest):
+                        provider_failed = False
+                        answer = None
+                        try:
+                            answer = await _call_callback(handler, admitted, event)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            provider_failed = True
+                        if provider_failed:
+                            raise InteractionRequired("Verification provider failed")
+                    else:
+                        answer = await _call_callback(handler, admitted, event)
+                    # The handler's authority ends here. Keep this inactive
+                    # frame above any enclosing callback while the SDK
+                    # delivers; validators still retain the parent guards.
+                    scope.active = False
+                    if skipped:
+                        return
+                    if not isinstance(answer, ActionReply) or answer._request is not event:
+                        raise TypeError(
+                            "on_interaction must return a reply to the interaction it received"
+                        )
+                    # Another cursor may have answered while the handler ran.
+                    if not admitted():
+                        return
+                    try:
+                        await self.respond(answer)
+                    except InteractionExpiredError:
+                        # A native child may retire during accepted delivery.
+                        if not isinstance(owner, _ChildCallbacks):
+                            raise
+                        if isinstance(event, ActionRequested):
+                            if self._native._check_manual_tool(event._grant):
+                                raise
+                        elif await self._native._child_question_pending(
+                            event._message["_sdk_question_id"]
+                        ):
+                            raise
+                finally:
+                    scope.active = False
+                    _invocation.reset(token)
+            except BaseException as error:
+                if isinstance(error, asyncio.CancelledError) and (
+                    stopping() or self._closing or owner.stopping or owner.terminal.done()
+                ):
+                    return
+                if failure is not None and not failure.done():
+                    failure.set_result(error)
+                if session_lifetime and event.submission_id is None:
+                    self._fail_interaction_session(error)
+                    return
+                if not owner.stopping and not owner.failure.done():
+                    owner.failure.set_result(error)
+                elif not isinstance(error, asyncio.CancelledError):
+                    owner.retain_cleanup_error(error)
+
+        async def invoke() -> None:
+            context = (
+                event._tracing_context
+                if isinstance(event, ActionRequested)
+                else tracing_owner._handle
+                if tracing_owner is not None
+                else None
+            )
+            if context is None and isinstance(owner, _Submission) and owner.tracing is not None:
+                context = owner.tracing.context
+            with (
+                _clear_current(),
+                _owned_span("interaction callback", "callback", context) as tracing,
+            ):
+                await invoke_body()
+                if tracing is not None and owner.failure.done():
+                    tracing.set_outcome(status="error", category="callback_error")
+
+        pending = asyncio.create_task(invoke())
+        try:
+            # The owner also waits for this callback. Watch its native
+            # terminal directly so an independently answered grant cannot
+            # strand a handler that is still waiting for application input.
+            await asyncio.wait((pending, owner.terminal), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            cancel_once(pending)
+            await _join(pending)
+
+    def _fail_interaction_session(self, error: BaseException) -> None:
+        if self._interaction_error is None:
+            self._interaction_error = error
+        self._broken = True
+        self._discard_pending(error)
+        for state in (self._active, *self._child_callbacks.values()):
+            if state is not None and not state.failure.done():
+                state.failure.set_result(error)
+        self._observations.notify()
+
+    def _dispatch_interaction(self, event: Interaction, owner: _CallbackState) -> None:
+        handler = self._interaction_handler
+        if (
+            handler is None
+            or self._closing
+            or owner.stopping
+            or owner.failure.done()
+            or owner.terminal.done()
+        ):
+            return
+        tracing = event._tracing if isinstance(event, _NativeQuestion) else None
+        task = _create_task(
+            self._answer_interaction(
+                event,
+                owner,
+                tracing,
+                handler,
+                stopping=lambda: self._closing,
+                session_lifetime=True,
+            )
+        )
+        owner.add_callback(task)
+
+    def _start_interaction_handler(self, handler: _InteractionHandler) -> None:
+        """Capture the handler and visit already-issued restored requests once."""
+        pending: list[tuple[Interaction, _CallbackState]] = []
+        for owner in (self._active, *self._child_callbacks.values()):
+            if owner is None or owner.handle is None:
+                continue
+            seen: set[int] = set()
+            while request := self._manual_request(owner.handle.submission_id, seen):
+                seen.add(request._invocation)
+                pending.append((request, owner))
+            pending.extend(
+                (cast(Interaction, question), owner) for question in owner.questions.values()
+            )
+        self._interaction_handler = handler
+        for event, owner in pending:
+            self._dispatch_interaction(event, owner)
+
     async def _run_with_interactions(
         self,
         submission: Turn[OutputT],
@@ -4179,144 +4423,6 @@ class Session(Generic[ContextT, OutputT]):
         failure: asyncio.Future[BaseException] = self._loop.create_future()
         callbacks: list[asyncio.Task[None]] = []
         stopping = False
-
-        async def answer(
-            event: Interaction, owner: _CallbackState, tracing_owner: SpanContext | None
-        ) -> None:
-            skipped = False
-
-            def admitted() -> bool:
-                nonlocal skipped
-                allowed = (
-                    not stopping
-                    and not self._closing
-                    and not owner.stopping
-                    and not owner.failure.done()
-                    and not owner.terminal.done()
-                    and (
-                        self._native._check_manual_tool(event._grant)
-                        if isinstance(event, ActionRequested)
-                        else owner.questions.get(id(event)) is event
-                    )
-                )
-                if allowed and isinstance(event, VerificationRequest):
-                    allowed = event._registration is self._hosted_verification and (
-                        event.subagent_id is not None
-                        or self._native._check_elicitation_pending(
-                            event.server_name, event._message["id"]
-                        )
-                    )
-                # _call_callback can refuse entry before a queued worker or
-                # its returned awaitable starts. That is not a handler result.
-                if not allowed:
-                    skipped = True
-                return allowed
-
-            async def invoke_body() -> None:
-                try:
-                    assert handler is not None
-                    if not admitted():
-                        return
-                    if event.subagent_id is not None and not isinstance(event, ActionRequested):
-                        if (
-                            not await self._native._child_question_pending(
-                                event._message["_sdk_question_id"]
-                            )
-                            or not admitted()
-                        ):
-                            return
-                    scope = _Invocation(self)
-                    token = _invocation.set(scope)
-                    try:
-                        if isinstance(event, VerificationRequest):
-                            provider_failed = False
-                            answer = None
-                            try:
-                                answer = await _call_callback(handler, admitted, event)
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception:
-                                provider_failed = True
-                            if provider_failed:
-                                raise InteractionRequired("Verification provider failed")
-                        else:
-                            answer = await _call_callback(handler, admitted, event)
-                        # The handler's authority ends here. Keep this inactive
-                        # frame above any enclosing callback while the SDK
-                        # delivers; validators still retain the parent guards.
-                        scope.active = False
-                        if skipped:
-                            return
-                        if not isinstance(answer, ActionReply) or answer._request is not event:
-                            raise TypeError(
-                                "on_interaction must return a reply to the interaction it received"
-                            )
-                        # Another cursor may have answered while the handler ran.
-                        if not admitted():
-                            return
-                        if isinstance(event, ElicitationRequest) and answer._value is _URL_ACCEPT:
-                            await event.accept_url()
-                        elif (
-                            isinstance(event, (ElicitationRequest, VerificationRequest))
-                            and answer._value is None
-                        ):
-                            await event.decline()
-                        else:
-                            try:
-                                await event.respond(answer._value)
-                            except InteractionExpiredError:
-                                # A native owner may retire while SDK delivery awaits its receipt.
-                                if not isinstance(owner, _ChildCallbacks):
-                                    raise
-                                if isinstance(event, ActionRequested):
-                                    if self._native._check_manual_tool(event._grant):
-                                        raise
-                                elif await self._native._child_question_pending(
-                                    event._message["_sdk_question_id"]
-                                ):
-                                    raise
-                    finally:
-                        scope.active = False
-                        _invocation.reset(token)
-                except BaseException as error:
-                    if isinstance(error, asyncio.CancelledError) and (
-                        stopping or self._closing or owner.stopping or owner.terminal.done()
-                    ):
-                        return
-                    if not failure.done():
-                        failure.set_result(error)
-                    if not owner.stopping and not owner.failure.done():
-                        owner.failure.set_result(error)
-                    elif not isinstance(error, asyncio.CancelledError):
-                        owner.retain_cleanup_error(error)
-
-            async def invoke() -> None:
-                context = (
-                    event._tracing_context
-                    if isinstance(event, ActionRequested)
-                    else tracing_owner._handle
-                    if tracing_owner is not None
-                    else None
-                )
-                if context is None and isinstance(owner, _Submission) and owner.tracing is not None:
-                    context = owner.tracing.context
-                with (
-                    _clear_current(),
-                    _owned_span("interaction callback", "callback", context) as tracing,
-                ):
-                    await invoke_body()
-                    if tracing is not None and owner.failure.done():
-                        tracing.set_outcome(status="error", category="callback_error")
-
-            pending = asyncio.create_task(invoke())
-            try:
-                # The owner also waits for this callback. Watch its native
-                # terminal directly so an independently answered grant cannot
-                # strand a handler that is still waiting for application input.
-                await asyncio.wait((pending, owner.terminal), return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                cancel_once(pending)
-                await _join(pending)
 
         async def consume() -> None:
             async for event in self.interactions():
@@ -4389,7 +4495,16 @@ class Session(Generic[ContextT, OutputT]):
                         continue
                     return
                 tracing_owner = event._tracing if isinstance(event, _NativeQuestion) else None
-                task = asyncio.create_task(answer(event, owner, tracing_owner))
+                task = asyncio.create_task(
+                    self._answer_interaction(
+                        event,
+                        owner,
+                        tracing_owner,
+                        handler,
+                        stopping=lambda: stopping,
+                        failure=failure,
+                    )
+                )
                 callbacks.append(task)
                 owner.add_callback(task)
 
@@ -6694,6 +6809,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
                 question = _question(self, message, state.handle)
                 state.questions[id(question)] = question
+                self._dispatch_interaction(question, state)
                 self._observations.notify()
                 state.add_callback(
                     asyncio.create_task(self._expire_child_question(state, question))
@@ -7033,12 +7149,19 @@ class Session(Generic[ContextT, OutputT]):
             if budget is not None:
                 budget.check()
             if callback is not None:
-                selection = await _call_callback(
-                    callback,
-                    active,
-                    state.handle if child else self.active_turn or state.handle,
-                    step_index=index,
-                )
+                if child:
+                    assert isinstance(state.handle, ChildInvocation)
+                    selection = await _call_callback(
+                        callback,
+                        active,
+                        ChildStepContext(
+                            context=self._context, child=state.handle, step_index=index
+                        ),
+                    )
+                else:
+                    selection = await _call_callback(
+                        callback, active, self.active_turn or state.handle, step_index=index
+                    )
             if not active():
                 return
             if isinstance(selection, StopTurn):
@@ -7520,6 +7643,7 @@ class Session(Generic[ContextT, OutputT]):
                         state.failure.set_result(error)
                     else:
                         state.questions[id(question)] = question
+                        self._dispatch_interaction(question, state)
                         self._observations.notify()
                 elif (
                     kind
@@ -8742,6 +8866,45 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             self._sealing = False
             self._observations.notify()
+
+    async def aclose(self) -> None:
+        """Join complete Session cleanup, including its original Environment scope.
+
+        Repeating a successful close is a no-op. Retry after a transient failure;
+        the original lease task owns Environment exit. An error with remaining
+        cleanup exposes that same owner as error.cleanup. run_sync retains its
+        loop until this obligation completes.
+        """
+        if self._closed and self._environment_lease is None:
+            return
+        if asyncio.get_running_loop() is not self._loop:
+            owner = self._sync_cleanup_owner
+            if owner is None or not self._sync_cleanup_deferred:
+                self._check_loop()
+            assert owner is not None
+            await _join(asyncio.create_task(asyncio.to_thread(owner.recover, self.aclose)))
+            return
+        self._check_callback_operation("close its own Session")
+        task = self._scope_close_task
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = _create_task(self._exit_scope())
+            self._scope_close_task = task
+        try:
+            await _join(task)
+            if self._interaction_error is not None:
+                raise self._interaction_error
+        except BaseException as error:
+            if not self._closed or self._environment_lease is not None:
+                cast(Any, error).cleanup = self
+                if self._sync_cleanup_owner is not None and not self._sync_cleanup_deferred:
+                    self._sync_cleanup_deferred = True
+                    self._sync_cleanup_owner.deferred += 1
+            raise
+        finally:
+            if self._closed and self._sync_cleanup_deferred:
+                assert self._sync_cleanup_owner is not None
+                self._sync_cleanup_deferred = False
+                self._sync_cleanup_owner.deferred -= 1
 
     async def _aclose(self) -> None:
         """Stop new work and join the native runtime, reader, and callbacks.

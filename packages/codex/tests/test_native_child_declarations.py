@@ -138,7 +138,7 @@ def test_native_agents_before_step_is_optional_callable_and_private_in_repr() ->
     with pytest.raises(TypeError, match="NativeAgents before_step must be callable"):
         NativeAgents(before_step="select")
 
-    def callback(child, *, step_index):
+    def callback(step):
         return []
 
     declaration = NativeAgents(before_step=callback)

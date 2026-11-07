@@ -390,7 +390,7 @@ async def test_host_child_reply_wins_during_sdk_delivery(tmp_path, monkeypatch):
     allow_alpha, allow_beta, children_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
     completed = set()
     events, tasks = {}, {}
-    run = Session._run_with_interactions
+    start = Session._start_interaction_handler
 
     async def hold_root(event):
         for part in event.get("item", {}).get("content", []):
@@ -404,7 +404,7 @@ async def test_host_child_reply_wins_during_sdk_delivery(tmp_path, monkeypatch):
             if text == "root complete":
                 await children_done.wait()
 
-    async def instrument(session, submission, handler, *, return_state=False, pause_manual=()):
+    def instrument(session, handler):
         native = session._native
 
         class HeldChild:
@@ -423,11 +423,9 @@ async def test_host_child_reply_wins_during_sdk_delivery(tmp_path, monkeypatch):
                 return await native._child_turn(child_id)
 
         monkeypatch.setattr(session, "_native", HeldChild())
-        return await run(
-            session, submission, handler, return_state=return_state, pause_manual=pause_manual
-        )
+        return start(session, handler)
 
-    monkeypatch.setattr(Session, "_run_with_interactions", instrument)
+    monkeypatch.setattr(Session, "_start_interaction_handler", instrument)
     peer.before_event = hold_root
     async with (
         timeout(35),

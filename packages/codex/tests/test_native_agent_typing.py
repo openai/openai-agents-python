@@ -17,6 +17,8 @@ from agents import (
     ChecklistState,
     CheckpointStatus,
     ChildInvocation,
+    ChildStepContext,
+    ChildTurn,
     CompactionContext,
     Completed,
     CompletionContext,
@@ -175,10 +177,11 @@ async def native_child_types(session: Session[None, str]) -> None:
     async for child in session.subagents():
         assert_type(child, Subagent)
         turn = child.turn
-        assert_type(turn, Turn[str] | None)
-        assert_type(await child.start("hello"), Turn[str])
+        assert_type(turn, ChildTurn | None)
+        assert_type(await child.start("hello"), ChildTurn)
         if turn is not None:
-            assert_type(await turn.get_result(), Completed[str])
+            assert_type(await turn.get_result(), Completed[str, ChildTurn])
+            assert_type((await turn.get_result()).turn, ChildTurn)
             assert_type(turn.events(), EventStream)
             assert_type(await turn.steer("detail"), None)
             assert_type(await child.try_cancel(turn), bool)
@@ -250,6 +253,10 @@ def composition_types(environment: EnvironmentSource[AuditContext]) -> None:
                 assert_type(request, agents.ElicitationRequest)
                 assert_type(request.call, agents.ToolCallInfo | None)
                 assert_type(request.subagent_id, str | None)
+                if request.mode == "url":
+                    assert_type(request, agents.UrlRequest)
+                    return request.reply_url_accept()
+                assert_type(request, agents.FormRequest)
                 return request.reply({"answer": outer.context.tenant})
 
         result = await child.run(
@@ -721,8 +728,10 @@ async def stop_step_async(current: Turn[Any], *, step_index: int) -> StopTurn | 
     return StopTurn("Step limit reached") if step_index >= 3 else [lookup.ref]
 
 
-async def stop_child_step(child: ChildInvocation, *, step_index: int) -> StopTurn | None:
-    return StopTurn("Step limit reached") if step_index >= 3 else None
+async def stop_child_step(step: ChildStepContext[Application]) -> StopTurn | None:
+    assert_type(step.context, Application)
+    assert_type(step.child, ChildInvocation)
+    return StopTurn("Step limit reached") if step.step_index >= 3 else None
 
 
 async def step_stop_types(session: Session[Application, Answer]) -> None:
@@ -736,7 +745,7 @@ async def step_stop_types(session: Session[Application, Answer]) -> None:
         agent.run_sync("stop", context=Application("a"), before_step=stop_step),
         Completed[Answer],
     )
-    assert_type(NativeAgents(before_step=stop_child_step), NativeAgents)
+    assert_type(NativeAgents(before_step=stop_child_step), NativeAgents[Application])
 
 
 async def prepared_request_types(agent: Agent[None, str], session: Session[None, str]) -> None:

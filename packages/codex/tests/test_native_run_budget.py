@@ -289,7 +289,10 @@ async def test_final_overshoot_can_save_idle_and_start_a_fresh_budget(
         assert first.final_output == "First"
         assert first.state is not None
         assert first.state.native_continuation is None
-        assert first.thread_usage is not None and first.thread_usage.last_token_usage.total_tokens == 14
+        assert (
+            first.thread_usage is not None
+            and first.thread_usage.last_token_usage.total_tokens == 14
+        )
         second = await asyncio.to_thread(agent.run_sync, "second", state=first.state, budget=budget)
         assert second.final_output == "Second"
     assert len(responses.requests) == 2

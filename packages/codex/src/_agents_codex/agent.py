@@ -566,6 +566,7 @@ class Agent(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        on_interaction: _InteractionHandler | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -585,6 +586,7 @@ class Agent(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        on_interaction: _InteractionHandler | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -604,6 +606,7 @@ class Agent(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        on_interaction: _InteractionHandler | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -623,8 +626,15 @@ class Agent(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        on_interaction: _InteractionHandler | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        on_interaction handles supported live requests for this Session's entire
+        lifetime, including requests without Turn IDs. Return the exact request's
+        reply. A failure affects the identified Turn, or the Session for an
+        unscoped request. Closing joins started handlers. The handler is registered
+        after supported opening completes; it does not enable startup prompts.
 
         parent_trace parents startup and defaults every new root or restored manual
         continuation. None supplies no explicit parent. Pass a fresh worker
@@ -694,6 +704,8 @@ class Agent(Generic[ContextT, OutputT]):
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
+        if on_interaction is not None and not callable(on_interaction):
+            raise TypeError("on_interaction must be callable or None")
         from .session import Session
         from .telemetry import _capture
 
@@ -724,18 +736,22 @@ class Agent(Generic[ContextT, OutputT]):
                 ),
             )
             session._trace_context = captured.context
+            if on_interaction is not None:
+                session._start_interaction_handler(on_interaction)
             try:
                 yield session
             except BaseException as error:
                 lease = session._environment_lease
-                await _close_after_error(error, session._exit_scope)
+                await _close_after_error(error, session.aclose)
+                if not session._closed or session._environment_lease is not None:
+                    cast(Any, error).cleanup = session
                 if lease is not None:
                     lease.raise_if_interrupted(error)
                 raise
             else:
                 lease = session._environment_lease
                 try:
-                    await session._exit_scope()
+                    await session.aclose()
                 except BaseException as error:
                     if lease is not None:
                         lease.raise_if_interrupted(error)
@@ -856,8 +872,9 @@ class Agent(Generic[ContextT, OutputT]):
         directly or through an awaitable. The SDK validates and delivers it.
         For approvals, use reply("allow_once") or reply("deny"). For forms,
         use reply(values); reply(None) declines a form or URL request.
-        Native replies acknowledge enqueue only. Direct Session callers use
-        request.respond/decline. Handlers may run concurrently; synchronous
+        Native replies acknowledge enqueue only. Direct Session callers can use
+        session.respond(request.reply(value)) or request-specific response methods.
+        Handlers may run concurrently; synchronous
         handlers run in worker threads. The SDK joins them before closing.
         Without a handler, a plain or native-output Python/manual-only run can complete or
         raise InteractionRequired with a checkpoint at a settled manual call.
@@ -978,6 +995,8 @@ class Agent(Generic[ContextT, OutputT]):
             # Capture before opening. An override may expose the Session and its
             # observations, including when it delegates to the original method.
             session_factory = self.session
+            if on_interaction is not None:
+                options["on_interaction"] = on_interaction
             if parent_trace is not None:
                 options["parent_trace"] = _trace_context(parent_trace)
             if trace_options is not None:
@@ -1043,7 +1062,9 @@ class Agent(Generic[ContextT, OutputT]):
                             "no local storage, environment, children or before_step. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
-                session._fail_unhandled_questions = on_interaction is None and not pause_manual
+                session._fail_unhandled_questions = (
+                    session._interaction_handler is None and not pause_manual
+                )
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -1059,7 +1080,7 @@ class Agent(Generic[ContextT, OutputT]):
                     submission = await session.submit(
                         input, tools=tools, before_step=before_step, **submit_options
                     )
-                if on_interaction is not None or pause_manual:
+                if session._interaction_handler is None and pause_manual:
                     return await session._run_with_interactions(
                         submission,
                         on_interaction,

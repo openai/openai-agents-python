@@ -110,7 +110,7 @@ def test_package_root_has_one_public_surface():
     assert [field.name for field in fields(Completed)] == [
         "turn",
         "final_output",
-        "usage",
+        "thread_usage",
         "state",
         "repair_attempts",
     ]
