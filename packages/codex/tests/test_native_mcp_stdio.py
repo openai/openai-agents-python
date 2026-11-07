@@ -245,7 +245,7 @@ async def test_native_stdio_reconnect_does_not_replay_uncertain_call(
         "--label",
         receipt,
         "--writable",
-        approval_mode="approve",
+        approval_mode="preapproved",
     )
     for key in (uncertain, later):
         event = function_call("search", {"key": key}, key)

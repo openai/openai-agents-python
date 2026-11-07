@@ -160,7 +160,7 @@ async def test_manual_run_releases_following_serial_mcp_call(
             provider=provider(responses),
             tools=[
                 manual,
-                HttpMCP(name="docs", url=url, tools=["search"], approval_mode="approve"),
+                HttpMCP(name="docs", url=url, tools=["search"], approval_mode="preapproved"),
             ],
         )
 

@@ -1,6 +1,7 @@
 # pyright: strict, reportUnnecessaryTypeIgnoreComment=true
 """Mixed native MCP declarations must preserve Python context and output types."""
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from typing_extensions import assert_type
@@ -34,9 +35,9 @@ approved = HttpMCP(
     name="records",
     url="https://example.invalid/mcp",
     tools=["write-record"],
-    approval_mode="approve",
+    approval_mode="preapproved",
 )
-assert_type(approved.approval_mode, Literal["auto", "approve"])
+assert_type(approved.approval_mode, Literal["native", "preapproved"])
 assert_type(Agent(instructions="Write.", tools=[approved]), Agent[None, str])
 selected: Tool[Application] = mcp
 mixed = Agent(instructions="Read.", tools=[mcp, plain, lookup], output_type=Answer)
@@ -68,6 +69,8 @@ def before(ctx: MCPCallContext[Application], call: NativeToolCall) -> Allow:
     assert_type(ctx.call.call_id, str | None)
     assert_type(ctx.call.nested_call_id, str | None)
     assert_type(ctx.server_name, str)
+    assert_type(ctx.original_arguments, Mapping[str, Any])
+    assert_type(ctx.effective_arguments, Mapping[str, Any])
     assert_type(call.agent_role, str | None)
     return Allow()
 

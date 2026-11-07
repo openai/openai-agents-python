@@ -119,7 +119,7 @@ def app(responses, url):
     return Agent(
         instructions="",
         provider=provider(responses),
-        tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+        tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
     )
 
 

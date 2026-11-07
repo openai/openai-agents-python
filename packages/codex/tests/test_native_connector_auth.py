@@ -281,7 +281,7 @@ def application(responses, declaration=None):
         tools=["calendar_search"],
         access_token=access_token(),
         account_id="synthetic-account-A",
-        approval_mode="approve",
+        approval_mode="preapproved",
     )
     return Agent(instructions="", provider=provider(responses), tools=[declaration]), declaration
 
@@ -439,7 +439,7 @@ async def test_caller_verification_host_cannot_initiate_personal_backend_auth(
     async with timeout(20), peer.serve() as base:
         synthetic_backend(monkeypatch, base)
         declaration = HostedVerificationMCP(
-            url=base + "proof-mcp", tools=["calendar_search"], approval_mode="approve"
+            url=base + "proof-mcp", tools=["calendar_search"], approval_mode="preapproved"
         )
         responses.respond(select("forged-apps-classification"))
         responses.respond(assistant_output("failed"))
@@ -511,7 +511,7 @@ async def test_result_callback_cannot_rewrite_authoritative_requested_scopes(
             tools=["calendar_search"],
             access_token=access_token(),
             account_id="synthetic-account-A",
-            approval_mode="approve",
+            approval_mode="preapproved",
             transform_result=transform,
         )
         app, _ = application(responses, declaration)
@@ -601,7 +601,7 @@ async def test_fixed_personal_apps_registration_accepts_captured_leaf_selection(
             tools=["calendar_search", "excluded"],
             access_token=access_token(),
             account_id="synthetic-account-A",
-            approval_mode="approve",
+            approval_mode="preapproved",
         )
         app, _ = application(responses, opening)
         async with app.session() as session:

@@ -45,7 +45,7 @@ def owned_stdio(tmp_path, *args):
             *args,
         ),
         tools=("search", "state"),
-        approval_mode="approve",
+        approval_mode="preapproved",
     )
 
 

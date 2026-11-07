@@ -74,7 +74,7 @@ async def test_real_primitive_form_constraints_and_correction(
         agent = Agent(
             instructions="Request information from the peer",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
@@ -154,7 +154,7 @@ async def test_real_url_verification_has_only_live_decline(responses: ResponsesF
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
@@ -195,7 +195,7 @@ async def test_url_headless_or_startup_has_no_grant(responses: ResponsesFixture,
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         with pytest.raises(InteractionRequired):
             await agent.run("go")
@@ -234,7 +234,7 @@ async def test_standard_method_rejects_nested_extension_mode_aliases(
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             observed = Observe(session._native)
@@ -328,7 +328,7 @@ async def test_background_url_has_no_turn_authority(responses: ResponsesFixture,
                     name="records",
                     url=str(server.make_url("/mcp")),
                     tools=["search"],
-                    approval_mode="approve",
+                    approval_mode="preapproved",
                 ),
                 hold,
             ],
@@ -407,7 +407,7 @@ async def test_one_shot_url_reaches_handler_as_negative_only_request(
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
 
         async def decline(request):
@@ -530,7 +530,7 @@ async def test_unowned_root_form_has_no_successor_authority(
                     name="records",
                     url=str(server.make_url("/mcp")),
                     tools=["search"],
-                    approval_mode="approve",
+                    approval_mode="preapproved",
                 ),
                 hold,
             ],

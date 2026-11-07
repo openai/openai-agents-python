@@ -264,7 +264,7 @@ async def test_reader_loss_expires_only_captured_reply_authority(
         else:
             peer = AskingPeer(form_mode="form", schema=SCHEMA)
             url = await stack.enter_async_context(peer.serve())
-            tool = HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")
+            tool = HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
             event = selected("form", "ordinary")
             valid = {**VALID, "email": "valid@example.invalid"}
             invalid = {**VALID, "display-name": secret}

@@ -801,7 +801,7 @@ async def test_native_form_validation_and_once_only_enqueue(
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
@@ -942,7 +942,7 @@ async def test_url_prompt_can_only_decline_without_enqueuing_acceptance(
         agent = Agent(
             instructions="Ask",
             provider=native,
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
@@ -1098,7 +1098,7 @@ async def test_root_native_mcp_reply_retirement_owns_its_enqueue(responses, kind
                 name="records",
                 url=url,
                 tools=["search"],
-                approval_mode="auto" if kind == "approval" else "approve",
+                approval_mode="native" if kind == "approval" else "preapproved",
             )
             responses.respond(selected("repeated-native-id", "old-effect"))
             async with Agent(instructions="Search", provider=native, tools=[server]).session() as s:

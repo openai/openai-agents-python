@@ -84,7 +84,7 @@ async def yielded_cell(
         agent = Agent(
             instructions="Keep the original cell owner.",
             model="gpt-5.5",
-            tools=[HttpMCP(name="gate", url=url, tools=["release"], approval_mode="approve")],
+            tools=[HttpMCP(name="gate", url=url, tools=["release"], approval_mode="preapproved")],
             provider=provider(responses),
             programmatic_tool_calling=True,
         )
@@ -200,7 +200,7 @@ async def test_writable_roots_cannot_change_while_a_yielded_cell_owns_them(
         trust(peer, tmp_path, monkeypatch)
         agent = Agent(
             instructions="Use the admitted code cell.",
-            tools=[HttpMCP(name="gate", url=url, tools=["release"], approval_mode="approve")],
+            tools=[HttpMCP(name="gate", url=url, tools=["release"], approval_mode="preapproved")],
             provider=provider(responses),
             programmatic_tool_calling=True,
         )

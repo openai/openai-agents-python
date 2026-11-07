@@ -222,7 +222,7 @@ async def test_mcp_discovery_activation_and_current_restore(responses):
             url=old_url,
             bearer_token="old-private",
             tools=["lookup"],
-            approval_mode="approve",
+            approval_mode="preapproved",
             defer_loading=True,
         )
         roster = [remote]
@@ -259,7 +259,7 @@ async def test_mcp_discovery_activation_and_current_restore(responses):
                 url=dest_url,
                 bearer_token="destination-private",
                 tools=["lookup"],
-                approval_mode="approve",
+                approval_mode="preapproved",
                 defer_loading=True,
             )
             fresh_roster = [fresh]
@@ -298,7 +298,7 @@ async def test_code_search_cannot_widen_peer_names(responses):
     peer = Peer(names=("lookup", "unrelated"))
     async with timeout(35), peer.serve() as url:
         remote = HttpMCP(
-            name="files", url=url, tools=["lookup"], approval_mode="approve", defer_loading=True
+            name="files", url=url, tools=["lookup"], approval_mode="preapproved", defer_loading=True
         )
         provider = NativeProvider(base_url=responses.url, api_key="code-search-key")
         agent = Agent(
@@ -390,7 +390,11 @@ async def test_native_model_change_adapts_only_the_current_python_and_mcp_roster
     peer = Peer(names=("lookup", "hidden"), label="current-source")
     async with timeout(40), peer.serve() as url:
         remote = HttpMCP(
-            name="records", url=url, tools=["lookup"], approval_mode="approve", defer_loading=True
+            name="records",
+            url=url,
+            tools=["lookup"],
+            approval_mode="preapproved",
+            defer_loading=True,
         )
         roster = [skylark_invoice, skylark_delete, remote]
         provider = NativeProvider(base_url=responses.url, api_key="native-default-and-change")

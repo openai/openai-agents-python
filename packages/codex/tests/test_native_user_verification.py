@@ -189,9 +189,9 @@ class VerificationPeer(AskingPeer):
 
 def application(responses, url, *, trusted=True):
     declaration = (
-        HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")
+        HostedVerificationMCP(url=url, tools=["search"], approval_mode="preapproved")
         if trusted
-        else HttpMCP(name="ordinary", url=url, tools=["search"], approval_mode="approve")
+        else HttpMCP(name="ordinary", url=url, tools=["search"], approval_mode="preapproved")
     )
     return Agent(instructions="", provider=provider(responses), tools=[declaration]), declaration
 
@@ -409,7 +409,7 @@ async def test_host_registration_cannot_be_replaced_in_a_live_session(
                 await session.update(
                     tools=[
                         HostedVerificationMCP(
-                            url=other_url, tools=["search"], approval_mode="approve"
+                            url=other_url, tools=["search"], approval_mode="preapproved"
                         )
                     ]
                 )
@@ -420,7 +420,7 @@ async def test_host_registration_cannot_be_replaced_in_a_live_session(
                 await session.update(
                     tools=[
                         HostedVerificationMCP(
-                            url=other_url, tools=["search"], approval_mode="approve"
+                            url=other_url, tools=["search"], approval_mode="preapproved"
                         )
                     ]
                 )
@@ -438,7 +438,7 @@ async def test_fixed_verification_registration_accepts_captured_leaf_selection(
     peer.names = ("search", "excluded")
     async with timeout(20), peer.serve() as url:
         opening = HostedVerificationMCP(
-            url=url, tools=["search", "excluded"], approval_mode="approve"
+            url=url, tools=["search", "excluded"], approval_mode="preapproved"
         )
         app = Agent(instructions="", provider=provider(responses), tools=[opening])
         async with app.session() as session:

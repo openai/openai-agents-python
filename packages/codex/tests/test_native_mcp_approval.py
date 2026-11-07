@@ -20,7 +20,7 @@ from tests.test_native_mcp_stdio import assert_stopped, records, stdio
 from tests.test_native_mcp_tools import Peer, mcp_call
 
 
-@pytest.mark.parametrize("mode", ["prompt", "always", "", None, True, {}])
+@pytest.mark.parametrize("mode", ["auto", "approve", "prompt", "always", "", None, True, {}])
 def test_approval_mode_rejects_unsupported_values_before_io(mode: object) -> None:
     with pytest.raises((TypeError, ValueError), match="approval_mode"):
         HttpMCP(
@@ -34,20 +34,20 @@ def test_approval_mode_rejects_unsupported_values_before_io(mode: object) -> Non
 def test_approval_capture_is_frozen_and_covers_only_selected_raw_names() -> None:
     names = ["find-record"]
     descriptor = HttpMCP(
-        name="docs", url="https://example.invalid/mcp", tools=names, approval_mode="approve"
+        name="docs", url="https://example.invalid/mcp", tools=names, approval_mode="preapproved"
     )
     names.append("excluded")
     assert descriptor.tools == ("find-record",)
     assert descriptor._config()["tools"] == {"find-record": {"approval_mode": "approve"}}
     with pytest.raises(FrozenInstanceError):
-        descriptor.approval_mode = "auto"
-    default = replace(descriptor, approval_mode="auto")
+        descriptor.approval_mode = "native"
+    default = replace(descriptor, approval_mode="native")
     assert "tools" not in default._config()
     assert default._config()["enabled_tools"] == ["find-record"]
 
 
 @pytest.mark.parametrize("transport", ["http", "stdio"])
-@pytest.mark.parametrize("approved", [False, True], ids=["auto", "approve"])
+@pytest.mark.parametrize("approved", [False, True], ids=["native", "preapproved"])
 async def test_nonreadonly_peer_uses_native_approval_and_exact_effect(
     responses: ResponsesFixture, tmp_path: Path, transport: str, approved: bool
 ) -> None:
@@ -62,7 +62,7 @@ async def test_nonreadonly_peer_uses_native_approval_and_exact_effect(
             descriptor = replace(stdio(log, "--writable"), name="docs")
             name = "search"
         if approved:
-            descriptor = replace(descriptor, approval_mode="approve")
+            descriptor = replace(descriptor, approval_mode="preapproved")
         responses.respond(mcp_call(name, "mcp__docs", "write-call"))
         responses.respond(assistant_output("done"))
         async with Agent(
@@ -139,7 +139,7 @@ async def test_replacement_and_restore_use_current_approval_without_expanding_ce
         annotations={"readOnlyHint": False, "destructiveHint": True},
     )
     async with timeout(30), peer.serve() as url:
-        selected = HttpMCP(name="docs", url=url, tools=["find-record"], approval_mode="approve")
+        selected = HttpMCP(name="docs", url=url, tools=["find-record"], approval_mode="preapproved")
         agent = Agent(
             instructions="Use the selected tool.",
             model="gpt-5.5",
@@ -160,7 +160,7 @@ async def test_replacement_and_restore_use_current_approval_without_expanding_ce
             assert len(peer.requests) == count
             with pytest.raises(ValueError, match="captured"):
                 await session.submit(
-                    "unbound policy", tools=[replace(selected, approval_mode="auto")]
+                    "unbound policy", tools=[replace(selected, approval_mode="native")]
                 )
             responses.respond(mcp_call("find_record", "mcp__docs", "denied-replacement"))
             responses.respond(assistant_output("denied"))
@@ -175,7 +175,7 @@ async def test_replacement_and_restore_use_current_approval_without_expanding_ce
             assert (
                 await (await session.submit("approved again")).get_result()
             ).final_output == "again"
-        current = replace(selected, approval_mode="auto")
+        current = replace(selected, approval_mode="native")
         restored_agent = Agent(
             instructions=agent.instructions,
             model="gpt-5.5",
@@ -215,7 +215,7 @@ async def test_approval_does_not_bypass_result_policy_or_undo_the_effect(
             name="docs",
             url=url,
             tools=["search"],
-            approval_mode="approve",
+            approval_mode="preapproved",
             transform_result=reject,
         )
         responses.respond(mcp_call("search", "mcp__docs", "rejected-result"))

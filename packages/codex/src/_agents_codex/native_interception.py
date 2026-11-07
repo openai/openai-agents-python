@@ -8,6 +8,7 @@ from collections.abc import Callable as Callable, Coroutine as Coroutine
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field, replace as replace
 from functools import partial as partial
+from types import MappingProxyType as MappingProxyType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -626,9 +627,25 @@ class _NativeInterception:
                 index = _tool_names((descriptor,)).index(
                     {"namespace": call.namespace, "name": call.name}
                 )
-                context = MCPCallContext(
-                    session._context, state.handle, info, descriptor.name, descriptor.tools[index]
+                original_arguments = (
+                    json.loads(call.input) if isinstance(call.input, str) else deepcopy(call.input)
                 )
+                if not isinstance(original_arguments, dict):
+                    return
+                effective_arguments = original_arguments
+                submission = state.handle
+
+                def call_context() -> MCPCallContext[Any]:
+                    return MCPCallContext(
+                        session._context,
+                        submission,
+                        info,
+                        descriptor.name,
+                        descriptor.tools[index],
+                        original_arguments=MappingProxyType(deepcopy(original_arguments)),
+                        effective_arguments=MappingProxyType(deepcopy(effective_arguments)),
+                    )
+
                 effective = call
                 decision: dict[str, Any] = {"action": "continue"}
                 if descriptor.before is not None:
@@ -649,7 +666,7 @@ class _NativeInterception:
                         value = await _call_callback(
                             descriptor.before,
                             admitted,
-                            context,
+                            call_context(),
                             replace(call, input=deepcopy(call.input)),
                         )
                     finally:
@@ -668,6 +685,7 @@ class _NativeInterception:
                         if not isinstance(replacement, dict):
                             return
                         decision = {"action": "replace", "value": replacement}
+                        effective_arguments = replacement
                         effective = replace(
                             call,
                             input=(
@@ -681,7 +699,9 @@ class _NativeInterception:
                 value = (
                     True
                     if descriptor.approval is None
-                    else await _call_callback(descriptor.approval, admitted, context, effective)
+                    else await _call_callback(
+                        descriptor.approval, admitted, call_context(), effective
+                    )
                 )
                 if admitted():
                     if isinstance(value, StopTurn):
