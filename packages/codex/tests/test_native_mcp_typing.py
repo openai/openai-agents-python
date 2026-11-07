@@ -11,8 +11,15 @@ from agents import (
     Allow,
     Completed,
     HttpMCP,
+    MCPBlobResourceContents,
     MCPCallContext,
+    MCPListResourcesResult,
+    MCPListResourceTemplatesResult,
+    MCPReadResourceResult,
+    MCPResource,
+    MCPResourceTemplate,
     MCPResultContext,
+    MCPTextResourceContents,
     NativeToolCall,
     Session,
     StdioMCP,
@@ -94,3 +101,44 @@ assert_type(policy_agent, Agent[Application, str])
 async def use_policy() -> None:
     async with policy_agent.session(context=Application("tenant")) as session:
         assert_type(session, Session[Application, str])
+
+
+resource_only = HttpMCP(name="resources", url="https://example.invalid/mcp", tools=[])
+assert_type(Agent(instructions="Read.", tools=[resource_only]), Agent[None, str])
+
+
+async def read_resources(session: Session[Application, Answer]) -> None:
+    page = await session.list_mcp_resources("resources")
+    assert_type(page, MCPListResourcesResult)
+    assert_type(page["resources"], list[MCPResource])
+    if "nextCursor" in page:
+        assert_type(page["nextCursor"], str)
+        assert_type(
+            await session.list_mcp_resources("resources", cursor=page["nextCursor"]),
+            MCPListResourcesResult,
+        )
+    templates = await session.list_mcp_resource_templates("resources", cursor=None)
+    assert_type(templates, MCPListResourceTemplatesResult)
+    assert_type(templates["resourceTemplates"], list[MCPResourceTemplate])
+    if "nextCursor" in templates:
+        assert_type(
+            await session.list_mcp_resource_templates("resources", templates["nextCursor"]),
+            MCPListResourceTemplatesResult,
+        )
+    result = await session.read_mcp_resource("resources", "fixture://report")
+    assert_type(result, MCPReadResourceResult)
+    assert_type(result["contents"], list[MCPTextResourceContents | MCPBlobResourceContents])
+    for transport_result in (page, templates, result):
+        if "resultType" in transport_result:
+            assert_type(transport_result["resultType"], str)
+        if "ttlMs" in transport_result:
+            assert_type(transport_result["ttlMs"], int)
+        if "cacheScope" in transport_result:
+            assert_type(transport_result["cacheScope"], Literal["public", "private"])
+    text: MCPTextResourceContents = {"uri": "fixture://report", "text": "hello"}
+    blob: MCPBlobResourceContents = {"uri": "fixture://image", "blob": "AA=="}
+    assert_type(text["text"], str)
+    assert_type(blob["blob"], str)
+    assert_type(text["uri"], str)
+    if "mimeType" in blob:
+        assert_type(blob["mimeType"], str)

@@ -120,6 +120,9 @@ from .mcp import (
     ChatGPTAppsMCP as ChatGPTAppsMCP,
     HostedVerificationMCP as HostedVerificationMCP,
     HttpMCP as HttpMCP,
+    MCPListResourcesResult as MCPListResourcesResult,
+    MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
+    MCPReadResourceResult as MCPReadResourceResult,
     MCPResultContext as MCPResultContext,
     StdioMCP as StdioMCP,
     _ready as _ready,
@@ -1136,8 +1139,17 @@ def _fixed_tool_refs(
     return fixed
 
 
+@dataclass(frozen=True)
+class _MCPResourceRef:
+    """Select a current ordinary server without granting any model tools."""
+
+    name: str
+
+
 def _split_tools(
-    tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents],
+    tools: Sequence[
+        ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents
+    ],
     programmatic_tool_calling: bool = False,
     *,
     available: Sequence[Tool[ContextT]] | None = None,
@@ -1203,6 +1215,27 @@ def _split_tools(
                 raise CapabilityError("Operation tools must select distinct fixed capabilities")
             retained.update(refs)
             continue
+        elif isinstance(tool, _MCPResourceRef):
+            resource_server = next(
+                (
+                    item
+                    for item in (() if available is None else available)
+                    if isinstance(item, (HttpMCP, StdioMCP))
+                    and type(item) in (HttpMCP, StdioMCP)
+                    and item.name == tool.name
+                ),
+                None,
+            )
+            if resource_server is None or not any(
+                isinstance(item, (HttpMCP, StdioMCP))
+                and type(item) in (HttpMCP, StdioMCP)
+                and item.name == tool.name
+                for item in opening
+            ):
+                raise CapabilityError(
+                    "Saved resource servers must name current ordinary MCP declarations"
+                )
+            tool = replace(resource_server, tools=())
         elif isinstance(tool, ToolRef):
             if tool in fixed:
                 if tool in retained:
@@ -1232,7 +1265,10 @@ def _split_tools(
                         "Replacement tool names must have been allowed when the Session opened"
                     )
             elif isinstance(tool, (HttpMCP, StdioMCP)):
-                if any((tool.name, raw) not in mcp_pairs for raw in tool.tools):
+                if not any(
+                    isinstance(item, (HttpMCP, StdioMCP)) and item.name == tool.name
+                    for item in opening
+                ) or any((tool.name, raw) not in mcp_pairs for raw in tool.tools):
                     raise CapabilityError(
                         "Replacement MCP names must have been allowed when the Session opened"
                     )
@@ -1252,7 +1288,11 @@ def _split_tools(
                 elif isinstance(tool, (HttpMCP, StdioMCP)):
                     # An opening object is a selector, never authority to restore
                     # its old endpoint or credentials after an acknowledged update.
-                    resolved = admitted[tool.tool(tool.tools[0])]
+                    resolved = next(
+                        item
+                        for item in available
+                        if isinstance(item, (HttpMCP, StdioMCP)) and item.name == tool.name
+                    )
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
@@ -1783,7 +1823,8 @@ class Session(Generic[ContextT, OutputT]):
         operation_slots = None
         restored_operation_refs = None
         restored_model_settings = None
-        restored_defaults = None
+        restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
+        restored_resource_servers: tuple[str, ...] = ()
         if state is not None:
             if not isinstance(state, SessionState):
                 raise TypeError("state must be a SessionState")
@@ -1807,6 +1848,19 @@ class Session(Generic[ContextT, OutputT]):
                     ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
                 )
                 payload["agent_options"].pop("_sdk_default_tools")
+            if "_sdk_default_mcp_resources" in saved.agent_options:
+                resource_names = saved.agent_options["_sdk_default_mcp_resources"]
+                if (
+                    restored_defaults is None
+                    or not isinstance(resource_names, list)
+                    or not all(isinstance(name, str) for name in resource_names)
+                    or len(set(resource_names)) != len(resource_names)
+                ):
+                    raise ValueError(
+                        "Saved resource servers require distinct names and idle defaults"
+                    )
+                restored_resource_servers = tuple(resource_names)
+                payload["agent_options"].pop("_sdk_default_mcp_resources")
             if saved.format_version in (4, 6):
                 # Idle selector names are SDK input, not native grants.
                 payload.pop("step_mcp_tools", None)
@@ -1821,6 +1875,12 @@ class Session(Generic[ContextT, OutputT]):
                 "do not yet have durable intent and result receipts"
             )
         tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+        if restored_resource_servers:
+            assert restored_defaults is not None
+            restored_defaults = (
+                *restored_defaults,
+                *(_MCPResourceRef(name) for name in restored_resource_servers),
+            )
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -2779,7 +2839,11 @@ class Session(Generic[ContextT, OutputT]):
             (server for server in mcp_tools if type(server) is ChatGPTAppsMCP), None
         )
         self._default_tools: (
-            tuple[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents, ...] | None
+            tuple[
+                ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents,
+                ...,
+            ]
+            | None
         ) = None
         self._executor: Environment[Any] | None = None
         self._writable_roots: tuple[str, ...] | None = None
@@ -2806,6 +2870,7 @@ class Session(Generic[ContextT, OutputT]):
         self._graph_interrupts: set[asyncio.Task[None]] = set()
         self._root_interrupts: set[asyncio.Task[None]] = set()
         self._mutation: asyncio.Task[Any] | None = None
+        self._mutation_cancellable = False
         self._checkpoint_task: asyncio.Future[None] | None = None
         self._sealed_checkpoint: str | None = None
         self._manual_source_digest: str | None = None
@@ -4005,6 +4070,105 @@ class Session(Generic[ContextT, OutputT]):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
+    async def list_mcp_resources(
+        self, server: str, cursor: str | None = None
+    ) -> MCPListResourcesResult:
+        """Read one resource page from a selected HttpMCP or StdioMCP while idle.
+
+        Pass the returned ``nextCursor`` to request another page. A server that
+        does not advertise the resources capability returns an empty list.
+        These calls never add resources to instructions or model context.
+        Transport and cleanup semantics match ``read_mcp_resource``.
+        """
+        params = {} if cursor is None else {"cursor": cursor}
+        return cast(
+            MCPListResourcesResult,
+            await self._mcp_resource_request("list_mcp_resources", server, params),
+        )
+
+    async def list_mcp_resource_templates(
+        self, server: str, cursor: str | None = None
+    ) -> MCPListResourceTemplatesResult:
+        """Read one template page while idle, leaving continuation to the caller.
+
+        A server without the resources capability returns an empty list.
+        The cursor and metadata are returned in their native transport shape.
+        Transport and cleanup semantics match ``read_mcp_resource``.
+        """
+        params = {} if cursor is None else {"cursor": cursor}
+        return cast(
+            MCPListResourceTemplatesResult,
+            await self._mcp_resource_request("list_mcp_resource_templates", server, params),
+        )
+
+    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:
+        """Read URI contents from a selected HttpMCP or StdioMCP while idle.
+
+        Return the transport result, including text, base64 blobs and metadata.
+        The result does not enter model context. Native transport errors propagate.
+        Resource operations use the server's execution timeout and joined cleanup.
+        Interactive requests are rejected. Cancellation or an interactive request
+        can retire the Session; open a new Session before doing further work.
+        """
+        return cast(
+            MCPReadResourceResult,
+            await self._mcp_resource_request("read_mcp_resource", server, {"uri": uri}),
+        )
+
+    async def _mcp_resource_request(
+        self, operation: str, server: str, params: dict[str, str]
+    ) -> dict[str, Any]:
+        self._check_idle_update()
+        assert self._opening_agent is not None
+        opening = self._opening_agent
+        _, selected_mcp, _ = _split_tools(
+            opening.tools if self._default_tools is None else self._default_tools,
+            opening.programmatic_tool_calling,
+            available=self._bindings,
+            ceiling=opening.tools,
+            environment=self._executor,
+            native_agents=self._native_agents,
+        )
+        resource_server = next(
+            (
+                item
+                for item in selected_mcp
+                if type(item) in (HttpMCP, StdioMCP) and item.name == server
+            ),
+            None,
+        )
+        if resource_server is None:
+            raise ValueError("Resource operations require a currently selected ordinary MCP server")
+        resource_server._check_context(self._context)
+
+        async def request() -> dict[str, Any]:
+            try:
+                if not any(item.name == server for item in self._mcp_tools):
+                    # Session opening is lazy. Activate only this server and
+                    # retain connections already owned by the Session.
+                    _, allowed_mcp, _ = _split_tools(opening.tools)
+                    candidate = _ToolCatalog(self._catalog.generation + 1, self._catalog.tools)
+                    await self._replace_tools(
+                        candidate,
+                        (*self._mcp_tools, replace(resource_server, tools=())),
+                        allowed_mcp,
+                        candidate.native_specs(),
+                    )
+                result = await self._publish_startup(
+                    self._native.call(operation, json.dumps({"server": server, "params": params}))
+                )
+            except InteractionRequired as error:
+                raise InteractionRequired(
+                    "MCP resource requests cannot handle interaction while the Session is idle"
+                ) from error
+            except NativeError:
+                raise
+            except RuntimeError as error:
+                raise NativeError(str(error)) from error
+            return cast(dict[str, Any], json.loads(result))
+
+        return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
+
     async def model_context(self) -> ModelContextSnapshot:
         """Read the current native model context of an idle Session.
 
@@ -4565,7 +4729,9 @@ class Session(Generic[ContextT, OutputT]):
         input: list[dict[str, Any]] | None,
         output: _PreparedOutput,
         *,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[
+            ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents
+        ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         enqueue: bool = False,
@@ -4863,14 +5029,16 @@ class Session(Generic[ContextT, OutputT]):
             opening_mcp_modes = {server.name: server.defer_loading for server in allowed_mcp}
             if any(server.defer_loading != opening_mcp_modes[server.name] for server in mcp):
                 raise CapabilityError("MCP schema discovery mode must match Session opening")
-            # MCP defaults use validated leaf selectors, not declaration identities
-            # which a same-alias replacement can supersede during publication.
+            # MCP defaults select current bindings by name, never by captured
+            # endpoints or credentials. Empty declarations select only a server.
             defaults = tuple(
                 ref
                 for tool in selection
                 for ref in (
                     tuple(tool.tool(raw) for raw in tool.tools)
-                    if isinstance(tool, (HttpMCP, StdioMCP))
+                    if isinstance(tool, (HttpMCP, StdioMCP)) and tool.tools
+                    else (_MCPResourceRef(tool.name),)
+                    if isinstance(tool, (HttpMCP, StdioMCP)) and type(tool) in (HttpMCP, StdioMCP)
                     else (tool,)
                 )
             )
@@ -4953,9 +5121,16 @@ class Session(Generic[ContextT, OutputT]):
             raise NativeError("Native instruction update acknowledgement did not match")
         self._instructions = instructions
 
-    async def _join_mutation(self, pending: asyncio.Task[_MutationResultT]) -> _MutationResultT:
+    async def _join_mutation(
+        self, pending: asyncio.Task[_MutationResultT], *, cancellable: bool = False
+    ) -> _MutationResultT:
         self._mutation = pending
+        self._mutation_cancellable = cancellable
         try:
+            if cancellable:
+                # Resource reads own cancellation cleanup through _publish_startup.
+                # Definition updates still wait for their publication receipt.
+                return await pending
             return cast(_MutationResultT, await _join(pending))
         except BaseException:
             if not pending.done() or pending.cancelled():
@@ -4964,6 +5139,7 @@ class Session(Generic[ContextT, OutputT]):
         finally:
             if pending.done():
                 self._mutation = None
+                self._mutation_cancellable = False
             if self._broken and not self._closing:
                 self._finish_failed_observations()
 
@@ -8833,6 +9009,13 @@ class Session(Generic[ContextT, OutputT]):
                 payload["agent_options"]["_sdk_default_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in default_refs
                 ]
+                resource_servers = [
+                    server.name
+                    for server in mcp
+                    if type(server) in (HttpMCP, StdioMCP) and not server.tools
+                ]
+                if resource_servers:
+                    payload["agent_options"]["_sdk_default_mcp_resources"] = resource_servers
             output = self._default_output if active is None else active.output
             # Native formats 2/3 become SDK formats 4/5 when fingerprinted.
             payload["format_version"] += 2
@@ -9044,6 +9227,8 @@ class Session(Generic[ContextT, OutputT]):
             engine_closed = False
             try:
                 if self._mutation is not None:
+                    if self._mutation_cancellable:
+                        cancel_once(self._mutation)
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:
                     await asyncio.gather(self._checkpoint_task, return_exceptions=True)
