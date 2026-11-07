@@ -36,7 +36,9 @@ class ModelRequestContext(Generic[ContextT]):
     items from the callback, or ``None`` to keep the original input. Replacements
     do not rewrite the original history items. Generated replies and compaction
     summaries are recorded normally. Preserve valid tool-call and result
-    relationships when filtering items.
+    relationships when filtering items. Tool results may already be truncated
+    in these items. To reduce a full result before native truncation and history
+    recording, use ``function_tool(after=...)`` or MCP ``transform_result``.
     The existing instruction and tool APIs control base instructions and tool
     definitions separately from these input items.
 
