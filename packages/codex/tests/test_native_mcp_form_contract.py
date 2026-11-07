@@ -8,7 +8,14 @@ from uuid import uuid4
 
 import pytest
 
-from agents import Agent, ElicitationRequest, HttpMCP, InteractionExpiredError, InteractionRequired
+from agents import (
+    Agent,
+    ElicitationRequest,
+    HttpMCP,
+    InteractionExpiredError,
+    InteractionRequired,
+    UrlRequest,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 from tests.test_native_scoped_policies import AskingPeer, provider, selected
@@ -164,10 +171,10 @@ async def test_real_url_verification_has_only_live_decline(responses: ResponsesF
             assert request.submission_id is None and request.turn_id is None
             assert "https://example.invalid/never-visit" in request.description
             assert "synthetic-unsupported" in request.description
-            assert request.schema == {}
+            assert isinstance(request, UrlRequest) and request.mode == "url"
+            assert not hasattr(request, "schema")
             assert "never-visit" not in repr(request)
-            with pytest.raises(ValueError, match="URL verification has no form"):
-                await request.respond({"confirmed": True})
+            assert not hasattr(request, "respond")
             assert (await session.pending_interactions()) == (request,)
             assert not peer.answers
             if reply == "decline":
@@ -373,9 +380,9 @@ async def test_background_url_has_no_turn_authority(responses: ResponsesFixture,
                 assert isinstance(question, ElicitationRequest)
                 assert question.session_id == session.id
                 assert question.turn_id is None and question.submission_id is None
-                assert question.schema == {}
-                with pytest.raises(ValueError, match="URL verification has no form"):
-                    await question.respond({"confirmed": True})
+                assert isinstance(question, UrlRequest) and question.mode == "url"
+                assert not hasattr(question, "schema")
+                assert not hasattr(question, "respond")
                 if reply == "decline":
                     await question.decline()
                     await peer.answered.wait()
@@ -414,9 +421,9 @@ async def test_one_shot_url_reaches_handler_as_negative_only_request(
             received.append(request)
             assert isinstance(request, ElicitationRequest)
             assert request.submission_id is None and request.turn_id is None
-            assert request.schema == {}
-            with pytest.raises(RuntimeError, match="A callback must return its reply"):
-                await request.respond({"confirmed": True})
+            assert isinstance(request, UrlRequest) and request.mode == "url"
+            assert not hasattr(request, "schema")
+            assert not hasattr(request, "respond")
             return request.reply(None)
 
         result = await agent.run("go", on_interaction=decline)
