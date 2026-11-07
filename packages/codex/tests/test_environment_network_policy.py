@@ -1199,7 +1199,11 @@ async def test_default_strict_allows_workspace_patch_but_denies_outside(
                 }
             )
         model.respond(assistant_output("done"))
-        agent = Agent(instructions="Apply patches.", provider=model.provider(websocket=False))
+        agent = Agent(
+            instructions="Apply patches.",
+            model="gpt-5.5",
+            provider=model.provider(websocket=False),
+        )
         async with agent.session(
             environment=Environment(
                 url=executor.url,
@@ -1211,8 +1215,16 @@ async def test_default_strict_allows_workspace_patch_but_denies_outside(
             assert (
                 await (await session.submit("Apply patches.")).get_result()
             ).final_output == "done"
+        assert any(
+            tool.get("type") == "custom" and tool.get("name") == "apply_patch"
+            for tool in model.requests[0].get("tools", [])
+        )
         assert inside.exists(), tool_output(model.requests[1], "inside", "custom_tool_call_output")
         assert inside.read_text() == "synthetic-policy-effect\n"
+        assert (
+            "patch rejected"
+            in tool_output(model.requests[2], "outside", "custom_tool_call_output").lower()
+        )
         assert not outside.exists()
 
 
