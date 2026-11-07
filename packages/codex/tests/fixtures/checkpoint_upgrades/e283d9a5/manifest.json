@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "producer": {
+    "kind": "source-snapshot",
+    "source_commit": "e283d9a5d6d73c5f8097423c18a42625b85bacdf",
+    "native_artifact_id": "13581901969",
+    "native_wheel_file": "openai_agents-0.24.0a6-cp310-abi3-manylinux_2_39_x86_64.whl",
+    "native_wheel_sha256": "0698cc538a973cfe58dbbea77eac55a9a92f6ee876717a581336199a7d408036",
+    "native_receipt_sha256": "60fe94d7239d856162a91029368b8fae29d362a68f6ca124155be5893dd00fef",
+    "codex_revision": "7c2ce90716335c889a5076ded9a630459f9c9899"
+  },
+  "capture_script_sha256": "26e54e05ec5f0d97549437b2a08f385cb544b644cc49c8d4ff3b333204da568f",
+  "cases": [
+    {
+      "file": "idle.json",
+      "sha256": "4f435049e7347bf53cffd93648a38213d3de0fe451a6791b7b64c60541f5bfd5",
+      "sdk_format_version": 4
+    },
+    {
+      "file": "manual.json",
+      "sha256": "895baaa22b09531a1aaa10c0b965d7c3b0049733d3707a43cbd9247985605095",
+      "sdk_format_version": 5
+    },
+    {
+      "file": "code.json",
+      "sha256": "36f01dfc01994b22d7721ab5cdf9876d14c516fdf70e99dda6a62f2b62900752",
+      "sdk_format_version": 6
+    }
+  ]
+}
