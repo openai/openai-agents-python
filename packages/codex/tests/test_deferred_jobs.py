@@ -1482,7 +1482,8 @@ async def test_optional_read_deadline_preserves_uncertain_journal_outcome(respon
                 await block()
             return await super().observe(claim)
 
-    journal, backend = Store(), Backend([accepted, done()])
+    completed = replace(done(), receipt=accepted.receipt)
+    journal, backend = Store(), Backend([accepted, completed])
     jobs, tool = declared(journal, backend)
     agent = Agent(instructions="Render.", tools=[tool], provider=provider(responses))
     async with timeout(5):
