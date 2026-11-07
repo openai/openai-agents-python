@@ -24,6 +24,7 @@ mod native_agents;
 mod native_interception;
 mod ops;
 mod options;
+mod project_search;
 mod provider_owner;
 mod python_tools;
 mod recovery_guard;

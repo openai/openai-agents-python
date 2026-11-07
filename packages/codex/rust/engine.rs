@@ -431,6 +431,7 @@ impl EngineState {
                     as Arc<dyn codex_code_mode::CodeModeSessionProvider>
             })
         });
+        let project_search = runtime_options.project_search();
         drop(runtime_options);
         let interception = Arc::new(crate::native_interception::Boundary::new(
             agent_graph.clone(),
@@ -446,6 +447,7 @@ impl EngineState {
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
+                project_search.clone(),
                 auth.clone(),
                 goals.as_ref(),
                 local_checklist_store.is_some(),

@@ -47,6 +47,8 @@ pub(crate) struct RuntimeOptions {
     sdk_native_config: bool,
     #[serde(rename = "_sdk_codex_login")]
     sdk_codex_login: Option<crate::auth::SavedCodexLogin>,
+    #[serde(rename = "_sdk_project_search")]
+    project_search: Option<crate::project_search::Options>,
     environment: Option<crate::environment::EnvironmentOptions>,
     deferred_environment: Option<crate::environment::DeferredEnvironmentOptions>,
     codex_home: Option<PathBuf>,
@@ -174,6 +176,10 @@ impl RuntimeOptions {
 
     pub(crate) fn sdk_codex_login(&mut self) -> Option<crate::auth::SavedCodexLogin> {
         self.sdk_codex_login.take()
+    }
+
+    pub(crate) fn project_search(&mut self) -> Option<crate::project_search::Options> {
+        self.project_search.take()
     }
 
     pub(crate) fn native_goal_store_enabled(&self) -> bool {

@@ -167,7 +167,7 @@
         "declarations": [
           "ContextT_co = TypeVar('ContextT_co', covariant=True, default=None)",
           "ContextT_contra = TypeVar('ContextT_contra', contravariant=True, default=object)",
-          "ExecutorToolName = Literal['exec_command', 'write_stdin', 'apply_patch']",
+          "ExecutorToolName = Literal['exec_command', 'write_stdin', 'apply_patch', 'project_glob', 'project_grep']",
           "@dataclass(frozen=True, kw_only=True)\nclass NetworkPolicy:\n    allowed_domains: Sequence[str] = field(default=(), repr=False)\n    denied_domains: Sequence[str] = field(default=(), repr=False)\n    allow_all_unix_sockets: bool = False\n    allow_local_binding: bool = False",
           "@dataclass(frozen=True)\nclass ExecutorContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    tool_name: ExecutorToolName\n    thread_id: str\n    turn_id: str\n    outer_call_id: str | None\n    cell_id: str | None\n    runtime_tool_call_id: str | None\n    call_id: str | None = None\n    session: Session[Any, Any] = field(repr=False, kw_only=True)\n    agent: Agent[Any, Any] = field(repr=False, kw_only=True)\n    agent_role: str | None = field(default=None, kw_only=True)\n    model: str | None = field(default=None, kw_only=True)",
           "@dataclass(frozen=True)\nclass LocalStorageMount:\n    source: str | PathLike[str]\n    destination: str | PathLike[str]\n    strategy: Literal['local_bind']\n    read_only: bool = True",

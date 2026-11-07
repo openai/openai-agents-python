@@ -98,6 +98,7 @@ impl ThreadLifecycleContributor<Config> for LocalGoalLifecycle {
 
 pub fn build(
     config: &Config,
+    project_search: Option<crate::project_search::Options>,
     auth: Arc<AuthManager>,
     goals: Option<&crate::goals::GoalBackend>,
     local_store: bool,
@@ -108,6 +109,11 @@ pub fn build(
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(events);
+    if let Some(options) = project_search {
+        builder.tool_contributor(Arc::new(crate::canonical_rules::AccessContributor(
+            Arc::new(crate::project_search::Contributor(options)),
+        )));
+    }
     let settlement = Arc::new(crate::turn_settlement::Contributor);
     builder.thread_lifecycle_contributor(settlement.clone());
     builder.turn_lifecycle_contributor(settlement);

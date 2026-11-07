@@ -267,7 +267,15 @@
     {
       "path": "0060-provider-hosted-tools.patch",
       "sha256": "6d248c094770df64ffd2c7268ed2a8dfacc50c171c25852466ca79bc6c7df710"
+    },
+    {
+      "path": "0061-bounded-nofollow-filesystem.patch",
+      "sha256": "5b0b7cb12755c813665ca67bb942e324e60384f37615618c2c0eeb69698916f7"
+    },
+    {
+      "path": "0062-early-project-search-result-policy.patch",
+      "sha256": "ac413ec794493e2047724a5ee0473744c4a0464313d4330ba6975780bda6e5d3"
     }
   ],
-  "result_tree": "7e76aee7eea330ecc21863a5344b5e40ddbcdab3"
+  "result_tree": "30e2cdc717ca33fdeb473324bf2c84a332d048a7"
 }

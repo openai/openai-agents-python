@@ -48,7 +48,9 @@ if TYPE_CHECKING:
 
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
 ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
-ExecutorToolName = Literal["exec_command", "write_stdin", "apply_patch"]
+ExecutorToolName = Literal[
+    "exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep"
+]
 
 
 def _domain_pattern(value: str) -> str:
@@ -205,8 +207,13 @@ class Environment(Generic[ContextT_contra]):
     The application owns the endpoint, credentials and remote workspace.
     By default no process or file tools are granted to the model. The connection
     can still run StdioMCP servers with location="environment". Select tools
-    explicitly to expose them; NativeAgents requires all three tools.
+    explicitly to expose them; NativeAgents requires the three execution tools.
     ``write_stdin`` requires ``exec_command`` and supports interactive TTY input.
+    ``project_glob`` and ``project_grep`` search beneath this Environment's fixed
+    working directory without granting command execution. Their ``path`` input
+    can narrow the search to a relative subdirectory, but cannot select another
+    root. Search does not follow symlinks, including in the root path. Additional
+    writable roots do not expand the search root.
     Pass the Environment to ``agent.session(environment=...)``; one Agent can
     serve independent sessions in different environments. A live Session cannot
     replace its connection. The SDK never falls back to executing these tools on
@@ -425,8 +432,14 @@ class Environment(Generic[ContextT_contra]):
         if isinstance(self.tools, str) or not isinstance(self.tools, Sequence):
             raise TypeError("Executor tools must be a sequence of native tool names")
         selected = tuple(self.tools)
-        if any(name not in ("exec_command", "write_stdin", "apply_patch") for name in selected):
-            raise ValueError("Select exec_command, write_stdin or apply_patch")
+        if any(
+            name
+            not in ("exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep")
+            for name in selected
+        ):
+            raise ValueError(
+                "Select exec_command, write_stdin, apply_patch, project_glob or project_grep"
+            )
         if len(set(selected)) != len(selected):
             raise ValueError("Executor tool names must be unique")
         if "write_stdin" in selected and "exec_command" not in selected:

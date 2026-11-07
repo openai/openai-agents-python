@@ -1638,6 +1638,14 @@ def _validate_storage_opening(
     return reconciliation
 
 
+def _configure_project_search(
+    runtime: dict[str, Any], environment: Environment[Any], cwd: str
+) -> None:
+    search_tools = [name for name in environment.tools if name in ("project_glob", "project_grep")]
+    if search_tools:
+        runtime["_sdk_project_search"] = {"root": cwd, "tools": search_tools}
+
+
 def _configure_storage_runtime(
     runtime: dict[str, Any],
     storage: LocalStorage | CustomStorage | None,
@@ -1849,7 +1857,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("NativeAgents requires an explicit compatible model")
             if environment is None or (
                 isinstance(environment, Environment)
-                and set(environment.tools) != {"exec_command", "write_stdin", "apply_patch"}
+                and not {"exec_command", "write_stdin", "apply_patch"}.issubset(environment.tools)
             ):
                 raise ValueError(
                     "NativeAgents requires an Environment with all three execution tools"
@@ -1941,6 +1949,12 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if executor is not None:
+                for tool in allowed_tools:
+                    if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
+                        raise ValueError(
+                            f"Python tool collides with enabled environment tool: {tool.name}"
+                        )
             if executor is not None and programmatic_tool_calling:
                 _check_namespaced_tool_collisions(
                     allowed_tools,
@@ -1966,7 +1980,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
             if native_agents is not None and (
                 executor is None
-                or set(executor.tools) != {"exec_command", "write_stdin", "apply_patch"}
+                or not {"exec_command", "write_stdin", "apply_patch"}.issubset(executor.tools)
             ):
                 raise ValueError(
                     "NativeAgents requires an Environment with all three execution tools"
@@ -2052,6 +2066,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
+                _configure_project_search(runtime, executor, native_environment["cwd"])
             if programmatic_tool_calling:
                 helpers = _package_files("agents") / "bin"
                 runtime["code_mode_host_exe"] = str(
