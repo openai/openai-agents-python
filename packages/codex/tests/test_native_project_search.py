@@ -20,6 +20,8 @@ from agents import (
     Agent,
     Environment,
     ExecutorContext,
+    LocalStorage,
+    LocalStorageMount,
     NativeError,
     StopTurn,
     ToolRef,
@@ -168,6 +170,67 @@ async def test_nested_projects_and_line_context(
         }
     ]
     assert grep["truncated"] is False
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+async def test_read_only_storage_mount_does_not_expand_search_root(
+    responses: ResponsesFixture, tmp_path: Path, name: ExecutorToolName
+) -> None:
+    project, mounted = tmp_path / "project", tmp_path / "mounted"
+    project.mkdir()
+    mounted.mkdir()
+    (project / "report.txt").write_text("needle in the project\n", encoding="utf-8")
+    canary = "needle private mounted content 739a"
+    (mounted / "private.txt").write_text(canary + "\n", encoding="utf-8")
+    paths = [".", "../mounted", str(mounted)]
+    for index, path in enumerate(paths):
+        responses.respond(
+            function_call(
+                name,
+                {"pattern": "**/*.txt" if name == "project_glob" else "needle", "path": path},
+                f"mounted-search-{index}",
+            )
+        )
+    responses.respond(assistant_output("done"))
+    environment = Environment.local(
+        cwd=project,
+        tools=[name],
+        mounts=[LocalStorageMount(mounted, mounted, strategy="local_bind", read_only=True)],
+    )
+    async with (
+        timeout(30),
+        Agent(instructions="Search the project.", provider=provider(responses)).session(
+            environment=environment
+        ) as session,
+    ):
+        assert (await (await session.submit("Search.")).get_result()).final_output == "done"
+
+    assert len(responses.requests) == 4
+    assert set(declarations(responses.requests[0])) == {("functions", name)}
+    result = json.loads(tool_output(responses.requests[1], "mounted-search-0"))
+    assert result["matches"] == (
+        ["report.txt"]
+        if name == "project_glob"
+        else [
+            {
+                "path": "report.txt",
+                "line_number": 1,
+                "line": "needle in the project",
+                "before": [],
+                "after": [],
+            }
+        ]
+    )
+    assert result["errors"] == []
+    assert result["truncated"] is False
+    for index, path in enumerate(paths[1:], start=1):
+        rejected = json.loads(tool_output(responses.requests[index + 1], f"mounted-search-{index}"))
+        assert rejected["matches"] == []
+        assert rejected["errors"] == [{"path": path, "code": "invalid_path"}]
+        assert rejected["truncated"] is False
+    assert canary not in json.dumps(responses.requests)
+    assert (mounted / "private.txt").read_text(encoding="utf-8") == canary + "\n"
 
 
 @pytest.mark.parametrize(
@@ -506,6 +569,103 @@ async def test_restore_uses_current_root_and_current_search_grants(
             await (await revoked.submit("Search again.")).get_result()
             assert not declarations(responses.requests[-1])
             assert "needle second" not in tool_output(responses.requests[-1], "revoked")
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+async def test_local_storage_reopen_preserves_history_without_restoring_search_grant(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: ExecutorToolName,
+) -> None:
+    """LocalStorage retains results; the current Environment alone grants search."""
+    profile = tmp_path / "profile"
+    agent = Agent(instructions="Search the project.", provider=provider(responses))
+    async with timeout(40), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        project = peer.root / "project"
+        project.mkdir()
+        (project / "saved.txt").write_text("needle saved result\n", encoding="utf-8")
+        selected = Environment(
+            url=peer.url,
+            cwd=str(project),
+            tools=[name],
+            headers={"Authorization": "Bearer " + peer.token},
+        )
+        arguments = {"pattern": "**/*.txt" if name == "project_glob" else "needle"}
+
+        def search_requests() -> list[dict[str, Any]]:
+            # Ignore ordinary discovery reads; observe actual bounded search I/O.
+            return [
+                request
+                for request in peer.requests
+                if (
+                    request.get("method") == "fs/walk"
+                    and request["params"]["options"].get("noFollow") is True
+                )
+                or (
+                    request.get("method") == "fs/readFile"
+                    and request["params"].get("maxBytes") is not None
+                )
+            ]
+
+        responses.respond(function_call(name, arguments, "saved-search"))
+        responses.respond(assistant_output("saved search complete"))
+        async with agent.session(storage=LocalStorage(profile), environment=selected) as original:
+            identity = original.id
+            assert (
+                await (await original.submit("Search.")).get_result()
+            ).final_output == "saved search complete"
+        assert len(responses.requests) == 2
+        assert set(declarations(responses.requests[0])) == {("functions", name)}
+        saved_output = tool_output(responses.requests[1], "saved-search")
+        saved_result = json.loads(saved_output)
+        assert saved_result["matches"] == (
+            ["saved.txt"]
+            if name == "project_glob"
+            else [
+                {
+                    "path": "saved.txt",
+                    "line_number": 1,
+                    "line": "needle saved result",
+                    "before": [],
+                    "after": [],
+                }
+            ]
+        )
+        assert saved_result["errors"] == []
+        assert saved_result["truncated"] is False
+        completed_requests = search_requests()
+        expected_methods = {"fs/walk"}
+        if name == "project_grep":
+            expected_methods.add("fs/readFile")
+        assert {request["method"] for request in completed_requests} == expected_methods
+
+        canary = "needle added after close 739b"
+        (project / "new-private.txt").write_text(canary + "\n", encoding="utf-8")
+        responses.respond(function_call(name, arguments, "revoked-search"))
+        responses.respond(assistant_output("search unavailable"))
+        async with agent.session(
+            storage=LocalStorage(profile),
+            resume=identity,
+            environment=replace(selected, tools=[]),
+        ) as reopened:
+            assert reopened.id == identity
+            assert (
+                await (await reopened.submit("Search again.")).get_result()
+            ).final_output == "search unavailable"
+
+        assert len(responses.requests) == 4
+        assert tool_output(responses.requests[2], "saved-search") == saved_output
+        assert "saved search complete" in json.dumps(responses.requests[2]["input"])
+        assert not declarations(responses.requests[2])
+        assert not declarations(responses.requests[3])
+        assert "unsupported call" in tool_output(responses.requests[3], "revoked-search")
+        assert search_requests() == completed_requests
+        assert canary not in json.dumps(responses.requests[2:])
+        assert "new-private.txt" not in json.dumps(responses.requests[2:])
 
 
 @local_search

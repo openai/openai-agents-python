@@ -17,6 +17,7 @@ import pytest
 from agents import (
     Agent,
     CustomStorage,
+    Environment,
     LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
@@ -689,6 +690,31 @@ async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
                 pytest.fail("Unsupported custom storage combination opened")
     assert acquisitions == []
     assert effects == []
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+async def test_custom_storage_rejects_search_environment_before_acquisition(
+    responses, tmp_path, name
+):
+    """CustomStorage does not support Environment, including search-only grants."""
+
+    class UnopenedStore(SQLiteSessionStore):
+        def acquire(self, thread_id):
+            pytest.fail("An unsupported search environment acquired the store")
+
+    backend = UnopenedStore(tmp_path / "canonical.sqlite")
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-admission")
+    agent = Agent(instructions="Search the project.", provider=provider)
+    async with provider:
+        with pytest.raises(
+            ValueError, match="CustomStorage preview does not support.*environments"
+        ):
+            async with agent.session(
+                storage=CustomStorage(backend),
+                environment=Environment.local(cwd=tmp_path, tools=[name]),
+            ):
+                pytest.fail("CustomStorage accepted a search environment")
     assert responses.requests == []
 
 
