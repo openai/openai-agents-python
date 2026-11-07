@@ -195,12 +195,9 @@ fn close_home(home: &Home) -> anyhow::Result<()> {
     let mut slot = home
         .lock()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if let Some(directory) = slot.as_mut() {
+    if let Some(directory) = slot.as_ref() {
         match std::fs::remove_dir_all(directory.path()) {
-            Ok(()) => {
-                // Removal succeeded; do not repeat it from TempDir::drop.
-                directory.disable_cleanup(true);
-            }
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

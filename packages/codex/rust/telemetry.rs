@@ -38,8 +38,8 @@ pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
 }
 
-pub fn collection_allowed() -> bool {
-    !EXPORTS_ENABLED.load(Ordering::Acquire)
+pub fn exports_enabled() -> bool {
+    EXPORTS_ENABLED.load(Ordering::Acquire)
 }
 
 pub async fn engine_starting() -> Result<()> {
@@ -107,17 +107,14 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     }
 
     let exports_enabled = export_requested(&config);
-    let logs_enabled = !matches!(config.otel.exporter, OtelExporterKind::None);
-    let traces_enabled = config.otel.trace_processors
-        || !matches!(config.otel.trace_exporter, OtelExporterKind::None);
     codex_otel::sdk_trace::configure_pipeline(false);
     // Claim the subscriber first: losing this race must not modify native OTel globals.
     let (logger, handle) = reload::Layer::new(None::<ExportLayer>);
     let mut layers: Vec<ExportLayer> = vec![
         logger
-            .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
-                logs_enabled && OtelProvider::log_export_filter(metadata)
-            }))
+            .with_filter(tracing_subscriber::filter::filter_fn(
+                OtelProvider::log_export_filter,
+            ))
             .boxed(),
     ];
     layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
@@ -148,7 +145,11 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     }
     codex_core::otel_init::record_process_start(provider.as_ref(), SERVICE);
     codex_core::otel_init::install_sqlite_telemetry(provider.as_ref(), SERVICE);
-    TRACE_INITIALIZED.store(traces_enabled, Ordering::Release);
+    TRACE_INITIALIZED.store(
+        config.otel.trace_processors
+            || !matches!(config.otel.trace_exporter, OtelExporterKind::None),
+        Ordering::Release,
+    );
     codex_otel::sdk_trace::configure_pipeline(TRACE_INITIALIZED.load(Ordering::Acquire));
     ACTIVE.store(true, Ordering::Release);
     state.provider = provider;

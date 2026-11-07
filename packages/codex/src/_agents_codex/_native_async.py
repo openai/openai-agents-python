@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio as asyncio
 import contextvars as contextvars
-import errno as errno
 import os as os
 import socket as socket
 import struct as struct
@@ -26,12 +25,6 @@ _dispatchers: weakref.WeakKeyDictionary[
 
 
 def _unix_completion_pair() -> tuple[socket.socket, socket.socket]:
-    if sys.platform == "linux" and hasattr(socket, "SOCK_NONBLOCK"):
-        try:
-            return socket.socketpair(type=socket.SOCK_STREAM | socket.SOCK_NONBLOCK)
-        except OSError as error:
-            if error.errno != errno.EINVAL:
-                raise
     reader, writer = socket.socketpair()
     try:
         reader.setblocking(False)
@@ -337,7 +330,7 @@ async def _await_native_event(read: Any) -> Any:
         # A saved pre-poll cancellation traceback must not keep the native
         # ThreadState owned by this unstarted read.
         read = None
-    if isinstance(result, (str, tuple)):
+    if isinstance(result, str):
         return result
     try:
         return await _await_native_completion(result)

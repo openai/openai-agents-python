@@ -238,7 +238,7 @@ pub fn build(
     // Skip shadow ranking only when SDK telemetry has no active consumer.
     let shadow_selection_enabled = skills_metrics.is_some()
         || !crate::telemetry::is_initialized()
-        || !crate::telemetry::collection_allowed();
+        || crate::telemetry::exports_enabled();
     codex_skills_extension::install_with_providers_and_metrics(
         &mut skills_registry,
         skills,
