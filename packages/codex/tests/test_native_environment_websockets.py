@@ -45,10 +45,14 @@ def _expected_executor_script(argv, command):
         pytest.param(
             tool,
             decision,
-            # Admitted processes launch the native macOS sandbox; denied and
-            # stopped calls still run inside the outer Codex sandbox.
-            marks=pytest.mark.requires_native_macos_sandbox
-            if tool == "exec_command" and decision in {"allow", "replace"}
+            # Admitted processes and strict filesystem writes launch native
+            # sandbox helpers; denied and stopped calls need no such helper.
+            marks=(
+                pytest.mark.requires_native_linux_sandbox
+                if sys.platform == "linux"
+                else pytest.mark.requires_native_macos_sandbox
+            )
+            if decision in {"allow", "replace"}
             else (),
         )
         for tool in ("exec_command", "apply_patch")

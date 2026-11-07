@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from contextlib import aclosing
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -65,6 +66,11 @@ def check_all(capabilities: Capabilities) -> dict[FeatureName, FeatureSupport]:
     return values
 
 
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 async def test_environment_code_result_report_matches_the_nested_return(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,8 +153,8 @@ async def test_environment_code_result_report_matches_the_nested_return(
                 if native_approvals:
                     assert writes[1]["params"]["sandbox"] is None
                 assert "native-write" not in outer
-                # The remote native filesystem enforces the workspace permissions.
-                # This route does not launch or assert native Linux process confinement.
+                # Strict filesystem writes launch the remote host's native sandbox
+                # helper even though this route sends no process/start RPC.
                 assert not any(
                     request.get("method") == "process/start" for request in peer.requests
                 )
