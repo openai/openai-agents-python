@@ -1,4 +1,4 @@
-"""Classic archive extraction applies resource limits before sandbox writes."""
+"""Classic archive extraction bounds resources and preserves trusted overrides."""
 
 from __future__ import annotations
 
@@ -35,6 +35,28 @@ if sys.platform != "win32":
         UnixLocalSandboxSession,
         UnixLocalSandboxSessionState,
     )
+
+_ZSTD_CODEC = None
+if sys.version_info >= (3, 14):
+    try:
+        from compression import zstd as _ZSTD_CODEC
+    except ImportError:
+        pass
+
+_ZIP_RESOURCE_CODECS = [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA]
+_TAR_COMPRESSION_SCHEMES = ["gzip"]
+_ARCHIVE_SCHEMES = ["tar", "tar.gz", "tar.bz2", "tar.xz", "tar.lzma", "zip", "zip.lzma", "zip.bz2"]
+if _ZSTD_CODEC is not None:
+    _ZIP_RESOURCE_CODECS.append(zipfile.ZIP_ZSTANDARD)
+    _TAR_COMPRESSION_SCHEMES.append("zstd")
+    _ARCHIVE_SCHEMES.extend(["tar.zstd", "zip.zstd"])
+
+
+def _compress_tar(data: bytes, compression: str) -> bytes:
+    if compression == "gzip":
+        return gzip.compress(data)
+    assert _ZSTD_CODEC is not None
+    return _ZSTD_CODEC.compress(data)
 
 
 def _session(root: Path) -> UnixLocalSandboxSession:
@@ -121,13 +143,16 @@ async def test_default_extracted_size_limit_rejects_tar_before_member_write(
     assert not (tmp_path / "huge.txt").exists()
 
 
-async def test_default_tar_metadata_limit_rejects_compressed_pax_bomb(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compression", _TAR_COMPRESSION_SCHEMES)
+async def test_default_tar_metadata_limit_rejects_compressed_pax_bomb(
+    tmp_path: Path, compression: str
+) -> None:
     limit = SandboxArchiveLimits().max_tar_metadata_bytes
     assert limit is not None
     header = tarfile.TarInfo("pax")
     header.type = tarfile.XHDTYPE
     header.size = limit + 1
-    compressed = gzip.compress(header.tobuf(format=tarfile.GNU_FORMAT) + b"\0" * 1024)
+    compressed = _compress_tar(header.tobuf(format=tarfile.GNU_FORMAT) + b"\0" * 1024, compression)
 
     with pytest.raises(WorkspaceArchiveWriteError) as error:
         await _session(tmp_path).extract("bomb.tar", io.BytesIO(compressed))
@@ -136,13 +161,16 @@ async def test_default_tar_metadata_limit_rejects_compressed_pax_bomb(tmp_path: 
     assert not (tmp_path / "pax").exists()
 
 
-async def test_tar_decoded_stream_limit_rejects_compressed_payload(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compression", _TAR_COMPRESSION_SCHEMES)
+async def test_tar_decoded_stream_limit_rejects_compressed_payload(
+    tmp_path: Path, compression: str
+) -> None:
     data = _tar_with_file("payload.txt", b"x" * 4096)
     limits = SandboxArchiveLimits(max_tar_stream_bytes=2048)
 
     with pytest.raises(WorkspaceArchiveWriteError) as error:
         await _session(tmp_path).extract(
-            "large.tar", io.BytesIO(gzip.compress(data.read())), archive_limits=limits
+            "large.tar", io.BytesIO(_compress_tar(data.read(), compression)), archive_limits=limits
         )
 
     assert error.value.context["reason"] == "archive decoded tar size exceeds limit"
@@ -259,9 +287,7 @@ async def test_zip_directory_size_limit_stops_parser(tmp_path: Path) -> None:
     assert not (tmp_path / "long-name.txt").exists()
 
 
-@pytest.mark.parametrize(
-    "scheme", ["tar", "tar.gz", "tar.bz2", "tar.xz", "tar.lzma", "zip", "zip.lzma", "zip.bz2"]
-)
+@pytest.mark.parametrize("scheme", _ARCHIVE_SCHEMES)
 async def test_ordinary_archives_still_extract(tmp_path: Path, scheme: str) -> None:
     data = (
         _tar_with_file("ordinary.txt", b"ordinary")
@@ -273,6 +299,7 @@ async def test_ordinary_archives_still_extract(tmp_path: Path, scheme: str) -> N
             "zip": zipfile.ZIP_STORED,
             "zip.lzma": zipfile.ZIP_LZMA,
             "zip.bz2": zipfile.ZIP_BZIP2,
+            "zip.zstd": getattr(zipfile, "ZIP_ZSTANDARD", -1),
         }[scheme]
         with zipfile.ZipFile(data, mode="w", compression=compression) as archive:
             archive.writestr("ordinary.txt", b"ordinary")
@@ -285,6 +312,8 @@ async def test_ordinary_archives_still_extract(tmp_path: Path, scheme: str) -> N
         data = io.BytesIO(lzma.compress(data.read()))
     elif scheme == "tar.lzma":
         data = io.BytesIO(lzma.compress(data.read(), format=lzma.FORMAT_ALONE))
+    elif scheme == "tar.zstd":
+        data = io.BytesIO(_compress_tar(data.read(), "zstd"))
 
     await _session(tmp_path).extract(
         f"ordinary.{scheme}", data, compression_scheme=scheme.split(".")[0]
@@ -341,7 +370,7 @@ async def test_trusted_override_can_disable_all_limits(tmp_path: Path) -> None:
     assert (tmp_path / "ordinary.txt").read_bytes() == b"ordinary"
 
 
-@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+@pytest.mark.parametrize("compression", _ZIP_RESOURCE_CODECS)
 @pytest.mark.parametrize("declared_size", [1, 256 * 1024])
 async def test_zip_decoder_output_is_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compression: int, declared_size: int
@@ -354,14 +383,20 @@ async def test_zip_decoder_output_is_bounded(
     directory = raw.rfind(b"PK\x01\x02")
     struct.pack_into("<I", raw, directory + 16, zlib.crc32(payload[:declared_size]))
     struct.pack_into("<I", raw, directory + 24, declared_size)
-    codec = bz2 if compression == zipfile.ZIP_BZIP2 else lzma
-    decoder_type = (
-        codec.BZ2Decompressor if compression == zipfile.ZIP_BZIP2 else codec.LZMADecompressor
-    )
+    if compression == zipfile.ZIP_BZIP2:
+        codec, decoder_name = bz2, "BZ2Decompressor"
+    elif compression == zipfile.ZIP_LZMA:
+        codec, decoder_name = lzma, "LZMADecompressor"
+    else:
+        assert _ZSTD_CODEC is not None
+        codec, decoder_name = _ZSTD_CODEC, "ZstdDecompressor"
+    decoder_type = getattr(codec, decoder_name)
     output_sizes: list[int] = []
+    decoder_options: list[object] = []
 
     class ObservedDecoder:
         def __init__(self, *args: object, **kwargs: object) -> None:
+            decoder_options.append(kwargs.get("options"))
             self.decoder = decoder_type(*args, **kwargs)
 
         def decompress(self, data: bytes, max_length: int = -1) -> bytes:
@@ -372,18 +407,16 @@ async def test_zip_decoder_output_is_bounded(
         def __getattr__(self, name: str) -> object:
             return getattr(self.decoder, name)
 
-    monkeypatch.setattr(
-        codec,
-        "BZ2Decompressor" if compression == zipfile.ZIP_BZIP2 else "LZMADecompressor",
-        ObservedDecoder,
-    )
+    monkeypatch.setattr(codec, decoder_name, ObservedDecoder)
     await _session(tmp_path).extract("bounded.zip", io.BytesIO(raw))
     assert (tmp_path / "payload.txt").read_bytes() == payload[:declared_size]
     assert output_sizes
     assert max(output_sizes) <= 64 * 1024
+    if codec is _ZSTD_CODEC:
+        assert {codec.DecompressionParameter.window_log_max: 27} in decoder_options
 
 
-@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+@pytest.mark.parametrize("compression", _ZIP_RESOURCE_CODECS)
 async def test_compressed_zip_members_support_backend_rewinding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compression: int
 ) -> None:
@@ -393,6 +426,17 @@ async def test_compressed_zip_members_support_backend_rewinding(
         archive.writestr("payload.txt", payload)
     session = _session(tmp_path)
     original_write = session.write
+    windows: list[int] = []
+    if _ZSTD_CODEC is not None and compression == zipfile.ZIP_ZSTANDARD:
+        decoder_type = _ZSTD_CODEC.ZstdDecompressor
+
+        def observed_decoder(**kwargs: object) -> object:
+            options = kwargs.get("options")
+            if options:
+                windows.append(options[_ZSTD_CODEC.DecompressionParameter.window_log_max])
+            return decoder_type(**kwargs)
+
+        monkeypatch.setattr(_ZSTD_CODEC, "ZstdDecompressor", observed_decoder)
 
     async def measuring_write(path: Path, stream: io.IOBase, **kwargs: object) -> None:
         if path.name == "payload.txt":
@@ -403,9 +447,11 @@ async def test_compressed_zip_members_support_backend_rewinding(
     monkeypatch.setattr(session, "write", measuring_write)
     await session.extract("rewound.zip", io.BytesIO(data.getvalue()))
     assert (tmp_path / "payload.txt").read_bytes() == payload
+    if _ZSTD_CODEC is not None and compression == zipfile.ZIP_ZSTANDARD:
+        assert windows.count(27) >= 2
 
 
-@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+@pytest.mark.parametrize("compression", _ZIP_RESOURCE_CODECS)
 async def test_compressed_zip_members_release_decoder_without_cyclic_gc(
     tmp_path: Path, compression: int
 ) -> None:
@@ -446,11 +492,11 @@ def test_plain_archives_work_without_optional_compression_backends(tmp_path: Pat
     script = """
 import importlib.abc
 import sys
-for name in ("bz2", "_bz2", "lzma", "_lzma"):
+for name in ("bz2", "_bz2", "lzma", "_lzma", "compression.zstd", "_zstd"):
     sys.modules.pop(name, None)
 class MissingCompression(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname in ("_bz2", "_lzma"):
+        if fullname in ("_bz2", "_lzma", "_zstd"):
             raise ModuleNotFoundError("optional compression backend unavailable", name=fullname)
 sys.meta_path.insert(0, MissingCompression())
 import asyncio, io, tarfile, zipfile

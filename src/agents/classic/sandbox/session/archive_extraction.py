@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import _compression
 import io
 import shutil
+import sys
 import tarfile
 import tempfile
 import weakref
@@ -17,6 +17,8 @@ from ...run_config import SandboxArchiveLimits
 from ..errors import ExecNonZeroError, WorkspaceArchiveWriteError
 from ..files import EntryKind, FileEntry
 from ..util.tar_utils import UnsafeTarMemberError, safe_tar_member_rel_path
+
+_ZSTD_WINDOW_LOG_MAX = 27
 
 
 class UnsafeZipMemberError(ValueError):
@@ -166,11 +168,16 @@ def _decoded_tar_stream(
     elif magic.startswith((b"\xfd7zXZ", b"\x5d\x00\x00\x80")):
         try:
             import lzma
+
+            if sys.version_info >= (3, 14):
+                from compression._common import _streams as compression_streams
+            else:
+                import _compression as compression_streams
         except ImportError as e:
             raise tarfile.CompressionError("lzma module is not available") from e
         try:
             with io.BufferedReader(
-                _compression.DecompressReader(
+                compression_streams.DecompressReader(
                     data,
                     lzma.LZMADecompressor,
                     trailing_error=lzma.LZMAError,
@@ -181,6 +188,22 @@ def _decoded_tar_stream(
                 yield decoded
         except lzma.LZMAError as e:
             raise tarfile.ReadError("invalid LZMA data or decoder memory limit exceeded") from e
+    elif sys.version_info >= (3, 14) and magic.startswith(b"\x28\xb5\x2f\xfd"):
+        try:
+            from compression import zstd
+        except ImportError as e:
+            raise tarfile.CompressionError("zstd module is not available") from e
+        try:
+            with zstd.ZstdFile(
+                data,
+                mode="rb",
+                options={zstd.DecompressionParameter.window_log_max: _ZSTD_WINDOW_LOG_MAX},
+            ) as decoded:
+                yield decoded
+        except zstd.ZstdError as e:
+            raise tarfile.ReadError(
+                "invalid Zstandard data or decoder window limit exceeded"
+            ) from e
     else:
         yield data
 
@@ -246,6 +269,17 @@ def _read_compressed_zip_chunk(member: Any, dictionary_limit: int | None, size: 
     ):
         # ZipExtFile.seek() can replace the decoder when rewinding.
         member._decompressor = _LimitedZipLzmaDecompressor(dictionary_limit)
+    elif (
+        sys.version_info >= (3, 14)
+        and member._compress_type == zipfile.ZIP_ZSTANDARD
+        and member._fileobj.tell() == member._orig_compress_start
+    ):
+        from compression import zstd
+
+        # Retain libzstd's existing 128 MiB window cap, including after rewinds.
+        member._decompressor = zstd.ZstdDecompressor(
+            options={zstd.DecompressionParameter.window_log_max: _ZSTD_WINDOW_LOG_MAX}
+        )
     decoder = member._decompressor
     data = member._read2(size) if decoder.needs_input else b""
     data = decoder.decompress(data, max(size, member.MIN_READ_SIZE))
@@ -428,7 +462,11 @@ class WorkspaceArchiveExtractor:
                             kind=EntryKind.DIRECTORY,
                         )
                         with archive.open(member, mode="r") as member_data:
-                            if member.compress_type in (zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA):
+                            if member.compress_type in (
+                                zipfile.ZIP_BZIP2,
+                                zipfile.ZIP_LZMA,
+                                getattr(zipfile, "ZIP_ZSTANDARD", -1),
+                            ):
                                 member_data._read1 = partial(  # type: ignore[attr-defined]
                                     _read_compressed_zip_chunk,
                                     weakref.proxy(member_data),
