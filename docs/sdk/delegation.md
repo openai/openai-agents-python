@@ -80,7 +80,7 @@ async for child in session.subagents():
 
 An `active` status means the child remains open for work; it can be idle or unloaded. Check `is_live` to see whether the snapshot captured a loaded active instance. Closing or reloading a child can make its snapshot stale. `start()` checks that the captured instance remains current.
 
-`Turn.get_result()` returns the child's `Completed[str]`, retaining its text and latest reported thread usage after later turns. Missing usage is `None`; root results exclude child usage. Native failures and interruptions raise `NativeError`. Python tool failures can raise the function's exception after cleanup.
+`ChildTurn.get_result()` returns the child's `Completed[str]`, retaining its text and latest reported thread usage after later turns. Missing usage is `None`; root results exclude child usage. Native failures and interruptions raise `NativeError`. Python tool failures can raise the function's exception after cleanup.
 
 A child's callback `submission` is a `ChildInvocation` in `ToolContext`, `MCPResultContext`, and `ExecutorContext`. This identity cannot wait for or cancel work. Wait through `Subagent.turn` in application code. `session.events()` covers root and child work.
 
@@ -92,7 +92,7 @@ Observe `SubagentLifecycle` through `session.events()`. Its `kind` is `"created"
 
 Use the captured child and turn handles:
 
-- `await child.start(message)` starts work on an idle, live child and returns its `Turn[str]`.
+- `await child.start(message)` starts work on an idle, live child and returns its `ChildTurn`.
 - `await child.turn.steer(message)` steers the observed active turn.
 - `await child.try_cancel(child.turn)` cancels the captured child turn. `await session.cancel_all()` cancels the tree. See [interruption](sessions.md#interrupt-work) for return values and cleanup limits.
 
