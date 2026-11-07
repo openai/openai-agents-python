@@ -179,7 +179,7 @@ async def test_worker_accepts_only_after_owned_resources_close(
         trace.steering.extend(["correction"] * len(worker.CORRECTIONS))
         return SimpleNamespace(
             final_output=worker.ArtifactResult(artifact="summary.txt", check="artifact checked"),
-            usage=None,
+            thread_usage=None,
         )
 
     monkeypatch.setattr(worker, "NativeProvider", Provider)

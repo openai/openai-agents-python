@@ -805,7 +805,7 @@ async def test_session_open_captures_before_await_and_releases_after_cleanup(
         assert session._trace_context not in native.released
         cleanup_leases.append(session._trace_context)
 
-    session._exit_scope = close
+    session.aclose = close
 
     async def open(*args: Any, **kwargs: Any) -> Any:
         assert native.leases
