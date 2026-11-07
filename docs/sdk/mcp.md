@@ -186,7 +186,7 @@ server = HttpMCP(
 )
 ```
 
-Include `server` in your Agent's tools. The context supplies the raw server and tool names. `ctx.original_arguments` and `ctx.effective_arguments` contain detached JSON mappings on both direct and generated-code routes. Before policy receives the original values in both mappings; approval receives any replacement in `effective_arguments`. Mutating a nested view does not change the admitted call. `call` retains raw native metadata, including the route-specific input representation. See [denial and stop outcomes](execution.md#executor-policies) for direct versus generated-code behavior and the restrictions on callbacks controlling their own Session.
+Include `server` in your Agent's tools. The context supplies the raw server and tool names. `ctx.original_arguments` and `ctx.effective_arguments` contain detached JSON mappings on both direct and generated-code routes. The `before` callback receives the original values in both mappings. The `approval` callback receives any replacement in `effective_arguments`. Mutating a nested view does not change the admitted call. `call` retains raw native metadata, including the route-specific input representation. See [denial and stop outcomes](execution.md#executor-policies) for direct versus generated-code behavior and the restrictions on callbacks controlling their own Session.
 
 Executor policies use a different order: [executor approval](execution.md#executor-policies) receives the original arguments before transformation. `transform_result_timeout` limits the MCP result callback, not approval.
 

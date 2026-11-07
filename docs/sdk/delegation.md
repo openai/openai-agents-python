@@ -47,7 +47,7 @@ Set delegation limits on `NativeAgents`:
 
 ### Select tools for each child step
 
-To narrow a child's tools before each model step, set `NativeAgents(before_step=select)`. The synchronous or asynchronous `select(step)` callback receives a typed `ChildStepContext`. `step.context` is the Session application context, `step.child` is the `ChildInvocation` for that exact child instance and turn, and `step.step_index` counts preparations. The callback can apply tenant policy without an external context lookup. Return `None` to use that child operation's default selection, a sequence to narrow the admitted tools, or `[]` to disable all model tools for that preparation. The selection cannot add tools or replace their definitions.
+To narrow a child's tools before each model step, set `NativeAgents(before_step=select)`. The synchronous or asynchronous `select(step)` callback receives a typed `ChildStepContext`. `step.context` is the Session application context, `step.child` is the `ChildInvocation` for that exact child instance and turn, and `step.step_index` counts preparations. The callback can apply tenant policy without an external context lookup. Return `None` to use that child operation's default selection. Return a sequence to narrow the admitted tools, or `[]` to disable all model tools for that preparation. The selection cannot add tools or replace their definitions.
 
 `step.step_index` starts at zero for each child turn and counts preparations, which can end before a model request. Root turns use the separate [`before_step` callback on submission](sessions.md#select-tools-before-each-model-step).
 

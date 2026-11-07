@@ -13,7 +13,8 @@ An Agent declares instructions, tools and final output. Its constructor does not
 ```text
 Agent(*, instructions: str, name=None, tools=None, model=None,
       model_settings=None, provider=None, output_type=None,
-      programmatic_tool_calling=False)
+      programmatic_tool_calling=False, transform_context=None,
+      before_compact=None, before_complete=None)
 
 agent.validate() -> None
 agent.with_output_type(output_type) -> Agent
@@ -28,7 +29,7 @@ agent.run_sync(input, *, context=None, on_interaction=None,
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
               instruction_files=(), reconciled_calls=(),
-              parent_trace=None, trace_options=None)
+              parent_trace=None, trace_options=None, on_interaction=None)
               -> async context manager[Session]
 ```
 
@@ -59,7 +60,9 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
+| `await session.respond(reply)` | Deliver a bound reply prepared by an exact live request. Preparing the reply does not reserve its request. See [retained Session handlers](approvals.md#handle-requests-for-a-retained-session). |
 | `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
+| `await session.aclose()` | Stop owned work and join cleanup. Retry through this same owner if cleanup fails. See [incomplete cleanup](sessions.md#retry-incomplete-cleanup). |
 | `await session.cancel_all(*, mode="force")` | Stop and join roots, descendants and queued work. See [interruption](sessions.md#interrupt-work). |
 | `await session.update(*, model=None, model_settings=None, instructions=None, tools=None)` | Change one idle category. Tool updates replace admitted Python or manual names or MCP server/raw-tool pairs and set defaults. Temporary selections use the last accepted bindings. See [Session updates](sessions.md#update-tools-instructions-and-model-settings). |
 
@@ -262,17 +265,17 @@ The one-shot handler returns the matching request's candidate reply. The SDK che
 
 ### ApprovalRequest, FormRequest and UrlRequest
 
-Both types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
+All three request types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
 
 For a `FormRequest`, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
 
 Standard forms can use primitive or general schemas, including nested objects and arrays on the general route; see [form schema support](approvals.md#handle-native-approvals-and-forms) for validation limits.
 
-A URL request has an empty schema, plus `url` and `elicitation_id`. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
+A `UrlRequest` exposes `url` and `elicitation_id`, without form methods or a `schema` field. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
 
 In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server's completion notification. Keep the Session open while waiting. Consent does not establish completion, and a server notification does not independently verify the result.
 
-A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](approvals.md#answer-interactions-during-a-one-shot-run).
+A timeout raises `TimeoutError` and stops only that observer. Cancelling the waiter also stops only that wait. Call `await request.cancel_url_completion()` to expire the shared lifecycle; other completion waiters then receive `InteractionExpiredError`. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](approvals.md#answer-interactions-during-a-one-shot-run).
 
 ### VerificationProof and VerificationRequest
 

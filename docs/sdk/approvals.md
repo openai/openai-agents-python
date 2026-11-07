@@ -6,6 +6,7 @@ Use a manual `FunctionTool` when your application must obtain or supply a tool r
 | --- | --- |
 | Supply a typed function result | [A manual tool](#manual-tool-results) |
 | Wait for requests during an explicit Session | [Wait for a request or result](#wait-for-a-request-or-result) |
+| Handle recurring requests across Session turns | [A retained Session handler](#handle-requests-for-a-retained-session) |
 | Answer requests during `run()` | [A one-shot handler](#answer-interactions-during-a-one-shot-run) |
 | Answer a native approval, form, or URL request | [Native interaction requests](#handle-native-approvals-and-forms) |
 | Answer a trusted service's verification challenge | [Verification proofs](#answer-a-verification-challenge) |
@@ -158,7 +159,7 @@ To expire pending root requests, use `await turn.cancel(mode="force")`. To inclu
 
 ### Handle requests for a retained Session
 
-An optional Session handler uses the same bound replies as a one-shot handler:
+An optional Session handler uses the same bound replies as a one-shot handler. This fragment reuses `agent` and `answer` from [Manual tool results](#manual-tool-results):
 
 ```python
 async with agent.session(on_interaction=answer) as session:
@@ -166,13 +167,13 @@ async with agent.session(on_interaction=answer) as session:
     result = await turn.get_result()
 ```
 
-The handler remains registered across root turns and receives supported requests from the Session registry, including URL requests with no Turn IDs. It does not enable unsupported startup prompts. Handler failures reach their identified Turn; a failure for a Session-scoped request fails the Session. Closing the Session joins started handlers. A root result alone does not close a retained Session.
+The handler remains registered across root turns. It receives supported requests from the Session registry, including URL requests with no Turn IDs. The handler does not enable unsupported startup prompts. Handler failures reach their identified Turn; a failure for a Session-scoped request fails the Session. Closing the Session joins started handlers. A root result alone does not close a retained Session.
 
 Applications that own their interaction tasks can keep using `session.interactions()`. Deliver the same prepared reply with `await session.respond(await answer(request))`. A reply does not reserve its request; another consumer can answer first, and delivery then raises `InteractionExpiredError`. Preserve the exact-request check when building reusable handlers.
 
 ### Answer interactions during a one-shot run
 
-Pass `on_interaction` to `agent.run()`, `agent.run_sync()`, or `agent.session()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
+Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
 
 #### Handle native approvals and forms
 
