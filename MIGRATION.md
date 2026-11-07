@@ -287,7 +287,9 @@ Classic Runner traces are not preserved. The adapter calls the selected Model wi
 
 To cancel, cancel the task awaiting `SDKRunner.run` and await that task's completion. The runner closes its response endpoint and native Session. During cancellation or failure, it waits for every started tool invocation to finish, including asynchronous tools. Runner cancellation does not cancel those tool invocations. A tool that never finishes can prevent cleanup from completing. A Model that suppresses cancellation can also delay cleanup.
 
-If native cleanup fails, the original error can carry a retry owner. In your error handler, retain `cleanup = getattr(error, "cleanup", None)`. If `cleanup is not None`, await `cleanup.aclose()` and retain that owner if the retry fails. After admission, this Session also closes the migration-owned native provider. The adapter still leaves your application Model and its provider open.
+If native cleanup fails, import `get_cleanup` from `agents.migration` and retain `cleanup = get_cleanup(error)` in your error handler. If `cleanup is not None`, await `cleanup.aclose()` and retain that owner if the retry fails. The helper finds the existing Session or NativeProvider through the error and its exception context. After admission, the Session also closes the migration-owned native provider; do not close that provider separately. The adapter still leaves your application Model and its provider open.
+
+Use `get_cleanup(error)` instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation remains `CancelledError`; the helper does not wrap or replace the error.
 
 Your application remains responsible for background work that its callbacks start independently. Cancellation and failure do not undo tool effects. Reconcile those effects before restarting a failed workflow.
 

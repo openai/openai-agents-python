@@ -492,3 +492,7 @@ A dictionary with `type="input_image"` and an `image_url` containing base64 imag
 ## Migration run handles
 
 The optional `agents.migration` adapter exposes `SDKRunner.start(...) -> SDKRunHandle` for a run that starts in the current event loop. Await `handle.get_result()` for its accepted result, or call `handle.cancel()` and then await settlement to join cleanup. `handle.replay_events()` and `result.replay_events()` yield buffered accepted semantic events after successful completion. They do not provide live model or tool progress. Classic Runner streaming APIs keep their existing behavior.
+
+For migration failures or cancellation, import `get_cleanup` from `agents.migration`. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None` finds the retained cleanup owner through the error and its exception context. It returns the existing Session or NativeProvider owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+
+Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation remains `CancelledError`; the helper does not wrap or replace the error.
