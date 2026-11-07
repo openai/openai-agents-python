@@ -286,7 +286,7 @@ Declares selected tools on a Streamable HTTP server:
 
 ```text
 HttpMCP(*, name: str, tools: Sequence[str], url: str,
-        approval_mode="auto", startup_timeout=10, execution_timeout=60,
+        approval_mode="native", startup_timeout=10, execution_timeout=60,
         transform_result=None, transform_result_timeout=None,
         before=None, approval=None, defer_loading=False, bearer_token=None)
 ```
@@ -298,7 +298,7 @@ Declares selected tools on a server process:
 ```text
 StdioMCP(*, name: str, tools: Sequence[str], command: str,
          args=(), env_vars=(), cwd=None, location="host",
-         approval_mode="auto", startup_timeout=10, execution_timeout=60,
+         approval_mode="native", startup_timeout=10, execution_timeout=60,
          transform_result=None, transform_result_timeout=None,
          before=None, approval=None, defer_loading=False)
 ```

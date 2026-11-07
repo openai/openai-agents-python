@@ -59,16 +59,16 @@ Restore uses the application's current server declarations and Environment.
 
 ## Configure MCP approval
 
-MCP selection and approval are separate. The default `approval_mode="auto"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a [one-shot handler](approvals.md#handle-native-approvals-and-forms). A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
+MCP selection and approval are separate. The default `approval_mode="native"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a [one-shot handler](approvals.md#handle-native-approvals-and-forms). A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
 
-To explicitly approve calls to selected tools, use `approval_mode="approve"`. This fragment reuses the `HttpMCP` import above:
+To explicitly approve calls to selected tools, use `approval_mode="preapproved"`. This fragment reuses the `HttpMCP` import above:
 
 ```python
 writer = HttpMCP(
     name="records",
     url="https://mcp.example.com/mcp",
     tools=("write_record",),
-    approval_mode="approve",
+    approval_mode="preapproved",
 )
 ```
 
@@ -186,7 +186,7 @@ server = HttpMCP(
 )
 ```
 
-Include `server` in your Agent's tools. The context supplies the raw server and tool names; `call` contains the effective input accepted after `before`. See [denial and stop outcomes](execution.md#executor-policies) for direct versus generated-code behavior and the restrictions on callbacks controlling their own Session.
+Include `server` in your Agent's tools. The context supplies the raw server and tool names. `ctx.original_arguments` and `ctx.effective_arguments` contain detached JSON mappings on both direct and generated-code routes. Before policy receives the original values in both mappings; approval receives any replacement in `effective_arguments`. Mutating a nested view does not change the admitted call. `call` retains raw native metadata, including the route-specific input representation. See [denial and stop outcomes](execution.md#executor-policies) for direct versus generated-code behavior and the restrictions on callbacks controlling their own Session.
 
 Executor policies use a different order: [executor approval](execution.md#executor-policies) receives the original arguments before transformation. `transform_result_timeout` limits the MCP result callback, not approval.
 
