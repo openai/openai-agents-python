@@ -14,6 +14,8 @@ When opening a Session:
 - Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
 - [Portable restore](state.md#save-and-restore-a-portable-checkpoint) keeps the saved model and settings instead.
 
+Development builds after `0.24.0-alpha.6` also support `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching-source setup](installation.md#examples-and-upgrades) for this option.
+
 An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
 
 ## Choose tools and workspace access
@@ -262,6 +264,14 @@ Choose the hook by what it owns:
 | Transform execution arguments or results | [Tool hooks](tools.md#inspect-or-change-tool-values). |
 
 These hooks have separate owners. A context projection does not change admitted tools or execution policy.
+
+## Check a proposed completion
+
+`before_complete` requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). Set `Agent(before_complete=callback)` to check a proposed root or child answer before the turn completes. The callback receives `CompletionContext` from `agents`, including application `context`, proposed `text`, native identity, and `continuation_count`.
+
+Return `None` to accept, `ContinueTurn("specific feedback")` to continue the same turn, or `StopTurn(...)` to stop it. Continuation feedback becomes model-visible conversation data and saved history. Bound root continuations with [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage). Root budgets exclude children, so use `continuation_count` and `StopTurn` to bound child continuations.
+
+The callback sees proposed text before output-type validation. Rejected text may already have streamed and remains in history. The callback does not run for provider failures, cancellation, compaction, or separate prompted-output repairs. A raised exception fails the turn. Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks. A callback must not mutate its own Session.
 
 ## Edit the next sampling request
 

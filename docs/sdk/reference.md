@@ -21,11 +21,11 @@ agent.with_output_type(output_type) -> Agent
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
                 tools=None, before_step=None, state=None, return_state=False,
-                parent_trace=None, trace_options=None, prepare_request=None) -> Completed
+                parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
                tools=None, before_step=None, state=None, return_state=False,
-               parent_trace=None, trace_options=None, prepare_request=None) -> Completed
+               parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
               instruction_files=(), reconciled_calls=(),
@@ -56,7 +56,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None, prepare_request=None)` | Return a root Turn after local registration, before native admission or completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None, prepare_request=None, budget=None)` | Return a root Turn after local registration, before native admission or completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
@@ -72,7 +72,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.compact(*, summary=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
+| `await session.model_context()` | Capture detached current model input while idle. Use the issued `ModelContextSnapshot` to [retain selected originals during compaction](state.md#retain-selected-context-items). |
+| `await session.compact(*, summary=None, snapshot=None, retain=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
 | `await session.fork()` | Return independent `SessionState`, leaving the source usable. Workspace files are not copied. See [save and restore](state.md#save-and-restore-a-portable-checkpoint) for storage, descendant and programmatic-state limits. |
 | `await session.suspend()` | Capture a supported manual boundary and retire the Session. See [manual suspension](state.md#save-a-settled-manual-request). |
@@ -106,11 +107,17 @@ Request editing requires a development build newer than alpha.6; use the [matchi
 
 `prepare_request(turn, request, *, preparation_index, recovery_attempt)` may return a complete `PreparedRequest`, `None`, or an awaitable of either. The value contains `instructions: str`, `input: list[dict]`, and `tools: list[PreparedToolPresentation]`. Input uses native ResponseItem JSON. A tool presentation contains `namespace`, `name`, `kind`, `strict`, `defer_loading`, `description`, and `parameters`; only the last two can change. Edits affect sampling, leaving canonical history and execution authority unchanged. See [request-editing profiles and lifecycle limits](configuration.md#edit-the-next-sampling-request).
 
+### CompletionContext, ContinueTurn, and CompactionContext
+
+These types require a development build newer than alpha.6. `Agent.before_complete` receives `CompletionContext` and returns `None`, `ContinueTurn(instructions)`, or `StopTurn(...)`. See [proposed completion checks](configuration.md#check-a-proposed-completion) for callback timing and limits.
+
+`Agent.before_compact` receives `CompactionContext` and returns a nonempty summary string or `None`. See [compaction callbacks](state.md#supply-summaries-through-a-callback) for retained history, fallback, and callback ownership.
+
 ### before_step
 
-The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, or a sequence of selectors for that preparation.
+The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, a sequence of selectors for that preparation, or `StopTurn(...)` to stop the root before the next model request.
 
-`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). Programmatic entry points are `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")`. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
+`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). With programmatic tool calling, the SDK includes `exec` and `wait` helpers for nonempty selections; an empty selection disables all tools. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
 
 ### Turn
 
@@ -163,6 +170,17 @@ Import these immutable data classes from `agents.usage`. `Completed.thread_usage
 `TokenUsage` contains integer fields `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. Cached and reasoning counts are already included in the totals.
 
 These values describe native thread snapshots. They do not report per-submission costs or billing records. See [usage readback and accounting limits](observability.md#read-usage-without-double-counting).
+
+### RunBudget
+
+Import `RunBudget` from `agents` or `agents.usage` in a development build newer than alpha.6:
+
+```text
+RunBudget(max_requests=None, max_tokens=None, max_estimated_cost_micros=None,
+          estimate_cost_micros=None, missing_usage="stop")
+```
+
+Pass `budget` to a one-shot run or `Session.submit()`. At least one limit is required; each limit is an integer from zero through `2**53 - 1`. The SDK checks limits before the next root sampling admission. An admitted response can overshoot a token or estimated cost limit. See [budget accounting, errors, and checkpoint limits](observability.md#limit-a-runs-model-requests-and-usage).
 
 ## Errors
 
@@ -343,10 +361,10 @@ These calls accept an `EnvironmentSource`: either a borrowed `Environment` descr
 ```text
 Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
             capability_directories=None, approval=None, transform_arguments=None,
-            transform_result=None, policy_timeout=30, network=None, writable_roots=None)
+            transform_result=None, policy_timeout=30, network=None, writable_roots=None, mounts=())
 Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
                   capability_directories=None, approval=None, transform_arguments=None,
-                  transform_result=None, policy_timeout=30) -> Environment
+                  transform_result=None, policy_timeout=30, mounts=()) -> Environment
 ```
 
 Environment options have these limits:
@@ -360,6 +378,10 @@ Environment options have these limits:
 Use [`Environment.local()`](execution.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in `cwd`. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](execution.md#replace-write-roots-between-turns) for policy changes and restore.
 
 For a Windows x64 job-local named pipe, omit `network` and `writable_roots`. `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](execution.md#windows-named-pipes-in-an-offline-job) and [remote execution](execution.md#remote-execution).
+
+### LocalStorageMount
+
+In development builds newer than alpha.6, `LocalStorageMount(source, destination, strategy, read_only=True)` adds an existing same-path directory to a Linux local executor's read-only mounts. Pass the declaration in `Environment.local(mounts=[...])`. Supply `strategy` explicitly; `read_only=False` is unsupported. See [read-only directory requirements and restore limits](execution.md#add-read-only-directories-on-linux).
 
 ### NetworkPolicy
 
@@ -407,7 +429,7 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 ### ModelSettings
 
-Supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override.
+Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in development builds after alpha.6, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](configuration.md#model-and-session-settings).
 
 ## Tracing
 
@@ -453,11 +475,11 @@ A processor implements `on_trace_event(event: TraceLifecycleEvent)` synchronousl
 
 ### WebSearch
 
-`WebSearch(mode="cached", route="standalone")` enables native web search at Session opening. `mode` also accepts `"live"`; `route` also accepts `"hosted"` for the provider-hosted protocol. The provider must support the chosen route. Omission disables both routes. The declaration is fixed for the opening, and explicit selections must retain it. It does not grant executor network access. See [the tools guide](tools.md).
+`WebSearch(mode="cached", route="standalone", allowed_domains=None, blocked_domains=None, location=None)` enables native web search at Session opening. `mode` also accepts `"live"`; `route` also accepts `"hosted"` for the provider-hosted protocol. The provider must support the chosen route. Omission disables both routes. The declaration is fixed for the opening. In development builds newer than alpha.6, explicit selections can omit it to disable search for that operation or preparation. Domain filters and approximate location require the hosted route and provider support. It does not grant executor network access. See [the tools guide](tools.md#native-web-search).
 
 ### Checklist and NativeGoals
 
-Put `Checklist()` in the opening tools to enable native checklist updates, then read them with `await session.checklist()`. Put `NativeGoals()` in the opening tools of a `LocalStorage` Session to enable native goals, then inspect `await session.goal()`. These declarations grant separate tools. Redeclare `NativeGoals()` when reopening a local conversation. Saved data alone grants no tools. Explicit selections must retain fixed planning declarations. Reopening does not itself start work. See [current checklists and goals](sessions.md#current-checklists-and-goals).
+Put `Checklist()` in the opening tools to enable native checklist updates, then read them with `await session.checklist()`. Put `NativeGoals()` in the opening tools of a `LocalStorage` Session to enable native goals, then inspect `await session.goal()`. These declarations grant separate tools. Redeclare `NativeGoals()` when reopening a local conversation. Saved data alone grants no tools. In development builds newer than alpha.6, explicit selections can omit a planning declaration to disable its tools for that operation or preparation. Reopening does not itself start work. See [current checklists and goals](sessions.md#current-checklists-and-goals).
 
 ### Saved checklist and goal data
 

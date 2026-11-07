@@ -1,7 +1,7 @@
 """Example demonstrating custom httpx_client_factory for MCPServerStreamableHttp.
 
-This example shows how to configure custom HTTP client behavior for MCP StreamableHTTP
-connections, including SSL certificates, proxy settings, and custom timeouts.
+This example configures headers, authentication, and timeouts for MCP StreamableHTTP
+connections while retaining the HTTP client's default TLS certificate verification.
 """
 
 import asyncio
@@ -44,10 +44,9 @@ def create_custom_http_client(
     """Create a custom HTTP client with specific configurations.
 
     This function demonstrates how to configure:
-    - Custom SSL verification settings
     - Custom timeouts
     - Custom headers
-    - Proxy settings (commented out)
+    - Authentication
     """
     if headers is None:
         headers = {
@@ -56,13 +55,10 @@ def create_custom_http_client(
         }
     if timeout is None:
         timeout = httpx2.Timeout(60.0, read=120.0)
-    if auth is None:
-        auth = None
     return httpx2.AsyncClient(
-        # Disable SSL verification for testing (not recommended for production)
-        verify=False,
         # Set custom timeout
-        timeout=httpx2.Timeout(60.0, read=120.0),
+        timeout=timeout,
+        auth=auth,
         # Add custom headers that will be sent with every request
         headers=headers,
     )
@@ -87,7 +83,7 @@ async def run_with_custom_client(mcp_server: MCPServer):
 async def main():
     """Main function demonstrating different HTTP client configurations."""
 
-    print("=== Example: Custom HTTP Client with SSL disabled and custom headers ===")
+    print("=== Example: Custom HTTP Client with custom headers and timeouts ===")
     async with MCPServerStreamableHttp(
         name="Streamable HTTP with Custom Client",
         params={

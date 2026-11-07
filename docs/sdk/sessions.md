@@ -402,7 +402,7 @@ result = await second.get_result()
 
 Updates cannot add new names or MCP pairs. Open a new Session for those. Temporary turn selections cannot install bindings. Selecting an original descriptor uses its last accepted replacement. See [idle replacement](tools.md#replace-tools-between-turns).
 
-Explicit selections must retain fixed native capabilities. `tools=[]` fails if it would remove one. [Per-step selection](#select-tools-before-each-model-step) has additional limits.
+In development builds newer than alpha.6, explicit selections can omit native capabilities admitted at opening. `tools=[]` disables all model tools for that operation. Select the captured Environment or `NativeAgents` declaration, or admitted `ToolRef` values, to include executor or collaboration tools. Changing the selection does not close resources or stop already running children or processes. [Per-step selection](#select-tools-before-each-model-step) can narrow the operation's selection further.
 
 ### Update instructions or model settings
 
@@ -443,6 +443,7 @@ To select tools before each model step, pass `before_step` to `submit()`, `agent
 
 - Return `None` to use the operation's tool selection.
 - Return a sequence to narrow the admitted tools.
+- Return `StopTurn(...)` from `agents` to stop the root before its next model request. After cleanup, `get_result()` raises `TurnStoppedError`; independent children can continue.
 
 `step_index` starts at zero and counts preparations in that Turn. Cancellation can stop a preparation before it sends a model request.
 
@@ -469,9 +470,9 @@ async with agent.session() as session:
 
 A selector has these limits:
 
-- It cannot add excluded tools, install or replace bindings, or change the operation's individual MCP tools.
-- It must retain each fixed native capability, including the opening Environment, `NativeAgents`, `Checklist`, `NativeGoals`, and other fixed declarations when present.
-- With programmatic tool calling, each explicit selection must include `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")` from `agents`.
+- It cannot add tools excluded by the operation, including MCP tools, or install or replace bindings.
+- In development builds newer than alpha.6, it can omit admitted native capabilities for that preparation, including executor, collaboration, search, and planning tools.
+- With programmatic tool calling, the SDK includes the `exec` and `wait` helpers for a nonempty selection. An empty selection disables the helpers and all tool calls for that preparation.
 
 An operation with `before_step` cannot be suspended because portable state does not retain its callback.
 
@@ -505,7 +506,7 @@ async with agent.session(storage=profile) as session:
     goal = await session.goal()
 ```
 
-After closing the Session, [reopen the local conversation](state.md#reopen-a-conversation-from-local-storage) with `agent.session(storage=profile, resume=saved_id)` and declare `NativeGoals()` again. Reopening the Session and reading the goal do not start a turn or resume goal work automatically. `NativeGoals` does not enable a checklist. Explicit tool selections for an operation or step must retain each granted planning declaration. Saved planning data alone grants neither tool.
+After closing the Session, [reopen the local conversation](state.md#reopen-a-conversation-from-local-storage) with `agent.session(storage=profile, resume=saved_id)` and declare `NativeGoals()` again. Reopening the Session and reading the goal do not start a turn or resume goal work automatically. `NativeGoals` does not enable a checklist. In development builds newer than alpha.6, explicit operation and step selections can omit a planning declaration to disable its tools for that operation or preparation. Saved planning data alone grants neither tool.
 
 ## Save, restore, or compact a conversation
 

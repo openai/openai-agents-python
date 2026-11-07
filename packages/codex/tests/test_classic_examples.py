@@ -1,5 +1,8 @@
 """The restored Classic runner discovers runnable modules from the SDK root."""
 
+import ast
+import asyncio
+import base64
 import os
 import subprocess
 import sys
@@ -119,3 +122,81 @@ def test_provider_examples_require_explicit_external_opt_in(tmp_path, relative_p
 def test_local_sandbox_examples_keep_default_runner_availability(tmp_path, relative_path):
     output = runner_dry_run(tmp_path, relative_path)
     assert f"- RUN  examples/classic/{relative_path}" in output
+
+
+@pytest.mark.parametrize("stall_response", [False, True])
+@pytest.mark.parametrize("factory_source", ["module", "readme"])
+async def test_custom_mcp_http_client_applies_auth_headers_and_read_timeout(
+    stall_response, factory_source
+):
+    import httpx2
+
+    from examples.classic.mcp.streamablehttp_custom_client_example.main import (
+        create_custom_http_client,
+    )
+
+    if factory_source == "readme":
+        readme = (
+            Path(__file__).resolve().parents[3]
+            / "examples/classic/mcp/streamablehttp_custom_client_example/README.md"
+        )
+        snippet = readme.read_text(encoding="utf-8").split("```python\n", 1)[1].split("```", 1)[0]
+        definitions = ast.parse(snippet, filename=str(readme))
+        definitions.body = [
+            node
+            for node in definitions.body
+            if isinstance(
+                node, ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef
+            )
+        ]
+        namespace = {}
+        exec(compile(definitions, str(readme), "exec"), namespace)
+        create_custom_http_client = namespace["create_custom_http_client"]
+
+    request_seen = asyncio.get_running_loop().create_future()
+    release_response = asyncio.Event()
+    connections = set()
+
+    async def handle_request(reader, writer):
+        task = asyncio.current_task()
+        connections.add(task)
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            request_seen.set_result(request.decode("ascii"))
+            if stall_response:
+                await release_response.wait()
+            else:
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            connections.discard(task)
+
+    server = await asyncio.start_server(handle_request, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with create_custom_http_client(
+            headers={"X-Custom-Client": "configured-example"},
+            timeout=httpx2.Timeout(5.0, read=0.1),
+            auth=httpx2.BasicAuth("example-user", "example-password"),
+        ) as client:
+            if stall_response:
+                with pytest.raises(httpx2.ReadTimeout):
+                    await asyncio.wait_for(client.get(f"http://127.0.0.1:{port}/"), timeout=5)
+            else:
+                response = await asyncio.wait_for(
+                    client.get(f"http://127.0.0.1:{port}/"), timeout=5
+                )
+                assert response.status_code == 200
+                assert response.text == "OK"
+            request = await asyncio.wait_for(request_seen, timeout=5)
+            credentials = base64.b64encode(b"example-user:example-password").decode("ascii")
+            assert f"Authorization: Basic {credentials}\r\n" in request
+            assert "X-Custom-Client: configured-example\r\n" in request
+    finally:
+        release_response.set()
+        if connections:
+            await asyncio.gather(*connections)
+        server.close()
+        await server.wait_closed()

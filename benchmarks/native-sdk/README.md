@@ -42,7 +42,7 @@ The wheel hook builds the native extension and matching execution helpers. Insta
 
 ## Verify and run a small correctness check
 
-Before execution, verify the eight source hashes and inventory against `benchmark-source-manifest.json`. Keep exactly eight `.py` files beside `compare.py`; it records every sibling Python file. Run ordinary Python without optimization or instrumentation. The controller and worker reject known inherited Python path/home, allocator, preload, profiling and scheduler overrides, including empty environment values. They also reject active Python trace/profile hooks and profiling `-X` options. Clear the listed controls rather than relying on a shell that happens to omit them. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported. These checks cover known controls, not every possible external profiler or modified interpreter.
+Before execution, verify the eight source hashes and inventory against `benchmark-source-manifest.json`. Keep exactly eight `.py` files in this directory, including `compare.py`; the controller records every Python file. Run ordinary Python without optimization or instrumentation. The controller and worker reject known inherited Python path/home, allocator, preload, profiling and scheduler overrides, including empty environment values. They also reject active Python trace/profile hooks and profiling `-X` options. Clear the listed controls rather than relying on a shell that happens to omit them. `PYTHONSAFEPATH` and the controller's fixed `PYTHONHASHSEED=0` remain supported. These checks cover known controls, not every possible external profiler or modified interpreter.
 
 ```sh
 "$PEER_PY" - "$BENCH" <<'VERIFY'
@@ -75,17 +75,35 @@ The output directory must be new. Expect validator PASS, six successful worker r
 
 ## Interpret the scope
 
+### Requests and framing
+
 The adapters fix the model identifier to `gpt-5.1-codex`, instructions and tool schema; there is no model/effort override. For final-only calls, stable uses JSON while native uses SSE. The peer performs that framing work, so large-output wall time does not isolate client cost. Streamed cases also validate chunks, and history/tool cases verify retained request contents and callbacks.
 
-The controller requires explicit expected SDK versions and checks each worker's actual version before accepting the row. Match `importlib.metadata.version('openai-agents')` exactly: native metadata can say `0.24.0-alpha.6` while its wheel filename uses `0.24.0a6`. The controller deliberately does not normalize those spellings. It requires the same reported CPython build/ABI fields and shared pydantic/typing-extensions versions across arms, and stable SDK/module/Python/dependency identity within each arm across rounds and cases. SDK and OpenAI dependency versions need not match across arms. Scheduled workload parameters and existing operation/tool-count receipts must match; the worker remains the authority for exact request/output/history/tool checks. The controller rehashes the sibling harness at the end, including failed runs. It does not bind installed Python/native files to wheel members, hash the interpreter executable or prove the source commit. Before making commit-specific claims, verify installed wheel members and retain before/after evidence plus complete dependency inventories. The runner's output/history/tool checks do not establish full model/instruction/settings request equivalence.
+### Version and source identity
+
+The controller requires explicit expected SDK versions and checks each worker's actual version before accepting the row. Match `importlib.metadata.version('openai-agents')` exactly: native metadata can say `0.24.0-alpha.6` while its wheel filename uses `0.24.0a6`. The controller deliberately does not normalize those spellings.
+
+The two environments must report the same CPython build/ABI fields, pydantic version and typing-extensions version. Within each environment, SDK, module, Python and dependency identities must stay the same across rounds and cases. SDK and OpenAI dependency versions need not match across arms. Scheduled workload parameters and existing operation/tool-count receipts must match; the worker remains the authority for exact request/output/history/tool checks. The controller rehashes the sibling harness at the end, including failed runs.
+
+It does not bind installed Python/native files to wheel members, hash the interpreter executable or prove the source commit. Before making commit-specific claims, verify installed wheel members and retain before/after evidence plus complete dependency inventories. The runner's output/history/tool checks do not establish full model/instruction/settings request equivalence.
+
+### Process lifetime
 
 Each worker runs in a dedicated process group; its peer inherits that group. The controller defers TERM/INT across spawn handoff and bounded teardown, then always retires the group, even if its leader exits first. The standalone validator owns its peer group, bounds readiness to 10 seconds and 64 KiB, then uses TERM, KILL and reap. Startup, teardown and OS failures can still fail a run; require joined exit 0, not just a saved JSON file. No SDK or performance qualification of this source bundle is claimed.
+
+### Memory and timing
 
 Raw `max_rss_kib` is explicitly unqualified Linux `RUSAGE_SELF.ru_maxrss`. It includes import/setup/validation and may inherit a parent high-water floor. It remains in individual worker data, but never enters summary comparisons, bootstrap intervals or verdicts. A memory comparison needs a separate qualified method.
 
 Operation timers include actual run/submit-result work; prefill and later checks are outside measured CPU/wall spans. Conversation opening/final close are separate, while a one-shot run includes its own Session lifetime. First-result latency starts at adapter import/setup, not interpreter or peer startup. Large-output peer framing work remains part of observed wall time.
 
-Each round supplies a matched v0/v1 process pair identified by sample index. The fixed-seed 10,000-resample bootstrap draws those pairs together and computes the ratio of their process medians. It rejects missing/duplicate pairs and unequal, empty, nonfinite or nonpositive metric vectors. Summaries retain every raw per-side metric value in pair order. Pairing retains observed shared round variation; it does not eliminate host drift, order effects or multiple exploration. One pair gives a degenerate interval, not uncertainty evidence. Five-pair defaults remain exploratory; the parity option is an engineering non-regression rule, not proof of behavioral equivalence or guaranteed 95% coverage.
+### Paired statistics
+
+Each round supplies a matched v0/v1 process pair identified by sample index. The fixed-seed 10,000-resample bootstrap draws those pairs together and computes the ratio of their process medians. It rejects missing/duplicate pairs and unequal, empty, nonfinite or nonpositive metric vectors. Summaries retain every raw per-side metric value in pair order. Pairing retains observed shared round variation; it does not eliminate host drift, order effects or multiple exploration. One pair gives a degenerate interval, not uncertainty evidence.
+
+Five-pair defaults remain exploratory; the parity option is an engineering non-regression rule, not proof of behavioral equivalence or guaranteed 95% coverage.
+
+### Compare with JavaScript
 
 Compared with the JS benchmark, this harness keeps a fresh peer per worker rather than a persistent fixture. Their JIT/heap/cache lifetimes therefore differ. Python operation p95 uses linear interpolation at `(n-1)*p`; bootstrap bounds retain the existing order-statistic indices `floor((B-1)*p)`. JS uses its own order-statistic quantiles. Do not silently treat these percentile definitions as identical. Neither these paired statistics nor raw high-water rows qualify a memory comparison.
 
@@ -97,9 +115,7 @@ The statistics/qualification tests use only the standard library and do not impo
 "$PEER_PY" -m unittest discover -s "$BENCH/tests" -v
 ```
 
-The optional native-SDK cursor check uses the loopback peer to verify a retained
-conversation beyond the observation buffer's retention and rejection of a genuine
-SDK gap. It reports correctness only:
+The optional native-SDK cursor check uses the loopback peer to verify a retained conversation beyond the observation buffer's retention and rejection of a genuine SDK gap. It reports correctness only:
 
 ```sh
 uv pip install --python "$NATIVE_PY" 'aiohttp==3.14.3'
