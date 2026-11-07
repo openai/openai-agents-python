@@ -27,6 +27,7 @@ from pydantic import TypeAdapter
 from .._function_tools import FunctionTool
 from .._trace_context import TraceContext, _trace_context
 from ..agent import Agent
+from ..executor import EnvironmentSource
 from ..manual import (
     ActionRequested,
     _CapturedManual,
@@ -126,11 +127,19 @@ class NativeA2AStore(VersionedTaskStore):
 
 @dataclass(frozen=True, kw_only=True, repr=False)
 class NativeA2AAgent:
-    """Current host configuration; never reconstructed from peer or saved metadata."""
+    """Current host configuration, re-evaluated on every execution and resume.
+
+    Peer and saved metadata never supply authority. Session owns Environment
+    acquisition, policy matching and cleanup, including current Environment
+    callbacks. Portable checkpoints with active RunBudget or root prepare_request
+    and before_step callbacks are unsupported; use Agent/Session directly for
+    those profiles. Return a fresh managed context manager on each factory call.
+    """
 
     agent: Agent[Any, Any]
     context: object = None
     parent_trace: TraceContext | Mapping[str, str | None] | None = None
+    environment: EnvironmentSource[Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parent_trace", _trace_context(self.parent_trace))
@@ -483,7 +492,11 @@ class NativeA2AExecutor(AgentExecutor):
         output_type = configured.agent.output_type
         result, captured = None, None
         if not live.canceled:
-            options: dict[str, Any] = {"context": configured.context, "state": state}
+            options: dict[str, Any] = {
+                "context": configured.context,
+                "state": state,
+                "environment": configured.environment,
+            }
             if configured.parent_trace is not None:
                 options["parent_trace"] = configured.parent_trace
             async with configured.agent.session(**options) as session:

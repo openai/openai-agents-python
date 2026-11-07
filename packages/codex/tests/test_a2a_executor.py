@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Annotated
 
@@ -15,14 +16,24 @@ from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, PlainSerializer
 
-from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput, function_tool
+from agents import (
+    Agent,
+    Environment,
+    FunctionTool,
+    NativeOutput,
+    NativeProvider,
+    PromptedOutput,
+    function_tool,
+)
 from agents.a2a import A2ALimits, NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
 from tests.a2a_helpers import HostStore, call_context, invoke, request_context
 from tests.a2a_http import card
+from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
     assistant_output,
     function_call,
     responses as responses,
+    tool_output,
 )
 
 
@@ -58,6 +69,176 @@ async def test_native_completion_is_exact_official_snapshot(tmp_path, responses)
     recovered = await executor.recover(binding, call_context())
     assert recovered == record
     assert len(responses.requests) == 1
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("mode", ["same", "changed", "omitted"])
+async def test_current_trusted_environment_survives_a2a_suspend_and_resume(
+    tmp_path, responses, monkeypatch, mode
+):
+    async with ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        acquired, disposed, factories = 0, 0, 0
+        resumed = False
+        approved = []
+
+        @asynccontextmanager
+        async def environment():
+            nonlocal acquired, disposed
+            acquired += 1
+            phase = "resumed" if resumed else "initial"
+
+            def approval(context, arguments):
+                approved.append(f"{phase}:{context.call_id}")
+                return True
+
+            try:
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(peer.root),
+                    tools=["exec_command"],
+                    approval=approval,
+                    writable_roots=[str(extra)] if resumed and mode == "changed" else [],
+                )
+            finally:
+                disposed += 1
+
+        decision = FunctionTool(
+            name="decision", description="Choose.", input_type=Approval, output_type=bool
+        )
+        agent = Agent(
+            instructions="Inspect the workspace, ask, then inspect again.",
+            model="test-model",
+            provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+            tools=[decision],
+        )
+
+        def configure(binding, call_context):
+            nonlocal factories
+            factories += 1
+            return NativeA2AAgent(
+                agent=agent,
+                environment=None if resumed and mode == "omitted" else environment(),
+            )
+
+        executor = NativeA2AExecutor(agent_factory=configure, store=HostStore(tmp_path))
+        responses.respond(
+            function_call("exec_command", {"cmd": "pwd", "max_output_tokens": 100}, "before")
+        )
+        responses.respond(function_call("decision", {"reason": "synthetic"}, "decision"))
+        initial = request_context()
+        initial.message.metadata.update(
+            {"environment": {"cwd": "/peer-selected", "writable_roots": ["/"]}}
+        )
+        first, _ = await invoke(executor, initial)
+        assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+        assert len(responses.requests) == 2
+        assert str(peer.root) in tool_output(responses.requests[1], "before")
+        assert (acquired, disposed) == (1, 1)
+        assert approved == ["initial:before"]
+        proposal = MessageToDict(first.task.status.message.parts[0].data)
+        resumed = True
+        if mode == "same":
+            responses.respond(
+                function_call("exec_command", {"cmd": "pwd", "max_output_tokens": 100}, "after")
+            )
+            responses.respond(assistant_output("trusted workspace"))
+        completed, _ = await invoke(
+            executor,
+            request_context(
+                reply={
+                    "challenge": proposal["challenge"],
+                    "generation": proposal["generation"],
+                    "result": True,
+                },
+                current=first.task,
+            ),
+        )
+        assert factories == 2
+        assert completed.task.status.state == (
+            p.TASK_STATE_COMPLETED if mode == "same" else p.TASK_STATE_FAILED
+        )
+        assert len(responses.requests) == (4 if mode == "same" else 2)
+        if mode == "same":
+            assert str(peer.root) in tool_output(responses.requests[3], "after")
+            assert completed.task.artifacts[0].parts[0].text == "trusted workspace"
+        assert disposed == acquired
+        assert approved == (
+            ["initial:before", "resumed:after"] if mode == "same" else ["initial:before"]
+        )
+        starts = [request for request in peer.requests if request["method"] == "process/start"]
+        assert len(starts) == (2 if mode == "same" else 1)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert executor.store.read(binding).checkpoint is None
+        assert binding not in executor._live
+
+
+async def test_managed_environment_reopens_for_model_only_a2a_continuation(
+    tmp_path, responses, monkeypatch
+):
+    async with ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        acquired, disposed = 0, 0
+
+        @asynccontextmanager
+        async def environment():
+            nonlocal acquired, disposed
+            acquired += 1
+            try:
+                yield Environment(
+                    url=peer.url,
+                    cwd=str(peer.root),
+                    writable_roots=[],
+                    headers={"Authorization": "Bearer " + peer.token},
+                    tools=["exec_command"],
+                )
+            finally:
+                await peer.wait_disconnected()
+                disposed += 1
+
+        decision = FunctionTool(
+            name="decision", description="Choose.", input_type=Approval, output_type=bool
+        )
+        agent = Agent(
+            instructions="Ask for a decision.",
+            model="test-model",
+            tools=[decision],
+            provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        )
+        executor = NativeA2AExecutor(
+            agent_factory=lambda binding, context: NativeA2AAgent(
+                agent=agent, environment=environment()
+            ),
+            store=HostStore(tmp_path),
+        )
+        responses.respond(function_call("decision", {"reason": "synthetic"}, "decision"))
+        first, _ = await invoke(executor, request_context())
+        assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+        assert (acquired, disposed) == (1, 1)
+        assert any(tool.get("name") == "exec_command" for tool in responses.requests[0]["tools"])
+        proposal = MessageToDict(first.task.status.message.parts[0].data)
+        responses.respond(assistant_output("approved"))
+        completed, _ = await invoke(
+            executor,
+            request_context(
+                reply={
+                    "challenge": proposal["challenge"],
+                    "generation": proposal["generation"],
+                    "result": True,
+                },
+                current=first.task,
+            ),
+        )
+        assert completed.task.status.state == p.TASK_STATE_COMPLETED
+        assert completed.task.artifacts[0].parts[0].text == "approved"
+        assert (acquired, disposed) == (2, 2)
+        assert len(responses.requests) == 2
+        assert not [request for request in peer.requests if request["method"] == "process/start"]
 
 
 class ResultNode(BaseModel):
