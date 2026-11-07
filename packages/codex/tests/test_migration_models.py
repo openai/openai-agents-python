@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
 
@@ -1068,3 +1068,377 @@ async def test_terminal_close_never_advances_remote_tail_and_joins_same_context_
             if tasks and not closing.is_set():
                 tasks[0].cancel()
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)
+
+
+@asynccontextmanager
+async def _gated_builtin_responses_transport(
+    *,
+    fail_close: bool = False,
+    read_end: Literal["blocked", "eof", "error"] = "blocked",
+    completion: ResponseCompletedEvent | None = None,
+) -> AsyncIterator[Any]:
+    """Use the supported create-only client fallback with a real HTTP close gate.
+
+    The custom client returns typed events and its iterator explicitly owns an
+    in-memory httpx response. No with_streaming_response API or parser patch is
+    present; this exercises _fetch_response's supported responses.create path.
+    Ordinary installed-client SSE cancellation is not claimed to leak cleanup.
+    """
+    from types import SimpleNamespace
+
+    import httpx2
+
+    from agents.classic.models.openai_responses import OpenAIResponsesModel
+
+    state = SimpleNamespace(
+        reading=asyncio.Event(),
+        close_started=asyncio.Event(),
+        cleanup_release=asyncio.Event(),
+        close_finished=asyncio.Event(),
+        transport_closed=asyncio.Event(),
+        close_calls=0,
+        requests=0,
+    )
+
+    class Body(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            raise AssertionError("The API boundary supplies parsed events")
+            yield b""
+
+        async def aclose(self) -> None:
+            state.close_calls += 1
+            state.close_started.set()
+            await state.cleanup_release.wait()
+            state.close_finished.set()
+            if fail_close:
+                try:
+                    raise OSError("inner transport close diagnostic")
+                except OSError as error:
+                    raise RuntimeError("synthetic HTTP close failure") from error
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        state.requests += 1
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=Body())
+
+    class Transport(httpx2.MockTransport):
+        async def aclose(self) -> None:
+            state.transport_closed.set()
+            await super().aclose()
+
+    http = httpx2.AsyncClient(transport=Transport(handle), trust_env=False)
+
+    class TypedEvents:
+        def __init__(self, response: httpx2.Response) -> None:
+            self.response = response
+            self.first = True
+
+        def __aiter__(self) -> TypedEvents:
+            return self
+
+        async def __anext__(self) -> TResponseStreamEvent:
+            if self.first:
+                self.first = False
+                return completion if completion is not None else delta()
+            if completion is not None:
+                raise StopAsyncIteration
+            state.reading.set()
+            if read_end == "eof":
+                raise StopAsyncIteration
+            if read_end == "error":
+                raise ValueError("synthetic noncancel read failure")
+            await asyncio.Future()
+            raise AssertionError("A cancelled read must not produce another event")
+
+        async def aclose(self) -> None:
+            await self.response.aclose()
+
+    async def create(**kwargs: Any) -> TypedEvents:
+        assert kwargs["stream"] is True
+        response = await http.send(
+            http.build_request("POST", "https://synthetic.invalid/responses"), stream=True
+        )
+        return TypedEvents(response)
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=create),
+        base_url="https://synthetic.invalid",
+        is_closed=lambda: http.is_closed,
+        close=http.aclose,
+    )
+    assert not hasattr(client.responses, "with_streaming_response")
+    state.client = client
+    state.model = OpenAIResponsesModel(model="gpt-5-chat-latest", openai_client=client)
+    state.provider = SelectedProvider(state.model)
+    try:
+        yield state
+    finally:
+        state.cleanup_release.set()
+        if state.close_started.is_set():
+            await asyncio.wait_for(state.close_finished.wait(), 15)
+        await client.close()
+
+
+@pytest.mark.parametrize("fail_close", [False, True])
+async def test_builtin_responses_cancellation_joins_http_close(fail_close: bool) -> None:
+    async with _gated_builtin_responses_transport(fail_close=fail_close) as state:
+        task = asyncio.create_task(
+            SDKRunner.run(
+                Agent("Built-in cancellation", model="selected"),
+                "hello",
+                model_provider=state.provider,
+                model_invocation="stream",
+            )
+        )
+        try:
+            await asyncio.wait_for(state.reading.wait(), 15)
+            task.cancel("original cancellation")
+            await asyncio.wait_for(state.close_started.wait(), 15)
+            await asyncio.sleep(0.05)
+            task.cancel("repeated cancellation")
+            await asyncio.sleep(0.05)
+            assert not task.done(), "SDKRunner returned before its HTTP response finished closing"
+            assert not state.close_finished.is_set()
+            assert not state.client.is_closed() and not state.provider.closed
+            assert not state.transport_closed.is_set() and state.requests == 1
+            state.cleanup_release.set()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await asyncio.wait_for(task, 15)
+            if sys.version_info >= (3, 11):
+                assert raised.value.args == ("original cancellation",)
+            assert state.close_finished.is_set() and state.close_calls == 1
+            assert not state.client.is_closed() and not state.provider.closed
+            assert not state.transport_closed.is_set()
+            chain: list[BaseException] = []
+            error: BaseException | None = raised.value
+            while error is not None:
+                assert not any(error is previous for previous in chain), "Exception context cycle"
+                chain.append(error)
+                error = error.__context__
+        finally:
+            state.cleanup_release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)
+
+
+@pytest.mark.parametrize("classic_read_end", ["blocked", "error"])
+async def test_builtin_responses_join_scope_does_not_change_concurrent_classic_cancellation(
+    classic_read_end: Literal["blocked", "error"],
+) -> None:
+    from agents.classic import RunConfig, Runner
+
+    async with (
+        _gated_builtin_responses_transport() as sdk,
+        _gated_builtin_responses_transport(read_end=classic_read_end) as classic,
+    ):
+        sdk_task = asyncio.create_task(
+            SDKRunner.run(
+                Agent("SDK concurrent", model="selected"),
+                "hello",
+                model_provider=sdk.provider,
+                model_invocation="stream",
+            )
+        )
+        classic_run = Runner.run_streamed(
+            Agent("Classic concurrent", model="selected"),
+            "hello",
+            run_config=RunConfig(model_provider=classic.provider, tracing_disabled=True),
+        )
+
+        async def read_classic() -> None:
+            async for _event in classic_run.stream_events():
+                pass
+
+        classic_task = asyncio.create_task(read_classic())
+        try:
+            await asyncio.wait_for(sdk.reading.wait(), 15)
+            await asyncio.wait_for(classic.reading.wait(), 15)
+            if classic_read_end == "error":
+                await asyncio.wait_for(classic.close_started.wait(), 15)
+            sdk_task.cancel()
+            classic_run.cancel()
+            await asyncio.wait_for(sdk.close_started.wait(), 15)
+            await asyncio.wait_for(classic.close_started.wait(), 15)
+            await asyncio.wait_for(classic_task, 15)
+            assert classic_run.is_complete
+            assert not classic.close_finished.is_set(), "Classic must retain background close"
+            await asyncio.sleep(0.05)
+            assert not sdk_task.done(), "SDK cleanup scope must join only its own response"
+            assert not sdk.close_finished.is_set()
+            assert not sdk.client.is_closed() and not classic.client.is_closed()
+            assert not sdk.provider.closed and not classic.provider.closed
+            classic.cleanup_release.set()
+            await asyncio.wait_for(classic.close_finished.wait(), 15)
+            assert not sdk_task.done()
+            sdk.cleanup_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(sdk_task, 15)
+            assert sdk.close_finished.is_set() and sdk.close_calls == classic.close_calls == 1
+        finally:
+            sdk.cleanup_release.set()
+            classic.cleanup_release.set()
+            classic_run.cancel()
+            if not sdk_task.done():
+                sdk_task.cancel()
+            await asyncio.wait_for(
+                asyncio.gather(sdk_task, classic_task, return_exceptions=True), 15
+            )
+
+
+@pytest.mark.parametrize("read_end", ["blocked", "error"])
+async def test_builtin_joined_cleanup_retains_cancel_and_inner_error_before_native_transport(
+    read_end: Literal["blocked", "error"],
+) -> None:
+    from agents.classic.models._run_context import joined_model_stream_cleanup
+
+    # Cancellation transport through native callbacks may discard exception
+    # contexts. Check diagnostics at the built-in model's owning boundary.
+    captured: list[tuple[type[BaseException], str]] = []
+    async with _gated_builtin_responses_transport(fail_close=True, read_end=read_end) as state:
+
+        async def consume() -> None:
+            with joined_model_stream_cleanup():
+                try:
+                    async for _event in state.model.stream_response(
+                        system_instructions=None,
+                        input="hello",
+                        model_settings=ModelSettings(),
+                        tools=[],
+                        output_schema=None,
+                        handoffs=[],
+                        tracing=ModelTracing.DISABLED,
+                        previous_response_id=None,
+                        conversation_id=None,
+                        prompt=None,
+                    ):
+                        pass
+                except asyncio.CancelledError as primary:
+                    seen: set[int] = set()
+                    error: BaseException | None = primary
+                    while error is not None:
+                        assert id(error) not in seen, "Exception context cycle"
+                        seen.add(id(error))
+                        captured.append((type(error), str(error)))
+                        error = error.__cause__ or error.__context__
+                    raise
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(state.reading.wait(), 15)
+            if read_end == "error":
+                await asyncio.wait_for(state.close_started.wait(), 15)
+            task.cancel("model cancellation")
+            await asyncio.wait_for(state.close_started.wait(), 15)
+            assert not task.done() and not state.close_finished.is_set()
+            state.cleanup_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 15)
+            assert captured[0][0] is asyncio.CancelledError
+            assert (RuntimeError, "synthetic HTTP close failure") in captured
+            assert (OSError, "inner transport close diagnostic") in captured
+            assert state.close_finished.is_set() and not state.client.is_closed()
+        finally:
+            state.cleanup_release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)
+
+
+@pytest.mark.parametrize("read_end,fail_close", [("eof", False), ("error", False), ("error", True)])
+async def test_builtin_responses_cancellation_joins_close_already_started(
+    read_end: Literal["eof", "error"], fail_close: bool
+) -> None:
+    async with _gated_builtin_responses_transport(
+        read_end=read_end, fail_close=fail_close
+    ) as state:
+        task = asyncio.create_task(
+            SDKRunner.run(
+                Agent("Already closing", model="selected"),
+                "hello",
+                model_provider=state.provider,
+                model_invocation="stream",
+            )
+        )
+        try:
+            # Both paths start transport close before application cancellation.
+            await asyncio.wait_for(state.close_started.wait(), 15)
+            assert state.reading.is_set() and state.close_calls == 1
+            task.cancel("original cancellation")
+            await asyncio.sleep(0.05)
+            task.cancel("repeated cancellation")
+            await asyncio.sleep(0.05)
+            assert not task.done(), "SDKRunner abandoned an already-started HTTP close"
+            assert not state.close_finished.is_set() and state.close_calls == 1
+            assert not state.client.is_closed() and not state.provider.closed
+            state.cleanup_release.set()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await asyncio.wait_for(task, 15)
+            if sys.version_info >= (3, 11):
+                assert raised.value.args == ("original cancellation",)
+            assert state.close_finished.is_set() and state.close_calls == 1
+            assert state.requests == 1 and not state.transport_closed.is_set()
+            assert not state.client.is_closed() and not state.provider.closed
+        finally:
+            state.cleanup_release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)
+
+
+@pytest.mark.parametrize("consumer", ["sdk", "classic"])
+async def test_builtin_terminal_close_failure_blocks_sdk_tools_and_preserves_classic_default(
+    consumer: str,
+) -> None:
+    from agents.classic import RunConfig, Runner
+
+    effects: list[str] = []
+
+    @function_tool
+    def effect() -> str:
+        effects.append("ran")
+        return "ran"
+
+    completion = await terminal(tools=consumer == "sdk")
+    async with _gated_builtin_responses_transport(fail_close=True, completion=completion) as state:
+        agent = Agent("Terminal cleanup", model="selected", tools=[effect])
+        if consumer == "sdk":
+            task = asyncio.create_task(
+                SDKRunner.run(
+                    agent,
+                    "hello",
+                    model_provider=state.provider,
+                    model_invocation="stream",
+                )
+            )
+        else:
+            running = Runner.run_streamed(
+                agent,
+                "hello",
+                run_config=RunConfig(model_provider=state.provider, tracing_disabled=True),
+            )
+
+            async def finish_classic() -> str:
+                async for _event in running.stream_events():
+                    pass
+                return running.final_output
+
+            task = asyncio.create_task(finish_classic())
+        try:
+            await asyncio.wait_for(state.close_started.wait(), 15)
+            assert not task.done() and effects == [] and state.close_calls == 1
+            assert not state.client.is_closed() and not state.provider.closed
+            state.cleanup_release.set()
+            if consumer == "sdk":
+                with pytest.raises(RuntimeError, match="synthetic HTTP close failure"):
+                    await asyncio.wait_for(task, 15)
+            else:
+                assert await asyncio.wait_for(task, 15) == "done"
+            assert effects == [] and state.close_finished.is_set()
+            assert state.close_calls == state.requests == 1
+            assert not state.client.is_closed() and not state.provider.closed
+            assert not state.transport_closed.is_set()
+        finally:
+            state.cleanup_release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)

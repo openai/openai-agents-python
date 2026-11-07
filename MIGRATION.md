@@ -268,7 +268,7 @@ An optional synchronous `on_model_event` callback receives detached raw Model ev
 
 The first successful `response.completed` event ends consumption. Its response can omit `status` or set it to `completed`; explicit failure states or error details are rejected. The adapter also rejects a stream that ends without a completed response. It awaits the iterator's `aclose`, when available, before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. The adapter does not read trailing events or wait for transport EOF.
 
-Cancellation joins iterator cleanup. Put resource cleanup in `finally` or `aclose`; ordinary code after the terminal yield may not run. A Model that suppresses cancellation or whose cleanup does not finish can delay the run's cancellation. The application still owns the Model and provider.
+Cancellation joins iterator cleanup, including response transport closure for the built-in `OpenAIResponsesModel`. A custom Model must await its cleanup before its iterator closes. Put resource cleanup in `finally` or `aclose`; ordinary code after the terminal yield may not run. A Model that suppresses cancellation or whose cleanup does not finish can delay the run's cancellation. The application still owns the Model and provider.
 
 The [application Model example](examples/codex/migration_models.py) uses a named ModelProvider, a per-run model selection, and a real native tool loop without external model requests:
 

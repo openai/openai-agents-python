@@ -48,6 +48,7 @@ from ..classic.items import (
     TResponseStreamEvent,
 )
 from ..classic.model_settings import ModelSettings, _coerce_model_settings
+from ..classic.models._run_context import joined_model_stream_cleanup
 from ..classic.models.interface import Model, ModelProvider, ModelTracing
 from ..classic.run_config import RunConfig
 from ..classic.run_context import RunContextWrapper
@@ -396,96 +397,101 @@ async def _stream_response(
 
     async def consume() -> ModelResponse:
         nonlocal settling
-        stream = create_stream()
-        completed: ResponseCompletedEvent | None = None
-        output_items: list[TResponseOutputItem] = []
-        serialized_bytes = 0
+        with joined_model_stream_cleanup():
+            stream = create_stream()
+            completed: ResponseCompletedEvent | None = None
+            output_items: list[TResponseOutputItem] = []
+            serialized_bytes = 0
 
-        async def close() -> None:
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                await aclose()
+            async def close() -> None:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()
 
-        try:
-            async for event in stream:
-                if not carrier.active:
-                    raise asyncio.CancelledError
-                serialized_bytes += len(
-                    json.dumps(event.model_dump(mode="json"), allow_nan=False).encode()
-                )
-                if serialized_bytes > 4 * 1024 * 1024:
-                    raise UserError("SDKRunner's model stream exceeds 4 MiB")
-                if isinstance(event, ResponseOutputItemDoneEvent):
-                    output_items.append(deepcopy(event.item))
-                if event.type == "response.completed":
-                    if (
-                        not isinstance(event, ResponseCompletedEvent)
-                        or event.response.status not in (None, "completed")
-                        or event.response.error is not None
-                        or event.response.incomplete_details is not None
-                    ):
-                        raise ModelBehaviorError("SDKRunner requires a valid response.completed")
-                    # Neither an observer nor a producer reusing event objects can
-                    # edit the response accepted after iterator cleanup.
-                    completed = deepcopy(event)
-                    # Completion ends consumption. Only same-owner cleanup may
-                    # await after this event; never request a remote tail/EOF.
-                    settling = True
-                if observer is not None:
+            try:
+                async for event in stream:
                     if not carrier.active:
                         raise asyncio.CancelledError
-                    observed = cast(Callable[[TResponseStreamEvent], object], observer)(
-                        deepcopy(event)
+                    serialized_bytes += len(
+                        json.dumps(event.model_dump(mode="json"), allow_nan=False).encode()
                     )
-                    if inspect.isawaitable(observed):
-                        if inspect.iscoroutine(observed):
-                            observed.close()
-                        raise TypeError("SDKRunner on_model_event must be synchronous")
-                if event.type in {
-                    "response.failed",
-                    "response.incomplete",
-                    "error",
-                    "response.error",
-                }:
+                    if serialized_bytes > 4 * 1024 * 1024:
+                        raise UserError("SDKRunner's model stream exceeds 4 MiB")
+                    if isinstance(event, ResponseOutputItemDoneEvent):
+                        output_items.append(deepcopy(event.item))
+                    if event.type == "response.completed":
+                        if (
+                            not isinstance(event, ResponseCompletedEvent)
+                            or event.response.status not in (None, "completed")
+                            or event.response.error is not None
+                            or event.response.incomplete_details is not None
+                        ):
+                            raise ModelBehaviorError(
+                                "SDKRunner requires a valid response.completed"
+                            )
+                        # Neither an observer nor a producer reusing event objects can
+                        # edit the response accepted after iterator cleanup.
+                        completed = deepcopy(event)
+                        # Completion ends consumption. Only same-owner cleanup may
+                        # await after this event; never request a remote tail/EOF.
+                        settling = True
+                    if observer is not None:
+                        if not carrier.active:
+                            raise asyncio.CancelledError
+                        observed = cast(Callable[[TResponseStreamEvent], object], observer)(
+                            deepcopy(event)
+                        )
+                        if inspect.isawaitable(observed):
+                            if inspect.iscoroutine(observed):
+                                observed.close()
+                            raise TypeError("SDKRunner on_model_event must be synchronous")
+                    if event.type in {
+                        "response.failed",
+                        "response.incomplete",
+                        "error",
+                        "response.error",
+                    }:
+                        raise ModelBehaviorError(
+                            "SDKRunner requires a successful completed model stream"
+                        )
+                    if completed is not None:
+                        break
+                if completed is None:
                     raise ModelBehaviorError(
-                        "SDKRunner requires a successful completed model stream"
+                        "SDKRunner model stream ended without response.completed"
                     )
-                if completed is not None:
-                    break
-            if completed is None:
-                raise ModelBehaviorError("SDKRunner model stream ended without response.completed")
-        except BaseException as error:
-            settling = True
-            previous = _error_contexts(error.__context__)
-            try:
+            except BaseException as error:
+                settling = True
+                previous = _error_contexts(error.__context__)
+                try:
+                    await close()
+                except BaseException as cleanup_error:
+                    _retain_cleanup_error(error, cleanup_error, previous)
+                raise
+            else:
+                settling = True
                 await close()
-            except BaseException as cleanup_error:
-                _retain_cleanup_error(error, cleanup_error, previous)
-            raise
-        else:
-            settling = True
-            await close()
-        if not carrier.active:
-            raise asyncio.CancelledError
-        response = completed.response
-        # Match Classic adapters that emit finished items but omit terminal output.
-        if not response.output:
-            response.output = output_items
-        return ModelResponse(
-            output=response.output,
-            usage=(
-                _response_usage_to_usage(response.usage)
-                if response.usage is not None
-                else Usage(requests=_requests_for_response_without_usage(response))
-            ),
-            response_id=response.id,
-            request_id=getattr(response, "_request_id", None),
-            raw_usage=(
-                _extract_raw_usage_snapshot(response)
-                if settings.preserve_raw_usage is True
-                else None
-            ),
-        )
+            if not carrier.active:
+                raise asyncio.CancelledError
+            response = completed.response
+            # Match Classic adapters that emit finished items but omit terminal output.
+            if not response.output:
+                response.output = output_items
+            return ModelResponse(
+                output=response.output,
+                usage=(
+                    _response_usage_to_usage(response.usage)
+                    if response.usage is not None
+                    else Usage(requests=_requests_for_response_without_usage(response))
+                ),
+                response_id=response.id,
+                request_id=getattr(response, "_request_id", None),
+                raw_usage=(
+                    _extract_raw_usage_snapshot(response)
+                    if settings.preserve_raw_usage is True
+                    else None
+                ),
+            )
 
     # Generator finalizers may reset ContextVar tokens or exit task-bound
     # scopes. Keep acquisition, iteration and close in one task. Once a terminal
