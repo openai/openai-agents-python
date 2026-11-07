@@ -538,6 +538,8 @@ pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
                         | "tool_search"
                         | "apply_patch"
                         | "write_stdin"
+                        | "project_glob"
+                        | "project_grep"
                 ))
                 && key.namespace.as_deref() != Some("tool_search")
                 && !matches!(

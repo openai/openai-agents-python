@@ -1690,6 +1690,7 @@ dependencies = [
  "pretty_assertions",
  "pyo3",
  "pyo3-async-runtimes",
+ "regex",
  "rmcp",
  "rustls",
  "serde",

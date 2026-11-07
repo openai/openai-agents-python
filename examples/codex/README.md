@@ -61,6 +61,7 @@ These programs use the current SDK and model credentials:
 | Task | Example | Prerequisites |
 | --- | --- | --- |
 | Run commands on an existing executor | [remote_executor.py](remote_executor.py) | Current SDK, an authenticated WSS exec-server, an assigned workspace, and model credentials. |
+| Search project paths and text | [project_search.py](project_search.py) | Current SDK, a Linux or macOS project directory, and model credentials. Uses structured glob and grep tools. |
 | Use Unix sockets inside an offline job | [offline_unix_sockets.py](offline_unix_sockets.py) | Current SDK, an isolated Linux or macOS executor, gateway credentials, and a local synthetic Responses peer. |
 | Provision an offline Docker job | [offline_docker.py](offline_docker.py) | Docker and a prepared image. This standard-library helper expects the application to supply the gateway and executor configuration. |
 

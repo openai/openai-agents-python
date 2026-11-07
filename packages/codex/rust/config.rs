@@ -47,6 +47,8 @@ struct RuntimeOptions {
     sdk_native_config: bool,
     #[serde(rename = "_sdk_codex_login")]
     sdk_codex_login: Option<crate::auth::SavedCodexLogin>,
+    #[serde(rename = "_sdk_project_search")]
+    project_search: Option<crate::project_search::Options>,
     environment: Option<crate::environment::EnvironmentOptions>,
     deferred_environment: Option<crate::environment::DeferredEnvironmentOptions>,
     codex_home: Option<PathBuf>,
@@ -506,4 +508,9 @@ pub async fn load(
         }
     }
     Ok((config, cloud))
+}
+
+/// Current application root and opt-in tools, including checkpoint restoration.
+pub fn project_search(runtime_json: &str) -> Result<Option<crate::project_search::Options>> {
+    Ok(decode::<RuntimeOptions>(serde_json::from_str(runtime_json)?)?.project_search)
 }

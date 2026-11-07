@@ -426,9 +426,11 @@ impl EngineState {
         } else {
             None
         };
+        let project_search = config::project_search(&runtime_json)?;
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
+                project_search.clone(),
                 auth.clone(),
                 goals.as_ref(),
                 local_checklist_store.is_some(),

@@ -251,7 +251,15 @@
     {
       "path": "0056-completion-callback.patch",
       "sha256": "ce5c3381285bf830cf3203b7bc031d3b5e6fd33331f2bf69428b8aabe4b8a619"
+    },
+    {
+      "path": "0057-bounded-nofollow-filesystem.patch",
+      "sha256": "d2048388044ec4004ba13d1111b2da602a401fb4c572280ae24474cd6f480bc1"
+    },
+    {
+      "path": "0058-early-project-search-result-policy.patch",
+      "sha256": "ac413ec794493e2047724a5ee0473744c4a0464313d4330ba6975780bda6e5d3"
     }
   ],
-  "result_tree": "8e02342a0ac03ac7c22ce7556988a857cb912f72"
+  "result_tree": "43fcb9c0e7c50cbd44b1aa2da20978fe520f4f28"
 }

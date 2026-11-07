@@ -769,7 +769,7 @@ impl Control {
             && name.is_default_namespace()
             && matches!(
                 name.name.as_str(),
-                "exec_command" | "write_stdin" | "apply_patch"
+                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
             )
             && self
                 .channel
@@ -796,7 +796,11 @@ impl Control {
                     name.is_default_namespace()
                         && matches!(
                             name.name.as_str(),
-                            "exec_command" | "write_stdin" | "apply_patch"
+                            "exec_command"
+                                | "write_stdin"
+                                | "apply_patch"
+                                | "project_glob"
+                                | "project_grep"
                         )
                 })
             });
@@ -819,7 +823,7 @@ impl Control {
         if !name.is_default_namespace()
             || !matches!(
                 name.name.as_str(),
-                "exec_command" | "write_stdin" | "apply_patch"
+                "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
             )
         {
             return false;
@@ -7383,8 +7387,11 @@ pub(crate) mod tests {
         for (namespace, name, result, expected) in [
             (None, Some("apply_patch"), true, true),
             (None, Some("exec_command"), false, true), // approval/arguments only
-            (None, None, false, false),                // no callbacks
+            (None, Some("project_glob"), true, true),
+            (None, Some("project_grep"), false, true),
+            (None, None, false, false), // no callbacks
             (Some("mcp__test"), Some("exec_command"), true, false),
+            (Some("mcp__test"), Some("project_grep"), true, false),
             (Some("collaboration"), Some("spawn_agent"), false, false),
         ] {
             let root = cell_owner_control(namespace, name, result);

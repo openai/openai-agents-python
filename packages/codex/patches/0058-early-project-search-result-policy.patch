@@ -1,0 +1,19 @@
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index cb911e429eeb7eab0f7efae3fcfcc871d08ecab7..d6c64b6b007646c7cbdfeb279f061e23c841be17 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -1,4 +1,4 @@
+-//! Whole-result policy for the three native Environment tools only.
++//! Whole-result policy for audited native Environment tools only.
+ use crate::function_tool::FunctionCallError;
+ use crate::tools::context::ToolInvocation;
+ use crate::unified_exec::PendingLocalExec;
+@@ -40,7 +40,7 @@ pub(crate) fn capture(invocation: &ToolInvocation) -> Option<Arc<dyn ToolLifecyc
+     if !invocation.tool_name.is_default_namespace()
+         || !matches!(
+             invocation.tool_name.name.as_str(),
+-            "exec_command" | "write_stdin" | "apply_patch"
++            "exec_command" | "write_stdin" | "apply_patch" | "project_glob" | "project_grep"
+         )
+     {
+         return None;

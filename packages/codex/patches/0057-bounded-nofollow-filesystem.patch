@@ -1,0 +1,1149 @@
+diff --git a/codex-rs/apply-patch/src/file_update.rs b/codex-rs/apply-patch/src/file_update.rs
+index 08bb0ebefe2197388562153db4888a89cefe2a53..7ee52e00c3b6ff2e83cea3347fa024ec9586d9c3 100644
+--- a/codex-rs/apply-patch/src/file_update.rs
++++ b/codex-rs/apply-patch/src/file_update.rs
+@@ -32,7 +32,14 @@ pub(crate) async fn derive_new_contents_from_chunks(
+     sandbox: Option<&FileSystemSandboxContext>,
+ ) -> std::result::Result<AppliedPatch, ApplyPatchError> {
+     let original_contents = fs
+-        .read_file_text(path, ReadFileOptions { follow_symlinks }, sandbox)
++        .read_file_text(
++            path,
++            ReadFileOptions {
++                max_bytes: None,
++                follow_symlinks,
++            },
++            sandbox,
++        )
+         .await
+         .map_err(|err| {
+             ApplyPatchError::IoError(IoError {
+diff --git a/codex-rs/apply-patch/src/lib.rs b/codex-rs/apply-patch/src/lib.rs
+index 0ee7a4e7ec811751c68984b7e05a0d969d7ae089..48e5d75ab7a99cbb1b00105dd8cdc0ed5d06a74c 100644
+--- a/codex-rs/apply-patch/src/lib.rs
++++ b/codex-rs/apply-patch/src/lib.rs
+@@ -543,7 +543,14 @@ async fn apply_hunks_to_files(
+                 )
+                 .await;
+                 let deleted_content = fs
+-                    .read_file_text(&path_uri, ReadFileOptions { follow_symlinks }, sandbox)
++                    .read_file_text(
++                        &path_uri,
++                        ReadFileOptions {
++                            max_bytes: None,
++                            follow_symlinks,
++                        },
++                        sandbox,
++                    )
+                     .await
+                     .ok();
+                 if deleted_content.is_none() {
+@@ -752,7 +759,14 @@ async fn remove_failure_was_side_effect_free(
+ ) -> bool {
+     match expected_content {
+         Some(expected_content) => fs
+-            .read_file_text(path, ReadFileOptions { follow_symlinks }, sandbox)
++            .read_file_text(
++                path,
++                ReadFileOptions {
++                    max_bytes: None,
++                    follow_symlinks,
++                },
++                sandbox,
++            )
+             .await
+             .is_ok_and(|content| content == expected_content),
+         None => false,
+@@ -768,7 +782,14 @@ async fn read_optional_file_text_for_delta(
+ ) -> Option<String> {
+     note_existing_path_delta_support(path, fs, follow_symlinks, sandbox, exact).await;
+     match fs
+-        .read_file_text(path, ReadFileOptions { follow_symlinks }, sandbox)
++        .read_file_text(
++            path,
++            ReadFileOptions {
++                max_bytes: None,
++                follow_symlinks,
++            },
++            sandbox,
++        )
+         .await
+     {
+         Ok(content) => Some(content),
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index 62d901e0f41209424523e817166441ce4265f5f9..d6134a843b3038a7d5db5b2626128f1aa1c24f3e 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -148,6 +148,10 @@ fn unknown_executor_version() -> String {
+ #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct EnvironmentCapabilities {
++    /// Actual per-call read caps and component-safe, bounded nofollow walks.
++    /// Clients must check before sending the additive filesystem options.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub bounded_nofollow_search: bool,
+     /// Whether `exec` accepts instructions for launching an executor-local network proxy.
+     #[serde(default)]
+     pub network_proxy_launch: bool,
+@@ -277,6 +281,7 @@ impl EnvironmentInfo {
+             temporary_directories: Some(temporary_directories),
+             temp_dir,
+             capabilities: EnvironmentCapabilities {
++                bounded_nofollow_search: true,
+                 network_proxy_launch: true,
+                 capability_discovery_sandbox: true,
+                 capability_discovery_v2: true,
+@@ -556,6 +561,8 @@ pub struct TerminateResponse {
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct FsReadFileParams {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub max_bytes: Option<u64>,
+     pub path: PathUri,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub follow_symlinks: Option<bool>,
+@@ -566,6 +573,8 @@ pub struct FsReadFileParams {
+ #[derive(Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct WireFsReadFileParams {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    max_bytes: Option<u64>,
+     path: PathUri,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     follow_symlinks: Option<bool>,
+@@ -914,7 +923,7 @@ macro_rules! impl_wire_filesystem_request {
+ }
+ 
+ impl_wire_filesystem_request! {
+-    WireFsReadFileParams => FsReadFileParams { path, follow_symlinks },
++    WireFsReadFileParams => FsReadFileParams { path, follow_symlinks, max_bytes },
+     WireFsOpenParams => FsOpenParams { handle_id, path, mode },
+     WireFsWriteFileParams => FsWriteFileParams { path, data_base64, follow_symlinks },
+     WireFsCreateDirectoryParams => FsCreateDirectoryParams { path, recursive, follow_symlinks },
+@@ -1464,6 +1473,7 @@ mod tests {
+         assert_eq!(
+             capabilities,
+             EnvironmentCapabilities {
++                bounded_nofollow_search: false,
+                 network_proxy_launch: true,
+                 capability_discovery_sandbox: true,
+                 capability_discovery_v2: false,
+@@ -1737,6 +1747,7 @@ mod tests {
+             network: NetworkSandboxPolicy::Restricted,
+         };
+         let params = FsReadFileParams {
++            max_bytes: None,
+             path: unc,
+             follow_symlinks: None,
+             sandbox: Some(FileSystemSandboxContext::from_permission_profile(
+@@ -1783,6 +1794,7 @@ mod tests {
+             ..FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled, cwd)
+         };
+         let params = FsReadFileParams {
++            max_bytes: None,
+             path,
+             follow_symlinks: None,
+             sandbox: Some(sandbox),
+diff --git a/codex-rs/exec-server/src/capability_discovery.rs b/codex-rs/exec-server/src/capability_discovery.rs
+index 2b071884c9eeb3b85e1ab32203861a2f884fada1..a3f12cabcf5244373aecd94202b7cb4f31fe933b 100644
+--- a/codex-rs/exec-server/src/capability_discovery.rs
++++ b/codex-rs/exec-server/src/capability_discovery.rs
+@@ -111,6 +111,7 @@ pub(crate) async fn discover_root(
+         .walk(
+             &path,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: MAX_SCAN_DEPTH,
+                 max_directories: MAX_DIRECTORIES_PER_ROOT,
+                 max_entries: MAX_ENTRIES_PER_ROOT,
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 77a54c492c956bd8777a7ef0b32cf4333714a4d1..2f0924183fc6c36e5dcf87422b0fd75e8513ea55 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -953,6 +953,15 @@ impl ExecServerClient {
+         &self,
+         params: FsReadFileParams,
+     ) -> Result<FsReadFileResponse, ExecServerError> {
++        if params.max_bytes.is_some()
++            && !self
++                .environment_info()
++                .await?
++                .capabilities
++                .bounded_nofollow_search
++        {
++            return Err(ExecServerError::Protocol("exec-server does not support bounded nofollow search; matching executor build required".into()));
++        }
+         self.call(FS_READ_FILE_METHOD, &WireFsReadFileParams::from(params))
+             .await
+     }
+@@ -1058,6 +1067,15 @@ impl ExecServerClient {
+     }
+ 
+     pub async fn fs_walk(&self, params: FsWalkParams) -> Result<FsWalkResponse, ExecServerError> {
++        if params.options.no_follow
++            && !self
++                .environment_info()
++                .await?
++                .capabilities
++                .bounded_nofollow_search
++        {
++            return Err(ExecServerError::Protocol("exec-server does not support bounded nofollow search; matching executor build required".into()));
++        }
+         self.call(FS_WALK_METHOD, &WireFsWalkParams::from(params))
+             .await
+     }
+@@ -2718,6 +2736,83 @@ mod tests {
+         Ok(())
+     }
+ 
++    /// Additive safe filesystem fields must never be sent to an executor that ignores them.
++    #[tokio::test]
++    async fn project_search_requires_executor_capability_before_sending_filesystem_calls()
++    -> anyhow::Result<()> {
++        let listener = TcpListener::bind("127.0.0.1:0").await?;
++        let websocket_url = format!("ws://{}", listener.local_addr()?);
++        let server = tokio::spawn(async move {
++            let mut websocket = accept_websocket(&listener).await;
++            let mut info = EnvironmentInfo::local();
++            info.capabilities.bounded_nofollow_search = false;
++            complete_websocket_initialize_with_environment_info(
++                &mut websocket,
++                "session-1",
++                None,
++                Some(info),
++            )
++            .await;
++            let JSONRPCMessage::Request(request) = read_jsonrpc_websocket(&mut websocket).await
++            else {
++                panic!("expected legacy read");
++            };
++            assert_eq!(request.method, crate::protocol::FS_READ_FILE_METHOD);
++            assert!(request.params.as_ref().unwrap().get("maxBytes").is_none());
++            write_jsonrpc_websocket(
++                &mut websocket,
++                JSONRPCMessage::Response(JSONRPCResponse {
++                    id: request.id,
++                    result: serde_json::json!({"dataBase64":""}),
++                }),
++            )
++            .await;
++        });
++        let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs::new(
++            websocket_url,
++            "project-search-test".into(),
++            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++        ))
++        .await?;
++        let path = PathUri::parse("file:///tmp/project")?;
++        let error = client
++            .fs_walk(crate::protocol::FsWalkParams {
++                path: path.clone(),
++                options: codex_file_system::WalkOptions {
++                    no_follow: true,
++                    max_depth: 64,
++                    max_entries: 10000,
++                    max_directories: 1000,
++                    follow_directory_symlinks: false,
++                    prune_hidden_directories: false,
++                },
++                sandbox: None,
++            })
++            .await
++            .unwrap_err();
++        assert!(matches!(error, ExecServerError::Protocol(_)));
++        let error = client
++            .fs_read_file(crate::protocol::FsReadFileParams {
++                path: path.clone(),
++                follow_symlinks: Some(false),
++                max_bytes: Some(1024),
++                sandbox: None,
++            })
++            .await
++            .unwrap_err();
++        assert!(matches!(error, ExecServerError::Protocol(_)));
++        client
++            .fs_read_file(crate::protocol::FsReadFileParams {
++                path,
++                follow_symlinks: None,
++                max_bytes: None,
++                sandbox: None,
++            })
++            .await?;
++        server.await?;
++        Ok(())
++    }
++
+     /// Old executors must never receive writable opens they would silently treat as reads.
+     #[tokio::test]
+     async fn writable_file_streams_require_executor_capability() -> anyhow::Result<()> {
+diff --git a/codex-rs/exec-server/src/discoverV2/capability_locations.rs b/codex-rs/exec-server/src/discoverV2/capability_locations.rs
+index 5f5a397400967819bf3aa9ca50e7e5197cd4575b..63b284b83435ab7ce04fd9c08b928928f30ce028 100644
+--- a/codex-rs/exec-server/src/discoverV2/capability_locations.rs
++++ b/codex-rs/exec-server/src/discoverV2/capability_locations.rs
+@@ -97,6 +97,7 @@ async fn discover_cached_plugins(
+         .walk(
+             cache,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 1,
+                 max_directories: 2_000,
+                 max_entries: 20_000,
+diff --git a/codex-rs/exec-server/src/fs_helper.rs b/codex-rs/exec-server/src/fs_helper.rs
+index d30766370c5962861ea2ae538a82d310cef63890..0a865812a441af89ead939bc120f877968b77149 100644
+--- a/codex-rs/exec-server/src/fs_helper.rs
++++ b/codex-rs/exec-server/src/fs_helper.rs
+@@ -71,6 +71,8 @@ pub(crate) enum FsHelperRequest {
+     Open(FsHelperOpenParams),
+     #[serde(rename = "fs/readFile")]
+     ReadFile(FsReadFileParams),
++    #[serde(rename = "fs/readFileBounded")]
++    ReadFileBounded(FsReadFileParams),
+     #[serde(rename = "fs/writeFile")]
+     WriteFile(FsWriteFileParams),
+     #[serde(rename = "fs/createDirectory")]
+@@ -83,6 +85,8 @@ pub(crate) enum FsHelperRequest {
+     ReadDirectory(FsReadDirectoryParams),
+     #[serde(rename = "fs/walk")]
+     Walk(FsWalkParams),
++    #[serde(rename = "fs/walkNoFollow")]
++    WalkNoFollow(FsWalkParams),
+     #[serde(rename = "fs/remove")]
+     Remove(FsRemoveParams),
+     #[serde(rename = "fs/copy")]
+@@ -296,11 +300,12 @@ pub(crate) async fn run_direct_request(
+         FsHelperRequest::Open(_) => Err(invalid_request(
+             "opening a file requires descriptor handoff".to_string(),
+         )),
+-        FsHelperRequest::ReadFile(params) => {
++        FsHelperRequest::ReadFile(params) | FsHelperRequest::ReadFileBounded(params) => {
+             let data = file_system
+                 .read_file(
+                     &params.path,
+                     ReadFileOptions {
++                        max_bytes: params.max_bytes,
+                         follow_symlinks: params.follow_symlinks.unwrap_or(true),
+                     },
+                     /*sandbox*/ None,
+@@ -391,7 +396,7 @@ pub(crate) async fn run_direct_request(
+                 entries,
+             }))
+         }
+-        FsHelperRequest::Walk(params) => {
++        FsHelperRequest::Walk(params) | FsHelperRequest::WalkNoFollow(params) => {
+             let outcome = file_system
+                 .walk(&params.path, params.options, /*sandbox*/ None)
+                 .await
+diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
+index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce1d3d08fb 100644
+--- a/codex-rs/exec-server/src/local_file_system.rs
++++ b/codex-rs/exec-server/src/local_file_system.rs
+@@ -703,6 +703,106 @@ impl DirectFileSystem {
+         Ok(entries)
+     }
+ 
++    fn sync_walk_no_follow(
++        root: &PathUri,
++        options: WalkOptions,
++        cancelled: &CancellationToken,
++    ) -> io::Result<WalkOutcome> {
++        let native = root.to_abs_path()?;
++        if !no_follow::walk_metadata_sync(native.as_path())?.is_directory {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "walk root is not a directory",
++            ));
++        }
++        let mut outcome = WalkOutcome::default();
++        let mut queue = VecDeque::from([(root.clone(), 0usize)]);
++        let mut directories = 1usize;
++        let mut examined = 0usize;
++        let mut response_bytes = 0usize;
++        while let Some((directory, depth)) = queue.pop_front() {
++            check_walk_cancelled(cancelled)?;
++            let native = directory.to_abs_path()?;
++            let remaining = options.max_entries - examined;
++            let names =
++                match no_follow::read_directory_bounded(native.as_path(), remaining + 1, cancelled)
++                {
++                    Ok(names) => names,
++                    Err(error) => {
++                        check_walk_cancelled(cancelled)?;
++                        if !push_walk_error(
++                            &mut outcome,
++                            &mut response_bytes,
++                            directory,
++                            error.to_string(),
++                        ) {
++                            break;
++                        }
++                        continue;
++                    }
++                };
++            if names.len() > remaining {
++                outcome.truncated = true;
++            }
++            for name in names.into_iter().take(remaining) {
++                check_walk_cancelled(cancelled)?;
++                examined += 1;
++                let path = directory.join(&name).map_err(io::Error::other)?;
++                let native = path.to_abs_path()?;
++                let metadata = match no_follow::walk_metadata_sync(native.as_path()) {
++                    Ok(metadata) => metadata,
++                    Err(error) => {
++                        if !push_walk_error(
++                            &mut outcome,
++                            &mut response_bytes,
++                            path,
++                            error.to_string(),
++                        ) {
++                            return Ok(outcome);
++                        }
++                        continue;
++                    }
++                };
++                let kind = if metadata.is_directory {
++                    WalkEntryKind::Directory
++                } else if metadata.is_file {
++                    WalkEntryKind::File
++                } else {
++                    continue;
++                };
++                if !reserve_walk_response_bytes(
++                    &mut outcome,
++                    &mut response_bytes,
++                    path.to_string().len(),
++                ) {
++                    return Ok(outcome);
++                }
++                outcome.entries.push(WalkEntry {
++                    path: path.clone(),
++                    kind,
++                });
++                if kind == WalkEntryKind::Directory {
++                    if options.prune_hidden_directories && name.starts_with('.') {
++                        continue;
++                    }
++                    if depth >= options.max_depth || directories >= options.max_directories {
++                        outcome.truncated = true;
++                    } else {
++                        directories += 1;
++                        queue.push_back((path, depth + 1));
++                    }
++                }
++            }
++            if examined == options.max_entries {
++                if !queue.is_empty() {
++                    outcome.truncated = true;
++                }
++                break;
++            }
++        }
++        Ok(outcome)
++    }
++
+     fn sync_walk(
+         root: &PathUri,
+         options: WalkOptions,
+@@ -727,6 +827,9 @@ impl DirectFileSystem {
+         }
+ 
+         check_walk_cancelled(cancelled)?;
++        if options.no_follow {
++            return Self::sync_walk_no_follow(root, options, cancelled);
++        }
+         let (root_metadata, root_is_symlink) = walk_metadata(root)?;
+         if !root_metadata.is_dir() || (root_is_symlink && !options.follow_directory_symlinks) {
+             return Ok(WalkOutcome::default());
+@@ -1341,6 +1444,7 @@ mod walk_tests {
+             root.clone(),
+         );
+         let options = WalkOptions {
++            no_follow: false,
+             max_depth: 1,
+             max_directories: 1,
+             max_entries: 1,
+@@ -1365,6 +1469,7 @@ mod walk_tests {
+         let temp = tempfile::tempdir()?;
+         let missing = PathUri::from_host_native_path(temp.path().join("missing"))?;
+         let options = WalkOptions {
++            no_follow: false,
+             max_depth: 1,
+             max_directories: 1,
+             max_entries: 1,
+@@ -1421,3 +1526,92 @@ mod walk_tests {
+         Ok(())
+     }
+ }
++
++#[cfg(all(test, unix))]
++mod project_search_walk_tests {
++    use super::*;
++    fn options() -> WalkOptions {
++        WalkOptions {
++            no_follow: true,
++            max_depth: 64,
++            max_directories: 1000,
++            max_entries: 10_000,
++            follow_directory_symlinks: false,
++            prune_hidden_directories: false,
++        }
++    }
++    #[test]
++    fn nofollow_walk_bounds_wide_directories_and_reports_depth() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let root = PathUri::from_host_native_path(temp.path().canonicalize()?)?;
++        for i in 0..200 {
++            std::fs::write(temp.path().join(format!("{i}.txt")), "x")?;
++        }
++        let mut limits = options();
++        limits.max_entries = 3;
++        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
++        assert_eq!(result.entries.len(), 3);
++        assert!(result.truncated);
++        let deep = temp.path().join("deep");
++        std::fs::create_dir(&deep)?;
++        let mut limits = options();
++        limits.max_depth = 0;
++        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
++        assert!(result.truncated);
++        assert!(
++            result
++                .entries
++                .iter()
++                .any(|entry| entry.kind == WalkEntryKind::Directory)
++        );
++        Ok(())
++    }
++    #[test]
++    fn nofollow_walk_rejects_root_symlink_ancestors() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        std::fs::create_dir(base.join("real"))?;
++        std::os::unix::fs::symlink(base.join("real"), base.join("alias"))?;
++        let root = PathUri::from_host_native_path(base.join("alias"))?;
++        assert!(DirectFileSystem::sync_walk(&root, options(), &CancellationToken::new()).is_err());
++        Ok(())
++    }
++    #[test]
++    fn nofollow_walk_never_reads_swapped_ancestor() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        let root = base.join("root");
++        let outside = base.join("outside");
++        std::fs::create_dir(&root)?;
++        std::fs::create_dir(&outside)?;
++        std::fs::write(root.join("inside"), "safe")?;
++        std::fs::write(outside.join("outside_secret"), "secret")?;
++        let root_uri = PathUri::from_host_native_path(&root)?;
++        let worker_root = root.clone();
++        let worker_base = base.clone();
++        let worker = std::thread::spawn(move || -> io::Result<()> {
++            for _ in 0..500 {
++                std::fs::rename(&worker_root, worker_base.join("parked"))?;
++                std::os::unix::fs::symlink(&outside, &worker_root)?;
++                std::thread::yield_now();
++                std::fs::remove_file(&worker_root)?;
++                std::fs::rename(worker_base.join("parked"), &worker_root)?;
++            }
++            Ok(())
++        });
++        for _ in 0..500 {
++            if let Ok(outcome) =
++                DirectFileSystem::sync_walk(&root_uri, options(), &CancellationToken::new())
++            {
++                assert!(
++                    outcome
++                        .entries
++                        .iter()
++                        .all(|entry| entry.path.basename().as_deref() != Some("outside_secret"))
++                );
++            }
++        }
++        worker.join().unwrap()?;
++        Ok(())
++    }
++}
+diff --git a/codex-rs/exec-server/src/local_file_system_read.rs b/codex-rs/exec-server/src/local_file_system_read.rs
+index e9bd05e85ca67b11e26f00fb0500d07500645f37..6f75b217fe9e4ac0b1c6abf6b2a26ddfd586e349 100644
+--- a/codex-rs/exec-server/src/local_file_system_read.rs
++++ b/codex-rs/exec-server/src/local_file_system_read.rs
+@@ -27,17 +27,21 @@ pub(super) async fn read_file(
+         } else {
+             no_follow::open_file(path.as_path())?
+         };
++        let limit = options
++            .max_bytes
++            .unwrap_or(MAX_READ_FILE_BYTES)
++            .min(MAX_READ_FILE_BYTES);
+         let metadata = file.metadata()?;
+-        if metadata.len() > MAX_READ_FILE_BYTES {
++        if metadata.len() > limit {
+             return Err(file_too_large_error());
+         }
+         let mut bytes = Vec::with_capacity(metadata.len() as usize);
+         CancellableReader {
+-            reader: file.take(MAX_READ_FILE_BYTES + 1),
++            reader: file.take(limit + 1),
+             cancelled,
+         }
+         .read_to_end(&mut bytes)?;
+-        if bytes.len() as u64 > MAX_READ_FILE_BYTES {
++        if bytes.len() as u64 > limit {
+             return Err(file_too_large_error());
+         }
+         Ok(bytes)
+diff --git a/codex-rs/exec-server/src/local_file_system_read_tests.rs b/codex-rs/exec-server/src/local_file_system_read_tests.rs
+index 354a9dab58c7eabae8cfaee910a0427db6428e0c..3cb0e13a670b4f448e1e0c725d8a669b2980d1bf 100644
+--- a/codex-rs/exec-server/src/local_file_system_read_tests.rs
++++ b/codex-rs/exec-server/src/local_file_system_read_tests.rs
+@@ -22,7 +22,10 @@ async fn reads_file_larger_than_tokio_buffer(follow_symlinks: bool) -> anyhow::R
+         LOCAL_FS
+             .read_file(
+                 &PathUri::from_host_native_path(&path)?,
+-                ReadFileOptions { follow_symlinks },
++                ReadFileOptions {
++                    max_bytes: None,
++                    follow_symlinks
++                },
+                 /*sandbox*/ None,
+             )
+             .await?,
+@@ -41,7 +44,10 @@ async fn rejects_oversized_file(follow_symlinks: bool) -> anyhow::Result<()> {
+     let error = LOCAL_FS
+         .read_file(
+             &PathUri::from_host_native_path(&path)?,
+-            ReadFileOptions { follow_symlinks },
++            ReadFileOptions {
++                max_bytes: None,
++                follow_symlinks,
++            },
+             /*sandbox*/ None,
+         )
+         .await
+@@ -89,3 +95,47 @@ fn cancellation_stops_a_reader_after_its_first_chunk() -> anyhow::Result<()> {
+     assert_eq!((first, error.kind()), (*b"x", std::io::ErrorKind::Other));
+     Ok(())
+ }
++
++#[tokio::test]
++async fn per_call_cap_rejects_files_and_bounds_growth() -> anyhow::Result<()> {
++    use std::io::Write;
++    use std::sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering},
++    };
++    let temp = TempDir::new()?;
++    let path = temp.path().canonicalize()?.join("growing");
++    std::fs::write(&path, vec![b'x'; 4096])?;
++    let stop = Arc::new(AtomicBool::new(false));
++    let worker_stop = stop.clone();
++    let worker_path = path.clone();
++    let worker = std::thread::spawn(move || {
++        let mut file = std::fs::OpenOptions::new()
++            .append(true)
++            .open(worker_path)
++            .unwrap();
++        while !worker_stop.load(Ordering::Acquire) {
++            file.write_all(&[b'x'; 4096]).unwrap();
++            std::thread::yield_now();
++        }
++    });
++    for _ in 0..50 {
++        let result = LOCAL_FS
++            .read_file(
++                &PathUri::from_host_native_path(&path)?,
++                ReadFileOptions {
++                    follow_symlinks: false,
++                    max_bytes: Some(8192),
++                },
++                None,
++            )
++            .await;
++        match result {
++            Ok(bytes) => assert!(bytes.len() <= 8192),
++            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput),
++        }
++    }
++    stop.store(true, Ordering::Release);
++    worker.join().unwrap();
++    Ok(())
++}
+diff --git a/codex-rs/exec-server/src/no_follow/mod.rs b/codex-rs/exec-server/src/no_follow/mod.rs
+index d7abd7ff9c7b38a8dd44fd266b103a8093452432..b66985045b8d6d366e24cc53e427c51ec7435eea 100644
+--- a/codex-rs/exec-server/src/no_follow/mod.rs
++++ b/codex-rs/exec-server/src/no_follow/mod.rs
+@@ -58,3 +58,14 @@ pub(crate) async fn create_directory(path: &Path, recursive: bool) -> io::Result
+ pub(crate) async fn remove(path: &Path, recursive: bool, force: bool) -> io::Result<()> {
+     imp::remove(path.to_path_buf(), recursive, force).await
+ }
++
++pub(crate) fn read_directory_bounded(
++    path: &Path,
++    limit: usize,
++    cancelled: &tokio_util::sync::CancellationToken,
++) -> io::Result<Vec<String>> {
++    imp::read_directory_bounded(path, limit, cancelled)
++}
++pub(crate) fn walk_metadata_sync(path: &Path) -> io::Result<FileMetadata> {
++    imp::walk_metadata_sync(path)
++}
+diff --git a/codex-rs/exec-server/src/no_follow/unix.rs b/codex-rs/exec-server/src/no_follow/unix.rs
+index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..528dd5e8592683b6724c7ba78bdef3b66fb9a93f 100644
+--- a/codex-rs/exec-server/src/no_follow/unix.rs
++++ b/codex-rs/exec-server/src/no_follow/unix.rs
+@@ -321,3 +321,45 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
+     .await
+     .map_err(|error| io::Error::other(format!("filesystem task failed: {error}")))?
+ }
++
++/// Enumerate from a descriptor resolved one component at a time with NOFOLLOW.
++pub(super) fn read_directory_bounded(
++    path: &Path,
++    limit: usize,
++    cancelled: &tokio_util::sync::CancellationToken,
++) -> io::Result<Vec<String>> {
++    let mut parent = root()?;
++    for component in components(path)? {
++        parent = open_directory(&parent, &component)?;
++    }
++    let fd = openat(
++        &parent,
++        ".",
++        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++        Mode::empty(),
++    )
++    .map_err(io::Error::from)?;
++    let mut dir = rustix::fs::Dir::new(fd).map_err(io::Error::from)?;
++    let mut names = Vec::new();
++    for entry in &mut dir {
++        if cancelled.is_cancelled() {
++            return Err(io::Error::new(io::ErrorKind::Interrupted, "walk cancelled"));
++        }
++        let entry = entry.map_err(io::Error::from)?;
++        let name = entry.file_name().to_bytes();
++        if name == b"." || name == b".." {
++            continue;
++        }
++        let name = std::str::from_utf8(name)
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non UTF-8 filename"))?;
++        names.push(name.to_owned());
++        if names.len() >= limit {
++            break;
++        }
++    }
++    Ok(names)
++}
++
++pub(super) fn walk_metadata_sync(path: &Path) -> io::Result<FileMetadata> {
++    metadata_sync(path)
++}
+diff --git a/codex-rs/exec-server/src/no_follow/windows.rs b/codex-rs/exec-server/src/no_follow/windows.rs
+index 0a668826785ee34b7ccfd7b0b4e2014040a64777..37740fae4eafc0fc89e4bcc274d2bbef61fe40c4 100644
+--- a/codex-rs/exec-server/src/no_follow/windows.rs
++++ b/codex-rs/exec-server/src/no_follow/windows.rs
+@@ -321,3 +321,100 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
+ #[cfg(test)]
+ #[path = "windows_tests.rs"]
+ mod tests;
++
++// Query the no-reparse directory handle itself; never reopen its path for enumeration.
++pub(super) fn read_directory_bounded(
++    path: &Path,
++    limit: usize,
++    cancelled: &tokio_util::sync::CancellationToken,
++) -> io::Result<Vec<String>> {
++    #[link(name = "ntdll")]
++    unsafe extern "system" {
++        fn NtQueryDirectoryFile(
++            handle: HANDLE,
++            event: HANDLE,
++            apc: *const c_void,
++            context: *const c_void,
++            status: *mut IO_STATUS_BLOCK,
++            buffer: *mut c_void,
++            length: u32,
++            class: u32,
++            single: u8,
++            name: *const UNICODE_STRING,
++            restart: u8,
++        ) -> NTSTATUS;
++    }
++    let handle = open_handle(path, FILE_GENERIC_READ, FILE_OPEN, FILE_DIRECTORY_FILE)?;
++    let mut names = Vec::new();
++    // FILE_DIRECTORY_INFORMATION: filename byte length at offset 60, UTF-16 at 64.
++    let mut buffer = vec![0u64; 8192];
++    loop {
++        if cancelled.is_cancelled() {
++            return Err(io::Error::new(io::ErrorKind::Interrupted, "walk cancelled"));
++        }
++        let mut status = IO_STATUS_BLOCK {
++            Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
++            Information: 0,
++        };
++        let result = unsafe {
++            NtQueryDirectoryFile(
++                handle.as_raw_handle(),
++                ptr::null_mut(),
++                ptr::null(),
++                ptr::null(),
++                &mut status,
++                buffer.as_mut_ptr().cast(),
++                (buffer.len() * 8) as u32,
++                1,
++                1,
++                ptr::null(),
++                0,
++            )
++        };
++        if result == 0x80000006_u32 as i32 {
++            break;
++        } // STATUS_NO_MORE_FILES
++        if result < 0 {
++            return Err(io::Error::from_raw_os_error(
++                unsafe { RtlNtStatusToDosError(result) } as i32,
++            ));
++        }
++        let bytes =
++            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) };
++        let length = u32::from_ne_bytes(bytes[60..64].try_into().unwrap()) as usize;
++        if length % 2 != 0 || length + 64 > status.Information || length + 64 > bytes.len() {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "invalid directory entry",
++            ));
++        }
++        let units: Vec<u16> = bytes[64..64 + length]
++            .chunks_exact(2)
++            .map(|v| u16::from_ne_bytes([v[0], v[1]]))
++            .collect();
++        let name = String::from_utf16(&units)
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid filename"))?;
++        if name == "." || name == ".." {
++            continue;
++        }
++        names.push(name);
++        if names.len() >= limit {
++            break;
++        }
++    }
++    Ok(names)
++}
++
++pub(super) fn walk_metadata_sync(path: &Path) -> io::Result<crate::FileMetadata> {
++    let handle = open_handle(path, FILE_READ_ATTRIBUTES, FILE_OPEN, 0)?;
++    let file = std::fs::File::from(handle);
++    let m = file.metadata()?;
++    Ok(crate::FileMetadata {
++        is_directory: m.is_dir(),
++        is_file: m.is_file(),
++        is_symlink: false,
++        size: m.len(),
++        created_at_ms: 0,
++        modified_at_ms: 0,
++    })
++}
+diff --git a/codex-rs/exec-server/src/remote_file_system.rs b/codex-rs/exec-server/src/remote_file_system.rs
+index 509e00d551b10a671e3cd6be6f4bb32b08db3c5d..503bf97a5ad21e7089f660c2353b5bd435239c8e 100644
+--- a/codex-rs/exec-server/src/remote_file_system.rs
++++ b/codex-rs/exec-server/src/remote_file_system.rs
+@@ -85,6 +85,7 @@ impl RemoteFileSystem {
+         let client = self.client.get().await.map_err(map_remote_error)?;
+         let response = client
+             .fs_read_file(FsReadFileParams {
++                max_bytes: options.max_bytes,
+                 path: path.clone(),
+                 follow_symlinks: (!options.follow_symlinks).then_some(false),
+                 sandbox: sandbox.cloned(),
+diff --git a/codex-rs/exec-server/src/remote_file_system_path_uri_tests.rs b/codex-rs/exec-server/src/remote_file_system_path_uri_tests.rs
+index 813574d1b1decdf1b0f4192e2787f6cd33ffb836..c7f7586cd062ac1199cd2232c39bf5d383c0ed40 100644
+--- a/codex-rs/exec-server/src/remote_file_system_path_uri_tests.rs
++++ b/codex-rs/exec-server/src/remote_file_system_path_uri_tests.rs
+@@ -91,6 +91,7 @@ async fn remote_file_system_sends_path_and_sandbox_cwd_uris_without_native_conve
+     let expected_params = paths
+         .into_iter()
+         .map(|path| FsReadFileParams {
++            max_bytes: None,
+             path,
+             follow_symlinks: None,
+             sandbox: Some(sandbox.clone()),
+@@ -220,6 +221,7 @@ async fn remote_file_system_preserves_only_cwd_dependent_policy_directories() {
+             })),
+         ));
+         expected_params.push(FsReadFileParams {
++            max_bytes: None,
+             path,
+             follow_symlinks: None,
+             sandbox: Some(sandbox),
+diff --git a/codex-rs/exec-server/src/sandboxed_file_system.rs b/codex-rs/exec-server/src/sandboxed_file_system.rs
+index 374058f0d0a1bb0af861ce82520cbbf6a43b0bb8..d1abef14c2ad9261d02e9d2d0f88f3e1db162020 100644
+--- a/codex-rs/exec-server/src/sandboxed_file_system.rs
++++ b/codex-rs/exec-server/src/sandboxed_file_system.rs
+@@ -149,7 +149,12 @@ impl SandboxedFileSystem {
+         let response = self
+             .run_sandboxed(
+                 sandbox,
+-                FsHelperRequest::ReadFile(FsReadFileParams {
++                (if options.max_bytes.is_some() {
++                    FsHelperRequest::ReadFileBounded
++                } else {
++                    FsHelperRequest::ReadFile
++                })(FsReadFileParams {
++                    max_bytes: options.max_bytes,
+                     path: path.clone(),
+                     follow_symlinks: (!options.follow_symlinks).then_some(false),
+                     sandbox: None,
+@@ -283,7 +288,11 @@ impl SandboxedFileSystem {
+         let response = self
+             .run_sandboxed(
+                 sandbox,
+-                FsHelperRequest::Walk(FsWalkParams {
++                (if options.no_follow {
++                    FsHelperRequest::WalkNoFollow
++                } else {
++                    FsHelperRequest::Walk
++                })(FsWalkParams {
+                     path: path.clone(),
+                     options,
+                     sandbox: None,
+diff --git a/codex-rs/exec-server/src/server/file_system_handler.rs b/codex-rs/exec-server/src/server/file_system_handler.rs
+index 199c1188fd5d6cd7cf1342171e802bc725b77cc6..5317484549e9d84304927c7c7ffb6b27c2367163 100644
+--- a/codex-rs/exec-server/src/server/file_system_handler.rs
++++ b/codex-rs/exec-server/src/server/file_system_handler.rs
+@@ -182,6 +182,7 @@ impl FileSystemHandler {
+             .read_file(
+                 &params.path,
+                 ReadFileOptions {
++                    max_bytes: params.max_bytes,
+                     follow_symlinks: params.follow_symlinks.unwrap_or(true),
+                 },
+                 params.sandbox.as_ref(),
+@@ -436,6 +437,7 @@ mod tests {
+ 
+             let response = handler
+                 .read_file(FsReadFileParams {
++                    max_bytes: None,
+                     path,
+                     follow_symlinks: None,
+                     sandbox: Some(sandbox_context(sandbox_policy)),
+diff --git a/codex-rs/exec-server/tests/file_stream.rs b/codex-rs/exec-server/tests/file_stream.rs
+index 2e37bb729be355673277675fe376aa6ef5a9f0e5..5ab8661ed6c9b4633d9a2ec5eb3a203bda5593e0 100644
+--- a/codex-rs/exec-server/tests/file_stream.rs
++++ b/codex-rs/exec-server/tests/file_stream.rs
+@@ -103,7 +103,10 @@ async fn file_reads_reject_fifo_without_waiting_for_a_writer(follow_symlinks: bo
+         Duration::from_secs(1),
+         file_system.read_file(
+             &path_uri,
+-            ReadFileOptions { follow_symlinks },
++            ReadFileOptions {
++                max_bytes: None,
++                follow_symlinks,
++            },
+             /*sandbox*/ None,
+         ),
+     )
+diff --git a/codex-rs/exec-server/tests/file_system/shared.rs b/codex-rs/exec-server/tests/file_system/shared.rs
+index 53c3f67b5eda0f4bb891dcdcec60f541f0c7384c..b4fd4903f0f93ce1c276cacb1c809140e68f5e91 100644
+--- a/codex-rs/exec-server/tests/file_system/shared.rs
++++ b/codex-rs/exec-server/tests/file_system/shared.rs
+@@ -470,6 +470,7 @@ async fn file_system_walk_returns_a_bounded_tree(
+         .walk(
+             &source_uri,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 4,
+                 max_directories: 10,
+                 max_entries: 10,
+@@ -516,6 +517,7 @@ async fn file_system_walk_returns_a_bounded_tree(
+         .walk(
+             &source_uri,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 0,
+                 max_directories: 10,
+                 max_entries: 10,
+@@ -539,6 +541,7 @@ async fn file_system_walk_returns_a_bounded_tree(
+         .walk(
+             &source_uri,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 4,
+                 max_directories: 1,
+                 max_entries: 10,
+@@ -562,6 +565,7 @@ async fn file_system_walk_returns_a_bounded_tree(
+         .walk(
+             &source_uri,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 4,
+                 max_directories: 10,
+                 max_entries: 1,
+@@ -600,6 +604,7 @@ async fn file_system_walk_handles_invalid_roots_and_limits(
+     std::fs::write(&file_path, "contents")?;
+     let missing = PathUri::from_host_native_path(tmp.path().join("missing"))?;
+     let options = WalkOptions {
++        no_follow: false,
+         max_depth: 8,
+         max_directories: 100,
+         max_entries: 100,
+@@ -650,6 +655,7 @@ async fn file_system_walk_handles_invalid_roots_and_limits(
+         ),
+     ] {
+         let options = WalkOptions {
++            no_follow: false,
+             max_depth,
+             max_directories,
+             max_entries,
+@@ -690,6 +696,7 @@ async fn file_system_walk_honors_read_sandbox(
+         .walk(
+             &PathUri::from_host_native_path(&source_dir)?,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 1,
+                 max_directories: 2,
+                 max_entries: 2,
+@@ -981,6 +988,7 @@ async fn file_system_full_disk_read_skips_sandbox_only_for_reads() -> Result<()>
+             .walk(
+                 &root_uri,
+                 WalkOptions {
++                    no_follow: false,
+                     max_depth: 1,
+                     max_directories: 2,
+                     max_entries: 2,
+diff --git a/codex-rs/exec-server/tests/file_system_unix.rs b/codex-rs/exec-server/tests/file_system_unix.rs
+index 6e45cd2dfcd7bb423dbb63f796ea112abed8a0d3..148d4ca5001883a499fb6025faed50836b7af3a8 100644
+--- a/codex-rs/exec-server/tests/file_system_unix.rs
++++ b/codex-rs/exec-server/tests/file_system_unix.rs
+@@ -153,6 +153,7 @@ async fn file_system_operations_can_reject_symlinks_in_any_path_component(
+     symlink(&existing, &file_link)?;
+ 
+     let no_follow_read = ReadFileOptions {
++        max_bytes: None,
+         follow_symlinks: false,
+     };
+     let no_follow_write = WriteFileOptions {
+@@ -376,6 +377,7 @@ async fn file_system_no_follow_operations_support_search_only_ancestors(
+                 .read_file(
+                     &uri(&existing)?,
+                     ReadFileOptions {
++                        max_bytes: None,
+                         follow_symlinks: false,
+                     },
+                     /*sandbox*/ None,
+@@ -781,6 +783,7 @@ async fn file_system_walk_handles_directory_symlinks(
+             .walk(
+                 &PathUri::from_host_native_path(root)?,
+                 WalkOptions {
++                    no_follow: false,
+                     max_depth: 2,
+                     max_directories: 4,
+                     max_entries: 8,
+@@ -804,6 +807,7 @@ async fn file_system_walk_handles_directory_symlinks(
+             .walk(
+                 &PathUri::from_host_native_path(root)?,
+                 WalkOptions {
++                    no_follow: false,
+                     max_depth: 2,
+                     max_directories: 4,
+                     max_entries: 8,
+@@ -867,6 +871,7 @@ async fn file_system_walk_reports_non_utf8_names(
+         .walk(
+             &PathUri::from_host_native_path(tmp.path())?,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 0,
+                 max_directories: 1,
+                 max_entries: 1,
+@@ -913,6 +918,7 @@ async fn file_system_walk_prunes_hidden_directories_without_claiming_visible_ali
+         .walk(
+             &PathUri::from_host_native_path(&root)?,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: 3,
+                 max_directories: 3,
+                 max_entries: 6,
+diff --git a/codex-rs/exec-server/tests/file_system_windows.rs b/codex-rs/exec-server/tests/file_system_windows.rs
+index bbcd2c069866ac8a7a2b8b47687286b91cb498c4..47ef58682a22c97a434c35e64171bf7b5da77770 100644
+--- a/codex-rs/exec-server/tests/file_system_windows.rs
++++ b/codex-rs/exec-server/tests/file_system_windows.rs
+@@ -105,6 +105,7 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
+     create_directory_junction(&real, &directory_junction)?;
+ 
+     let no_follow_read = ReadFileOptions {
++        max_bytes: None,
+         follow_symlinks: false,
+     };
+     let no_follow_write = WriteFileOptions {
+@@ -334,6 +335,7 @@ async fn file_system_no_follow_operations_reject_named_pipes(
+         context.file_system.read_file(
+             &PathUri::from_host_native_path(Path::new(&client_path))?,
+             ReadFileOptions {
++                max_bytes: None,
+                 follow_symlinks: false,
+             },
+             /*sandbox*/ None,
+diff --git a/codex-rs/exec-server/tests/forward.rs b/codex-rs/exec-server/tests/forward.rs
+index f7854db669f79af1143acbc4037554ee6c733499..94cfde6bb62e745c648496640bef6dfe35be0d3f 100644
+--- a/codex-rs/exec-server/tests/forward.rs
++++ b/codex-rs/exec-server/tests/forward.rs
+@@ -126,6 +126,7 @@ async fn forwarder_runs_commands_and_transfers_files() -> Result<()> {
+     // A following request must still arrive as its own complete message.
+     let read_response = client
+         .fs_read_file(FsReadFileParams {
++            max_bytes: None,
+             path: PathUri::from_host_native_path(path)?,
+             follow_symlinks: None,
+             sandbox: None,
+diff --git a/codex-rs/exec-server/tests/relay.rs b/codex-rs/exec-server/tests/relay.rs
+index e7ff5360dc83e92dc664e45b47029a9f8d669be7..cee5c4e4585485ec5e24b82f934d9dd7c7edc9ad 100644
+--- a/codex-rs/exec-server/tests/relay.rs
++++ b/codex-rs/exec-server/tests/relay.rs
+@@ -406,6 +406,7 @@ async fn remote_environment_routes_encrypted_exec_server_rpc() -> Result<()> {
+     std::fs::write(&large_file_path, &large_file_contents)?;
+     let read_response = client
+         .fs_read_file(FsReadFileParams {
++            max_bytes: None,
+             path: PathUri::from_host_native_path(large_file_path)?,
+             follow_symlinks: None,
+             sandbox: None,
+diff --git a/codex-rs/ext/skills/src/loader/discovery.rs b/codex-rs/ext/skills/src/loader/discovery.rs
+index ad68d3ba02d7e017d4fd4635672c95135996cea1..abfdff31adc19878b6a1f78e82175a2a65d568a4 100644
+--- a/codex-rs/ext/skills/src/loader/discovery.rs
++++ b/codex-rs/ext/skills/src/loader/discovery.rs
+@@ -66,6 +66,7 @@ pub(super) async fn discover_skills(
+         .walk(
+             root,
+             WalkOptions {
++                no_follow: false,
+                 max_depth: match options.mode {
+                     SkillDiscoveryMode::Recursive => MAX_SCAN_DEPTH,
+                     SkillDiscoveryMode::DirectChildren => 2,
+diff --git a/codex-rs/file-system/src/lib.rs b/codex-rs/file-system/src/lib.rs
+index 6edd302cf167744eb19ec716b251e4c5c8ef45ef..4e304fa073af24fea5ddb96eb6423d84e1fe9ce1 100644
+--- a/codex-rs/file-system/src/lib.rs
++++ b/codex-rs/file-system/src/lib.rs
+@@ -54,12 +54,15 @@ pub const WALK_RESPONSE_ITEM_OVERHEAD_BYTES: usize = 64;
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub struct ReadFileOptions {
++    /// Optional actual byte limit; omitted callers retain the existing default.
++    pub max_bytes: Option<u64>,
+     pub follow_symlinks: bool,
+ }
+ 
+ impl Default for ReadFileOptions {
+     fn default() -> Self {
+         Self {
++            max_bytes: None,
+             follow_symlinks: true,
+         }
+     }
+@@ -131,6 +134,9 @@ pub struct ReadDirectoryEntry {
+ #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct WalkOptions {
++    /// Reject symlinks in every component, including root ancestors.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub no_follow: bool,
+     /// Maximum directory depth below the root that may be traversed.
+     pub max_depth: usize,
+     /// Maximum number of directories that may be traversed, including the root.
