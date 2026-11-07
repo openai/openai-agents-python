@@ -19,6 +19,7 @@ from agents import (
     ChildInvocation,
     ChildStepContext,
     ChildTurn,
+    CodeInterpreter,
     CompactionContext,
     Completed,
     CompletionContext,
@@ -71,6 +72,16 @@ search = WebSearch(route="hosted", allowed_domains=["weather.example"], location
 search_settings: ModelSettings = {"tool_choice": "required"}
 search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
 assert_type(search_agent, Agent[None, str])
+
+code_interpreter = CodeInterpreter(container="cntr_existing", allowed_callers=["direct"])
+assert_type(code_interpreter.allowed_callers, Sequence[Literal["direct", "programmatic"]] | None)
+automatic_code_interpreter = CodeInterpreter(
+    container={"type": "auto"}, allowed_callers=("direct", "programmatic")
+)
+assert_type(
+    Agent(instructions="Calculate.", tools=[automatic_code_interpreter]),
+    Agent[None, str],
+)
 
 web_citation: URLCitation = {
     "type": "url_citation",
