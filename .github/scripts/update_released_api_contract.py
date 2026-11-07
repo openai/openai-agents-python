@@ -340,7 +340,7 @@ def public_api() -> dict[str, Any]:
 
 
 def _comparison_api(api: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Ignore explicit self-re-exports when comparing reviewed import syntax."""
+    """Ignore formatting and explicit self-re-exports in reviewed API syntax."""
     if api is None:
         return None
     result = copy.deepcopy(api)
@@ -357,6 +357,13 @@ def _comparison_api(api: dict[str, Any] | None) -> dict[str, Any] | None:
                 if alias.asname == alias.name:
                     alias.asname = None
             imports[index] = ast.unparse(node)
+    declaration_lists = [
+        result.get("root_declarations", []),
+        *(contract.get("declarations", []) for contract in result["modules"].values()),
+        *(contract.get("declarations", []) for contract in result["root_definitions"].values()),
+    ]
+    for declarations in declaration_lists:
+        declarations[:] = [ast.unparse(ast.parse(statement)) for statement in declarations]
     return result
 
 
