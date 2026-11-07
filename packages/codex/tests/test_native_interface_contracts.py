@@ -84,6 +84,7 @@ async def cleanup_session(events, *, managed_environment=True):
     session._observations = SimpleNamespace(notify=lambda: None)
     session._provider_lease = SimpleNamespace(release=lambda: events.append(("provider", None)))
     session._owned_provider = None
+    session._repair_session = None
     session._model_context_snapshots = {}
     failed = False
 
