@@ -334,10 +334,10 @@ index d30766370c5962861ea2ae538a82d310cef63890..0a865812a441af89ead939bc120f8779
                  .walk(&params.path, params.options, /*sandbox*/ None)
                  .await
 diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
-index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce1d3d08fb 100644
+index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087d893111a 100644
 --- a/codex-rs/exec-server/src/local_file_system.rs
 +++ b/codex-rs/exec-server/src/local_file_system.rs
-@@ -703,6 +703,106 @@ impl DirectFileSystem {
+@@ -703,6 +703,120 @@ impl DirectFileSystem {
          Ok(entries)
      }
  
@@ -385,6 +385,20 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
 +            for name in names.into_iter().take(remaining) {
 +                check_walk_cancelled(cancelled)?;
 +                examined += 1;
++                let name = match name {
++                    Ok(name) => name,
++                    Err(error) => {
++                        if !push_walk_error(
++                            &mut outcome,
++                            &mut response_bytes,
++                            directory.clone(),
++                            error.to_string(),
++                        ) {
++                            return Ok(outcome);
++                        }
++                        continue;
++                    }
++                };
 +                let path = directory.join(&name).map_err(io::Error::other)?;
 +                let native = path.to_abs_path()?;
 +                let metadata = match no_follow::walk_metadata_sync(native.as_path()) {
@@ -444,7 +458,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
      fn sync_walk(
          root: &PathUri,
          options: WalkOptions,
-@@ -727,6 +827,9 @@ impl DirectFileSystem {
+@@ -727,6 +841,9 @@ impl DirectFileSystem {
          }
  
          check_walk_cancelled(cancelled)?;
@@ -454,7 +468,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
          let (root_metadata, root_is_symlink) = walk_metadata(root)?;
          if !root_metadata.is_dir() || (root_is_symlink && !options.follow_directory_symlinks) {
              return Ok(WalkOutcome::default());
-@@ -1341,6 +1444,7 @@ mod walk_tests {
+@@ -1341,6 +1458,7 @@ mod walk_tests {
              root.clone(),
          );
          let options = WalkOptions {
@@ -462,7 +476,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
              max_depth: 1,
              max_directories: 1,
              max_entries: 1,
-@@ -1365,6 +1469,7 @@ mod walk_tests {
+@@ -1365,6 +1483,7 @@ mod walk_tests {
          let temp = tempfile::tempdir()?;
          let missing = PathUri::from_host_native_path(temp.path().join("missing"))?;
          let options = WalkOptions {
@@ -470,12 +484,12 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
              max_depth: 1,
              max_directories: 1,
              max_entries: 1,
-@@ -1421,3 +1526,92 @@ mod walk_tests {
+@@ -1421,3 +1540,172 @@ mod walk_tests {
          Ok(())
      }
  }
 +
-+#[cfg(all(test, unix))]
++#[cfg(test)]
 +mod project_search_walk_tests {
 +    use super::*;
 +    fn options() -> WalkOptions {
@@ -488,6 +502,84 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
 +            prune_hidden_directories: false,
 +        }
 +    }
++    fn invalid_filename(index: usize) -> std::ffi::OsString {
++        let name = format!("invalid-{index}-");
++        #[cfg(unix)]
++        {
++            use std::os::unix::ffi::OsStringExt;
++            let mut bytes = name.into_bytes();
++            bytes.push(0xff);
++            std::ffi::OsString::from_vec(bytes)
++        }
++        #[cfg(windows)]
++        {
++            use std::os::windows::ffi::OsStringExt;
++            let units: Vec<u16> = name.encode_utf16().chain([0xd800]).collect();
++            std::ffi::OsString::from_wide(&units)
++        }
++    }
++
++    #[test]
++    fn invalid_filename_preserves_valid_siblings_and_descendants() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        std::fs::write(base.join("good.txt"), "needle")?;
++        std::fs::write(base.join(invalid_filename(0)), "unrepresentable")?;
++        std::fs::create_dir(base.join("nested"))?;
++        std::fs::write(base.join("nested/match.txt"), "needle")?;
++        let root = PathUri::from_host_native_path(&base)?;
++        let result = DirectFileSystem::sync_walk(&root, options(), &CancellationToken::new())?;
++        assert_eq!(result.entries.len(), 3);
++        for name in ["good.txt", "nested", "nested/match.txt"] {
++            let expected = root.join(name).unwrap();
++            assert!(result.entries.iter().any(|entry| entry.path == expected));
++        }
++        assert_eq!(result.errors.len(), 1);
++        assert_eq!(result.errors[0].path, root);
++        assert!(
++            !result.truncated,
++            "the error is not an entry-limit truncation"
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn invalid_filenames_consume_the_entry_budget() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        for index in 0..8 {
++            std::fs::write(base.join(invalid_filename(index)), "unrepresentable")?;
++        }
++        let root = PathUri::from_host_native_path(&base)?;
++        let mut limits = options();
++        limits.max_entries = 3;
++        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
++        assert!(result.entries.is_empty());
++        assert_eq!(result.errors.len(), 3);
++        assert!(result.errors.iter().all(|error| error.path == root));
++        assert!(result.truncated);
++        let entries = no_follow::read_directory_bounded(&base, 4, &CancellationToken::new())?;
++        assert_eq!(entries.len(), 4, "including only the bounded extra probe");
++        Ok(())
++    }
++
++    #[test]
++    fn invalid_filename_cancellation_and_setup_failures_stay_outer() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        std::fs::write(base.join(invalid_filename(0)), "unrepresentable")?;
++        let cancelled = CancellationToken::new();
++        cancelled.cancel();
++        let error = no_follow::read_directory_bounded(&base, 4, &cancelled).unwrap_err();
++        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
++        assert!(
++            no_follow::read_directory_bounded(&base.join("missing"), 4, &CancellationToken::new(),)
++                .is_err()
++        );
++        Ok(())
++    }
++
++    #[cfg(unix)]
 +    #[test]
 +    fn nofollow_walk_bounds_wide_directories_and_reports_depth() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
@@ -514,6 +606,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
 +        );
 +        Ok(())
 +    }
++    #[cfg(unix)]
 +    #[test]
 +    fn nofollow_walk_rejects_root_symlink_ancestors() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
@@ -524,6 +617,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..87c6e36cdf4e48cc2a7ce74db2259fce
 +        assert!(DirectFileSystem::sync_walk(&root, options(), &CancellationToken::new()).is_err());
 +        Ok(())
 +    }
++    #[cfg(unix)]
 +    #[test]
 +    fn nofollow_walk_never_reads_swapped_ancestor() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
@@ -669,29 +763,31 @@ index 354a9dab58c7eabae8cfaee910a0427db6428e0c..3cb0e13a670b4f448e1e0c725d8a669b
 +    Ok(())
 +}
 diff --git a/codex-rs/exec-server/src/no_follow/mod.rs b/codex-rs/exec-server/src/no_follow/mod.rs
-index d7abd7ff9c7b38a8dd44fd266b103a8093452432..b66985045b8d6d366e24cc53e427c51ec7435eea 100644
+index d7abd7ff9c7b38a8dd44fd266b103a8093452432..c095c1483ff3d7c4f252d2c832ac06cf3f18462c 100644
 --- a/codex-rs/exec-server/src/no_follow/mod.rs
 +++ b/codex-rs/exec-server/src/no_follow/mod.rs
-@@ -58,3 +58,14 @@ pub(crate) async fn create_directory(path: &Path, recursive: bool) -> io::Result
+@@ -58,3 +58,16 @@ pub(crate) async fn create_directory(path: &Path, recursive: bool) -> io::Result
  pub(crate) async fn remove(path: &Path, recursive: bool, force: bool) -> io::Result<()> {
      imp::remove(path.to_path_buf(), recursive, force).await
  }
 +
++/// Each item, including an unrepresentable name or enumeration error, consumes
++/// one entry slot. Setup and cancellation failures remain outer errors.
 +pub(crate) fn read_directory_bounded(
 +    path: &Path,
 +    limit: usize,
 +    cancelled: &tokio_util::sync::CancellationToken,
-+) -> io::Result<Vec<String>> {
++) -> io::Result<Vec<io::Result<String>>> {
 +    imp::read_directory_bounded(path, limit, cancelled)
 +}
 +pub(crate) fn walk_metadata_sync(path: &Path) -> io::Result<FileMetadata> {
 +    imp::walk_metadata_sync(path)
 +}
 diff --git a/codex-rs/exec-server/src/no_follow/unix.rs b/codex-rs/exec-server/src/no_follow/unix.rs
-index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..528dd5e8592683b6724c7ba78bdef3b66fb9a93f 100644
+index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..2b237e256c2654007c445816359b4c55a15f6960 100644
 --- a/codex-rs/exec-server/src/no_follow/unix.rs
 +++ b/codex-rs/exec-server/src/no_follow/unix.rs
-@@ -321,3 +321,45 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
+@@ -321,3 +321,53 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
      .await
      .map_err(|error| io::Error::other(format!("filesystem task failed: {error}")))?
  }
@@ -701,7 +797,7 @@ index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..528dd5e8592683b6724c7ba78bdef3b6
 +    path: &Path,
 +    limit: usize,
 +    cancelled: &tokio_util::sync::CancellationToken,
-+) -> io::Result<Vec<String>> {
++) -> io::Result<Vec<io::Result<String>>> {
 +    let mut parent = root()?;
 +    for component in components(path)? {
 +        parent = open_directory(&parent, &component)?;
@@ -715,21 +811,29 @@ index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..528dd5e8592683b6724c7ba78bdef3b6
 +    .map_err(io::Error::from)?;
 +    let mut dir = rustix::fs::Dir::new(fd).map_err(io::Error::from)?;
 +    let mut names = Vec::new();
-+    for entry in &mut dir {
++    while names.len() < limit {
 +        if cancelled.is_cancelled() {
 +            return Err(io::Error::new(io::ErrorKind::Interrupted, "walk cancelled"));
 +        }
-+        let entry = entry.map_err(io::Error::from)?;
++        let Some(entry) = dir.next() else {
++            break;
++        };
++        let entry = match entry {
++            Ok(entry) => entry,
++            Err(error) => {
++                names.push(Err(io::Error::from(error)));
++                break;
++            }
++        };
 +        let name = entry.file_name().to_bytes();
 +        if name == b"." || name == b".." {
 +            continue;
 +        }
-+        let name = std::str::from_utf8(name)
-+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non UTF-8 filename"))?;
-+        names.push(name.to_owned());
-+        if names.len() >= limit {
-+            break;
-+        }
++        names.push(
++            std::str::from_utf8(name)
++                .map(str::to_owned)
++                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non UTF-8 filename")),
++        );
 +    }
 +    Ok(names)
 +}
@@ -738,10 +842,10 @@ index 330a316ab03fa9fe5bb122beccbd4f7527056e8b..528dd5e8592683b6724c7ba78bdef3b6
 +    metadata_sync(path)
 +}
 diff --git a/codex-rs/exec-server/src/no_follow/windows.rs b/codex-rs/exec-server/src/no_follow/windows.rs
-index 0a668826785ee34b7ccfd7b0b4e2014040a64777..37740fae4eafc0fc89e4bcc274d2bbef61fe40c4 100644
+index 0a668826785ee34b7ccfd7b0b4e2014040a64777..9cb3955cf22df366ab55edb72bb0356857cbc2d6 100644
 --- a/codex-rs/exec-server/src/no_follow/windows.rs
 +++ b/codex-rs/exec-server/src/no_follow/windows.rs
-@@ -321,3 +321,100 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
+@@ -321,3 +321,99 @@ pub(super) async fn remove(path: PathBuf, recursive: bool, force: bool) -> io::R
  #[cfg(test)]
  #[path = "windows_tests.rs"]
  mod tests;
@@ -751,7 +855,7 @@ index 0a668826785ee34b7ccfd7b0b4e2014040a64777..37740fae4eafc0fc89e4bcc274d2bbef
 +    path: &Path,
 +    limit: usize,
 +    cancelled: &tokio_util::sync::CancellationToken,
-+) -> io::Result<Vec<String>> {
++) -> io::Result<Vec<io::Result<String>>> {
 +    #[link(name = "ntdll")]
 +    unsafe extern "system" {
 +        fn NtQueryDirectoryFile(
@@ -772,7 +876,7 @@ index 0a668826785ee34b7ccfd7b0b4e2014040a64777..37740fae4eafc0fc89e4bcc274d2bbef
 +    let mut names = Vec::new();
 +    // FILE_DIRECTORY_INFORMATION: filename byte length at offset 60, UTF-16 at 64.
 +    let mut buffer = vec![0u64; 8192];
-+    loop {
++    while names.len() < limit {
 +        if cancelled.is_cancelled() {
 +            return Err(io::Error::new(io::ErrorKind::Interrupted, "walk cancelled"));
 +        }
@@ -799,32 +903,31 @@ index 0a668826785ee34b7ccfd7b0b4e2014040a64777..37740fae4eafc0fc89e4bcc274d2bbef
 +            break;
 +        } // STATUS_NO_MORE_FILES
 +        if result < 0 {
-+            return Err(io::Error::from_raw_os_error(
++            names.push(Err(io::Error::from_raw_os_error(
 +                unsafe { RtlNtStatusToDosError(result) } as i32,
-+            ));
++            )));
++            break;
 +        }
 +        let bytes =
 +            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) };
 +        let length = u32::from_ne_bytes(bytes[60..64].try_into().unwrap()) as usize;
 +        if length % 2 != 0 || length + 64 > status.Information || length + 64 > bytes.len() {
-+            return Err(io::Error::new(
++            names.push(Err(io::Error::new(
 +                io::ErrorKind::InvalidData,
 +                "invalid directory entry",
-+            ));
++            )));
++            break;
 +        }
 +        let units: Vec<u16> = bytes[64..64 + length]
 +            .chunks_exact(2)
 +            .map(|v| u16::from_ne_bytes([v[0], v[1]]))
 +            .collect();
 +        let name = String::from_utf16(&units)
-+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid filename"))?;
-+        if name == "." || name == ".." {
++            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid filename"));
++        if matches!(name.as_deref(), Ok("." | "..")) {
 +            continue;
 +        }
 +        names.push(name);
-+        if names.len() >= limit {
-+            break;
-+        }
 +    }
 +    Ok(names)
 +}

@@ -186,6 +186,36 @@ async def test_complete_no_match_is_not_truncation(
 
 
 @local_search
+@pytest.mark.skipif(os.name != "posix", reason="Requires raw Unix filename bytes")
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+async def test_invalid_filename_preserves_valid_siblings_and_descendants(
+    responses: ResponsesFixture, tmp_path: Path, name: ExecutorToolName
+) -> None:
+    (tmp_path / "valid.txt").write_text("needle root\n", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "valid.txt").write_text("needle nested\n", encoding="utf-8")
+    with open(os.fsencode(tmp_path) + b"/invalid-\xff", "wb") as invalid:
+        invalid.write(b"unrelated\n")
+
+    result = await run_search(
+        responses,
+        Environment.local(cwd=tmp_path, tools=[name]),
+        name,
+        {"pattern": "**/*.txt" if name == "project_glob" else "needle"},
+    )
+    paths = (
+        result["matches"]
+        if name == "project_glob"
+        else [match["path"] for match in result["matches"]]
+    )
+    assert set(paths) == {"valid.txt", "nested/valid.txt"}
+    assert result["errors"] == [{"path": "", "code": "path_unavailable"}]
+    assert result["truncated"] is True
+    assert result["truncation_reasons"] == ["read_errors"]
+
+
+@local_search
 async def test_result_limit_is_explicit(responses: ResponsesFixture, tmp_path: Path) -> None:
     (tmp_path / "many.txt").write_text("needle\n" * 2000)
     result = await run_search(
