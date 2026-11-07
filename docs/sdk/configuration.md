@@ -43,6 +43,8 @@ The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent
 
 Use `NativeProvider(response_mode="buffered")` when the endpoint supports nonstreaming Responses and your application can wait for each complete model response. The SDK requests JSON over HTTP and delivers that response's output events after reading its full body. Tool calls start after that model response completes. Tool events remain available while tools execute, and subsequent model requests follow the normal tool loop.
 
+Each buffered HTTP response body is limited to 64 MiB. Larger responses fail without retry; use streaming mode for such responses.
+
 Set the agent's `model` explicitly to a model that uses standard Responses. The current default model uses Responses Lite and cannot use buffered mode.
 
 If the provider reports failure or an incomplete response that cannot continue, such as a token-limit error, that response's output is not delivered. An undecodable response body also yields no partial output. Any validated response metadata remains in the turn record.
