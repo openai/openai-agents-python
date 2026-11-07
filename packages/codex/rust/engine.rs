@@ -250,6 +250,15 @@ impl EngineState {
                 .map(|account| account.auth_file.as_path()),
         };
         let environment_options = runtime_options.environment()?;
+        if let Some(environment) = &environment_options {
+            environment.validate_storage_mounts(
+                &config,
+                LocalPrivatePaths {
+                    storage_home,
+                    ..private_paths
+                },
+            )?;
+        }
         // A local executor must pass its storage check before the profile opens.
         let local_environment = match (&environment_options, storage_home) {
             (Some(environment), Some(home)) if environment.is_local() => {

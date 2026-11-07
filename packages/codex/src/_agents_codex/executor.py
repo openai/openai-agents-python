@@ -17,7 +17,7 @@ from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManage
 from dataclasses import dataclass as dataclass, field as field
 from ipaddress import IPv6Address as IPv6Address
 from os import PathLike as PathLike, fspath as fspath
-from pathlib import PurePosixPath as PurePosixPath, PureWindowsPath as PureWindowsPath
+from pathlib import Path as Path, PurePosixPath as PurePosixPath, PureWindowsPath as PureWindowsPath
 from types import MappingProxyType as MappingProxyType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -35,6 +35,7 @@ from typing_extensions import TypeVar as TypeVar
 from ._options import (
     RuntimeEnvironment as RuntimeEnvironment,
     RuntimeNetworkPolicy as RuntimeNetworkPolicy,
+    RuntimeStorageMount as RuntimeStorageMount,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -163,6 +164,40 @@ class ExecutorContext(Generic[ContextT_co]):
     model: str | None = field(default=None, kw_only=True)
 
 
+@dataclass(frozen=True)
+class LocalStorageMount:
+    """Read an existing canonical Linux directory through a native read-only bind.
+
+    Supply ``strategy="local_bind"`` explicitly. Source and destination must
+    name the same directory. The caller owns the directory and its contents.
+    """
+
+    source: str | PathLike[str]
+    destination: str | PathLike[str]
+    strategy: Literal["local_bind"]
+    read_only: bool = True
+
+    def __post_init__(self) -> None:
+        if self.strategy != "local_bind" or self.read_only is not True:
+            raise ValueError("Storage mounts require strategy='local_bind' and read_only=True")
+        for name in ("source", "destination"):
+            raw = fspath(getattr(self, name))
+            if not isinstance(raw, str) or not raw or "\0" in raw:
+                raise ValueError("Storage mounts require canonical absolute directory paths")
+            path = Path(raw)
+            if not path.is_absolute() or str(path) != raw or ".." in path.parts:
+                raise ValueError("Storage mounts require canonical absolute directory paths")
+            try:
+                valid = path.is_dir() and str(path.resolve(strict=True)) == raw
+            except OSError:
+                valid = False
+            if not valid:
+                raise ValueError("Storage mounts require existing directories without symlinks")
+            object.__setattr__(self, name, raw)
+        if self.source != self.destination:
+            raise ValueError("Storage mounts require the same source and destination")
+
+
 @dataclass(frozen=True, kw_only=True)
 class Environment(Generic[ContextT_contra]):
     """Select one authenticated WSS executor or use :meth:`local` for local work.
@@ -268,6 +303,7 @@ class Environment(Generic[ContextT_contra]):
     policy_timeout: float = 30
     network: NetworkPolicy | RuntimeNetworkPolicy | None = None
     writable_roots: Sequence[str | PathLike[str]] | None = None
+    mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
 
     @classmethod
     def local(
@@ -292,6 +328,7 @@ class Environment(Generic[ContextT_contra]):
             Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None
         ) = None,
         policy_timeout: float = 30,
+        mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -302,6 +339,8 @@ class Environment(Generic[ContextT_contra]):
         no ambient environment variables. They can read the working directory,
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
+        On Linux, ``mounts`` adds read-only access to canonical same-path
+        directories with an explicit ``local_bind`` strategy.
         Keep the SDK, its native helpers, and LocalStorage profiles outside
         the working directory and additional writable roots.
         """
@@ -317,6 +356,7 @@ class Environment(Generic[ContextT_contra]):
             transform_arguments=transform_arguments,
             transform_result=transform_result,
             policy_timeout=policy_timeout,
+            mounts=mounts,
         )
 
     def __post_init__(self) -> None:
@@ -327,6 +367,20 @@ class Environment(Generic[ContextT_contra]):
             self._validate_remote_url()
         if self.writable_roots is not None:
             object.__setattr__(self, "writable_roots", _writable_roots(self.writable_roots))
+        if isinstance(self.mounts, (str, bytes)) or not isinstance(self.mounts, Sequence):
+            raise TypeError("mounts must be a sequence of LocalStorageMount declarations")
+        mounts = []
+        for mount in self.mounts:
+            if isinstance(mount, dict):
+                if set(mount) - {"source", "destination", "strategy", "read_only"}:
+                    raise ValueError("Storage mount contains unsupported fields")
+                mount = LocalStorageMount(**mount)
+            if not isinstance(mount, LocalStorageMount):
+                raise TypeError("mounts must contain LocalStorageMount declarations")
+            mounts.append(mount)
+        if mounts and (not self._is_local or sys.platform != "linux"):
+            raise ValueError("Storage mounts require Environment.local on Linux")
+        object.__setattr__(self, "mounts", tuple(mounts))
         self._validate_settings()
         if self._is_local:
             object.__setattr__(self, "url", _path_uri(self.cwd))
@@ -483,6 +537,18 @@ class Environment(Generic[ContextT_contra]):
             result["url"] = self.url
         if self.writable_roots is not None:
             result["writable_roots"] = [fspath(root) for root in self.writable_roots]
+        if self.mounts:
+            native_mounts: list[RuntimeStorageMount] = [
+                {
+                    "source": fspath(mount.source),
+                    "destination": fspath(mount.destination),
+                    "strategy": mount.strategy,
+                    "read_only": mount.read_only,
+                }
+                for mount in self.mounts
+                if isinstance(mount, LocalStorageMount)
+            ]
+            result["mounts"] = native_mounts
         if self.capability_directories is not None:
             result["capability_directories"] = [
                 _path_uri(root) for root in self.capability_directories

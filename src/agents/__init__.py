@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
         ExecutorContext as ExecutorContext,
+        LocalStorageMount as LocalStorageMount,
         NetworkPolicy as NetworkPolicy,
     )
     from .input import (
@@ -157,6 +158,7 @@ _MODULES = {
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
     "Environment": ".executor",
+    "LocalStorageMount": ".executor",
     "EnvironmentSource": ".executor",
     "NetworkPolicy": ".executor",
     "Checklist": ".tools",
