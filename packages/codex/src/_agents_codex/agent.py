@@ -155,7 +155,8 @@ class NativeProvider:
     Set ``response_mode="buffered"`` to request complete JSON responses from an
     endpoint that supports nonstreaming Responses. Model output events become
     available after the full response arrives, without token-level progress.
-    Each HTTP response body is limited to 64 MiB; larger responses fail without
+    Each HTTP response body is limited to 64 MiB and one million structural
+    characters (``{}[],:``) outside strings. Exceeding either limit fails without
     retry. Each model response is buffered separately. Tool calls start after that
     response completes; events remain available while tools execute.
     Successful output uses the normal Session history and tool processing.

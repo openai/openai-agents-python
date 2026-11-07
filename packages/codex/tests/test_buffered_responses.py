@@ -427,6 +427,25 @@ async def test_buffered_function_tool_uses_core_continuation_once() -> None:
         await disconnected(peer.transports)
 
 
+@pytest.mark.parametrize("entry,count", [(b"{}", 400_000), (b"0", 1_000_010)])
+async def test_buffered_structural_limit_rejects_dense_metadata_without_retry(
+    entry: bytes, count: int
+) -> None:
+    async with timeout(30), json_peer() as peer:
+        response = json.dumps(
+            json_response("ordinary answer", "dense-response", "dense-item")
+        ).encode()
+        body = response[:-1] + b', "ignored": [' + (entry + b",") * (count - 1) + entry + b"]}"
+        assert len(body) < 64 * 1024 * 1024
+        peer.json_replies.append(body)
+        async with provider(peer) as owner:
+            agent = Agent(model="gpt-5.2", instructions="Answer.", provider=owner)
+            with pytest.raises(NativeError, match="structural complexity limit"):
+                await agent.run("Reject dense metadata")
+            assert len(peer.requests) == 1
+        await disconnected(peer.transports)
+
+
 async def test_buffered_mcp_namespace_uses_core_continuation_once() -> None:
     mcp = MCPPeer(names=("search",), label="buffered-mcp-receipt")
     async with timeout(30), json_peer() as peer, mcp.serve() as url:

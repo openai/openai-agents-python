@@ -200,10 +200,10 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..40ff37082281faf6356163819a10b872
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263bb1b9af73
+index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6c946a207
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,237 @@
 +//! Lazy buffered Responses ingress. The caller's mapper owns and polls the body.
 +use crate::api_rate_limits::parse_api_rate_limits;
 +use crate::common::ResponseEvent;
@@ -223,6 +223,8 @@ index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263b
 +use std::sync::Arc;
 +use std::sync::OnceLock;
 +use std::time::Duration;
++
++const MAX_JSON_STRUCTURE_TOKENS: usize = 1_000_000;
 +
 +pub(super) fn response_stream(
 +    response: StreamResponse,
@@ -276,6 +278,7 @@ index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263b
 +            })?;
 +            body.extend_from_slice(&chunk);
 +        }
++        check_json_structure(&body)?;
 +        let mut response: Value = serde_json::from_slice(&body)
 +            .map_err(|error| ApiError::Stream(format!("failed to decode Responses JSON: {error}")))?;
 +        drop(body);
@@ -405,6 +408,30 @@ index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263b
 +    (request_id, Box::pin(events))
 +}
 +
++// Bound tree allocation from dense arrays and objects; quoted payload text is exempt.
++// serde_json remains responsible for syntax, number and nesting validation.
++fn check_json_structure(body: &[u8]) -> Result<(), ApiError> {
++    let mut in_string = false;
++    let mut escaped = false;
++    let mut remaining = MAX_JSON_STRUCTURE_TOKENS;
++    for &byte in body {
++        if in_string && escaped {
++            escaped = false;
++        } else if in_string && byte == b'\\' {
++            escaped = true;
++        } else if byte == b'"' {
++            in_string = !in_string;
++        } else if !in_string && matches!(byte, b'{' | b'}' | b'[' | b']' | b',' | b':') {
++            remaining = remaining
++                .checked_sub(1)
++                .ok_or_else(|| ApiError::InvalidRequest {
++                    message: "Responses JSON exceeds the structural complexity limit".into(),
++                })?;
++        }
++    }
++    Ok(())
++}
++
 +fn invalid_item() -> ApiError {
 +    ApiError::ResponseIntegrity {
 +        reason: ResponseIntegrityReason::UndecodableOutputItem,
@@ -416,10 +443,10 @@ index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263b
 +mod tests;
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4540f42840de808bd4a29c3e7b1834cb33743def
+index 0000000000000000000000000000000000000000..1cd4e583f223c20b3db41d2a0b9e8a40a6132255
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,588 @@
 +use super::*;
 +use bytes::Bytes;
 +use codex_client::TransportError;
@@ -966,6 +993,47 @@ index 0000000000000000000000000000000000000000..4540f42840de808bd4a29c3e7b1834cb
 +        drop(client);
 +    }
 +    Ok(())
++}
++
++#[tokio::test]
++async fn dense_ignored_objects_and_scalars_fail_before_response_projection() {
++    for (entry, count) in [("{}", 400_000), ("0", 1_000_010)] {
++        let mut body = serde_json::to_vec(&terminal(
++            "completed",
++            json!([message("msg", "ordinary answer")]),
++        ))
++        .unwrap();
++        assert_eq!(body.pop(), Some(b'}'));
++        body.extend_from_slice(br#", "ignored": ["#);
++        for index in 0..count {
++            if index != 0 {
++                body.push(b',');
++            }
++            body.extend_from_slice(entry.as_bytes());
++        }
++        body.extend_from_slice(b"]}");
++        let events: Events = from_bytes(body).collect().await;
++        assert!(default_header_reset(events.first()));
++        assert_eq!(events.len(), 2);
++        assert!(matches!(
++            events.last(),
++            Some(Err(ApiError::InvalidRequest { message }))
++                if message == "Responses JSON exceeds the structural complexity limit"
++        ));
++    }
++}
++
++#[tokio::test]
++async fn large_escaped_text_does_not_consume_the_structure_budget() {
++    let text = "\"\\\\{}[],: café🐈".repeat(170_000);
++    let events = collect(terminal("completed", json!([message("msg", &text)]))).await;
++    assert!(events.iter().any(|event| matches!(
++        event, Ok(ResponseEvent::OutputTextDelta(value)) if value == &text
++    )));
++    assert!(matches!(
++        events.last(),
++        Some(Ok(ResponseEvent::Completed { .. }))
++    ));
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
 index 30bc97b1157daf506f6962f0cddf5fb66bb32532..5b862aa2b6a85c69cf7945b1ee497cfaeecda6e3 100644
