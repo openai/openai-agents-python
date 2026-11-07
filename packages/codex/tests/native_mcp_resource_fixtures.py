@@ -95,7 +95,7 @@ def main() -> None:
     atexit.register(record, "exit")
     record("start")
     pending = None
-    for line in sys.stdin:
+    for line in sys.stdin.buffer:
         message = json.loads(line)
         record("request", message=message)
         method = message.get("method")
