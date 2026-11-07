@@ -358,7 +358,7 @@ Use this adapter when your application owns an external job and its durable jour
 
 `MCPTasksProvider` is an optional experimental Python adapter for one host-selected remote MCP tool. The adapter requires exactly `mcp==2.0.0` and `mcp-types==2.0.0`. Import `MCPTasksProvider` and `MCPInputReply` from `agents.experimental.mcp_tasks`. Normal native SDK imports do not require these packages.
 
-The SDK package retains Classic's `mcp>=1.30.0, <3, !=2.0.*, !=2.1.*` dependency constraint. That constraint conflicts with the Tasks adapter's exact `2.0.0` requirement, so Classic and MCP Tasks cannot share one supported dependency environment. Isolate any Tasks experiments from Classic workers in separate environments. A second environment alone does not resolve installation of the SDK distribution with MCP 2.0.0: the distribution itself retains Classic's constraint. Do not force installation or override that constraint. The experimental adapter has no supported standalone installation recipe here.
+The optional `classic` extra requires `mcp>=1.30.0, <3, !=2.0.*, !=2.1.*`. That constraint conflicts with the Tasks adapter's exact `2.0.0` requirement, so Classic and MCP Tasks cannot share one supported dependency environment. Keep Tasks experiments separate from Classic workers, and do not install the `classic` extra or extras that include it in the Tasks environment. Do not override Classic's constraint to combine them.
 
 #### Configure the remote tool
 
