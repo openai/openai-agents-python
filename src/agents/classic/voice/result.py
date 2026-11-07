@@ -432,42 +432,44 @@ class StreamedAudioResult:
             producer_exception: BaseException | None = None
             cleanup_exception: BaseException | None = None
 
-            # Let the producer finish gracefully after terminal event delivery so any active
-            # trace context can emit `trace_end` before cleanup. Await completed tasks too so a
-            # terminal producer failure cannot be hidden by the preceding lifecycle event.
-            #
-            # An error is a terminal event too. The producer reports it and then still has to
-            # close the transcription session, so cancelling here instead of waiting would tear
-            # that session down mid-close.
-            # A synthesis failure can terminate playback while the producer is
-            # still awaiting more workflow output. Cancel it below rather than
-            # waiting forever for work whose speech consumer has already failed.
-            synthesis_failed = any(
-                task.done() and not task.cancelled() and task.exception() is not None
-                for task in self._tasks
+            # Waiting and outcome collection are separate: a speech failure must
+            # stop pending production, but cannot hide an already-settled processing
+            # error. Healthy speech lets the producer finish transcription cleanup
+            # and its enclosing trace before owned tasks are joined below.
+            synthesis_exception = next(
+                (
+                    error
+                    for task in self._tasks
+                    if task.done() and not task.cancelled()
+                    if (error := task.exception()) is not None
+                ),
+                None,
             )
-            if (
-                saw_terminal_event
-                and self.text_generation_task is not None
-                and not synthesis_failed
-            ):
+            producer = self.text_generation_task
+            if saw_terminal_event and producer is not None and synthesis_exception is None:
                 try:
-                    # asyncio.wait() completes without propagating the producer outcome. A
-                    # cancellation raised by this shield therefore belongs to the consumer on
-                    # every supported Python version.
-                    await asyncio.shield(asyncio.wait((self.text_generation_task,)))
+                    # asyncio.wait() does not propagate the producer's outcome.
+                    # A cancellation from this shield belongs to the consumer.
+                    await asyncio.shield(asyncio.wait((producer,)))
                 except BaseException as exc:
                     consumer_finalization_exception = exc
-                else:
-                    try:
-                        producer_exception = self.text_generation_task.exception()
-                    except asyncio.CancelledError as exc:
-                        producer_exception = exc
 
+            # A speech failure stops any producer that is still pending. Report
+            # that failure instead of the cancellation used to stop production.
+            cancel_for_synthesis = (
+                synthesis_exception is not None and producer is not None and not producer.done()
+            )
             try:
                 await self._cleanup_tasks()
             except BaseException as exc:
                 cleanup_exception = exc
+
+            if producer is not None and producer.done():
+                try:
+                    producer_exception = producer.exception()
+                except asyncio.CancelledError as exc:
+                    if not cancel_for_synthesis:
+                        producer_exception = exc
 
             # A caller cancellation always wins. Otherwise preserve a consumer exception, except
             # that GeneratorExit after terminal delivery is only the control-flow signal from
@@ -486,6 +488,8 @@ class StreamedAudioResult:
                 pass
             elif producer_exception is not None:
                 exception_to_raise = producer_exception
+            elif synthesis_exception is not None:
+                exception_to_raise = synthesis_exception
             elif consumer_finalization_exception is not None:
                 exception_to_raise = consumer_finalization_exception
             elif cleanup_exception is not None:
@@ -502,6 +506,7 @@ class StreamedAudioResult:
                 for exc in (
                     consumer_finalization_exception,
                     producer_exception,
+                    synthesis_exception,
                     cleanup_exception,
                 )
             )

@@ -8,18 +8,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._public import preserve_module_identity as _preserve_module_identity
-from ..observation import EventGap, OutputTextDelta, TurnStarted
 from ..session import Session
 from ..turn import Turn
 
 
-class VoiceEventGapError(RuntimeError):
-    """Native output observations were lost before they could be spoken."""
-
-
 @dataclass
 class _Invocation:
-    submission: asyncio.Task[Turn[str]]
+    submission: asyncio.Task[Turn[Any]]
     cancellation: asyncio.Task[None] | None = None
     finished: bool = False
 
@@ -35,7 +30,11 @@ async def _join(task: asyncio.Task[Any]) -> None:
 
 
 class NativeSessionVoiceWorkflow:
-    """Speak native output while retaining the Session's history and policies.
+    """Speak accepted native output with the Session's history and policies.
+
+    Speech starts after native output validation and completion acceptance.
+    Use a text-output Session; a structured result requires a custom workflow
+    that selects and renders the fields the application wants spoken.
 
     The application opens and closes the Session and handles its interactions.
     Each transcription submits a new root turn. Concurrent runs are rejected;
@@ -54,7 +53,7 @@ class NativeSessionVoiceWorkflow:
         yield
 
     async def run(self, transcription: str) -> AsyncGenerator[str, None]:
-        """Yield this transcription's native text; propagate terminal failures."""
+        """Yield only accepted final text after inherited output validation."""
         if not isinstance(transcription, str) or not transcription.strip():
             raise ValueError("transcription must be a nonempty string")
         if self._invocation is not None:
@@ -62,36 +61,23 @@ class NativeSessionVoiceWorkflow:
 
         # Reserve before awaiting admission. Shielding retains the exact Turn if
         # cancellation races with submit returning its locally issued handle.
-        invocation = _Invocation(
-            asyncio.create_task(self._session.submit(transcription, output_type=str))
-        )
+        invocation = _Invocation(asyncio.create_task(self._session.submit(transcription)))
         self._invocation = invocation
         completed = False
         primary_error: BaseException | None = None
         try:
             turn = await asyncio.shield(invocation.submission)
-            started = False
-            preceding_gap = False
-            async for event in turn.events():
-                if invocation.cancellation is not None:
-                    raise asyncio.CancelledError
-                if isinstance(event, TurnStarted) and event.submission_id == turn.submission_id:
-                    started = True
-                    preceding_gap = False
-                elif isinstance(event, EventGap):
-                    if started:
-                        raise VoiceEventGapError("Native voice output observations were lost")
-                    preceding_gap = True
-                elif isinstance(event, OutputTextDelta):
-                    if preceding_gap:
-                        raise VoiceEventGapError("Native voice turn start or output was lost")
-                    yield event.delta
-            if preceding_gap:
-                raise VoiceEventGapError("Native voice turn observations were lost")
-            await turn.get_result()
+            result = await turn.get_result()
             if invocation.cancellation is not None:
                 raise asyncio.CancelledError
             completed = True
+            if not isinstance(result.final_output, str):
+                raise TypeError(
+                    "NativeSessionVoiceWorkflow requires a string final_output; "
+                    "use a text-output Session or a custom workflow to render structured output"
+                )
+            if result.final_output:
+                yield result.final_output
         except BaseException as error:
             primary_error = error
             raise

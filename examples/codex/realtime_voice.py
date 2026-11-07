@@ -3,7 +3,8 @@
 Install the matching SDK's voice and classic-realtime extras and set
 OPENAI_API_KEY. Run: python examples/codex/realtime_voice.py 'Your question' answer.wav
 A text prompt starts the speech conversation; Realtime generates PCM audio.
-The two conversations stay separate. Application code must handle any native
+The two conversations stay separate. Delegation returns accepted final text
+after native validation and completion policies, without forwarding drafts. Application code must handle any native
 Session interactions; this example grants no approvals. Realtime barge-in does
 not automatically cancel native work. Scope exit explicitly cancels that work. Record for a bounded --seconds window;
 a spoken preamble does not end the example before delegation completes.

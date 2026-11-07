@@ -3,6 +3,7 @@
 Install the matching SDK's voice extra. Set OPENAI_API_KEY for speech and native
 API requests. Run: python examples/codex/voice.py input.wav output.wav
 Input must be mono PCM16 at 24 kHz. No microphone or speaker is opened.
+Speech begins after native completion accepts and validates the final text.
 """
 
 import argparse
