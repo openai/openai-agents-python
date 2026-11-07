@@ -88,6 +88,7 @@ if TYPE_CHECKING:
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
         OutputValidationError as OutputValidationError,
+        OutputValidationIssue as OutputValidationIssue,
         PromptedOutput as PromptedOutput,
     )
     from .session import (
@@ -190,6 +191,7 @@ _MODULES = {
     "PromptedOutput": ".schema",
     "OutputSpec": ".schema",
     "OutputValidationError": ".schema",
+    "OutputValidationIssue": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",

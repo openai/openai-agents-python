@@ -67,16 +67,32 @@ class PromptedOutput(Generic[OutputT]):
 OutputSpec: TypeAlias = type[OutputT] | NativeOutput[OutputT] | PromptedOutput[OutputT]
 
 
+@dataclass(frozen=True)
+class OutputValidationIssue:
+    """Sensitive diagnostic selected from one failed output validation.
+
+    ``path`` addresses application output. Native non-object roots omit the
+    SDK's ``response`` prefix; failures in that wrapper use the root path ().
+    Codes and paths may contain application data. Access them deliberately,
+    with the same care as ``OutputValidationError.raw_output``.
+    """
+
+    code: str
+    path: tuple[str | int, ...]
+
+
 class OutputValidationError(ValueError):
     """The final text failed its captured output contract.
 
-    raw_output is deliberate application access and may contain sensitive data.
+    raw_output and issues are deliberate application access and may contain
+    sensitive data, including application-defined codes and field names.
     The exception message does not contain provider output or validation inputs.
     """
 
-    def __init__(self, raw_output: str) -> None:
+    def __init__(self, raw_output: str, issues: tuple[OutputValidationIssue, ...] = ()) -> None:
         super().__init__("Final output did not match the requested output type")
         self.raw_output = raw_output
+        self.issues = issues
 
 
 @dataclass(frozen=True)
@@ -106,10 +122,22 @@ class _PreparedOutput:
         try:
             decoded = self.adapter.validate_json(text)
             return decoded.response if self.wrapped else decoded
-        except (ValidationError, TypeError):
-            pass
+        except ValidationError as error:
+            issues = tuple(
+                OutputValidationIssue(
+                    code=issue["type"],
+                    path=(issue["loc"][1:] if issue["loc"][:1] == ("response",) else ())
+                    if self.wrapped
+                    else issue["loc"],
+                )
+                for issue in error.errors(
+                    include_url=False, include_context=False, include_input=False
+                )
+            )
+        except TypeError:
+            issues = (OutputValidationIssue(code="validation_error", path=()),)
         # Do not attach the validator exception, which contains rejected inputs.
-        raise OutputValidationError(text)
+        raise OutputValidationError(text, issues)
 
 
 def _prepare_spec(output: OutputSpec[Any] | None) -> _PreparedOutput:
