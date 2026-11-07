@@ -50,7 +50,14 @@ from typing import (
 from uuid import uuid4 as uuid4
 
 from ._compat import cancel_once as cancel_once
-from ._events import MessageItem, SessionItem as SessionItem, WebSearchCallItem
+from ._events import (
+    CodeInterpreterCallItem,
+    FileSearchCallItem,
+    ImageGenerationCallItem,
+    MessageItem,
+    SessionItem as SessionItem,
+    WebSearchCallItem,
+)
 from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext
 from ._history import project_history as project_history
 from ._lifecycle import (
@@ -136,6 +143,7 @@ from .observation import (
     ContextCompacted as ContextCompacted,
     EventStream as EventStream,
     ExecutionItemCompleted as ExecutionItemCompleted,
+    HostedToolCallProgress,
     ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
     SubagentLifecycle as SubagentLifecycle,
@@ -187,13 +195,16 @@ from .telemetry import (
     _owned_span as _owned_span,
 )
 from .tools import (
+    _HOSTED_TOOLS,
     Checklist as Checklist,
     NativeGoals as NativeGoals,
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
     ToolRef as ToolRef,
     WebSearch as WebSearch,
+    _capture_hosted_tools,
     _CapturedFunction as _CapturedFunction,
+    _hosted_tool_name,
     _ToolCatalog as _ToolCatalog,
 )
 from .turn import (
@@ -1102,6 +1113,8 @@ def _fixed_tool_refs(
             fixed.update(
                 ToolRef(n, "functions") for n in ("create_goal", "get_goal", "update_goal")
             )
+        elif isinstance(tool, _HOSTED_TOOLS):
+            fixed.add(ToolRef(_hosted_tool_name(tool), "functions"))
         elif isinstance(tool, WebSearch):
             fixed.add(
                 ToolRef("run", "web")
@@ -1165,6 +1178,10 @@ def _split_tools(
     has_goals = any(isinstance(item, NativeGoals) for item in opening)
     if sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
+    for hosted_type in _HOSTED_TOOLS:
+        if sum(isinstance(item, hosted_type) for item in opening) > 1:
+            raise ValueError(f"Declare {hosted_type.__name__} only once per Session")
+    hosted_names = {_hosted_tool_name(item) for item in opening if isinstance(item, _HOSTED_TOOLS)}
     for item in tools:
         tool = item
         if available is not None and isinstance(tool, (Environment, NativeAgents)):
@@ -1233,6 +1250,8 @@ def _split_tools(
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
+            if tool.ref.namespace in (None, "functions") and tool.name in hosted_names:
+                raise ValueError(f"Hosted tools reserve the tool name {tool.name}")
             if has_checklist and tool.ref == ToolRef("update_plan"):
                 raise ValueError("Checklist reserves the tool name update_plan")
             if (
@@ -1263,7 +1282,7 @@ def _split_tools(
             if native_agents is not None:
                 raise ValueError("A Session supports exactly one NativeAgents declaration")
             native_agents = tool
-        elif isinstance(tool, (Checklist, NativeGoals, WebSearch)):
+        elif isinstance(tool, (Checklist, NativeGoals, WebSearch, *_HOSTED_TOOLS)):
             if (
                 available is None
                 and isinstance(tool, WebSearch)
@@ -1283,7 +1302,8 @@ def _split_tools(
         else:
             raise TypeError(
                 "tools must use FunctionTool, function_tool, StdioMCP, HttpMCP, "
-                "Checklist, NativeGoals, WebSearch or NativeAgents"
+                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, "
+                "ImageGeneration or NativeAgents"
             )
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
@@ -1638,6 +1658,18 @@ def _configure_storage_runtime(
             runtime["native_goal_store"] = str(storage.path)
 
 
+def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    if search is not None:
+        if search.allowed_domains is not None:
+            config["tools.web_search.allowed_domains"] = list(search.allowed_domains)
+        if search.blocked_domains is not None:
+            config["tools.web_search.blocked_domains"] = list(search.blocked_domains)
+        if search.location is not None:
+            config["tools.web_search.location"] = dict(search.location)
+    return config
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -1770,7 +1802,7 @@ class Session(Generic[ContextT, OutputT]):
             or checklist
             or mcp_tools
             or environment is not None
-            or any(isinstance(tool, WebSearch) for tool in available)
+            or any(isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in available)
             or any(tool._bind is None for tool in tools)
         ):
             raise ValueError(
@@ -1779,20 +1811,12 @@ class Session(Generic[ContextT, OutputT]):
             )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
+        hosted_tools = _capture_hosted_tools(available)
+        if hosted_tools and codex_login is not None:
+            raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
         web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
         # Capture the controls before opening can await. Later selections only select the grant.
-        web_search_config: dict[str, Any] = {}
-        if web_search is not None:
-            if web_search.allowed_domains is not None:
-                web_search_config["tools.web_search.allowed_domains"] = list(
-                    web_search.allowed_domains
-                )
-            if web_search.blocked_domains is not None:
-                web_search_config["tools.web_search.blocked_domains"] = list(
-                    web_search.blocked_domains
-                )
-            if web_search.location is not None:
-                web_search_config["tools.web_search.location"] = dict(web_search.location)
+        web_search_config = _capture_web_search_config(web_search)
         allowed_tools, allowed_mcp = tools, mcp_tools
         deferred_schemas = any(tool.defer_loading for tool in allowed_tools) or any(
             server.defer_loading for server in allowed_mcp
@@ -2172,6 +2196,7 @@ class Session(Generic[ContextT, OutputT]):
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
+                    "_hosted_tools": hosted_tools,
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
                     "_before_complete": agent.before_complete is not None,
@@ -2236,6 +2261,10 @@ class Session(Generic[ContextT, OutputT]):
                             for entry in allowed_tools
                         ]
                         + mcp_names
+                        + [
+                            {"name": tool["type"], "namespace": "functions"}
+                            for tool in hosted_tools
+                        ]
                         + (
                             [{"name": "run", "namespace": "web"}]
                             if web_search is not None and web_search.route == "standalone"
@@ -6204,7 +6233,17 @@ class Session(Generic[ContextT, OutputT]):
         assert handle.turn_id is not None
         message = event["msg"]
         kind = message["type"]
-        if kind == "token_count" and event["id"] == handle.turn_id:
+        if kind == "hosted_tool_call_progress" and event["id"] == handle.turn_id:
+            self._observations.append(
+                HostedToolCallProgress(
+                    session_id=self.id,
+                    turn_id=handle.turn_id,
+                    submission_id=handle.submission_id,
+                    item_id=message["event"]["item_id"],
+                    event=message["event"],
+                )
+            )
+        elif kind == "token_count" and event["id"] == handle.turn_id:
             if "api_rate_limits" in message:
                 snapshot = _api_rate_limits(message["api_rate_limits"])
                 if snapshot is not None:
@@ -6256,7 +6295,13 @@ class Session(Generic[ContextT, OutputT]):
             elif kind == "item_completed":
                 item = project_model_output_item(message["item"], True, handle.turn_id)
                 if item is not None and (
-                    item["type"] == "web_search_call"
+                    item["type"]
+                    in {
+                        "web_search_call",
+                        "file_search_call",
+                        "code_interpreter_call",
+                        "image_generation_call",
+                    }
                     or any(part.get("annotations") for part in item["content"])
                 ):
                     self._observations.append(
@@ -6264,7 +6309,14 @@ class Session(Generic[ContextT, OutputT]):
                             session_id=self.id,
                             turn_id=handle.turn_id,
                             submission_id=handle.submission_id,
-                            item=cast(MessageItem | WebSearchCallItem, item),
+                            item=cast(
+                                MessageItem
+                                | WebSearchCallItem
+                                | FileSearchCallItem
+                                | CodeInterpreterCallItem
+                                | ImageGenerationCallItem,
+                                item,
+                            ),
                         )
                     )
 
@@ -6542,7 +6594,13 @@ class Session(Generic[ContextT, OutputT]):
         kind = message["type"]
         incarnation = event.get("subagent_incarnation")
         turn_id = message.get("turn_id", message.get("turnId"))
-        if kind in {"task_complete", "turn_complete", "turn_aborted", "token_count"}:
+        if kind in {
+            "task_complete",
+            "turn_complete",
+            "turn_aborted",
+            "token_count",
+            "hosted_tool_call_progress",
+        }:
             turn_id = turn_id or event["id"]
         if not turn_id and kind == "elicitation_request":
             # Only the Core token is owned. A same-server call does not
@@ -6581,9 +6639,9 @@ class Session(Generic[ContextT, OutputT]):
             return
         if not turn_id:
             return
-        if kind == "token_count":
-            # Rate-limit counts need not belong to a live turn. They must not
-            # create a never-settling owner without native admission.
+        if kind in {"token_count", "hosted_tool_call_progress"}:
+            # Passive progress must not create a never-settling owner without
+            # native admission.
             current = self._child_callbacks.get((event["subagent_id"], incarnation, turn_id))
             if current is None:
                 return
@@ -7364,7 +7422,10 @@ class Session(Generic[ContextT, OutputT]):
                     state.add_callback(task)
                 elif preparation_callback is not None:
                     state.add_callback(asyncio.create_task(preparation_callback(state, message)))
-                elif kind == "token_count" and event["id"] == handle.turn_id:
+                elif (
+                    kind in {"token_count", "hosted_tool_call_progress"}
+                    and event["id"] == handle.turn_id
+                ):
                     self._observe_progress(event, handle, self.id)
                 elif (
                     self._mcp_reader is not None

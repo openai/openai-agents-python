@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import subprocess
@@ -195,8 +196,13 @@ async def test_invalid_filename_preserves_valid_siblings_and_descendants(
     nested = tmp_path / "nested"
     nested.mkdir()
     (nested / "valid.txt").write_text("needle nested\n", encoding="utf-8")
-    with open(os.fsencode(tmp_path) + b"/invalid-\xff", "wb") as invalid:
-        invalid.write(b"unrelated\n")
+    try:
+        with open(os.fsencode(tmp_path) + b"/invalid-\xff", "wb") as invalid:
+            invalid.write(b"unrelated\n")
+    except OSError as error:
+        if error.errno == errno.EILSEQ:
+            pytest.skip("Filesystem rejects the non-UTF-8 fixture name")
+        raise
 
     result = await run_search(
         responses,

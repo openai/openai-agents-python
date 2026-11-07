@@ -334,7 +334,7 @@ index d30766370c5962861ea2ae538a82d310cef63890..0a865812a441af89ead939bc120f8779
                  .walk(&params.path, params.options, /*sandbox*/ None)
                  .await
 diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
-index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7ab24392d 100644
+index ec8b81c52a3a4a96d47e413af388a1873f49c676..32ddcfb972ea3c0f7e8f1d7184e64f65c9045e43 100644
 --- a/codex-rs/exec-server/src/local_file_system.rs
 +++ b/codex-rs/exec-server/src/local_file_system.rs
 @@ -703,6 +703,133 @@ impl DirectFileSystem {
@@ -497,7 +497,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7
              max_depth: 1,
              max_directories: 1,
              max_entries: 1,
-@@ -1421,3 +1553,299 @@ mod walk_tests {
+@@ -1421,3 +1553,319 @@ mod walk_tests {
          Ok(())
      }
  }
@@ -659,12 +659,28 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7
 +        }
 +    }
 +
++    fn create_invalid_filename_fixture(base: &Path) -> io::Result<bool> {
++        let mut file = match std::fs::File::create(base.join(invalid_filename(0))) {
++            Ok(file) => file,
++            #[cfg(unix)]
++            Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
++                eprintln!("not applicable: filesystem rejects invalid filename bytes ({error})");
++                return Ok(false);
++            }
++            Err(error) => return Err(error),
++        };
++        std::io::Write::write_all(&mut file, b"unrepresentable")?;
++        Ok(true)
++    }
++
 +    #[test]
 +    fn invalid_filename_preserves_valid_siblings_and_descendants() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
 +        let base = temp.path().canonicalize()?;
 +        std::fs::write(base.join("good.txt"), "needle")?;
-+        std::fs::write(base.join(invalid_filename(0)), "unrepresentable")?;
++        if !create_invalid_filename_fixture(&base)? {
++            return Ok(());
++        }
 +        std::fs::create_dir(base.join("nested"))?;
 +        std::fs::write(base.join("nested/match.txt"), "needle")?;
 +        let root = PathUri::from_host_native_path(&base)?;
@@ -687,7 +703,10 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7
 +    fn invalid_filenames_consume_the_entry_budget() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
 +        let base = temp.path().canonicalize()?;
-+        for index in 0..8 {
++        if !create_invalid_filename_fixture(&base)? {
++            return Ok(());
++        }
++        for index in 1..8 {
 +            std::fs::write(base.join(invalid_filename(index)), "unrepresentable")?;
 +        }
 +        let root = PathUri::from_host_native_path(&base)?;
@@ -707,7 +726,8 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7
 +    fn invalid_filename_cancellation_and_setup_failures_stay_outer() -> io::Result<()> {
 +        let temp = tempfile::tempdir()?;
 +        let base = temp.path().canonicalize()?;
-+        std::fs::write(base.join(invalid_filename(0)), "unrepresentable")?;
++        // These assertions also apply when the filesystem rejects invalid filenames.
++        let _ = create_invalid_filename_fixture(&base)?;
 +        let cancelled = CancellationToken::new();
 +        cancelled.cancel();
 +        let error = no_follow::read_directory_bounded(&base, 4, &cancelled).unwrap_err();

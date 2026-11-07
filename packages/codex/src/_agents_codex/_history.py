@@ -9,6 +9,7 @@ from ._projection import (
     _execution_item as _execution_item,
     _usage as _usage,
     project_execution_completion as project_execution_completion,
+    project_hosted_response_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._web_projection import project_web_search_item as project_web_search_item
@@ -117,7 +118,7 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         }
     if kind == "web_search_call":
         return project_web_search_item({**raw, "type": "WebSearch"}, True, turn_id)
-    return None
+    return project_hosted_response_item(raw, turn_id)
 
 
 def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:

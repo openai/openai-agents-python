@@ -10,6 +10,7 @@ Examples with `await` or `async with` are fragments for an async function. [Conf
 | --- | --- |
 | Call a Python function | [Python functions](#python-functions) |
 | Search the web through the native provider | [Native web search](#native-web-search) |
+| Search uploaded files, run provider code, or generate images | [Provider-hosted tools](#provider-hosted-tools) |
 | Give a function application data | [Application context](#application-context) |
 | Connect tools from an MCP server | [MCP servers](mcp.md) |
 | Run commands or edit workspace files | [Local and remote execution](execution.md) |
@@ -168,6 +169,41 @@ agent = Agent(instructions="Research the user's question.", tools=[search])
 Keep the original `search` declaration in every explicit turn or step selection, such as `tools=[search]`. Turns, steps, and idle updates cannot add search or change its mode or route. Open a new Session to change the declaration.
 
 Saved history retains search results but does not enable search. To search after restore, declare `WebSearch` again in the current Agent or opening Session tools. `Environment.network` controls executor commands, not web search.
+
+## Provider-hosted tools
+
+Declare `FileSearch`, `CodeInterpreter`, or `ImageGeneration` in `Agent.tools` to run these tools through the native Responses loop. Use an API-key Responses provider and a model that supports the chosen tools. Hosted tools do not support the Responses Lite protocol or Codex login. The provider validates model-specific settings.
+
+```python
+import os
+
+from agents import Agent, CodeInterpreter, FileSearch, ImageGeneration
+
+search = FileSearch(
+    vector_store_ids=[os.environ["VECTOR_STORE_ID"]],
+    max_num_results=5,
+    include_search_results=True,
+)
+code = CodeInterpreter(container={"type": "auto", "memory_limit": "1g"})
+images = ImageGeneration(output_format="png", partial_images=1)
+agent = Agent(
+    instructions="Use the hosted tools.",
+    model=os.environ["HOSTED_TOOLS_MODEL"],
+    tools=[search, code, images],
+)
+```
+
+The Session captures each declaration when it opens. When you supply an explicit tool selection for a turn, include the captured declaration to enable that tool. Leaving it out of that selection disables it for that turn. Open a new Session to change its settings. Declare each hosted tool once. Hosted tools can run alongside Python functions, but their reserved names cannot also name a Python function. The provider executes hosted tools; Python function callbacks do not receive their calls.
+
+`FileSearch` accepts metadata `filters` and `ranking_options` in the provider's format. Set `include_search_results=True` to request raw retrieved chunks. The resulting `file_search_call` item exposes `queries`, `results`, and the full `provider_data`. Without that setting, the provider can omit raw results. Assistant text retains file citations in its `annotations`.
+
+For Code Interpreter, supply an existing container ID or an auto-container configuration with optional `file_ids`, `memory_limit`, and `network_policy`. The provider owns container creation, reuse, and expiration. Closing or cancelling a Session does not delete the container. Each `code_interpreter_call` item exposes its `container_id`, `code`, and `outputs`. Generated-file citations retain the container and file IDs in text `annotations`. Use the provider's Containers API to download files while the container remains active. See the [provider container guide](https://developers.openai.com/api/docs/guides/tools-code-interpreter#containers).
+
+`ImageGeneration` accepts image settings such as quality, size, background, format, compression, and partial-image count. To edit an image, supply the source image as inline base64 `input_image` content and set `action="edit"`. An optional `input_image_mask` can reference a provider file ID or a base64 image URL. A completed `image_generation_call` item exposes the base64 `result` and revised prompt. A failed or unfinished call can have `result=None`; inspect `status` and `provider_data` before decoding it.
+
+`Session.events()` and `Turn.events()` include `HostedToolCallProgress` observations from `agents.observation`. Each `event` field holds the full provider event, including code deltas and partial-image bytes when requested. These passive streams report gaps if a reader falls behind. They retain at most 16 MiB of base64 per preview and 32 MiB across retained previews. Oversized previews also produce gaps; missed previews cannot be recovered from history. Read `Session.items()` for the final image, including images too large for a completion observation. Final tool items also retain provider fields in `provider_data`, including failure details and image metadata. These items and text annotations survive saved-state restore. Restoring history does not grant tool access: declare the tools again in the current Agent to use them in later turns.
+
+Runnable examples for [file search, Code Interpreter, and images](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/hosted_tools) show each tool separately.
 
 ## Connect MCP tools
 

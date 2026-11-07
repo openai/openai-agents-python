@@ -879,7 +879,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
             from .state import SessionState
-            from .tools import WebSearch
+            from .tools import _HOSTED_TOOLS, WebSearch
 
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
@@ -1033,7 +1033,9 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._storage is not None
                         or selected_mcp
                         or any(tool._ref.namespace is not None for tool in session._bound_tools)
-                        or any(isinstance(tool, WebSearch) for tool in opening.tools)
+                        or any(
+                            isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in opening.tools
+                        )
                     ):
                         raise InteractionRequired(
                             "Pausing for manual replies requires unnamespaced Python/manual tools, "

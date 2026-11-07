@@ -8,7 +8,7 @@ import importlib.util
 import pickle
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from importlib.metadata import version
 from pathlib import Path
 from types import ModuleType
@@ -372,14 +372,17 @@ def test_inherited_event_fields_remain_available_to_schema_readers() -> None:
 
 
 def test_annotations_resolve_after_public_module_metadata_is_restored() -> None:
-    from agents import FunctionTool, Session, Turn
+    from agents import FileSearch, FunctionTool, Session, Turn
     from agents.input import InputText
+    from agents.observation import HostedToolCallProgress
     from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
     from agents.telemetry import SpanContext, TraceOptions, TraceScope, trace
     from agents.usage import RunBudget, TokenUsage
 
     assert get_type_hints(trace)["return"] is TraceScope
     assert get_type_hints(FunctionTool)["name"] is str
+    assert get_type_hints(FileSearch)["vector_store_ids"] == Sequence[str]
+    assert get_origin(get_type_hints(HostedToolCallProgress)["event"]) is dict
     assert get_type_hints(InputText)["text"] is str
     assert get_type_hints(TraceOptions)["parent"] == SpanContext | None
     assert get_type_hints(ApiRateLimits)["requests"] == ApiRateLimitWindow | None
