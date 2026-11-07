@@ -1,0 +1,153 @@
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index 68daf8912d2b6ca2ae741ca2a3f83e53fd99249f..aab8d78af148dbf066dd738b05c6c82c69eea709 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -41,6 +41,9 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
+ use codex_rmcp_client::ElicitationResponse;
+ use codex_rmcp_client::with_http_headers_helper;
+ use codex_utils_path_uri::PathUri;
++use rmcp::model::ListResourceTemplatesResult;
++use rmcp::model::ListResourcesResult;
++use rmcp::model::PaginatedRequestParams;
+ use rmcp::model::ReadResourceRequestParams;
+ use rmcp::model::ReadResourceResult;
+ use rmcp::model::RequestId;
+@@ -838,6 +841,26 @@ impl McpRuntime {
+             .await
+     }
+ 
++    pub async fn latest_list_resources(
++        &self,
++        server: &str,
++        params: Option<PaginatedRequestParams>,
++    ) -> anyhow::Result<ListResourcesResult> {
++        self.latest_connections()
++            .list_resources(server, params)
++            .await
++    }
++
++    pub async fn latest_list_resource_templates(
++        &self,
++        server: &str,
++        params: Option<PaginatedRequestParams>,
++    ) -> anyhow::Result<ListResourceTemplatesResult> {
++        self.latest_connections()
++            .list_resource_templates(server, params)
++            .await
++    }
++
+     pub async fn latest_read_resource(
+         &self,
+         server: &str,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index a90ee2639a546d68ecc2de7523dfaba3c294dca0..06f66b9388ad1bd888aab82938ddde84bb50cfae 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -72,6 +72,7 @@ use codex_thread_store::ThreadStoreResult;
+ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_path_uri::LegacyAppPathString;
+ use codex_utils_path_uri::PathUri;
++use rmcp::model::PaginatedRequestParams;
+ use rmcp::model::ReadResourceRequestParams;
+ use std::any::Any;
+ use std::path::PathBuf;
+@@ -1187,6 +1188,38 @@ impl CodexThread {
+         self.session.inspect_selected_capability_roots()
+     }
+ 
++    /// Returns one resource page from this thread's current MCP connection.
++    pub async fn list_mcp_resources(
++        &self,
++        server: &str,
++        params: Option<PaginatedRequestParams>,
++    ) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_list_resources(server, params)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
++    /// Returns one resource-template page without exhausting its cursor.
++    pub async fn list_mcp_resource_templates(
++        &self,
++        server: &str,
++        params: Option<PaginatedRequestParams>,
++    ) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_list_resource_templates(server, params)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
+     pub async fn read_mcp_resource(
+         &self,
+         server: &str,
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index 9cb63de3fd82c9f58b66946fd2aee94791040589..e1fd3e65398ddd452fdaf74bacf9336ac4712ad1 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -1040,7 +1040,17 @@ impl RmcpClient {
+         let result = self
+             .run_service_operation("tools/list", timeout, move |service| {
+                 let params = params.clone();
+-                async move { service.list_tools(params).await }.boxed()
++                async move {
++                    if service
++                        .peer()
++                        .peer_info()
++                        .is_some_and(|info| info.capabilities.tools.is_none())
++                    {
++                        return Ok(ListToolsResult::with_all_items(Vec::new()));
++                    }
++                    service.list_tools(params).await
++                }
++                .boxed()
+             })
+             .await?;
+         self.persist_oauth_tokens().await;
+@@ -1096,7 +1106,17 @@ impl RmcpClient {
+         let result = self
+             .run_service_operation("resources/list", timeout, move |service| {
+                 let params = params.clone();
+-                async move { service.list_resources(params).await }.boxed()
++                async move {
++                    if service
++                        .peer()
++                        .peer_info()
++                        .is_some_and(|info| info.capabilities.resources.is_none())
++                    {
++                        return Ok(ListResourcesResult::with_all_items(Vec::new()));
++                    }
++                    service.list_resources(params).await
++                }
++                .boxed()
+             })
+             .await?;
+         self.persist_oauth_tokens().await;
+@@ -1113,7 +1133,17 @@ impl RmcpClient {
+         let result = self
+             .run_service_operation("resources/templates/list", timeout, move |service| {
+                 let params = params.clone();
+-                async move { service.list_resource_templates(params).await }.boxed()
++                async move {
++                    if service
++                        .peer()
++                        .peer_info()
++                        .is_some_and(|info| info.capabilities.resources.is_none())
++                    {
++                        return Ok(ListResourceTemplatesResult::with_all_items(Vec::new()));
++                    }
++                    service.list_resource_templates(params).await
++                }
++                .boxed()
+             })
+             .await?;
+         self.persist_oauth_tokens().await;

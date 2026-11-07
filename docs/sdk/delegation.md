@@ -1,6 +1,8 @@
 # Delegate work to native children
 
-Use `NativeAgents` when the model needs to delegate independent tasks within one conversation. Native children share the parent's executor workspace and selected tools, so give each child a task that can safely run alongside the others.
+Use `NativeAgents` for workspace delegation within one conversation. Native children share the parent's executor workspace and selected tools, so give each child a task that can safely run alongside the others.
+
+`NativeAgents` requires an `Environment` with `exec_command`, `write_stdin`, and `apply_patch`, even when the delegated task only calls Python or MCP tools. For delegation without an executor workspace, call separately configured `Agent` instances and let your application coordinate their inputs, results, and lifetimes.
 
 Before running the examples:
 

@@ -277,9 +277,13 @@
       "sha256": "ac413ec794493e2047724a5ee0473744c4a0464313d4330ba6975780bda6e5d3"
     },
     {
-      "path": "0063-buffered-responses.patch",
+      "path": "0063-caller-controlled-mcp-resources.patch",
+      "sha256": "6a36e7a5778bd0253cd286ccef32afad19813c913f4310dee576e9cb37e87cac"
+    },
+    {
+      "path": "0064-buffered-responses.patch",
       "sha256": "f26b628dc280a965259ecbd1c29d58d316a236955400e211b0cab6d4a27aa361"
     }
   ],
-  "result_tree": "3413ec19409d12ebf437a344bb26292882195c63"
+  "result_tree": "6984d1c3fd6ec6f667876ff3fb9fc431fd05fbd9"
 }

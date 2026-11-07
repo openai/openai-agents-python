@@ -113,6 +113,8 @@ pub const OPERATIONS: &[&str] = &[
     "set_app_server_client_info",
     "call_mcp_tool",
     "read_mcp_resource",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
     "read_mcp_resource_for_call",
     "environment_ready",
     "environment_failed",
@@ -869,6 +871,10 @@ params!(McpReadParams {
     server: String,
     params: rmcp::model::ReadResourceRequestParams
 });
+params!(McpListParams {
+    server: String,
+    params: Option<rmcp::model::PaginatedRequestParams>
+});
 params!(McpCallReadParams {
     call_id: String,
     uri: String
@@ -1186,9 +1192,26 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     .await?,
             )?);
         }
+        "list_mcp_resources" => {
+            let p: McpListParams = decode(params)?;
+            return thread
+                .list_mcp_resources(&p.server, p.params)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
+        }
+        "list_mcp_resource_templates" => {
+            let p: McpListParams = decode(params)?;
+            return thread
+                .list_mcp_resource_templates(&p.server, p.params)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
+        }
         "read_mcp_resource" => {
             let p: McpReadParams = decode(params)?;
-            return thread.read_mcp_resource(&p.server, p.params).await;
+            return thread
+                .read_mcp_resource(&p.server, p.params)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
         }
         "read_mcp_resource_for_call" => {
             let p: McpCallReadParams = decode(params)?;
