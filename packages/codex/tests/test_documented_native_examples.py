@@ -3,6 +3,7 @@
 import ast
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -496,6 +497,9 @@ async def test_documented_capability_fragment_discovers_remote_skill(
             await owner.aclose()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="The documented strict executor requires Linux or macOS."
+)
 async def test_exact_executor_lease_fragment_releases_after_native_connection(
     responses, tmp_path, monkeypatch
 ):
@@ -669,7 +673,10 @@ async def test_provider_storage_example_main_owns_gateway_and_api(
             trust(peer, tmp_path, monkeypatch)
             events.append("connect")
             yield Environment(
-                url=peer.url, cwd=str(peer.root), headers={"Authorization": "Bearer " + peer.token}
+                url=peer.url,
+                cwd=str(peer.root),
+                headers={"Authorization": "Bearer " + peer.token},
+                write_policy="legacy" if sys.platform == "win32" else "strict",
             )
             await peer.wait_disconnected()
             assert not any(
