@@ -108,6 +108,7 @@ if TYPE_CHECKING:
         SessionBusyError as SessionBusyError,
         StaleTurnError as StaleTurnError,
         TurnStoppedError as TurnStoppedError,
+        get_cleanup as get_cleanup,
     )
     from .state import (
         ChecklistState as ChecklistState,
@@ -229,6 +230,7 @@ _MODULES = {
     "MCPCallContext": ".mcp",
     "function_tool": "._function_tools",
     "Completed": ".session",
+    "get_cleanup": ".session",
     "Capabilities": ".session",
     "CapabilityError": ".session",
     "FeatureName": ".session",

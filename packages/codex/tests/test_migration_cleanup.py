@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from agents import NativeProvider, Session
+from agents import NativeProvider, Session, get_cleanup as native_get_cleanup
 from agents.classic import Agent
 from agents.migration import SDKRunner, _runner, get_cleanup
 
@@ -291,3 +291,7 @@ def test_get_cleanup_ignores_provider_only_and_handles_context_cycles() -> None:
     assert get_cleanup(error) is None
     assert error.__context__ is context
     assert context.__context__ is error
+
+
+def test_migration_cleanup_accessor_is_native_accessor() -> None:
+    assert get_cleanup is native_get_cleanup

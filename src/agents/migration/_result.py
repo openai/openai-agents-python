@@ -16,9 +16,8 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
-from _agents_codex._lifecycle import _close_after_error, _error_contexts
-from _agents_codex.agent import NativeProvider
-from _agents_codex.session import Completed, Session
+from _agents_codex._lifecycle import _close_after_error
+from _agents_codex.session import Completed, get_cleanup
 
 from ..classic.agent import Agent
 from ..classic.exceptions import ModelBehaviorError, UserError
@@ -40,21 +39,6 @@ from ..classic.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent,
 from ..classic.tool import FunctionTool, ToolOrigin, get_function_tool_origin
 
 ContextT = TypeVar("ContextT")
-
-
-def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:
-    """Return the migration run's retained owner after failed cleanup, if any.
-
-    Await the owner's ``aclose()`` to retry retirement. This also works after
-    Python 3.10 Tasks replace cancellation exceptions: their contexts retain
-    the original error and its cleanup owner. A retained Session closes its
-    migration-owned provider too; do not close that provider separately.
-    """
-    for current in _error_contexts(error):
-        owner = getattr(current, "cleanup", None)
-        if isinstance(owner, (Session, NativeProvider)):
-            return owner
-    return None
 
 
 @dataclass(frozen=True)

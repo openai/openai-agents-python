@@ -2734,6 +2734,7 @@ class Session(Generic[ContextT, OutputT]):
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._owned_provider: NativeProvider | None = None
+        self._repair_session: Session[ContextT, str] | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
@@ -6226,6 +6227,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise asyncio.CancelledError()
             if state.failure.done():
                 raise state.failure.result()
+            # A previous Turn may have left a failed repair close. Retire that
+            # exact owner before another repair can replace it.
+            if self._repair_session is not None:
+                await self._repair_session.aclose()
+                self._repair_session = None
             repair = await Session[ContextT, str]._open(
                 declaration,
                 context=self._context,
@@ -6233,6 +6239,7 @@ class Session(Generic[ContextT, OutputT]):
                 _expected_codex_login_binding=self._codex_login_binding,
                 parent_trace=state.parent_trace,
             )
+            self._repair_session = repair
             repair._trace_context = state.tracing.context if state.tracing is not None else None
             repair._context_transform_purpose = "output_repair"
             repair._observations.repair_parent = (self._observations, handle.submission_id)
@@ -6294,10 +6301,13 @@ class Session(Generic[ContextT, OutputT]):
                                 self._repair_receipts_incomplete = True
                                 raise
             except BaseException as error:
-                await _close_after_error(error, repair._exit_scope)
+                await _close_after_error(error, repair.aclose)
                 raise
             else:
-                await repair._exit_scope()
+                await repair.aclose()
+            finally:
+                if repair._closed and repair._environment_lease is None:
+                    self._repair_session = None
             text = result.final_output
             try:
                 return self._validate_traced_output(state, text)
@@ -8974,6 +8984,11 @@ class Session(Generic[ContextT, OutputT]):
         if not self._resources_retired:
             raise RuntimeError("Session resources have not retired")
         self._closed = False
+        # Native root work has joined. Its repair may still hold the provider
+        # lease after a failed close, so keep it owned until its retry succeeds.
+        if self._repair_session is not None:
+            await self._repair_session.aclose()
+            self._repair_session = None
         if self._environment_lease is not None:
             lease, self._environment_lease = self._environment_lease, None
             try:
@@ -9172,6 +9187,22 @@ class Session(Generic[ContextT, OutputT]):
                         first, remaining_error, _error_contexts(first.__context__)
                     )
             raise first
+
+
+def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:
+    """Return the retained Session or provider after failed cleanup, if any.
+
+    Await the owner's ``aclose()`` to retry retirement. This also works after
+    Python 3.10 Tasks replace cancellation exceptions: their contexts retain
+    the original error and its cleanup owner. A retained Session also joins
+    its internal repair Sessions and closes its owned provider. Explicit
+    providers remain the caller's responsibility after their Sessions close.
+    """
+    for current in _error_contexts(error):
+        owner = getattr(current, "cleanup", None)
+        if isinstance(owner, (Session, NativeProvider)):
+            return owner
+    return None
 
 
 _preserve_module_identity(globals(), "agents.session")

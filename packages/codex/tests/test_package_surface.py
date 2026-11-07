@@ -39,7 +39,7 @@ class ForbiddenRuntime(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
-from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool
+from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool, get_cleanup
 from agents import ModelContextSnapshot, ModelRequestContext
 from agents.model_context import ModelContextSnapshot as SnapshotFromModule
 from agents._events import URLCitation, WebSearchSource
@@ -48,6 +48,7 @@ from agents.state import SessionState
 from agents.tools import WebSearch, WebSearchLocation
 
 assert ModelContextSnapshot is SnapshotFromModule
+assert get_cleanup(RuntimeError("no retained owner")) is None
 
 def reject_socket(*args, **kwargs):
     raise AssertionError('Declaration opened a socket')
