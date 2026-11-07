@@ -361,10 +361,12 @@ These calls accept an `EnvironmentSource`: either a borrowed `Environment` descr
 ```text
 Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
             capability_directories=None, approval=None, transform_arguments=None,
-            transform_result=None, policy_timeout=30, network=None, writable_roots=None, mounts=())
+            transform_result=None, policy_timeout=30, network=None, writable_roots=None,
+            mounts=(), write_policy="strict")
 Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
                   capability_directories=None, approval=None, transform_arguments=None,
-                  transform_result=None, policy_timeout=30, mounts=()) -> Environment
+                  transform_result=None, policy_timeout=30, mounts=(),
+                  write_policy="strict") -> Environment
 ```
 
 Environment options have these limits:
@@ -375,9 +377,9 @@ Environment options have these limits:
 - `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots. See [native skill setup](execution.md#supply-native-skills) for the `skills/NAME/SKILL.md` layout and restore rules.
 - `network` accepts immutable `NetworkPolicy` or a same-field dictionary. Explicit policies require `"exec_command"` and a compatible Linux or macOS managed-proxy executor. Windows rejects them in this revision. The Python controller may run on another OS. See [network and local socket access](execution.md#network-and-local-socket-access).
 
-Use [`Environment.local()`](execution.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in `cwd`. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](execution.md#replace-write-roots-between-turns) for policy changes and restore.
+Use [`Environment.local()`](execution.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. New local and remote Environments default to `write_policy="strict"`. Omitting roots or using `writable_roots=[]` grants writes in `cwd` only. Remote-only `write_policy="legacy"` retains the previous implicit WSS policy and rejects supplied roots. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](execution.md#replace-write-roots-between-turns) for policy changes and restore.
 
-For a Windows x64 job-local named pipe, omit `network` and `writable_roots`. `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](execution.md#windows-named-pipes-in-an-offline-job) and [remote execution](execution.md#remote-execution).
+For a Windows x64 job-local named pipe, explicitly select `write_policy="legacy"` and omit `network` and `writable_roots`. `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](execution.md#windows-named-pipes-in-an-offline-job) and [remote execution](execution.md#remote-execution).
 
 ### LocalStorageMount
 

@@ -52,15 +52,16 @@ Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlappin
 
 The executor limits writes to `cwd` and any additional `writable_roots`, while preserving native metadata protections. Linux commands can also write to a private temporary filesystem whose contents disappear when the sandbox exits. Paths resolve on the executor. If a linked Git worktree must update Git state, explicitly grant its required Git directories after checking which paths those grants expose.
 
-Set the initial `writable_roots` on a local Environment or a compatible Linux or macOS WSS Environment. WSS distinguishes these values:
+In the current development API, new local and remote Environments default to `write_policy="strict"`. Set the initial `writable_roots` to opt into extra directories:
 
-| `writable_roots` value | WSS write policy |
+| `writable_roots` value | Strict write policy |
 | --- | --- |
-| `None`, the default | Uses the default WSS policy. |
-| `[]` | Enables strict writes in the working directory only. |
-| A nonempty sequence | Enables strict writes in the working directory and the listed roots. |
+| `None`, the default, or `[]` | Writes in the working directory only. |
+| A nonempty sequence | Writes in the working directory and the listed roots. |
 
-The strict policy disables native sandbox escalation and permission requests that could widen the grants.
+An empty list keeps the working directory writable; it does not create a read-only workspace. Strict enforcement requires a compatible Linux or macOS executor. An unsupported executor fails admission rather than falling back to broader write access. The strict policy disables native sandbox escalation and permission requests that could widen the grants.
+
+To retain the previous implicit WSS policy, explicitly set `write_policy="legacy"` on a remote Environment and leave `writable_roots=None`. Legacy mode rejects any supplied roots, including `[]`, and is unavailable for local execution. Use strict mode with explicit roots for additional workspace grants.
 
 To replace write grants between turns, use a supported local executor or Linux WSS executor. With macOS WSS, set write roots when opening the Session. Later submissions can resubmit an equivalent grant if the paths pass validation.
 
@@ -252,7 +253,7 @@ Explicit policies have platform limits:
 
 - On macOS, `NetworkPolicy()` grants no network destinations or Unix sockets.
 - Linux cannot enforce Unix-socket denial. The SDK rejects an explicit policy before commands start unless `allow_all_unix_sockets=True`, even with domain rules.
-- Windows rejects every explicit network policy in this revision. Its default named-pipe path remains available.
+- Windows rejects every explicit network policy in this revision. Its named-pipe path remains available with `write_policy="legacy"`.
 
 ### Domain and local access rules
 
@@ -304,7 +305,7 @@ An empty destination list does not prevent proxy hostname lookups before denial.
 
 The backend must verify the offline boundary. The SDK cannot infer that isolation from a URL.
 
-When restoring a checkpoint or reopening with `LocalStorage`, follow the [executor policy matching rules](state.md#restore-executor-policy). These rules also explain when an implicit WSS conversation can reopen for model-only work. Start a new conversation to change the network policy.
+When restoring a checkpoint or reopening with `LocalStorage`, follow the [executor policy matching rules](state.md#restore-executor-policy). These rules also explain when a legacy WSS conversation can reopen for model-only work. Start a new conversation to change the network policy.
 
 Python callbacks can run fixed operations directly in the application's worker, using the worker's permissions.
 
@@ -324,7 +325,7 @@ The image and host must support the native executor and its Linux sandbox. Docke
 
 For a job-local named pipe on Windows x64:
 
-1. Select `tools=["exec_command"]` and omit `network`. Unix socket grants do not apply.
+1. Select `tools=["exec_command"]` and `write_policy="legacy"`, and omit `network` and `writable_roots`. Strict write enforcement is unsupported on Windows. Unix socket grants do not apply.
 2. Have the provisioner resolve the workspace on the Windows executor and pass its canonical path as `Environment.cwd`.
 3. Give the executor account read and write access to its private workspace. The native command sandbox still applies.
 
