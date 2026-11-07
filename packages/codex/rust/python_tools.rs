@@ -1302,46 +1302,69 @@ impl PythonTools {
         self.context_transform_enabled
     }
 
-    pub(crate) async fn transform_context(
+    async fn exchange_preparation<T, U>(
         self: &Arc<Self>,
-        input: codex_extension_api::ModelContextInput<'_>,
-    ) -> Result<()> {
-        let owner = self.admission_ready(input.turn_id)?;
+        owner: Arc<TurnAdmission>,
+        [expired, reader_closed, cancelled]: [&'static str; 3],
+        prepare: impl FnOnce(oneshot::Sender<T>) -> PreparationReply,
+        request: impl FnOnce(u64) -> Value,
+        decode: impl FnOnce(T) -> Result<U>,
+    ) -> Result<U> {
         let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
         let (reply, receive) = oneshot::channel();
         self.preparation_replies
             .lock()
             .expect("Python preparation replies poisoned")
             .as_mut()
-            .context("Expired model context owner")?
-            .insert(id, PreparationReply::Context(reply));
+            .context(expired)?
+            .insert(id, prepare(reply));
         let _pending = PendingPreparation {
             tools: self.clone(),
             id,
         };
-        let mut request = json!({
-            "id": input.turn_id,
-            "msg": {
-                "type": "_sdk_transform_context", "turn_id": input.turn_id,
-                "thread": input.thread_id, "instance": self.instance,
-                "step_id": id, "model": input.model,
-                "purpose": if input.compaction { "compaction" } else { "turn" },
-                "items": input.items,
-            }
-        });
+        let mut request = request(id);
         if let Some(tracing) = &owner.tracing {
             request["msg"]["tracing_context"] = json!(tracing.token());
         }
-        ensure!(owner.is_current(), "Expired model context owner");
+        ensure!(owner.is_current(), "{expired}");
         self.family
             .requests
             .send(QueuedRequest::Step(request))
-            .map_err(|_| anyhow::anyhow!("Model context reader closed"))?;
-        let update = receive
-            .await
-            .context("Model context transformation cancelled")?
-            .context("Model context transformation failed")?;
-        ensure!(owner.is_current(), "Expired model context owner");
+            .map_err(|_| anyhow::anyhow!(reader_closed))?;
+        let result = decode(receive.await.context(cancelled)?)?;
+        ensure!(owner.is_current(), "{expired}");
+        Ok(result)
+    }
+
+    pub(crate) async fn transform_context(
+        self: &Arc<Self>,
+        input: codex_extension_api::ModelContextInput<'_>,
+    ) -> Result<()> {
+        let owner = self.admission_ready(input.turn_id)?;
+        let update = self
+            .exchange_preparation(
+                owner,
+                [
+                    "Expired model context owner",
+                    "Model context reader closed",
+                    "Model context transformation cancelled",
+                ],
+                PreparationReply::Context,
+                |id| {
+                    json!({
+                        "id": input.turn_id,
+                        "msg": {
+                            "type": "_sdk_transform_context", "turn_id": input.turn_id,
+                            "thread": input.thread_id, "instance": self.instance,
+                            "step_id": id, "model": input.model,
+                            "purpose": if input.compaction { "compaction" } else { "turn" },
+                            "items": input.items,
+                        }
+                    })
+                },
+                |update| update.context("Model context transformation failed"),
+            )
+            .await?;
         if let ModelContextUpdate::Replace(items) = update {
             *input.items = items;
         }
@@ -1357,42 +1380,29 @@ impl PythonTools {
         input: codex_extension_api::CompactionInput<'_>,
     ) -> Result<Option<String>> {
         let owner = self.admission_ready(input.turn_id)?;
-        let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
-        let (reply, receive) = oneshot::channel();
-        self.preparation_replies
-            .lock()
-            .expect("Python preparation replies poisoned")
-            .as_mut()
-            .context("Expired compaction owner")?
-            .insert(id, PreparationReply::Compaction(reply));
-        let _pending = PendingPreparation {
-            tools: self.clone(),
-            id,
-        };
-        let mut request = json!({
-            "id": input.turn_id,
-            "msg": {
-                "type": "_sdk_before_compact", "turn_id": input.turn_id,
-                "thread": input.thread_id, "instance": self.instance,
-                "step_id": id, "model": input.model,
-                "trigger": if input.automatic { "auto" } else { "manual" },
-                "items": input.items,
-            }
-        });
-        if let Some(tracing) = &owner.tracing {
-            request["msg"]["tracing_context"] = json!(tracing.token());
-        }
-        ensure!(owner.is_current(), "Expired compaction owner");
-        self.family
-            .requests
-            .send(QueuedRequest::Step(request))
-            .map_err(|_| anyhow::anyhow!("Compaction callback reader closed"))?;
-        let summary = receive
-            .await
-            .context("Compaction callback cancelled")?
-            .map_err(|_| anyhow::anyhow!("Compaction callback failed"))?;
-        ensure!(owner.is_current(), "Expired compaction owner");
-        Ok(summary)
+        self.exchange_preparation(
+            owner,
+            [
+                "Expired compaction owner",
+                "Compaction callback reader closed",
+                "Compaction callback cancelled",
+            ],
+            PreparationReply::Compaction,
+            |id| {
+                json!({
+                    "id": input.turn_id,
+                    "msg": {
+                        "type": "_sdk_before_compact", "turn_id": input.turn_id,
+                        "thread": input.thread_id, "instance": self.instance,
+                        "step_id": id, "model": input.model,
+                        "trigger": if input.automatic { "auto" } else { "manual" },
+                        "items": input.items,
+                    }
+                })
+            },
+            |summary| summary.map_err(|_| anyhow::anyhow!("Compaction callback failed")),
+        )
+        .await
     }
 
     pub(crate) fn reply_compaction(
@@ -1423,42 +1433,29 @@ impl PythonTools {
         let stop =
             crate::native_interception::capture_step_stop(input.thread_store, input.turn_store)
                 .context("Completion owner unavailable")?;
-        let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
-        let (reply, receive) = oneshot::channel();
-        self.preparation_replies
-            .lock()
-            .expect("Python preparation replies poisoned")
-            .as_mut()
-            .context("Expired completion owner")?
-            .insert(id, PreparationReply::Completion { reply, stop });
-        let _pending = PendingPreparation {
-            tools: self.clone(),
-            id,
-        };
-        let mut request = json!({
-            "id": input.turn_id,
-            "msg": {
-                "type": "_sdk_before_complete", "turn_id": input.turn_id,
-                "thread": input.thread_store.level_id(), "instance": self.instance,
-                "step_id": id, "model": input.model,
-                "text": input.last_assistant_message,
-                "continuation_count": input.continuation_count,
-            }
-        });
-        if let Some(tracing) = &owner.tracing {
-            request["msg"]["tracing_context"] = json!(tracing.token());
-        }
-        ensure!(owner.is_current(), "Expired completion owner");
-        self.family
-            .requests
-            .send(QueuedRequest::Step(request))
-            .map_err(|_| anyhow::anyhow!("Completion callback reader closed"))?;
-        let instructions = receive
-            .await
-            .context("Completion callback cancelled")?
-            .map_err(|_| anyhow::anyhow!("Completion callback failed"))?;
-        ensure!(owner.is_current(), "Expired completion owner");
-        Ok(instructions)
+        self.exchange_preparation(
+            owner,
+            [
+                "Expired completion owner",
+                "Completion callback reader closed",
+                "Completion callback cancelled",
+            ],
+            |reply| PreparationReply::Completion { reply, stop },
+            |id| {
+                json!({
+                    "id": input.turn_id,
+                    "msg": {
+                        "type": "_sdk_before_complete", "turn_id": input.turn_id,
+                        "thread": input.thread_store.level_id(), "instance": self.instance,
+                        "step_id": id, "model": input.model,
+                        "text": input.last_assistant_message,
+                        "continuation_count": input.continuation_count,
+                    }
+                })
+            },
+            |instructions| instructions.map_err(|_| anyhow::anyhow!("Completion callback failed")),
+        )
+        .await
     }
 
     pub(crate) fn reply_completion(

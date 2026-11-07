@@ -7053,6 +7053,12 @@ class Session(Generic[ContextT, OutputT]):
                     state.failure.set_result(NativeError("Step selection expired"))
 
     async def _read_events(self) -> None:
+        preparation_callbacks = {
+            "_sdk_select_step": self._select_step,
+            "_sdk_transform_context": self._transform_context,
+            "_sdk_before_compact": self._before_compact,
+            "_sdk_before_complete": self._before_complete,
+        }
         try:
             while True:
                 raw_event = await self._native._next_session_event()
@@ -7119,16 +7125,8 @@ class Session(Generic[ContextT, OutputT]):
                             )
                             child.failure.set_result(_model_failure_error(message))
                     continue
-                if (
-                    message.get("type")
-                    in {
-                        "_sdk_select_step",
-                        "_sdk_transform_context",
-                        "_sdk_before_compact",
-                        "_sdk_before_complete",
-                    }
-                    and message["thread"] != self.id
-                ):
+                preparation_callback = preparation_callbacks.get(message.get("type"))
+                if preparation_callback is not None and message["thread"] != self.id:
                     try:
                         self._native._check_step(
                             message["step_id"], message["thread"], message["instance"]
@@ -7138,16 +7136,7 @@ class Session(Generic[ContextT, OutputT]):
                     child = self._child_callback_state(
                         message["thread"], message["instance"], message["turn_id"]
                     )
-                    callback = (
-                        self._transform_context
-                        if message["type"] == "_sdk_transform_context"
-                        else self._before_compact
-                        if message["type"] == "_sdk_before_compact"
-                        else self._before_complete
-                        if message["type"] == "_sdk_before_complete"
-                        else self._select_step
-                    )
-                    child.add_callback(asyncio.create_task(callback(child, message)))
+                    child.add_callback(asyncio.create_task(preparation_callback(child, message)))
                     continue
                 marker = message.get("_sdk_python_tool")
                 if marker is not None and marker["thread"] != self.id:
@@ -7342,15 +7331,8 @@ class Session(Generic[ContextT, OutputT]):
                 elif kind == "_sdk_prepare_request":
                     task = asyncio.create_task(self._prepare_sampling_request(state, message))
                     state.add_callback(task)
-                elif kind == "_sdk_select_step":
-                    task = asyncio.create_task(self._select_step(state, message))
-                    state.add_callback(task)
-                elif kind == "_sdk_before_complete":
-                    state.add_callback(asyncio.create_task(self._before_complete(state, message)))
-                elif kind == "_sdk_before_compact":
-                    state.add_callback(asyncio.create_task(self._before_compact(state, message)))
-                elif kind == "_sdk_transform_context":
-                    state.add_callback(asyncio.create_task(self._transform_context(state, message)))
+                elif preparation_callback is not None:
+                    state.add_callback(asyncio.create_task(preparation_callback(state, message)))
                 elif kind == "token_count" and event["id"] == handle.turn_id:
                     self._observe_progress(event, handle, self.id)
                 elif (
