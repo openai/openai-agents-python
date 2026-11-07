@@ -12,7 +12,6 @@ mod config;
 mod context;
 mod engine;
 mod environment;
-mod event_batch;
 mod extensions;
 mod goals;
 mod live;
@@ -2528,20 +2527,6 @@ impl NativeThread {
         async_bridge::session_event_into_py(py, async move {
             let value = inner.next_session_event().await.map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
-        })
-    }
-
-    fn _next_session_event_batch<'py>(
-        &self,
-        py: Python<'py>,
-        expected_turn: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.current()?;
-        async_bridge::session_event_value_into_py(py, async move {
-            // A configured native exporter/processor is outside this private lane.
-            let collect = telemetry::collection_allowed()
-                && !telemetry::export_requested(&inner.engine.service_config);
-            Ok(event_batch::collect(|| inner.next_session_event(), &expected_turn, collect).await)
         })
     }
 

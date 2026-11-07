@@ -17,21 +17,13 @@ from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
 from tests.test_native_agent_observation import text_response
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="prototype retains the Windows single-reader route"
-)
-
-
 class ReadProbe:
     """Observe the actual native API while retaining its real futures/owners."""
 
     def __init__(self, native: Any) -> None:
         self.native = native
-        self.batches: list[list[dict[str, Any]]] = []
         self.native_events: list[dict[str, Any] | None] = []
-        self.batch_entered = asyncio.Event()
         self.cancelled_reads = 0
-        self.barriers: list[bool] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.native, name)
@@ -45,18 +37,6 @@ class ReadProbe:
         self.native_events.append(json.loads(raw))
         return raw
 
-    async def _next_session_event_batch(self, turn_id: str) -> Any:
-        self.batch_entered.set()
-        try:
-            result = await self.native._next_session_event_batch(turn_id)
-        except asyncio.CancelledError:
-            self.cancelled_reads += 1
-            raise
-        packet = json.loads(result[0])
-        self.batches.append(packet)
-        self.native_events.extend(packet)
-        self.barriers.append(result[2])
-        return result
 
 
 def instrument_reader(monkeypatch: pytest.MonkeyPatch) -> list[ReadProbe]:
@@ -105,7 +85,7 @@ def normalized_observations(events: list[Any]) -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize("chunks", [("one",), tuple(f"part-{i};" for i in range(80))])
-async def test_plain_run_preserves_full_retained_stream_against_single_read_control(
+async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonical_agent(
     responses, monkeypatch, chunks
 ):
     probes = instrument_reader(monkeypatch)
@@ -115,12 +95,6 @@ async def test_plain_run_preserves_full_retained_stream_against_single_read_cont
     retained = [event async for event in completed.turn.events()]
     assert completed.final_output == "".join(chunks)
     assert [event.delta for event in retained if isinstance(event, OutputTextDelta)] == list(chunks)
-    assert any(probe.batches for probe in probes), (
-        "eligible public run never exercised the collector"
-    )
-    if len(chunks) > 32:
-        assert sum(len(probe.batches) for probe in probes) >= 3
-
     class OrdinaryControl(Agent):
         pass
 
@@ -130,7 +104,6 @@ async def test_plain_run_preserves_full_retained_stream_against_single_read_cont
     start = len(probes)
     control = await OrdinaryControl(instructions="Answer directly.", provider=provider).run("input")
     ordinary = [event async for event in control.turn.events()]
-    assert not any(probe.batches for probe in probes[start:])
     assert completed.final_output == control.final_output
     assert completed.usage == control.usage
     metadata_types = (ModelRequestDispatching, ModelResponseLinked)
@@ -248,8 +221,7 @@ async def test_delegating_or_spoofed_factory_keeps_live_cursor_semantics(
 
         monkeypatch.setattr(agent, "session", Spoof())
     else:
-        # A class override is a genuine bound MethodType, but its function must
-        # not become the captured original merely because the class changed.
+        # A supported class override can retain the live Session cursor.
         monkeypatch.setattr(Agent, "session", delegate)
     responses.replies.append(text_response("out", "first", "second"))
     completed = await agent.run("input")
@@ -259,35 +231,6 @@ async def test_delegating_or_spoofed_factory_keeps_live_cursor_semantics(
         "first",
         "second",
     ]
-    assert not any(probe.batches for probe in probes)
-
-
-async def test_factory_present_at_reader_creation_declines_after_reset(responses, monkeypatch):
-    probes = instrument_reader(monkeypatch)
-    loop = asyncio.get_running_loop()
-    previous = loop.get_task_factory()
-    original = Session._read_events
-
-    async def reset_then_read(self):
-        loop.set_task_factory(None)
-        await original(self)
-
-    monkeypatch.setattr(Session, "_read_events", reset_then_read)
-
-    def factory(loop, coro, **kwargs):
-        return asyncio.Task(coro, loop=loop, **kwargs)
-
-    loop.set_task_factory(factory)
-    try:
-        responses.replies.append(text_response("out", "complete"))
-        result = await Agent(
-            instructions="Answer directly.",
-            provider=NativeProvider(base_url=responses.url, api_key="synthetic-batch-key"),
-        ).run("input")
-    finally:
-        loop.set_task_factory(previous)
-    assert result.final_output == "complete"
-    assert probes and not any(probe.batches for probe in probes)
 
 
 async def test_cancel_owned_run_receives_abort_without_cancelling_reader(responses, monkeypatch):
@@ -310,131 +253,20 @@ async def test_cancel_owned_run_receives_abort_without_cancelling_reader(respons
         async with timeout(10):
             await emitted.wait()
             assert probes
-            await probes[-1].batch_entered.wait()
             running.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await running
         assert all(probe.cancelled_reads == 0 for probe in probes)
         assert any(
-            event["msg"]["type"] == "turn_aborted"
+            event is not None and event["msg"]["type"] == "turn_aborted"
             for probe in probes
-            for batch in probe.batches
-            for event in batch
+            for event in probe.native_events
         )
     finally:
         responses.delta_gate.set()
         if not running.done():
             running.cancel()
         await asyncio.gather(running, return_exceptions=True)
-
-
-@pytest.mark.parametrize(
-    "case", ["none", "logs", "traces", "metrics", "processors", "parent", "scope"]
-)
-def test_fresh_telemetry_configuration_eligibility(case):
-    # Subscriber configuration is process-terminal. Reuse the existing
-    # telemetry-test subprocess pattern rather than resetting native state.
-    import os
-    import subprocess
-    from pathlib import Path
-
-    env = dict(os.environ)
-    root = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import asyncio, sys; "
-            "from tests.test_native_plain_event_collection import _telemetry_case; "
-            "asyncio.run(asyncio.wait_for(_telemetry_case(sys.argv[1]), 30))",
-            case,
-        ],
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=40,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-async def _telemetry_case(case):
-    from aiohttp import web
-    from aiohttp.test_utils import TestServer
-
-    from agents import telemetry
-    from tests.native_fixtures import ResponsesFixture
-
-    class Processor:
-        def on_trace_event(self, event):
-            pass
-
-    fixture = ResponsesFixture()
-    fixture.replies.append(text_response("out", "first", "second"))
-    app = web.Application()
-    app.router.add_post("/v1/responses", fixture.handle)
-
-    async def exported(request):
-        await request.read()
-        return web.Response(body=b"", content_type="application/x-protobuf")
-
-    app.router.add_post("/otlp", exported)
-    async with TestServer(app) as server:
-        exporter = telemetry.OtlpHttp(endpoint=str(server.make_url("/otlp")))
-        options = {}
-        if case in {"logs", "traces", "metrics"}:
-            options[case] = exporter
-        if case in {"processors", "parent", "scope"}:
-            options["processors"] = [Processor()]
-        # The empty options case deliberately performs the same supported
-        # all-None configure call as the unchanged frozen v1 workload.
-        await telemetry.configure(**options)
-        with pytest.MonkeyPatch.context() as patch:
-            probes = instrument_reader(patch)
-            eligible = []
-            original = Session._plain_event_collection_ready
-
-            def ready(self, state):
-                result = original(self, state)
-                if result:
-                    eligible.append((state.tracing.context, state.tracing.scope))
-                return result
-
-            patch.setattr(Session, "_plain_event_collection_ready", ready)
-            agent = Agent(
-                instructions="Answer directly.",
-                provider=NativeProvider(
-                    base_url=str(server.make_url("/v1")), api_key="synthetic-batch-key"
-                ),
-            )
-            if case == "parent":
-                with telemetry.trace("parent"):
-                    completed = await agent.run("input")
-            elif case == "scope":
-                completed = await agent.run("input", trace_options={})
-            else:
-                completed = await agent.run("input")
-            assert completed.final_output == "firstsecond"
-            if case == "none":
-                assert eligible and all(pair == (None, None) for pair in eligible)
-                assert any(len(packet) > 1 for probe in probes for packet in probe.batches), (
-                    "all-None configure never drained a batch"
-                )
-            elif case in {"logs", "traces", "metrics"}:
-                # The native process-configuration fact rejects collection. Its
-                # one-record barrier permanently returns this reader to the
-                # original route; Python never suppresses that record's yield.
-                attempted = [probe for probe in probes if probe.batches]
-                assert attempted
-                assert all(
-                    len(probe.batches) == 1
-                    and len(probe.batches[0]) == 1
-                    and probe.barriers == [True]
-                    for probe in attempted
-                )
-            else:
-                assert not eligible and not any(probe.batches for probe in probes)
-        await telemetry.shutdown()
 
 
 def test_before_compact_run_preserves_metrics_off_ordinary_route():
@@ -515,8 +347,8 @@ async def _automatic_compaction_run(fixture, provider, probes, patch):
     start = _native.Engine.start_replaceable_thread
 
     def configure(config):
-        # Exercise genuine post-turn compaction without tools, a return_state
-        # option, or an overridden Session factory hiding callback eligibility.
+        # Exercise genuine post-turn compaction through ordinary Agent.run
+        # with its declared callback and no model-generated compaction request.
         config["model_context_window"] = 100_000
         config["model_post_turn_compact_threshold_percent"] = 50
 
@@ -579,7 +411,7 @@ async def _automatic_compaction_run(fixture, provider, probes, patch):
     events = [event async for event in result.turn.events()]
     assert any(isinstance(event, ContextCompacted) for event in events)
     assert [event.status for event in events if isinstance(event, TurnFinished)] == ["completed"]
-    assert len(probes) == 1 and not probes[0].batches
+    assert len(probes) == 1
     assert any(
         event is not None and event["msg"]["type"] == "_sdk_before_compact"
         for event in probes[0].native_events

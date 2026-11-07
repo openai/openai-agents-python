@@ -50,16 +50,7 @@ class InjectFirstFrozenTail:
 
     async def _next_session_event(self) -> str:
         raw = await self.native._next_session_event()
-        return json.dumps(await self._project_terminal(json.loads(raw)))
-
-    async def _next_session_event_batch(
-        self, expected_turn: str
-    ) -> tuple[str, BaseException | None, bool]:
-        raw, following_error, barrier = await self.native._next_session_event_batch(expected_turn)
-        events = [await self._project_terminal(event) for event in json.loads(raw)]
-        return json.dumps(events), following_error, barrier
-
-    async def _project_terminal(self, event: Any) -> Any:
+        event = json.loads(raw)
         if event is not None and self.terminal is None and event.get("subagent_id") is None:
             message = event["msg"]
             kind = message["type"]
@@ -71,7 +62,8 @@ class InjectFirstFrozenTail:
                 self.delivered.set()
                 if self.pause:
                     await self.release.wait()
-        return event
+                return json.dumps(event)
+        return raw
 
 
 class ProjectContinuation(InjectFirstFrozenTail):

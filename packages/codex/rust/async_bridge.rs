@@ -295,38 +295,7 @@ where
     )
 }
 
-// One reader owner, with typed batch failures converted under the same GIL boundary.
-pub(crate) enum EventValue {
-    One(String),
-    Batch {
-        events_json: String,
-        following_error: Option<PyErr>,
-        barrier: bool,
-    },
-}
-
-impl<'py> IntoPyObject<'py> for EventValue {
-    type Target = PyAny;
-    type Output = Bound<'py, PyAny>;
-    type Error = PyErr;
-
-    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
-        let value = match self {
-            Self::One(value) => value.into_py_any(py)?,
-            Self::Batch {
-                events_json,
-                following_error,
-                barrier,
-            } => {
-                let error = following_error.map(|error| error.into_value(py));
-                (events_json, error, barrier).into_py_any(py)?
-            }
-        };
-        Ok(value.into_bound(py))
-    }
-}
-
-pub(crate) fn panic_error(panic: Box<dyn std::any::Any + Send>) -> PyErr {
+fn panic_error(panic: Box<dyn std::any::Any + Send>) -> PyErr {
     let message = panic
         .downcast_ref::<&str>()
         .copied()
@@ -337,11 +306,11 @@ pub(crate) fn panic_error(panic: Box<dyn std::any::Any + Send>) -> PyErr {
 }
 
 #[cfg(not(windows))]
-type EventFuture = Pin<Box<dyn Future<Output = PyResult<EventValue>> + Send>>;
+type EventFuture = Pin<Box<dyn Future<Output = PyResult<String>> + Send>>;
 
 #[cfg(not(windows))]
 enum EventPoll {
-    Ready(PyResult<EventValue>),
+    Ready(PyResult<String>),
     Pending(EventFuture),
 }
 
@@ -400,16 +369,6 @@ impl ReadyRead {
 pub(crate) fn session_event_into_py<'py, F>(py: Python<'py>, fut: F) -> PyResult<Bound<'py, PyAny>>
 where
     F: Future<Output = PyResult<String>> + Send + 'static,
-{
-    session_event_value_into_py(py, async move { fut.await.map(EventValue::One) })
-}
-
-pub(crate) fn session_event_value_into_py<'py, F>(
-    py: Python<'py>,
-    fut: F,
-) -> PyResult<Bound<'py, PyAny>>
-where
-    F: Future<Output = PyResult<EventValue>> + Send + 'static,
 {
     #[cfg(windows)]
     {
@@ -470,7 +429,7 @@ mod tests {
                 assert_eq!(receiver.recv().await.map_err(py_error)?, sequence);
                 observed.fetch_add(1, Ordering::Release);
             }
-            Ok(EventValue::One("finished".to_owned()))
+            Ok("finished".to_owned())
         });
 
         let EventPoll::Pending(read) = poll_event_once(read) else {
@@ -484,10 +443,7 @@ mod tests {
         // Continue the retained read under the normal runtime. All original
         // channel rows must still appear exactly once and in order.
         let joined = py_tokio::get_runtime().spawn(read);
-        let EventValue::One(value) = py_tokio::get_runtime().block_on(joined).unwrap().unwrap()
-        else {
-            panic!("single event changed its result shape");
-        };
+        let value = py_tokio::get_runtime().block_on(joined).unwrap().unwrap();
         assert_eq!(value, "finished");
         assert_eq!(completed.load(Ordering::Acquire), ITEMS);
     }
@@ -499,7 +455,7 @@ mod tests {
         let observed = Arc::clone(&polled);
         let read: EventFuture = Box::pin(async move {
             observed.fetch_add(1, Ordering::Release);
-            Ok(EventValue::One("original bridge".to_owned()))
+            Ok("original bridge".to_owned())
         });
         let read = {
             let _entered = py_tokio::get_runtime().enter();
@@ -510,10 +466,7 @@ mod tests {
             read
         };
         let joined = py_tokio::get_runtime().spawn(read);
-        let EventValue::One(value) = py_tokio::get_runtime().block_on(joined).unwrap().unwrap()
-        else {
-            panic!("single event changed its result shape");
-        };
+        let value = py_tokio::get_runtime().block_on(joined).unwrap().unwrap();
         assert_eq!(value, "original bridge");
         assert_eq!(polled.load(Ordering::Acquire), 1);
     }
