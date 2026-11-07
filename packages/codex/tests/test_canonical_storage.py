@@ -1,5 +1,6 @@
 """Persistent adapter ownership and atomic revision contract."""
 
+import asyncio
 import json
 import multiprocessing
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import CustomStorage, SQLiteSessionStore
+from agents import CustomStorage, SessionStoreCleanup, SQLiteSessionStore, get_cleanup
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 
@@ -322,8 +323,12 @@ async def test_reconcile_preserves_the_actual_tool_output(
     }
     received = []
 
-    async def reconcile(backend, session_id, turn_id, call_id, payload):
-        received.append((backend, session_id, turn_id, call_id, json.loads(payload)))
+    def reconcile(backend, session_id, turn_id, call_id, payload):
+        class Operation:
+            async def run(self):
+                received.append((backend, session_id, turn_id, call_id, json.loads(payload)))
+
+        return Operation()
 
     monkeypatch.setattr(_native, "reconcile_canonical_store", reconcile)
     store = SQLiteSessionStore(tmp_path / "history.sqlite")
@@ -332,6 +337,52 @@ async def test_reconcile_preserves_the_actual_tool_output(
     )
     assert received == [(store, "session", "turn", "call", expected[kind])]
     assert not store._owners
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_cleanup_joins_retries_without_repeating_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents import _native
+
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    class Operation:
+        runs = 0
+        releases = 0
+
+        async def run(self):
+            self.runs += 1
+            raise RuntimeError("Canonical storage release failed")
+
+        async def aclose(self):
+            self.releases += 1
+            if self.releases == 1:
+                entered.set()
+                await proceed.wait()
+                raise RuntimeError("Canonical storage release failed")
+
+    operation = Operation()
+    monkeypatch.setattr(_native, "reconcile_canonical_store", lambda *args: operation)
+    with pytest.raises(RuntimeError) as caught:
+        await CustomStorage(SQLiteSessionStore(tmp_path / "history.sqlite")).reconcile(
+            "session", turn_id="turn", call_id="call", output="verified"
+        )
+    cleanup = get_cleanup(caught.value)
+    assert isinstance(cleanup, SessionStoreCleanup)
+    first = asyncio.create_task(cleanup.aclose())
+    second = asyncio.create_task(cleanup.aclose())
+    await entered.wait()
+    assert operation.releases == 1
+    proceed.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert all(isinstance(result, RuntimeError) for result in results)
+    assert all(get_cleanup(result) is cleanup for result in results)
+    await cleanup.aclose()
+    await cleanup.aclose()
+    assert operation.runs == 1
+    assert operation.releases == 2
 
 
 @pytest.mark.asyncio
