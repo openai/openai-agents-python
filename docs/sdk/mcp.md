@@ -74,7 +74,7 @@ writer = HttpMCP(
 
 Codex applies that setting only to the selected raw tool names. Native constraints and strict review still apply. The setting does not answer a server's own requests for interactive input, sandbox server startup, or limit effects the server does not disclose. Result policies still run after execution and cannot undo those effects. Do not change a tool's read-only annotation to obtain approval.
 
-Approval settings follow the current declaration during idle replacement and restore. Restoring with the default `auto` does not inherit an explicit approval from the saved Session.
+Approval settings follow the current declaration during idle replacement and restore. Restoring with the default `native` does not inherit an explicit approval from the saved Session.
 
 ## Handle MCP startup errors
 
