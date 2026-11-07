@@ -112,6 +112,8 @@ The SDK rejects later reuse of a reconciled call ID. A new call ID can still req
 
 Restore a portable checkpoint with an SDK pinned to the same Codex revision that saved it. The SDK rejects a different revision for both idle checkpoints and pending manual continuations, even when it recognizes the checkpoint JSON format. Keep the matching SDK wheel available for saved conversations you need to resume. Changing the checkpoint's `codex_revision` field does not migrate its contents.
 
+Portable checkpoints retain native history, including platform-specific absolute paths. Restore validates those paths on the destination platform, so moving a checkpoint between operating systems is not guaranteed. Do not rewrite saved paths to bypass validation.
+
 ```python
 async with agent.session() as session:
     handle = await session.submit("Remember the label atlas.")
