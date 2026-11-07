@@ -213,6 +213,7 @@ async def worker() -> None:
                 environment=Environment(
                     url=request["executor"],
                     cwd=request["cwd"],
+                    write_policy=request["write_policy"],
                     headers={"Authorization": "Bearer " + request["token"]},
                     tools=["exec_command", "write_stdin", "apply_patch"],
                 ),
@@ -241,6 +242,7 @@ async def start(
     identity="",
     no_children=False,
     model=DESCENDANT_MODEL,
+    write_policy="strict",
 ):
     request = {
         "path": str(directory),
@@ -250,6 +252,7 @@ async def start(
         "resume": identity,
         "no_children": no_children,
         "model": model,
+        "write_policy": write_policy,
         "executor": executor.url,
         "cwd": str(executor.root),
         "token": executor.token,
@@ -310,7 +313,10 @@ async def test_sdk_runner_reopens_local_root_with_completed_child_history(tmp_pa
     ):
         peer.url = str(server.make_url("/v1"))
         code, rows, err = await _collect(
-            await start(peer, executor, tmp_path, "known", 1, model="gpt-5.5")
+            # SDKRunner resumes without an Environment; retain a legacy source policy.
+            await start(
+                peer, executor, tmp_path, "known", 1, model="gpt-5.5", write_policy="legacy"
+            )
         )
         assert code == 0, (rows, err)
         session_id = rows[0]["opened"]

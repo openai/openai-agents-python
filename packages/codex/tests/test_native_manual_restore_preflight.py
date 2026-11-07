@@ -37,6 +37,7 @@ async def test_manual_restore_validates_before_executor_connect(tmp_path, monkey
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The suspended source had no Environment; keep its legacy write policy.
         agent = Agent(instructions="Read A.", tools=[manual], provider=model.provider())
         model.respond(function_call("lookup", {"key": "A"}, "call-A"))
         async with agent.session() as source:
@@ -50,13 +51,17 @@ async def test_manual_restore_validates_before_executor_connect(tmp_path, monkey
         current = replace(agent, tools=[lookup]) if invalid == "callback" else agent
         error = "not a manual tool" if invalid == "callback" else "differ from accepted history"
         with pytest.raises(RuntimeError, match=error):
-            async with current.session(state=state, environment=declaration(executor)):
+            async with current.session(
+                state=state, environment=declaration(executor, write_policy="legacy")
+            ):
                 pytest.fail("Invalid manual restore connected an executor")
         assert executor.attempts == 0 and not executor.requests
         assert len(model.requests) == 1 and not effects
         # Rejection must leave the valid portable boundary usable with current
         # manual bindings, without replaying its original model request.
-        async with agent.session(state=good, environment=declaration(executor)) as restored:
+        async with agent.session(
+            state=good, environment=declaration(executor, write_policy="legacy")
+        ) as restored:
             request = await next_request(restored.interactions(), manual)
             assert executor.attempts > 0
             assert request.call_id == "call-A" and len(model.requests) == 1

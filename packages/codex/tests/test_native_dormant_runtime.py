@@ -82,7 +82,8 @@ async def test_idle_stdio_restore_uses_only_selected_destination_launch(
         if location != "host":
             executor = await stack.enter_async_context(ExecutorPeer(tmp_path / "executor").serve())
             trust(executor, tmp_path, monkeypatch)
-            environment = declaration(executor)
+            # The saved host-only session did not use strict executor writes.
+            environment = declaration(executor, write_policy="legacy")
         # [] at opening excludes the source definition and cannot authorize it
         # later by name or by a new object. No destination process is acquired.
         async with source.session(state=saved, tools=[], environment=environment) as empty:
