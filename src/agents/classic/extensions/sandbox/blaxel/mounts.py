@@ -711,7 +711,10 @@ async def _attach_drive(sandbox: Any, config: BlaxelDriveMountConfig) -> None:
     drives = getattr(sandbox, "drives", None)
     if drives is not None and hasattr(drives, "mount"):
         try:
-            await drives.mount(config.drive_name, config.mount_path, config.drive_path)
+            mount_options = {"read_only": True} if config.read_only else {}
+            await drives.mount(
+                config.drive_name, config.mount_path, config.drive_path, **mount_options
+            )
         except Exception as e:
             raise MountConfigError(
                 message=f"drive mount failed for {config.drive_name}",

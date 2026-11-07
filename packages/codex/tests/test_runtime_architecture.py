@@ -136,6 +136,17 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     importlib.util.resolve_name(name, package) if name.startswith(".") else name
                 ]
             for target in targets:
+                # Only this bridge may depend on the existing sandbox resource owners.
+                if relative.as_posix() == "sandbox" and target in {
+                    "agents.classic.sandbox._mount_security",
+                    "agents.classic.sandbox.errors",
+                    "agents.classic.sandbox.entries",
+                    "agents.classic.sandbox.entries.mounts",
+                    "agents.classic.sandbox.manifest",
+                    "agents.classic.sandbox.session.sandbox_client",
+                    "agents.classic.sandbox.session.sandbox_session",
+                }:
+                    continue
                 if target and (target == "agents" or target.startswith("agents.")):
                     if (target.endswith("._native") and target != "agents._native") or not (
                         target == "_agents_codex"
