@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "34d764789ca46ae219330154cfa4f03434327c29",
+  "baseline_commit": "0d18217debe9cc183b99550761ea5b30a22d3c6f",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -562,8 +562,8 @@
         "declarations": [
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
-          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest | Mapping[str, Any], options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]]) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
-          "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest | Mapping[str, Any]) -> str:\n    pass"
+          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]]) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
+          "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
         "exports": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.providers.azure_blob.AzureBlobMount",

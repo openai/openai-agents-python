@@ -32,7 +32,7 @@ from agents.classic.sandbox.entries.mounts import (
     S3Mount,
 )
 from agents.classic.sandbox.errors import MountConfigError
-from agents.classic.sandbox.manifest import Manifest, _coerce_manifest
+from agents.classic.sandbox.manifest import Manifest
 from agents.classic.sandbox.session.sandbox_client import (
     BaseSandboxClient,
     BaseSandboxClientOptions,
@@ -67,11 +67,13 @@ def _configuration_error(error: ValueError | TypeError, target: str) -> MountCon
     return safe
 
 
-def _manifest(value: Manifest | Mapping[str, Any]) -> Manifest:
+def _manifest(value: Manifest) -> Manifest:
+    if not isinstance(value, Manifest):
+        error = MountConfigError(message="manifest must be a trusted Manifest instance")
+        _mark_mount_error_data_safe(error)
+        raise error
     try:
-        return _coerce_manifest(
-            dict(value) if isinstance(value, Mapping) else value, parameter_name="manifest"
-        ).model_copy(deep=True)
+        return value.model_copy(deep=True)
     except (ValueError, TypeError) as error:
         raise _configuration_error(error, "manifest") from None
 
@@ -80,7 +82,7 @@ def _manifest(value: Manifest | Mapping[str, Any]) -> Manifest:
 def sandbox_environment(
     client: BaseSandboxClient[_OptionsT],
     *,
-    manifest: Manifest | Mapping[str, Any],
+    manifest: Manifest,
     options: _OptionsT | Mapping[str, Any],
     connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]],
 ) -> AbstractAsyncContextManager[Environment[_ContextT]]:
@@ -91,8 +93,9 @@ def sandbox_environment(
     state or snapshot is accepted. Create a new source for each native Session.
     Cleanup follows client policy, including deletion of selected backends where
     the provider implements it. The caller must authorize that disposal.
-    Host path grants and local sources require a trusted Manifest instance;
-    mappings cannot grant that authority.
+    Supply an application-authorized Manifest and trusted provider options.
+    Mappings are not accepted as manifests. Validate untrusted data before
+    constructing a Manifest; construction alone does not authorize its contents.
     """
     captured_manifest = _manifest(manifest)
     try:
@@ -117,9 +120,10 @@ def sandbox_environment(
 
 
 @redact_mount_error_data_sync
-def render_storage_layout(manifest: Manifest | Mapping[str, Any]) -> str:
+def render_storage_layout(manifest: Manifest) -> str:
     """Render only mount paths, access modes and explicit caller descriptions.
 
+    Supply the same application-authorized Manifest used for the sandbox.
     Credentials, provider settings, environment values and file contents are not
     included. Descriptions are trusted caller text; do not put secrets in them.
     The result is guidance, not filesystem authority.

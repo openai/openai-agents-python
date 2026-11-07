@@ -204,7 +204,7 @@ async def test_configuration_is_captured_and_strategies_are_explicit() -> None:
         S3Mount(bucket="synthetic")
 
 
-async def test_dictionary_configuration_uses_owning_models() -> None:
+async def test_provider_option_dictionaries_use_owning_models() -> None:
     client = Client([])
 
     @asynccontextmanager
@@ -213,13 +213,69 @@ async def test_dictionary_configuration_uses_owning_models() -> None:
 
     async with sandbox_environment(
         client,
-        manifest={"entries": {"data": declaration()}},
+        manifest=Manifest(entries={"data": declaration()}),
         options={"type": "native_storage_test", "labels": {"owner": "dict"}},
         connect=connect,
     ):
         assert isinstance(client.options, Options)
         assert client.options.labels == {"owner": "dict"}
         assert isinstance(client.manifest.entries["data"], S3Mount)
+
+
+@pytest.mark.parametrize("mapping_proxy", [False, True])
+@pytest.mark.parametrize("helper", ["source", "layout"])
+def test_manifest_mappings_cannot_select_provider_secrets(mapping_proxy: bool, helper: str) -> None:
+    from dataclasses import asdict
+    from types import MappingProxyType
+
+    from agents.classic.extensions.sandbox.modal.mounts import ModalCloudBucketMountStrategy
+
+    secret = "synthetic-application-secret"
+    mount = S3Mount(
+        bucket="synthetic-bucket",
+        mount_strategy=ModalCloudBucketMountStrategy(
+            secret_name=secret, secret_environment_name="synthetic-environment"
+        ),
+    )
+    payload = {"entries": {"data": mount.model_dump()}}
+    value: Any = MappingProxyType(payload) if mapping_proxy else payload
+    client = Client([])
+
+    @asynccontextmanager
+    async def connect(session):
+        pytest.fail("A mapping must not select provider credentials")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    with pytest.raises(MountConfigError, match="trusted Manifest") as caught:
+        if helper == "layout":
+            render_storage_layout(value)
+        else:
+            sandbox_environment(client, manifest=value, options=Options(), connect=connect)
+    assert client.events == []
+    assert secret not in json.dumps(asdict(caught.value), default=str)
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+async def test_trusted_manifest_preserves_provider_secret_selection() -> None:
+    from agents.classic.extensions.sandbox.modal.mounts import ModalCloudBucketMountStrategy
+
+    client = Client([])
+    client.backend_id = "modal"
+    strategy = ModalCloudBucketMountStrategy(
+        secret_name="synthetic-application-secret", secret_environment_name="synthetic-environment"
+    )
+    manifest = Manifest(
+        entries={"data": S3Mount(bucket="synthetic-bucket", mount_strategy=strategy)}
+    )
+
+    @asynccontextmanager
+    async def connect(session):
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    async with sandbox_environment(client, manifest=manifest, options=Options(), connect=connect):
+        assert client.manifest is not manifest
+        assert client.manifest.entries["data"].mount_strategy == strategy
+        assert strategy.secret_name not in render_storage_layout(client.manifest)
 
 
 @pytest.mark.parametrize("kind", ["grant", "file", "directory"])
@@ -648,38 +704,19 @@ async def test_actual_docker_provider_mount_and_disposal(tmp_path: Path) -> None
     assert marker.read_text() == "caller-owned" and marker.stat().st_mode == mode
 
 
-@pytest.mark.parametrize("missing", ["bucket", "mount_strategy"])
 @pytest.mark.parametrize("helper", ["layout", "source"])
-def test_mapping_validation_diagnostics_do_not_retain_credentials(
-    missing: str, helper: str
-) -> None:
-    from dataclasses import asdict
-
-    from pydantic import ValidationError
-
-    secret = "fixture-secret-redaction-probe"
-    raw = declaration(secret_access_key=secret).model_dump()
-    del raw[missing]
-    payload = {"entries": {"data": raw}}
+def test_empty_manifest_mapping_is_not_a_trusted_manifest(helper: str) -> None:
     client = Client([])
+    payload: Any = {}
 
     @asynccontextmanager
     async def connect(session):
-        pytest.fail("Invalid configuration must not open a gateway")
+        pytest.fail("A mapping must not create a sandbox")
         yield Environment(url="wss://executor.invalid", cwd="/workspace")
 
-    with pytest.raises((ValidationError, MountConfigError)) as caught:
+    with pytest.raises(MountConfigError, match="trusted Manifest"):
         if helper == "layout":
             render_storage_layout(payload)
         else:
             sandbox_environment(client, manifest=payload, options=Options(), connect=connect)
-    error = caught.value
-    diagnostic = (
-        error.json()
-        if isinstance(error, ValidationError)
-        else json.dumps(asdict(error), default=str)
-    )
-    assert secret not in diagnostic
-    assert missing in str(error)
-    assert error.__context__ is None and error.__cause__ is None
     assert client.events == []

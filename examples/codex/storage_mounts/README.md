@@ -82,10 +82,11 @@ it does not run a Classic agent or another model loop. The shared resource
 classes keep their existing `agents.classic` identities. Install the dependencies
 required by the selected resource provider.
 
-Pass a client, a manifest, provider options, and `connect`. Manifest dictionaries
-use the existing manifest coercion boundary. Local host sources and extra path
-grants require a trusted `Manifest` instance; dictionaries cannot grant them.
-Provider-option dictionaries require the
+Pass a client, an application-authorized `Manifest`, trusted provider options,
+and `connect`. Both the adapter and `render_storage_layout` require a `Manifest`
+instance; they do not parse manifest dictionaries. Validate untrusted values
+before constructing a manifest. Construction alone does not authorize its
+paths, resources, or credential selections. Provider-option dictionaries require the
 existing `type` discriminator; typed provider options also work. The adapter
 captures the manifest and options before creation. Every mount must specify its
 `mount_strategy`; the adapter does not infer or replace strategies.
