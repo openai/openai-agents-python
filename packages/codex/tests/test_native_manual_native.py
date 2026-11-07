@@ -232,7 +232,11 @@ async def test_manual_checkpoint_preserves_remote_write_mode(
         monkeypatch.setenv("SSL_CERT_FILE", str(trust))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
         responses.respond(function_call("lookup", {"key": "pending"}, "manual"))
-        original = declaration(old, writable_roots=[] if strict else None)
+        original = declaration(
+            old,
+            writable_roots=[] if strict else None,
+            write_policy="strict" if strict else "legacy",
+        )
         agent = Agent(instructions="Read a record.", tools=[manual], provider=provider(responses))
         try:
             async with agent.session(environment=original) as session:
@@ -242,7 +246,11 @@ async def test_manual_checkpoint_preserves_remote_write_mode(
                 with pytest.raises(InteractionRequired):
                     await turn.get_result()
 
-            changed_mode = declaration(old, writable_roots=None if strict else [])
+            changed_mode = declaration(
+                old,
+                writable_roots=None if strict else [],
+                write_policy="legacy" if strict else "strict",
+            )
             rejected = [changed_mode]
             if strict:
                 rejected.append(declaration(current, writable_roots=[]))
@@ -251,7 +259,7 @@ async def test_manual_checkpoint_preserves_remote_write_mode(
                     async with agent.session(state=saved, environment=environment):
                         pytest.fail("Restore changed the executor write authority")
 
-            destination = original if strict else declaration(current)
+            destination = original if strict else declaration(current, write_policy="legacy")
             async with agent.session(
                 state=SessionState.from_json(saved.to_json()), environment=destination
             ) as restored:
