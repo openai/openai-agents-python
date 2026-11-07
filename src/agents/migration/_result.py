@@ -16,8 +16,9 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
-from _agents_codex._lifecycle import _close_after_error
-from _agents_codex.session import Completed
+from _agents_codex._lifecycle import _close_after_error, _error_contexts
+from _agents_codex.agent import NativeProvider
+from _agents_codex.session import Completed, Session
 
 from ..classic.agent import Agent
 from ..classic.exceptions import ModelBehaviorError, UserError
@@ -39,6 +40,21 @@ from ..classic.stream_events import AgentUpdatedStreamEvent, RunItemStreamEvent,
 from ..classic.tool import FunctionTool, ToolOrigin, get_function_tool_origin
 
 ContextT = TypeVar("ContextT")
+
+
+def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:
+    """Return the migration run's retained owner after failed cleanup, if any.
+
+    Await the owner's ``aclose()`` to retry retirement. This also works after
+    Python 3.10 Tasks replace cancellation exceptions: their contexts retain
+    the original error and its cleanup owner. A retained Session closes its
+    migration-owned provider too; do not close that provider separately.
+    """
+    for current in _error_contexts(error):
+        owner = getattr(current, "cleanup", None)
+        if isinstance(owner, (Session, NativeProvider)):
+            return owner
+    return None
 
 
 @dataclass(frozen=True)
@@ -222,6 +238,11 @@ class SDKRunHandle(Generic[ContextT]):
                     # lose the original error's public cleanup capability.
                     self._cancelled_error = error
             assert self._cancelled_error is not None
+            # Raising inside the shield's cancellation handler can replace this
+            # error's context too, including an error cached by _settle().
+            owner = get_cleanup(self._cancelled_error)
+            if owner is not None:
+                cast(Any, self._cancelled_error).cleanup = owner
             raise self._cancelled_error
         result = self._task.result()
         # The execution owner may finish an awaited operation that suppressed cancellation.

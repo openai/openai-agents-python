@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from agents import NativeProvider, Session
 from agents.classic import Agent
-from agents.migration import SDKRunner, _runner
+from agents.migration import SDKRunner, _runner, get_cleanup
 
 from .test_migration_runner import ScriptedModel, message
 
@@ -80,7 +80,8 @@ async def test_run_error_exposes_complete_cleanup(
     assert error is (primary if model_failure else cleanup_error)
     if model_failure:
         assert error.__context__ is cleanup_error
-    cleanup = getattr(error, "cleanup", None)
+    cleanup = get_cleanup(error)
+    assert cleanup is getattr(error, "cleanup", None)
     assert isinstance(cleanup, Session)
     assert getattr(error, "provider", None) is cleanup._owned_provider
     assert carriers and all(not carrier.active for carrier in carriers)
@@ -96,21 +97,30 @@ async def test_run_error_exposes_complete_cleanup(
 
 
 @pytest.mark.parametrize("consumer", ["run", "cancel_handle", "cancel_waiter", "cancel_replay"])
+@pytest.mark.parametrize("stage", ["session", "provider"])
 async def test_cancelled_run_retains_public_cleanup(
-    monkeypatch: pytest.MonkeyPatch, consumer: str
+    monkeypatch: pytest.MonkeyPatch, consumer: str, stage: str
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     failure = OSError("transient cancelled retirement")
     original_close = Session._close_session
+    original_provider_close = NativeProvider.aclose
     failed = False
 
     async def close(self: Any) -> None:
         nonlocal failed
-        if not failed:
+        if stage == "session" and not failed:
             failed = True
             raise failure
         await original_close(self)
+
+    async def provider_close(self: NativeProvider) -> None:
+        nonlocal failed
+        if stage == "provider" and not failed:
+            failed = True
+            raise failure
+        await original_provider_close(self)
 
     class HeldModel(ScriptedModel):
         async def get_response(self, *args: Any, **kwargs: Any):
@@ -119,6 +129,7 @@ async def test_cancelled_run_retains_public_cleanup(
             return await super().get_response(*args, **kwargs)
 
     monkeypatch.setattr(Session, "_close_session", close)
+    monkeypatch.setattr(NativeProvider, "aclose", provider_close)
     agent = Agent("Cancelled cleanup", model=HeldModel([message("unused")]))
     if consumer == "run":
         task = asyncio.create_task(SDKRunner.run(agent, "hello"))
@@ -135,17 +146,26 @@ async def test_cancelled_run_retains_public_cleanup(
             task.cancel()
         with pytest.raises(asyncio.CancelledError) as raised:
             await task
-        cleanup = getattr(raised.value, "cleanup", None)
+        cleanup = get_cleanup(raised.value)
         assert isinstance(cleanup, Session)
-        provider = getattr(raised.value, "provider", None)
+        provider = cleanup._owned_provider
         assert isinstance(provider, NativeProvider)
         try:
             if consumer != "run":
+                for _ in range(3):
+                    with pytest.raises(asyncio.CancelledError) as repeated:
+                        await handle.get_result()
+                    assert get_cleanup(repeated.value) is cleanup
                 with pytest.raises(asyncio.CancelledError) as repeated:
-                    await handle.get_result()
-                assert getattr(repeated.value, "cleanup", None) is cleanup
+                    _ = handle.final_output
+                assert get_cleanup(repeated.value) is cleanup
+                with pytest.raises(asyncio.CancelledError) as repeated:
+                    await anext(handle.replay_events())
+                assert get_cleanup(repeated.value) is cleanup
         finally:
             await cleanup.aclose()
+            await cleanup.aclose()
+        assert task.cancelled()
         assert vars(provider).get("_closed") is True
     finally:
         release.set()
@@ -185,7 +205,8 @@ async def test_failed_opening_retains_migration_owned_provider(
         await operation
     assert raised.value is primary
     assert primary.__context__ is cleanup_error
-    cleanup = getattr(primary, "cleanup", None)
+    cleanup = get_cleanup(primary)
+    assert cleanup is getattr(primary, "cleanup", None)
     assert isinstance(cleanup, NativeProvider)
     assert getattr(primary, "provider", None) is cleanup
     await cleanup.aclose()
@@ -227,9 +248,9 @@ async def test_cancellation_during_terminal_close_joins_and_exposes_retry(
         release.set()
         with pytest.raises(asyncio.CancelledError) as raised:
             await task
-        cleanup = getattr(raised.value, "cleanup", None)
+        cleanup = get_cleanup(raised.value)
         assert isinstance(cleanup, Session)
-        provider = getattr(raised.value, "provider", None)
+        provider = cleanup._owned_provider
         await cleanup.aclose()
         assert vars(provider).get("_closed") is True
     finally:
@@ -237,3 +258,36 @@ async def test_cancellation_during_terminal_close_joins_and_exposes_retry(
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def test_get_cleanup_retains_nearest_owner_and_does_not_change_error_chain() -> None:
+    nearest = NativeProvider()
+    older = NativeProvider()
+    original = OSError("cleanup failed")
+    cast(Any, original).cleanup = older
+    cancelled = asyncio.CancelledError()
+    cast(Any, cancelled).cleanup = nearest
+    cancelled.__context__ = original
+    replacement = asyncio.CancelledError()
+    replacement.__context__ = cancelled
+    cause = RuntimeError("explicit cause")
+    replacement.__cause__ = cause
+
+    assert get_cleanup(replacement) is nearest
+    assert replacement.__context__ is cancelled
+    assert cancelled.__context__ is original
+    assert replacement.__cause__ is cause
+    assert not hasattr(replacement, "cleanup")
+
+
+def test_get_cleanup_ignores_provider_only_and_handles_context_cycles() -> None:
+    error = RuntimeError("unrelated failure")
+    cast(Any, error).cleanup = object()
+    cast(Any, error).provider = NativeProvider()
+    context = RuntimeError("cyclic context")
+    context.__context__ = error
+    error.__context__ = context
+
+    assert get_cleanup(error) is None
+    assert error.__context__ is context
+    assert context.__context__ is error
