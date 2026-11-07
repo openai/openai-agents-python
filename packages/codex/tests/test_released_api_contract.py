@@ -277,6 +277,32 @@ def test_contract_comparison_ignores_only_redundant_import_aliases() -> None:
         assert comparison(original) != comparison(changed)
 
 
+@pytest.mark.parametrize("location", ["root_declarations", "modules", "root_definitions"])
+def test_contract_comparison_normalizes_declarations_without_changing_values(location: str) -> None:
+    comparison = runpy.run_path(str(SCRIPT))["_comparison_api"]
+
+    def api(declaration: str) -> dict:
+        result = {
+            "root_imports": [],
+            "root_declarations": [],
+            "modules": {},
+            "root_definitions": {},
+        }
+        if location == "root_declarations":
+            result[location] = [declaration]
+        else:
+            result[location] = {"example": {"declarations": [declaration]}}
+        return result
+
+    original = api("Factory = lambda: 'lambda:'")
+    spaced = api("Factory = lambda : 'lambda:'")
+    assert comparison(original) == comparison(spaced)
+    assert original != spaced
+    assert comparison(original) != comparison(api("Factory = lambda: 'lambda :'"))
+    assert comparison(original) != comparison(api("Factory = lambda value: 'lambda:'"))
+    assert comparison(original) != comparison(api("Factory = lambda: None"))
+
+
 def test_method_body_does_not_change_contract(candidate: Path) -> None:
     source = implementation(candidate, "session.py")
     text = source.read_text()

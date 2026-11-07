@@ -48,6 +48,8 @@ async def main() -> None:
         getattr(importlib.import_module(module), name),
     )
     manifest = Manifest(
+        # Render guidance using Docker's effective workspace root.
+        root="/workspace",
         entries={
             "data": S3Mount(
                 bucket=args.bucket,
@@ -58,7 +60,7 @@ async def main() -> None:
                 description="Reference data; write results in the workspace.",
                 mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
             ),
-        }
+        },
     )
     api = docker.from_env()
     try:

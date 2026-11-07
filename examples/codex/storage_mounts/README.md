@@ -83,7 +83,9 @@ classes keep their existing `agents.classic` identities. Install the dependencie
 required by the selected resource provider.
 
 Pass a client, a manifest, provider options, and `connect`. Manifest dictionaries
-use the existing `Manifest` parser. Provider-option dictionaries require the
+use the existing manifest coercion boundary. Local host sources and extra path
+grants require a trusted `Manifest` instance; dictionaries cannot grant them.
+Provider-option dictionaries require the
 existing `type` discriminator; typed provider options also work. The adapter
 captures the manifest and options before creation. Every mount must specify its
 `mount_strategy`; the adapter does not infer or replace strategies.
@@ -142,6 +144,13 @@ an optional caller description. It does not serialize credentials, provider
 settings, environment values, or file contents. Descriptions are caller text;
 do not put credentials in them. Add this guidance to instructions only when
 wanted; the adapter does not inject it automatically.
+
+Render the prepared `session.state.manifest` to use the provider's resolved paths.
+If you build instructions before creating the sandbox, set the manifest's
+effective provider root explicitly. For example, Vercel replaces the default
+`/workspace` root with `/vercel/sandbox`; use `Manifest(root="/vercel/sandbox",
+entries=...)` with Vercel-compatible entries before rendering its layout.
+The Docker example below explicitly uses its `/workspace` root.
 
 The provider example uses Docker's existing Rclone volume strategy. Prepare the
 host driver and an image that supports the native executor. Supply your trusted

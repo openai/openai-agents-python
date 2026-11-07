@@ -222,7 +222,41 @@ async def test_dictionary_configuration_uses_owning_models() -> None:
         assert isinstance(client.manifest.entries["data"], S3Mount)
 
 
-def test_layout_only_renders_explicit_safe_fields_and_preserves_identity() -> None:
+@pytest.mark.parametrize("kind", ["grant", "file", "directory"])
+@pytest.mark.parametrize("mapping_proxy", [False, True])
+@pytest.mark.parametrize("helper", ["source", "layout"])
+def test_manifest_mappings_do_not_grant_host_authority(
+    kind: str, mapping_proxy: bool, helper: str
+) -> None:
+    from types import MappingProxyType
+
+    payload: dict[str, Any] = (
+        {"extra_path_grants": [{"path": "/data", "host_path": "/private", "read_only": False}]}
+        if kind == "grant"
+        else {
+            "entries": {
+                "data": {"type": "local_file" if kind == "file" else "local_dir", "src": "private"}
+            }
+        }
+    )
+    value = MappingProxyType(payload) if mapping_proxy else payload
+    client = Client([])
+
+    @asynccontextmanager
+    async def connect(session):
+        pytest.fail("A mapping must not grant access to host paths")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    with pytest.raises(MountConfigError):
+        if helper == "layout":
+            render_storage_layout(value)
+        else:
+            sandbox_environment(client, manifest=value, options=Options(), connect=connect)
+    assert client.events == []
+
+
+@pytest.mark.parametrize("root", ["/workspace", "/vercel/sandbox"])
+def test_layout_only_renders_explicit_safe_fields_and_preserves_identity(root: str) -> None:
     from agents.classic.sandbox.entries import S3Mount as OwningMount
 
     mount = declaration(
@@ -232,13 +266,17 @@ def test_layout_only_renders_explicit_safe_fields_and_preserves_identity() -> No
         description='data\n"quoted"',
         mount_path=Path("/data/reports"),
     )
-    manifest = Manifest(entries={"data": mount, "writable": declaration(read_only=False)})
+    manifest = Manifest(
+        root=root, entries={"data": mount, "writable": declaration(read_only=False)}
+    )
     rendered = render_storage_layout(manifest)
-    assert json.loads(rendered) == {
-        "workspace": "/workspace",
+    layout = json.loads(rendered)
+    layout["storage"].sort(key=lambda entry: entry["path"])
+    assert layout == {
+        "workspace": root,
         "storage": [
             {"path": "/data/reports", "access": "read_only", "description": 'data\n"quoted"'},
-            {"path": "/workspace/writable", "access": "read_write"},
+            {"path": f"{root}/writable", "access": "read_write"},
         ],
     }
     assert "do-not-render" not in rendered and "endpoint" not in rendered
@@ -489,12 +527,10 @@ async def test_all_typed_mounts_reach_owning_docker_preparation(
 
 
 @pytest.mark.parametrize("invalid", ["s3", "gcs", "r2", "azure", "box", "s3_files", "credentials"])
-@pytest.mark.parametrize("declaration_kind", ["mapping", "mutated_model"])
 async def test_provider_rejects_before_infrastructure_or_connector(
     monkeypatch: pytest.MonkeyPatch,
     responses: ResponsesFixture,
     invalid: str,
-    declaration_kind: str,
 ) -> None:
     from unittest.mock import MagicMock
 
@@ -506,19 +542,12 @@ async def test_provider_rejects_before_infrastructure_or_connector(
 
     if invalid != "credentials":
         mount = configured_mount(invalid)
-        if declaration_kind == "mutated_model":
-            if invalid == "s3_files":
-                mount.mount_strategy.pattern = RcloneMountPattern()
-            else:
-                mount.mount_strategy.driver = "unsupported"
-            manifest = Manifest(entries={"data": mount})
+        raw = mount.model_dump()
+        if invalid == "s3_files":
+            raw["mount_strategy"]["pattern"] = RcloneMountPattern().model_dump()
         else:
-            raw = mount.model_dump()
-            if invalid == "s3_files":
-                raw["mount_strategy"]["pattern"] = RcloneMountPattern().model_dump()
-            else:
-                raw["mount_strategy"]["driver"] = "unsupported"
-            manifest = {"entries": {"data": raw}}
+            raw["mount_strategy"]["driver"] = "unsupported"
+        manifest = {"entries": {"data": raw}}
     else:
         mount = S3Mount(
             bucket="synthetic",

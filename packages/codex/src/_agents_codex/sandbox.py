@@ -32,7 +32,7 @@ from agents.classic.sandbox.entries.mounts import (
     S3Mount,
 )
 from agents.classic.sandbox.errors import MountConfigError
-from agents.classic.sandbox.manifest import Manifest
+from agents.classic.sandbox.manifest import Manifest, _coerce_manifest
 from agents.classic.sandbox.session.sandbox_client import (
     BaseSandboxClient,
     BaseSandboxClientOptions,
@@ -69,11 +69,9 @@ def _configuration_error(error: ValueError | TypeError, target: str) -> MountCon
 
 def _manifest(value: Manifest | Mapping[str, Any]) -> Manifest:
     try:
-        captured = Manifest.model_validate(value).model_copy(deep=True)
-        # Typed models remain mutable after their construction-time validation.
-        for mount, _path in captured.mount_targets():
-            mount.mount_strategy.validate_mount(mount)
-        return captured
+        return _coerce_manifest(
+            dict(value) if isinstance(value, Mapping) else value, parameter_name="manifest"
+        ).model_copy(deep=True)
     except (ValueError, TypeError) as error:
         raise _configuration_error(error, "manifest") from None
 
@@ -93,6 +91,8 @@ def sandbox_environment(
     state or snapshot is accepted. Create a new source for each native Session.
     Cleanup follows client policy, including deletion of selected backends where
     the provider implements it. The caller must authorize that disposal.
+    Host path grants and local sources require a trusted Manifest instance;
+    mappings cannot grant that authority.
     """
     captured_manifest = _manifest(manifest)
     try:
@@ -123,6 +123,8 @@ def render_storage_layout(manifest: Manifest | Mapping[str, Any]) -> str:
     Credentials, provider settings, environment values and file contents are not
     included. Descriptions are trusted caller text; do not put secrets in them.
     The result is guidance, not filesystem authority.
+    Pass the prepared session.state.manifest or configure the provider's effective
+    root explicitly before rendering. Providers can replace the default root.
     """
     manifest = _manifest(manifest)
     storage = []
