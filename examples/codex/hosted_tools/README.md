@@ -26,5 +26,15 @@ The scripts inspect completed `session.items()` records. Each hosted call has
 typed result fields, its native `turn_id`, and `provider_data` containing the
 complete provider item. Image partial events carry previews, not final bytes.
 
+Default `session.events()` and `turn.events()` readers receive
+`HostedToolCallSummary` for these three hosted tools. The summary contains only
+`type`, `id`, `turn_id`, and `status`. Hosted progress keeps its observation
+identity and only the provider event `type` in `event`.
+
+For a trusted reader that needs code, retrieval results, image bytes, or other
+provider payloads, pass `include_execution_details=True` to either event reader.
+Full typed results remain available from `session.items()`. Treat detailed
+observations and canonical history as private data before logging or sharing.
+
 Provider references: [GPT-5.2](https://developers.openai.com/api/docs/models/gpt-5.2),
 [Responses tools](https://developers.openai.com/api/docs/guides/tools).

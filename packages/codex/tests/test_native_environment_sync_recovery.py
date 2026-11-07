@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from agents import Agent, Environment, NativeProvider, function_tool
+from agents import Agent, Environment, NativeProvider, function_tool, get_cleanup
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -103,6 +103,7 @@ async def test_implicit_sync_opening_retains_only_an_unretired_recovery_owner(
         assert len(entered) == 1 and entered[0] is not None
         loop = entered[0].get_loop()
         recovery = getattr(original.value, "provider", None)
+        assert get_cleanup(original.value) is recovery
         if requires_retry:
             assert not exited
             assert isinstance(recovery, NativeProvider)
@@ -161,6 +162,7 @@ async def test_implicit_async_opening_retains_only_an_unretired_recovery_owner(
             assert delayed_native_join == ["join", "join", "join"]
             assert len(entered) == 1 and entered[0].get_loop() is asyncio.get_running_loop()
             recovery = getattr(original.value, "provider", None)
+            assert get_cleanup(original.value) is recovery
             if requires_retry:
                 assert not exited
                 assert isinstance(recovery, NativeProvider)
@@ -268,3 +270,110 @@ async def test_sync_child_owned_provider_retains_only_child_manager(
         finally:
             await outer_provider.aclose()
             await inner_provider.aclose()
+
+
+@pytest.mark.parametrize("call_route", ["async", "sync"])
+@pytest.mark.parametrize("implicit_provider", [True, False], ids=["implicit", "borrowed"])
+@pytest.mark.parametrize("delayed_native_join", [3], indirect=True)
+async def test_interrupted_opening_exposes_existing_provider_cleanup(
+    responses: ResponsesFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    delayed_native_join: list[str],
+    call_route: str,
+    implicit_provider: bool,
+) -> None:
+    from _agents_codex import session as native_session
+    from agents import _native
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-interrupted-opening-test")
+    retained = []
+    entered = []
+    manager_interrupted = asyncio.Event()
+    original_engine = _native.create_engine
+    original_cleanup = native_session._close_after_error
+    original_defer = NativeProvider._defer_opening
+
+    def defer(self, opening, environment):
+        retained.append(self)
+        return original_defer(self, opening, environment)
+
+    def engine(*args, **kwargs):
+        operation = original_engine(*args, **kwargs)
+
+        async def publish():
+            # Keep the real native result unpublished until the manager's
+            # own timeout interrupts opening, independent of TCP refusal speed.
+            await manager_interrupted.wait()
+            return await operation
+
+        return publish()
+
+    async def observe_interruption(error, close):
+        if (
+            entered
+            and asyncio.current_task() is entered[0]
+            and isinstance(error, asyncio.CancelledError)
+        ):
+            manager_interrupted.set()
+        await original_cleanup(error, close)
+
+    async def forbid_submission(*args, **kwargs):
+        pytest.fail("failed Environment startup must not submit a model request")
+
+    monkeypatch.setattr(NativeProvider, "_defer_opening", defer)
+    monkeypatch.setattr(_native, "create_engine", engine)
+    monkeypatch.setattr(native_session, "_close_after_error", observe_interruption)
+    monkeypatch.setattr(_native.NativeThread, "_submit", forbid_submission)
+    shared = None if implicit_provider else provider(responses)
+    agent = Agent(instructions="Inspect.", model="gpt-5.5", provider=shared)
+
+    @asynccontextmanager
+    async def manager():
+        entered.append(asyncio.current_task())
+        async with timeout(0.02):
+            yield Environment(url="wss://127.0.0.1:1/exec", cwd="/workspace", connect_timeout=0.15)
+
+    async with timeout(20):
+        try:
+            with pytest.raises(RuntimeError, match="controlled native retirement") as caught:
+                if call_route == "sync":
+                    await asyncio.to_thread(agent.run_sync, "Inspect", environment=manager())
+                else:
+                    await agent.run("Inspect", environment=manager())
+            error = caught.value
+            assert len(retained) == 1
+            recovery = get_cleanup(error)
+            assert recovery is retained[0]
+            assert not vars(recovery).get("_closed", False)
+            assert error.__cause__ is None and error.__suppress_context__
+            if implicit_provider:
+                assert getattr(error, "provider", None) is recovery
+                assert delayed_native_join == ["join"] * 3
+            else:
+                assert recovery is shared
+                assert getattr(error, "provider", None) is None
+                assert delayed_native_join == ["join"] * 2
+                with pytest.raises(RuntimeError, match="controlled native retirement"):
+                    await recovery.aclose()
+            owner_loop = entered[0].get_loop()
+            if call_route == "sync":
+                assert not owner_loop.is_running() and not owner_loop.is_closed()
+            # Native retirement now succeeds. The same manager's timeout still
+            # propagates once before an idempotent retry completes the provider.
+            with pytest.raises(asyncio.TimeoutError):
+                await recovery.aclose()
+            await recovery.aclose()
+            await recovery.aclose()
+            assert vars(recovery).get("_closed") is True
+            assert delayed_native_join == ["join"] * 4
+            assert get_cleanup(error) is recovery
+            if call_route == "sync":
+                assert owner_loop.is_closed()
+        finally:
+            for recovery in retained:
+                for _ in range(3):
+                    try:
+                        await recovery.aclose()
+                    except (RuntimeError, asyncio.TimeoutError):
+                        continue
+                    break

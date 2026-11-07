@@ -43,7 +43,9 @@ if TYPE_CHECKING:
         ActionRequested as ActionRequested,
         ApprovalRequest as ApprovalRequest,
         ElicitationRequest as ElicitationRequest,
+        FormRequest as FormRequest,
         Interaction as Interaction,
+        UrlRequest as UrlRequest,
         VerificationProof as VerificationProof,
         VerificationRequest as VerificationRequest,
     )
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
     )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
+        ChildStepContext as ChildStepContext,
         NativeAgents as NativeAgents,
         NativeRole as NativeRole,
     )
@@ -88,6 +91,7 @@ if TYPE_CHECKING:
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
         OutputValidationError as OutputValidationError,
+        OutputValidationIssue as OutputValidationIssue,
         PromptedOutput as PromptedOutput,
     )
     from .session import (
@@ -104,6 +108,7 @@ if TYPE_CHECKING:
         SessionBusyError as SessionBusyError,
         StaleTurnError as StaleTurnError,
         TurnStoppedError as TurnStoppedError,
+        get_cleanup as get_cleanup,
     )
     from .state import (
         ChecklistState as ChecklistState,
@@ -128,6 +133,7 @@ if TYPE_CHECKING:
         WebSearch as WebSearch,
     )
     from .turn import (
+        ChildTurn as ChildTurn,
         PendingRequests as PendingRequests,
         SteeringReceipt as SteeringReceipt,
         Turn as Turn,
@@ -158,6 +164,7 @@ _MODULES = {
     "StopTurn": ".native_interception",
     "ExecutorContext": ".executor",
     "ChildInvocation": ".native_agents",
+    "ChildStepContext": ".native_agents",
     "NativeAgents": ".native_agents",
     "NativeRole": ".native_agents",
     "Environment": ".executor",
@@ -177,6 +184,8 @@ _MODULES = {
     "ActionReply": ".manual",
     "ActionRequested": ".manual",
     "ApprovalRequest": ".manual",
+    "FormRequest": ".manual",
+    "UrlRequest": ".manual",
     "ElicitationRequest": ".manual",
     "VerificationRequest": ".manual",
     "VerificationProof": ".manual",
@@ -190,6 +199,7 @@ _MODULES = {
     "PromptedOutput": ".schema",
     "OutputSpec": ".schema",
     "OutputValidationError": ".schema",
+    "OutputValidationIssue": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
@@ -220,6 +230,7 @@ _MODULES = {
     "MCPCallContext": ".mcp",
     "function_tool": "._function_tools",
     "Completed": ".session",
+    "get_cleanup": ".session",
     "Capabilities": ".session",
     "CapabilityError": ".session",
     "FeatureName": ".session",
@@ -233,6 +244,7 @@ _MODULES = {
     "Session": ".session",
     "SessionBusyError": ".session",
     "Turn": ".turn",
+    "ChildTurn": ".turn",
     "PendingRequests": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",

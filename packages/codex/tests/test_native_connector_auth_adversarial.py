@@ -117,7 +117,7 @@ async def test_apps_credentials_cannot_be_replaced_in_same_session(
                 else opening.access_token
             ),
             account_id=replacement_account,
-            approval_mode="approve",
+            approval_mode="preapproved",
         )
         async with app.session() as session:
             with pytest.raises(ValueError, match="Apps registration is fixed"):
@@ -161,7 +161,7 @@ async def test_closed_session_apps_wrapper_cannot_complete_new_session_request(
             tools=["calendar_search"],
             access_token=access_token(user="synthetic-user-B"),
             account_id="synthetic-account-A",
-            approval_mode="approve",
+            approval_mode="preapproved",
         )
         new_app, _ = application(responses, fresh)
         async with new_app.session() as new_session:

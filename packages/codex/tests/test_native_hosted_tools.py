@@ -166,7 +166,7 @@ async def test_config_completion_and_portable_history(responses, tool, wire, raw
     async with timeout(30), borrowed:
         async with agent.session() as session:
             turn = await session.submit("Perform the hosted task.")
-            events = [event async for event in turn.events()]
+            events = [event async for event in turn.events(include_execution_details=True)]
             assert (await turn.get_result()).final_output == "Provider finished."
             items = [item async for item in session.items()]
             calls = [item for item in items if item["type"] == raw["type"]]
@@ -330,7 +330,7 @@ async def test_mixed_hosted_and_local_calls_stream_and_keep_citations(responses)
         ).session() as session,
     ):
         turn = await session.submit("Prepare a report.")
-        events = [event async for event in turn.events()]
+        events = [event async for event in turn.events(include_execution_details=True)]
         assert (await turn.get_result()).final_output == "Report ready."
         assert "".join(e.delta for e in events if isinstance(e, OutputTextDelta)) == "Report ready."
         messages = [
@@ -447,7 +447,7 @@ async def test_native_progress_observations_preserve_provider_events_and_large_p
         ).session() as session,
     ):
         turn = await session.submit("Create a square and explain the calculation.")
-        events = [event async for event in turn.events()]
+        events = [event async for event in turn.events(include_execution_details=True)]
         assert (await turn.get_result()).final_output == "All hosted tools finished."
         progress = [event for event in events if isinstance(event, HostedToolCallProgress)]
         assert [event.event for event in progress] == raw_events
@@ -475,7 +475,7 @@ async def test_native_progress_observations_preserve_provider_events_and_large_p
         assert isinstance(nested, list)
         nested.append("reader mutation")
         progress[-1].event["partial_image_b64"] = "reader mutation"
-        replay = [event async for event in turn.events()]
+        replay = [event async for event in turn.events(include_execution_details=True)]
         assert [event.event for event in replay if isinstance(event, HostedToolCallProgress)] == (
             raw_events
         )
@@ -537,7 +537,7 @@ async def test_native_progress_buffer_gaps_preserve_readable_suffix_and_final_hi
         turn = await session.submit("Draw a square.")
         # Read only after completion so the aggregate case tests a slow cursor.
         assert (await turn.get_result()).final_output == "Final image retained."
-        events = [event async for event in turn.events()]
+        events = [event async for event in turn.events(include_execution_details=True)]
         assert isinstance(events[0], EventGap)
         progress = [event for event in events if isinstance(event, HostedToolCallProgress)]
         assert [event.event for event in progress] == [*retained_previews, readable]

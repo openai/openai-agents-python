@@ -63,8 +63,8 @@ async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
             budget = RunBudget(max_requests=2)
             original = await session.submit("Keep this input.", budget=budget)
             completed = await original.get_result()
-            assert completed.usage is not None
-            assert completed.usage.last_token_usage.total_tokens == 24
+            assert completed.thread_usage is not None
+            assert completed.thread_usage.last_token_usage.total_tokens == 24
             before = await session.save_state()
             items = [item async for item in session.items()]
             turns = [turn async for turn in session.turns()]
@@ -126,10 +126,10 @@ async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
             )
             outcome = await (await session.submit("Work now.", budget=budget)).get_result()
             assert outcome.final_output == "following"
-            assert outcome.usage is not None
+            assert outcome.thread_usage is not None
             assert (
-                outcome.usage.total_token_usage.total_tokens
-                == completed.usage.total_token_usage.total_tokens + 48
+                outcome.thread_usage.total_token_usage.total_tokens
+                == completed.thread_usage.total_token_usage.total_tokens + 48
             )
         events = [event async for event in stream]
         assert isinstance(events[-1], SessionEnded)
@@ -148,7 +148,7 @@ async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
                 await restored.submit("Use current context", budget=budget)
             ).get_result()
             assert resumed.final_output == "restored"
-            assert resumed.usage == outcome.usage
+            assert resumed.thread_usage == outcome.thread_usage
             sent_before_block = len(wire.requests)
             blocked = await restored.submit("No sampling.", budget=RunBudget(max_requests=0))
             with pytest.raises(NativeError) as stopped:

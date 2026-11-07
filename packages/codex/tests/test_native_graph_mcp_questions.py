@@ -139,7 +139,7 @@ async def test_child_form_is_not_answerable_and_native_successor_survives(
         agent = replace(
             agent,
             tools=[
-                HttpMCP(name="vault", url=url, tools=["search"], approval_mode="approve")
+                HttpMCP(name="vault", url=url, tools=["search"], approval_mode="preapproved")
                 if isinstance(t, HttpMCP)
                 else t
                 for t in agent.tools
@@ -237,7 +237,7 @@ async def test_background_form_on_same_server_cannot_stop_native_successor(
                 replace(tool, interactions=interactions)
                 if isinstance(tool, NativeAgents)
                 else replace(
-                    stdio(log, "--background-form-on-second-call", approval_mode="approve"),
+                    stdio(log, "--background-form-on-second-call", approval_mode="preapproved"),
                     name="vault",
                 )
                 if isinstance(tool, HttpMCP)

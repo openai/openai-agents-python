@@ -92,7 +92,7 @@ async def test_child_text_presence_belongs_to_the_exact_turn(
                 captured = await first_turn.get_result()
                 assert captured.turn is first_turn
                 assert captured.final_output == result.final_output == ""
-                assert captured.usage == result.usage
+                assert captured.thread_usage == result.thread_usage
             assert not replies
 
 
@@ -164,7 +164,7 @@ async def test_canonical_text_phase_belongs_to_exact_child_turn(
                 assert later.turn_id != first.turn_id and later.child_id == first.child_id
                 assert (await later.get_result()).final_output == "fresh child answer"
                 captured = await first.get_result()
-                assert captured.turn is first and captured.usage == result.usage
+                assert captured.turn is first and captured.thread_usage == result.thread_usage
                 assert captured.final_output == result.final_output
                 assert not replies and len(peer.child_requests["alpha"]) == 2
                 assert result.final_output == expected

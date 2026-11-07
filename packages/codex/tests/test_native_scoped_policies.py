@@ -29,6 +29,7 @@ from agents import (
     ToolContext,
     ToolOutput,
     TurnStoppedError,
+    UrlRequest,
     function_tool,
 )
 from tests._asyncio import timeout
@@ -801,7 +802,7 @@ async def test_native_form_validation_and_once_only_enqueue(
         agent = Agent(
             instructions="Ask",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
@@ -931,7 +932,7 @@ async def test_dormant_startup_form_fails_joins_and_fences_unconfirmed_roster(
         assert all(reply.get("result") == {"action": "cancel"} for reply in peer.answers)
 
 
-async def test_url_prompt_can_only_decline_without_enqueuing_acceptance(
+async def test_url_prompt_rejects_form_values_without_enqueuing_acceptance(
     responses: ResponsesFixture,
 ):
     peer = AskingPeer(unsupported=True)
@@ -942,19 +943,20 @@ async def test_url_prompt_can_only_decline_without_enqueuing_acceptance(
         agent = Agent(
             instructions="Ask",
             provider=native,
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")
             async for request in session.interactions():
-                assert isinstance(request, ElicitationRequest)
-                assert request.schema == {}
+                assert isinstance(request, UrlRequest) and request.mode == "url"
+                assert not hasattr(request, "schema")
+                assert not hasattr(request, "respond")
                 assert request.submission_id is None
                 assert request.turn_id is None
                 assert "example.invalid/never-visit" in request.description
                 assert "example.invalid" not in repr(request)
-                with pytest.raises(ValueError, match="URL verification has no form"):
-                    await request.respond({"answer": "never accept"})
+                with pytest.raises(ValueError, match="not form values"):
+                    request.reply({"answer": "never accept"})
                 assert not peer.answers
                 assert await session.pending_interactions() == (request,)
                 await request.decline()
@@ -1098,7 +1100,7 @@ async def test_root_native_mcp_reply_retirement_owns_its_enqueue(responses, kind
                 name="records",
                 url=url,
                 tools=["search"],
-                approval_mode="auto" if kind == "approval" else "approve",
+                approval_mode="native" if kind == "approval" else "preapproved",
             )
             responses.respond(selected("repeated-native-id", "old-effect"))
             async with Agent(instructions="Search", provider=native, tools=[server]).session() as s:

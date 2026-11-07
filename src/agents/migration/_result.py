@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Coroutine, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Generic, TypeVar, cast
 
 from openai.types.responses import (
@@ -16,7 +17,7 @@ from openai.types.responses import (
 from openai.types.responses.response_input_item_param import FunctionCallOutput
 
 from _agents_codex._lifecycle import _close_after_error
-from _agents_codex.session import Completed
+from _agents_codex.session import Completed, get_cleanup
 
 from ..classic.agent import Agent
 from ..classic.exceptions import ModelBehaviorError, UserError
@@ -74,7 +75,7 @@ class SDKRunResult(Generic[ContextT]):
             raise UserError("SDKRunResult.to_input_list requires preserve_all or normalized mode")
         return deepcopy(ItemHelpers.input_to_new_input_list(self.input)) + self._new_input_items()
 
-    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+    async def replay_events(self) -> AsyncIterator[StreamEvent]:
         """Replay accepted semantic events. Raw Model frames and deltas are unavailable."""
         yield AgentUpdatedStreamEvent(new_agent=self.last_agent)
         for item in self.new_items:
@@ -179,14 +180,15 @@ class _ResultProjection(Generic[ContextT]):
         )
 
 
-class SDKRunResultStreaming(Generic[ContextT]):
+class SDKRunHandle(Generic[ContextT]):
     """An in-flight SDKRunner run with buffered semantic events."""
 
     def __init__(self, run: Coroutine[Any, Any, SDKRunResult[ContextT]]) -> None:
         self._cancel_requested = False
+        self._cancelled_error: asyncio.CancelledError | None = None
         self._task = asyncio.create_task(run)
         # A run can settle without an event reader. Retain the exception on the
-        # task for get_result()/stream_events() without logging an orphan failure.
+        # task for get_result()/replay_events() without logging an orphan failure.
         self._task.add_done_callback(self._observe_failure)
 
     @staticmethod
@@ -211,14 +213,39 @@ class SDKRunResultStreaming(Generic[ContextT]):
             self._task.cancel()
 
     def _result(self) -> SDKRunResult[ContextT]:
+        if self._task.cancelled():
+            if self._cancelled_error is None:
+                try:
+                    self._task.result()
+                except asyncio.CancelledError as error:
+                    # Later task reads can manufacture a new cancellation and
+                    # lose the original error's public cleanup capability.
+                    self._cancelled_error = error
+            assert self._cancelled_error is not None
+            # Raising inside the shield's cancellation handler can replace this
+            # error's context too, including an error cached by _settle().
+            owner = get_cleanup(self._cancelled_error)
+            if owner is not None:
+                cast(Any, self._cancelled_error).cleanup = owner
+            raise self._cancelled_error
         result = self._task.result()
         # The execution owner may finish an awaited operation that suppressed cancellation.
         if self._cancel_requested:
             raise asyncio.CancelledError
         return result
 
-    async def _settle(self) -> None:
-        await self._task
+    async def _settle(self, primary: BaseException) -> None:
+        try:
+            await self._task
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                error = self._cancelled_error or error
+                self._cancelled_error = error
+            for attribute in ("cleanup", "provider"):
+                owner = getattr(error, attribute, None)
+                if owner is not None:
+                    setattr(primary, attribute, owner)
+            raise
 
     async def get_result(self) -> SDKRunResult[ContextT]:
         """Await settlement. Cancelling this wait stops and joins the run."""
@@ -228,12 +255,12 @@ class SDKRunResultStreaming(Generic[ContextT]):
             if self._task.cancelled():
                 return self._result()
             self.cancel()
-            await _close_after_error(error, self._settle)
+            await _close_after_error(error, partial(self._settle, error))
             raise
         return self._result()
 
-    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+    async def replay_events(self) -> AsyncIterator[StreamEvent]:
         """Yield buffered semantic events after success, or raise the run's error."""
         result = await self.get_result()
-        async for event in result.stream_events():
+        async for event in result.replay_events():
             yield event

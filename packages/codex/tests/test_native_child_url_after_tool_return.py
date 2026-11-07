@@ -39,7 +39,9 @@ async def test_child_http_url_completion_after_original_tool_return(
     following_request = asyncio.Event()
     release_model = asyncio.Event()
     async with timeout(50), peer.serve() as url:
-        registration = HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")
+        registration = HttpMCP(
+            name="records", url=url, tools=["search"], approval_mode="preapproved"
+        )
         async with owned_http_child(tmp_path, monkeypatch, registration) as (
             model,
             session,

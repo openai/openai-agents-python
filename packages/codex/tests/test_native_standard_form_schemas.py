@@ -125,7 +125,7 @@ async def test_standard_raw_schema_and_reply_cross_native_stdio(
         agent = Agent(
             instructions="Ask the stdio peer",
             provider=provider(responses),
-            tools=[stdio(log, "--form-schema", str(schema_file), approval_mode="approve")],
+            tools=[stdio(log, "--form-schema", str(schema_file), approval_mode="preapproved")],
         )
         async with agent.session() as session:
             turn = await session.submit("go")

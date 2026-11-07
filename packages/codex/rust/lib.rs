@@ -325,6 +325,39 @@ impl Engine {
         })
     }
 
+    fn _inspect_custom_recovery<'py>(
+        &self,
+        py: Python<'py>,
+        session_id: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let id = codex_core_api::ThreadId::from_string(session_id).map_err(py_error)?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.operation(false).map_err(py_error)?;
+            let _lifecycle = inner.lifecycle.lock().await;
+            if !inner
+                .store
+                .as_any()
+                .is::<canonical_storage::CanonicalStore>()
+            {
+                return Err(PyRuntimeError::new_err(
+                    "Recovery inspection requires custom canonical storage",
+                ));
+            }
+            // CanonicalStore loads under its exclusive writer. Keep that lease
+            // through startup or failed-opening cleanup; never start Core here.
+            let history = inner
+                .store
+                .load_history(codex_thread_store::LoadThreadHistoryParams {
+                    thread_id: id,
+                    include_archived: true,
+                })
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&history.items).map_err(py_error)
+        })
+    }
+
     fn _start_initial_replaceable_thread<'py>(
         &self,
         py: Python<'py>,

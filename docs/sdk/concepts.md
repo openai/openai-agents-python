@@ -90,6 +90,7 @@ Configure [native telemetry](observability.md) separately before opening the fir
 | Extension point | Scope |
 | --- | --- |
 | [Agent and Session configuration](configuration.md#choose-tools-and-workspace-access) | Bind opening tools, instructions, provider, context, and executor policy. |
+| [`transform_context`](configuration.md#choose-a-model-context-hook) | Replace model input for roots, children, compaction, or output repair. Canonical history remains unchanged. |
 | [`before_step`](sessions.md#select-tools-before-each-model-step) | Select among available tools for the next model step or return `StopTurn`; cannot add capabilities. |
 | [`prepare_request`](configuration.md#edit-the-next-sampling-request) | Edit a copy of the next model request, within its supported feature profile. Tool routing, validators, and approval policies still apply. |
 | [Function `before` and `after`](tools.md#execution-and-cancellation) | Allow, deny, or replace validated arguments before execution; transform the reply afterward. |

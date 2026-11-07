@@ -217,7 +217,7 @@ async def test_hosted_progress_cancel_preserves_sibling_and_session_recovery(
             responses.respond(progress, completed(cancelled_image))
             turn = await first.submit("first private image prompt")
             await first_blocked.wait()
-            async for event in turn.events():
+            async for event in turn.events(include_execution_details=True):
                 if isinstance(event, HostedToolCallProgress):
                     assert event.event == progress
                     assert event.session_id == first.id
@@ -318,7 +318,7 @@ async def test_completed_hosted_item_survives_provider_failure_without_success(
         turn = await session.submit("Generate before the provider failure.")
         with pytest.raises(NativeError, match="synthetic hosted request rejected"):
             await turn.get_result()
-        events = [event async for event in turn.events()]
+        events = [event async for event in turn.events(include_execution_details=True)]
         assert [event.status for event in events if isinstance(event, TurnFinished)] == ["failed"]
         images = [item async for item in session.items() if item["type"] == "image_generation_call"]
         assert len(images) == 1

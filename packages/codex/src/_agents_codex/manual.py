@@ -32,6 +32,7 @@ from pydantic import (
     ValidationError as ValidationError,
 )
 
+from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -218,7 +219,7 @@ ResultT = TypeVar("ResultT")
 
 @dataclass(frozen=True, slots=True, init=False)
 class ActionReply(Generic[ResultT]):
-    """A candidate answer for Agent.run to validate and deliver.
+    """A bound answer for Session.respond or an on_interaction handler.
 
     Packaging a reply does not consume a live grant. Do not persist it.
     """
@@ -382,7 +383,7 @@ class ApprovalRequest(_NativeQuestion):
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class ElicitationRequest(_NativeQuestion):
+class _ElicitationRequest(_NativeQuestion):
     """A native MCP form or explicitly answered URL request.
 
     Primitive forms keep strict types, formats, bounds and enums.
@@ -390,8 +391,8 @@ class ElicitationRequest(_NativeQuestion):
     object schemas with nested JSON values and single-hop local definition
     references. General forms treat formats as annotations;
     regex keywords, resource identifiers, and dynamic references are unsupported.
-    The schema is empty for a URL request; its description contains the URL
-    and verification ID. A URL without a native turn ID is Session-scoped:
+    A UrlRequest exposes its target URL and verification ID.
+    A URL without a native turn ID is Session-scoped:
     submission_id and turn_id are None, even while a turn is active. Do not
     infer an originating turn for those requests. Opted-in child requests keep
     their original native child turn and admission. URL consent uses accept_url;
@@ -413,13 +414,13 @@ class ElicitationRequest(_NativeQuestion):
         """The server's URL interaction identifier; it grants no reply authority."""
         return cast(str | None, self._message["request"].get("elicitation_id"))
 
-    def reply_url_accept(self) -> ActionReply[object]:
+    def _reply_url_accept(self) -> ActionReply[object]:
         """Package explicit URL consent for an on_interaction callback."""
         if self.url is None:
             raise ValueError("Only URL requests support URL consent")
-        return _reply(self, _URL_ACCEPT)
+        return _reply(cast("Interaction", self), _URL_ACCEPT)
 
-    async def accept_url(self) -> None:
+    async def _accept_url(self) -> None:
         """Enqueue URL consent once. This does not establish completion or verification."""
         session = self._check_current()
         if self.url is None:
@@ -448,12 +449,12 @@ class ElicitationRequest(_NativeQuestion):
             },
         )
 
-    async def wait_url_completion(self, *, timeout: float) -> None:
+    async def _wait_url_completion(self, *, timeout: float) -> None:
         """Wait for this issuing server to report completion of this URL ID.
 
         A matched server notification is not cryptographic verification. The
         application decides whether this server can report the needed outcome.
-        Timeout revokes this lifecycle and raises the built-in TimeoutError.
+        Timeout stops only this observer and raises the built-in TimeoutError.
         Cancelling a waiter only stops that wait.
         """
         session = self._session()
@@ -461,19 +462,20 @@ class ElicitationRequest(_NativeQuestion):
             from .session import InteractionExpiredError
 
             raise InteractionExpiredError("URL request is expired")
-        await session._wait_url_completion(self, timeout)
+        await session._wait_url_completion(cast("UrlRequest", self), timeout)
 
-    def reply(self, value: Mapping[str, Any] | None) -> ActionReply[Mapping[str, Any] | None]:
-        """Package one-shot form values, or None to decline a form or URL request."""
-        return _reply(self, value)
+    def _form_reply(self, value: Mapping[str, Any] | None) -> ActionReply[Mapping[str, Any] | None]:
+        """Validate detached form values without consuming the live request."""
+        return _reply(
+            cast("Interaction", self), None if value is None else self._validate_form(value)
+        )
 
     @property
-    def schema(self) -> Mapping[str, Any]:
+    def _schema(self) -> Mapping[str, Any]:
         """A detached form schema, or an empty mapping for a URL request."""
         return deepcopy(self._message["request"].get("requested_schema", {}))
 
-    async def respond(self, value: Mapping[str, Any]) -> None:
-        self._check_current()
+    def _validate_form(self, value: Mapping[str, Any]) -> dict[str, Any]:
         request = self._message["request"]
         if request["mode"] not in _FORM_MODES:
             raise ValueError("URL verification has no form; use accept_url() or decline()")
@@ -492,17 +494,7 @@ class ElicitationRequest(_NativeQuestion):
                 pass
             if valid_extension is None:
                 raise ValueError("MCP form failed validation")
-            await self._enqueue(
-                "resolve_elicitation",
-                {
-                    "server_name": self._message["server_name"],
-                    "request_id": self._message["id"],
-                    "decision": "accept",
-                    "content": valid_extension,
-                    "meta": None,
-                },
-            )
-            return
+            return deepcopy(valid_extension)
         schema = request["requested_schema"]
         if not isinstance(value, Mapping):
             raise ValueError("MCP form requires a mapping")
@@ -587,13 +579,20 @@ class ElicitationRequest(_NativeQuestion):
             valid = None
         if valid is None:
             raise ValueError("MCP form failed validation")
+        return deepcopy(valid)
+
+    async def _form_respond(self, value: Mapping[str, Any]) -> None:
+        self._check_current()
+        await self._enqueue_form(self._validate_form(value))
+
+    async def _enqueue_form(self, value: Mapping[str, Any]) -> None:
         await self._enqueue(
             "resolve_elicitation",
             {
                 "server_name": self._message["server_name"],
                 "request_id": self._message["id"],
                 "decision": "accept",
-                "content": valid,
+                "content": value,
                 "meta": None,
             },
         )
@@ -610,6 +609,49 @@ class ElicitationRequest(_NativeQuestion):
                 "meta": None,
             },
         )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class FormRequest(_ElicitationRequest):
+    """A live MCP form. Preparing values validates them without consuming authority."""
+
+    mode: Literal["form"] = field(default="form", init=False)
+    schema = _ElicitationRequest._schema
+    reply = _ElicitationRequest._form_reply
+    respond = _ElicitationRequest._form_respond
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class UrlRequest(_ElicitationRequest):
+    """Explicit URL consent and passive observation of the issuing peer's completion."""
+
+    mode: Literal["url"] = field(default="url", init=False)
+    reply_url_accept = _ElicitationRequest._reply_url_accept
+    accept_url = _ElicitationRequest._accept_url
+    wait_url_completion = _ElicitationRequest._wait_url_completion
+
+    async def cancel_url_completion(self) -> None:
+        """Expire this shared URL lifecycle and cancel the peer completion route."""
+        session = self._session()
+        if session is None or self._url_completion is None:
+            from .session import InteractionExpiredError
+
+            raise InteractionExpiredError("URL request is expired")
+        session._check_open()
+        session._check_callback_operation("cancel URL completion")
+        if self._url_completion.done():
+            return
+        session._settle_url_completion(self, False)
+        await _join(asyncio.create_task(session._cancel_url_completion(self)))
+
+    def reply(self, value: None) -> ActionReply[None]:
+        """Prepare a URL decline. Use reply_url_accept() to grant consent."""
+        if value is not None:
+            raise ValueError("URL requests accept consent or decline, not form values")
+        return _reply(self, None)
+
+
+ElicitationRequest: TypeAlias = FormRequest | UrlRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,7 +796,7 @@ def _question(
         ):
             schema = request.get("requested_schema")
             if request.get("mode") == "url":
-                cls = ElicitationRequest
+                cls = UrlRequest
                 description = (
                     f"{description}\nURL: {request['url']}\n"
                     f"Elicitation ID: {request['elicitation_id']}"
@@ -771,8 +813,8 @@ def _question(
                     validator = _general_form_validator(deepcopy(schema))
             else:
                 raise InteractionRequired("Unsupported MCP interaction")
-            if cls is not VerificationRequest:
-                cls = ElicitationRequest
+            if cls not in (VerificationRequest, UrlRequest):
+                cls = FormRequest
     if isinstance(handle, ChildInvocation) and (
         session._native_agents is None
         or not session._native_agents.interactions
@@ -784,7 +826,7 @@ def _question(
         # No issued request exists, and its delayed observation must not fail the turn.
         raise InteractionExpiredError("Native child request expired before delivery")
     unowned_url = (
-        cls in (ElicitationRequest, VerificationRequest)
+        cls in (UrlRequest, VerificationRequest)
         and message["request"].get("mode") in {"url", "openai/userVerification"}
         and not message.get("turn_id", message.get("turnId"))
     )
@@ -815,7 +857,8 @@ def _question(
         result._message["_sdk_child_incarnation"] = handle.instance_id
     if cls is VerificationRequest:
         object.__setattr__(result, "_registration", session._hosted_verification)
-    if cls is ElicitationRequest:
+    if cls in (FormRequest, UrlRequest):
+        object.__setattr__(result, "mode", "form" if cls is FormRequest else "url")
         object.__setattr__(result, "_validator", validator)
         completion = None
         if message["request"].get("mode") == "url" and (

@@ -210,3 +210,15 @@ if TYPE_CHECKING:
 
     Agent(instructions="Answer.", before_complete=invalid_completion_result)  # pyright: ignore[reportArgumentType]
     Agent[Application](instructions="Answer.", before_complete=incompatible_completion_context)  # pyright: ignore[reportArgumentType]
+
+
+if TYPE_CHECKING:
+    from agents import ChildTurn, FormRequest, UrlRequest
+
+    async def unsupported_child_controls(turn: ChildTurn) -> None:
+        await turn.cancel()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        await turn.steer_exact("input", expected_turn_id="native")  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+    def unsupported_interaction_methods(form: FormRequest, url: UrlRequest) -> None:
+        form.reply_url_accept()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        url.reply({"answer": "not a form"})  # pyright: ignore[reportArgumentType]

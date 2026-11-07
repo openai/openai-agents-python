@@ -19,7 +19,6 @@ from _agents_codex.history import (
     Any as Any,
     Failure as Failure,
     Literal as Literal,
-    ModelContext as ModelContext,
     NotRequired as NotRequired,
     ReceivedInputTokensDetails as ReceivedInputTokensDetails,
     ReceivedOutputTokensDetails as ReceivedOutputTokensDetails,
@@ -29,5 +28,4 @@ from _agents_codex.history import (
     TokenUsage as TokenUsage,
     TurnReceipt as TurnReceipt,
     TypedDict as TypedDict,
-    dataclass as dataclass,
 )

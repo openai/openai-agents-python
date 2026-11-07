@@ -33,8 +33,8 @@ async def test_omitted_reasoning_uses_sdk_catalog_defaults(
     async with timeout(30), provider_for(responses) as provider:
         result = await Agent(model=model, instructions="Answer.", provider=provider).run("one")
     assert result.final_output == "finished"
-    assert result.usage is not None
-    assert result.usage.model_context_window == 258_400
+    assert result.thread_usage is not None
+    assert result.thread_usage.model_context_window == 258_400
     assert len(responses.requests) == 1
     assert responses.requests[0]["model"] == model
     assert responses.requests[0]["reasoning"]["effort"] == "medium"
@@ -53,7 +53,7 @@ async def test_astra_explicit_effort_overrides_catalog_default(
             model_settings={"reasoning_effort": effort},
         ).run("one")
     assert result.final_output == "finished"
-    assert result.usage is not None and result.usage.model_context_window == 258_400
+    assert result.thread_usage is not None and result.thread_usage.model_context_window == 258_400
     assert len(responses.requests) == 1
     assert responses.requests[0]["reasoning"]["effort"] == effort
 
@@ -106,8 +106,8 @@ async def test_omitted_reasoning_reselects_default_after_model_change(
                 await session.update(model=model)
                 result = await (await session.submit("selected model")).get_result()
                 assert result.final_output == "finished"
-                assert result.usage is not None
-                assert result.usage.model_context_window == (
+                assert result.thread_usage is not None
+                assert result.thread_usage.model_context_window == (
                     None if model == UNKNOWN_MODEL else 258_400
                 )
                 assert responses.requests[index]["model"] == model

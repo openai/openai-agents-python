@@ -106,7 +106,7 @@ async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonic
     control = await OrdinaryControl(instructions="Answer directly.", provider=provider).run("input")
     ordinary = [event async for event in control.turn.events()]
     assert completed.final_output == control.final_output
-    assert completed.usage == control.usage
+    assert completed.thread_usage == control.thread_usage
     metadata_types = (ModelRequestDispatching, ModelResponseLinked)
     for events, result, readers in (
         (retained, completed, probes[:start]),

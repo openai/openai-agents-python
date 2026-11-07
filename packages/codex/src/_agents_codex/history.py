@@ -15,7 +15,6 @@ preview before retention. A call interrupted before Core records a completion
 may have no item.
 """
 
-from dataclasses import dataclass as dataclass
 from typing import Any as Any, Literal as Literal
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
@@ -23,17 +22,6 @@ from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 from ._events import Failure as Failure, TokenUsage as TokenUsage
 from ._public import preserve_module_identity as _preserve_module_identity
 from .turn_receipt import TurnReceipt as TurnReceipt
-
-
-@dataclass(frozen=True)
-class ModelContext:
-    """A record of model-history items and a revision label.
-
-    Current Session APIs do not return this type.
-    """
-
-    revision: str
-    items: tuple[dict[str, Any], ...]
 
 
 class ReceivedInputTokensDetails(TypedDict, total=False):

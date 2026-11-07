@@ -4,11 +4,11 @@ Read token usage from completed results and configure telemetry to trace work ac
 
 ## Read usage without double counting
 
-After a successful [one-shot run or Turn](concepts.md), inspect the optional `Completed.usage` snapshot. This fragment assumes `result` is the `Completed` value returned by `await agent.run(...)` or `await turn.get_result()`:
+After a successful [one-shot run or Turn](concepts.md), inspect the optional `Completed.thread_usage` snapshot. This fragment assumes `result` is the `Completed` value returned by `await agent.run(...)` or `await turn.get_result()`:
 
 ```python
 # result is the Completed value returned by agent.run() or turn.get_result().
-usage = result.usage
+usage = result.thread_usage
 if usage is None:
     print("No usage was reported.")
 else:

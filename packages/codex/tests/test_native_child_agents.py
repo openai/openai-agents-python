@@ -257,8 +257,8 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             root = await session.submit("Use two children")
             await asyncio.gather(*(event.wait() for event in peer.entered.values()))
             root_result = await (root).get_result()
-            assert root_result.usage is not None
-            assert root_result.usage.total_token_usage.total_tokens == 216
+            assert root_result.thread_usage is not None
+            assert root_result.thread_usage.total_token_usage.total_tokens == 216
             by_id = {handle.child_id: handle for handle in await handles(session, 2)}
             alpha = by_id[peer.child_metadata["alpha"][0]["thread_id"]]
             beta = by_id[peer.child_metadata["beta"][0]["thread_id"]]
@@ -267,14 +267,14 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             first, other = await asyncio.gather((alpha).get_result(), (beta).get_result())
             assert first.turn is alpha and other.turn is beta
             assert first.final_output == "alpha complete" and other.final_output == "beta complete"
-            assert first.usage is not None and other.usage is not None
-            assert first.usage.total_token_usage.total_tokens == 20
-            assert first.usage.last_token_usage.total_tokens == 10
-            assert first.usage.total_token_usage.cached_input_tokens == 4
-            assert first.usage.total_token_usage.reasoning_output_tokens == 2
-            assert other.usage.total_token_usage.total_tokens == 44
-            assert other.usage.last_token_usage.total_tokens == 22
-            assert (await (root).get_result()).usage == root_result.usage
+            assert first.thread_usage is not None and other.thread_usage is not None
+            assert first.thread_usage.total_token_usage.total_tokens == 20
+            assert first.thread_usage.last_token_usage.total_tokens == 10
+            assert first.thread_usage.total_token_usage.cached_input_tokens == 4
+            assert first.thread_usage.total_token_usage.reasoning_output_tokens == 2
+            assert other.thread_usage.total_token_usage.total_tokens == 44
+            assert other.thread_usage.last_token_usage.total_tokens == 22
+            assert (await (root).get_result()).thread_usage == root_result.thread_usage
 
             counts["/root/alpha"] = (23, 7, 3, 2)
             peer.entered["alpha"].clear()
@@ -295,11 +295,11 @@ async def test_child_usage_is_retained_per_exact_turn_and_thread(
             peer.release["alpha"].set()
             later = await (current).get_result()
             assert len(peer.child_requests["alpha"]) == 3
-            assert later.usage is not None
-            assert later.usage.total_token_usage.total_tokens == 50
-            assert later.usage.last_token_usage.total_tokens == 30
-            assert later.usage.total_token_usage.cached_input_tokens == 7
-            assert later.usage.total_token_usage.reasoning_output_tokens == 4
+            assert later.thread_usage is not None
+            assert later.thread_usage.total_token_usage.total_tokens == 50
+            assert later.thread_usage.last_token_usage.total_tokens == 30
+            assert later.thread_usage.total_token_usage.cached_input_tokens == 7
+            assert later.thread_usage.total_token_usage.reasoning_output_tokens == 4
             assert await (alpha).get_result() == first
         assert await (alpha).get_result() == first
         assert await (beta).get_result() == other
@@ -325,9 +325,9 @@ async def test_child_missing_usage_remains_none(
             result = await (child).get_result()
             assert result.turn is child
             assert result.final_output == "alpha complete"
-            assert result.usage is None
-            assert root.usage is not None
-        assert (await (child).get_result()).usage is None
+            assert result.thread_usage is None
+            assert root.thread_usage is not None
+        assert (await (child).get_result()).thread_usage is None
 
 
 def assert_catalog(request: dict[str, Any]) -> None:

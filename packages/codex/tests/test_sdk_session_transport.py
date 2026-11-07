@@ -150,8 +150,8 @@ async def test_agent_fresh_public_runs_keep_history_isolated_and_close_http(
             peer.respond(assistant_output("BENCHMARK_OK"))
             result = await agent.run(f"isolated-input-{index}")
             assert result.final_output == "BENCHMARK_OK"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == (28 if use_tool else 14)
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == (28 if use_tool else 14)
             roots.append(result.turn.session_id)
             first = peer.requests[-2 if use_tool else -1]
             assert f"isolated-input-{index}" in json.dumps(first["input"])
@@ -220,9 +220,9 @@ async def test_shared_provider_keeps_fresh_agents_and_model_catalogs_independent
             (second, 28, 258_400),
             (third, 14, None),
         ):
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == tokens
-            assert result.usage.model_context_window == context_window
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == tokens
+            assert result.thread_usage.model_context_window == context_window
         assert effects == ["alpha:apple", "beta:pear"]
         assert len(peer.requests) == peer.finished_bodies == 5
         assert tool_output(peer.requests[1], "shared-provider-call") == "first:apple"
@@ -318,8 +318,8 @@ async def test_shared_provider_cancelled_session_does_not_stop_independent_sibli
                 second_release.set()
                 result = await waiting
                 assert result.final_output == "sibling complete"
-                assert result.usage is not None
-                assert result.usage.total_token_usage.total_tokens == 28
+                assert result.thread_usage is not None
+                assert result.thread_usage.total_token_usage.total_tokens == 28
                 assert tool_output(peer.requests[2], "same-call") == "independent result"
                 assert "first private input" not in json.dumps(peer.requests[2]["input"])
                 assert application_texts(peer.requests[2]) == ["Only second."]
@@ -406,8 +406,8 @@ async def test_saved_lightweight_history_restores_core_with_accepted_settings() 
             assert [entry async for entry in restored.turns()] == before_turns
             result = await (await restored.submit("what label?")).get_result()
             assert result.final_output == "restored"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 28
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 28
         assert len(peer.requests) == 2
         request = peer.requests[1]
         assert request["model"] == "gpt-5.2-codex"
@@ -682,11 +682,11 @@ async def test_reported_usage_promotes_before_followup_without_replaying_tool() 
             assert result.final_output == "after required compaction"
             observed = [event async for event in events]
             assert any(isinstance(event, ContextCompacted) for event in observed)
-            assert result.usage is not None
+            assert result.thread_usage is not None
             # gpt-5.2 has no catalog limit. Core still compacts with its
             # operating fallback without reporting that fallback as known.
-            assert result.usage.model_context_window is None
-            assert result.usage.total_token_usage.total_tokens >= 250_000
+            assert result.thread_usage.model_context_window is None
+            assert result.thread_usage.total_token_usage.total_tokens >= 250_000
             saved = await session.save_state()
             assert any(record["type"] == "compacted" for record in saved.history)
         assert effects == ["called"]
@@ -713,8 +713,8 @@ async def test_provider_nonterminal_response_continues_the_same_public_turn() ->
             result = await (handle).get_result()
             assert result.final_output == "final response"
             assert result.turn is handle
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 28
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 28
             turns = [entry async for entry in session.turns()]
             assert len(turns) == 1
             assert turns[0]["id"] == handle.turn_id
@@ -949,10 +949,10 @@ async def test_large_text_completion_preserves_content_and_joins_provider_cleanu
         try:
             result = await agent.run("Return the complete large text.")
             assert result.final_output == expected
-            assert result.usage is not None
-            assert result.usage.total_token_usage.input_tokens == 11
-            assert result.usage.total_token_usage.output_tokens == 3
-            assert result.usage.total_token_usage.total_tokens == 14
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.input_tokens == 11
+            assert result.thread_usage.total_token_usage.output_tokens == 3
+            assert result.thread_usage.total_token_usage.total_tokens == 14
             assert len(peer.requests) == peer.finished_bodies == 1
             assert peer.disconnected_bodies == 0
         finally:
@@ -1014,8 +1014,8 @@ async def test_partial_sse_eof_retries_with_accepted_tools_and_no_duplicate_usag
         async with agent.session() as session:
             result = await (await session.submit("look up once")).get_result()
             assert result.final_output == "retry succeeded"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 14
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 14
             saved = await session.save_state()
             outputs = [
                 row["payload"]
@@ -1108,8 +1108,8 @@ async def test_content_filter_retry_preserves_guidance_and_already_streamed_tool
         async with agent.session() as session:
             result = await (await session.submit("answer safely")).get_result()
             assert result.final_output == "safe retry"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 14
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 14
             saved = await session.save_state()
             guidance = [
                 row["payload"]
@@ -1181,10 +1181,10 @@ async def test_same_agent_model_switch_refreshes_catalog_metadata_and_closes_tra
             peer.respond(assistant_output(expected))
             result = await agent.run(f"model-input-{index}")
             assert result.final_output == expected
-            assert result.usage is not None
-            assert result.usage.model_context_window == context_window
-            assert result.usage.total_token_usage.total_tokens == 14
-            assert result.usage.last_token_usage.total_tokens == 14
+            assert result.thread_usage is not None
+            assert result.thread_usage.model_context_window == context_window
+            assert result.thread_usage.total_token_usage.total_tokens == 14
+            assert result.thread_usage.last_token_usage.total_tokens == 14
             roots.append(result.turn.session_id)
             request = peer.requests[index]
             assert request["model"] == model
@@ -1331,8 +1331,8 @@ async def test_default_model_uses_lite_wire_and_preserves_stream_usage_and_histo
                 )
                 == "visible answer"
             )
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == (28 if use_tool else 14)
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == (28 if use_tool else 14)
             saved = await session.save_state()
         assert calls == (["once"] if use_tool else [])
         assert len(peer.requests) == (2 if use_tool else 1)
@@ -1476,8 +1476,8 @@ async def test_provider_and_agent_changes_keep_live_sessions_isolated() -> None:
                         peer.respond(assistant_output(prompt))
                         result = await (await session.submit(prompt)).get_result()
                         assert result.final_output == prompt
-                        assert result.usage is not None
-                        assert result.usage.total_token_usage.total_tokens == 14
+                        assert result.thread_usage is not None
+                        assert result.thread_usage.total_token_usage.total_tokens == 14
                         request = peer.requests[-1]
                         assert request["model"] == model
                         assert request["reasoning"]["effort"] == effort

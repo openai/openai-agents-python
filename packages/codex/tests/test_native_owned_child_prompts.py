@@ -123,7 +123,7 @@ async def test_owned_child_approvals_use_equal_call_ids_without_sibling_authorit
 @pytest.mark.parametrize(
     "method", ["elicitation/create", "openai/form", "openai/elicitation/create"]
 )
-@pytest.mark.parametrize("approval_mode", ["approve", "auto"])
+@pytest.mark.parametrize("approval_mode", ["preapproved", "native"])
 async def test_owned_child_http_form_reaches_original_turn_and_continues(
     tmp_path, monkeypatch, method, approval_mode
 ):
@@ -186,7 +186,7 @@ async def test_owned_child_http_form_reaches_original_turn_and_continues(
                 release.set()
             async with aclosing(session.interactions()) as cursor:
                 request = await anext(cursor)
-            if approval_mode == "auto":
+            if approval_mode == "native":
                 assert isinstance(request, ApprovalRequest)
                 await request.respond("allow_once")
                 async with aclosing(session.interactions()) as cursor:
@@ -452,7 +452,7 @@ async def test_uncached_required_child_startup_fails_before_turn_publication(
             app,
             tools=[
                 *app.tools,
-                HttpMCP(name="vault", url=url, tools=["search"], approval_mode="approve"),
+                HttpMCP(name="vault", url=url, tools=["search"], approval_mode="preapproved"),
             ],
         )
         async with app.session(environment=declaration(executor)) as session:
