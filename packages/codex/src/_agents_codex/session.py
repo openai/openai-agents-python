@@ -8876,6 +8876,16 @@ class Session(Generic[ContextT, OutputT]):
         loop until this obligation completes.
         """
         if self._closed and self._environment_lease is None:
+            if self._scope_close_task is None and self._close_task is not None:
+                # Early native retirement may finish all resources yet report a
+                # cleanup failure. Its first enclosing scope must still observe
+                # that outcome; later retries have no remaining obligation.
+                self._scope_close_task = self._close_task
+                await _join(self._close_task)
+                if self._interaction_error is not None:
+                    raise self._interaction_error
+            elif self._scope_close_task is not None and not self._scope_close_task.done():
+                await _join(self._scope_close_task)
             return
         if asyncio.get_running_loop() is not self._loop:
             owner = self._sync_cleanup_owner

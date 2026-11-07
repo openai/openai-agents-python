@@ -56,7 +56,7 @@ def test_form_reply_uses_complete_schema_and_captures_detached_json() -> None:
     assert not hasattr(UrlRequest, "respond")
 
 
-async def cleanup_session(events):
+async def cleanup_session(events, *, managed_environment=True):
     @asynccontextmanager
     async def environment():
         task = asyncio.current_task()
@@ -67,8 +67,9 @@ async def cleanup_session(events):
             events.append(("exit", asyncio.current_task()))
             assert asyncio.current_task() is task
 
-    lease = _EnvironmentLease(environment())
-    await lease.acquire()
+    lease = _EnvironmentLease(environment()) if managed_environment else None
+    if lease is not None:
+        await lease.acquire()
     session = object.__new__(Session)
     session._loop = asyncio.get_running_loop()
     session._close_task = None
@@ -206,3 +207,25 @@ def test_run_sync_exposes_cleanup_after_scope_exit_failure(monkeypatch) -> None:
     asyncio.run(cleanup.aclose())
     assert owner.loop.is_closed()
     assert [event[0] for event in events] == ["enter", "native", "exit", "provider"]
+
+
+async def test_first_scope_exit_observes_failed_early_native_close() -> None:
+    events = []
+    session = await cleanup_session(events, managed_environment=False)
+    cleanup_error = OSError("native retirement reported failure after closing")
+
+    async def fail_after_retirement():
+        session._resources_retired = True
+        events.append(("native", None))
+        raise cleanup_error
+
+    session._close_session = fail_after_retirement
+    with pytest.raises(OSError) as early:
+        await session._aclose()
+    assert early.value is cleanup_error
+    assert session._closed
+    with pytest.raises(OSError) as scope:
+        await session.aclose()
+    assert scope.value is cleanup_error
+    await session.aclose()
+    assert [event[0] for event in events] == ["native", "provider"]
