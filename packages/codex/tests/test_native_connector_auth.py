@@ -393,8 +393,8 @@ async def test_backend_auth_errors_do_not_fallback_or_forward_credentials(
         )
 
 
-@pytest.mark.parametrize("retirement", ["timeout", "close", "refresh"])
-async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
+@pytest.mark.parametrize("retirement", ["timeout", "cancel", "close", "refresh"])
+async def test_raw_auth_completion_respects_observer_and_retirement_boundaries(
     responses, monkeypatch, retirement
 ):
     peer = ConnectorBackend()
@@ -412,6 +412,10 @@ async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
             if retirement == "timeout":
                 with pytest.raises(TimeoutError):
                     await question.wait_url_completion(timeout=0.05)
+                assert not peer.authorization_complete
+                assert len(peer.calls) == 1
+            elif retirement == "cancel":
+                await question.cancel_url_completion()
             elif retirement == "close":
                 await session.cancel_all()
             else:
@@ -419,7 +423,7 @@ async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
                 with pytest.raises(RuntimeError, match="unsupported for replaceable tool sessions"):
                     await session._native.call("refresh_mcp_servers", "{}")
             peer.complete.set()
-            if retirement == "refresh":
+            if retirement in {"timeout", "refresh"}:
                 await question.wait_url_completion(timeout=3)
                 assert peer.authorization_complete
                 assert len(peer.init_requests) == 1 and len(peer.calls) == 1
