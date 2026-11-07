@@ -47,9 +47,11 @@ from ..classic.items import (
     TResponseOutputItem,
     TResponseStreamEvent,
 )
-from ..classic.model_settings import ModelSettings
+from ..classic.model_settings import ModelSettings, _coerce_model_settings
 from ..classic.models.interface import Model, ModelProvider, ModelTracing
+from ..classic.run_config import RunConfig
 from ..classic.run_context import RunContextWrapper
+from ..classic.run_internal.turn_preparation import _model_settings_for_resolved_name
 from ..classic.tool import FunctionTool as ClassicFunctionTool, ToolOriginType
 from ..classic.tool_context import ToolContext as ClassicToolContext
 from ..classic.usage import (
@@ -70,6 +72,22 @@ ContextT = TypeVar("ContextT")
 
 def _unsupported(feature: str) -> UserError:
     return UserError(f"SDKRunner does not support {feature}; use agents.classic.Runner instead")
+
+
+def _validate_model_settings(settings: ModelSettings) -> None:
+    for name in (
+        "retry",
+        "timeout",
+        "context_management",
+        "extra_query",
+        "extra_body",
+        "extra_headers",
+        "extra_args",
+    ):
+        if getattr(settings, name) is not None:
+            raise _unsupported(f"model_settings.{name}")
+    if settings.tool_choice not in (None, "auto"):
+        raise _unsupported("model_settings.tool_choice")
 
 
 def _check_loopback_route(environment: Mapping[str, str], platform: str, os_name: str) -> None:
@@ -107,7 +125,7 @@ def _capture_agent(
     *,
     has_approval_callback: bool,
     model_override: Model | str | None,
-    settings_override: ModelSettings | None,
+    settings_override: ModelSettings | dict[str, Any] | None,
 ) -> tuple[str, str | None, Model | str, ModelSettings, list[ClassicFunctionTool]]:
     if type(agent) is not classic.Agent:
         raise _unsupported("agent subclasses")
@@ -136,22 +154,17 @@ def _capture_agent(
         raise UserError("SDKRunner requires model_provider for a model name")
     if isinstance(model, Model) and provider is not None:
         raise UserError("SDKRunner model_provider applies only to a model name")
-    if settings_override is not None and not isinstance(settings_override, ModelSettings):
-        raise TypeError("SDKRunner model_settings must be ModelSettings or None")
-    settings = deepcopy(agent.model_settings.resolve(settings_override))
-    for name in (
-        "retry",
-        "timeout",
-        "context_management",
-        "extra_query",
-        "extra_body",
-        "extra_headers",
-        "extra_args",
-    ):
-        if getattr(settings, name) is not None:
-            raise _unsupported(f"model_settings.{name}")
-    if settings.tool_choice not in (None, "auto"):
-        raise _unsupported("model_settings.tool_choice")
+    if settings_override is not None:
+        settings_override = _coerce_model_settings(
+            settings_override, parameter_name="SDKRunner model_settings"
+        )
+    # Validate caller settings before lookup. Implicit defaults depend on the
+    # selected/resolved Model and are filled in after lookup, as in Classic.
+    base_settings = (
+        ModelSettings() if agent._uses_implicit_model_settings() else agent.model_settings
+    )
+    settings = deepcopy(base_settings.resolve(settings_override))
+    _validate_model_settings(settings)
     tools: list[ClassicFunctionTool] = []
     names: set[str] = set()
     for tool in agent.tools:
@@ -397,37 +410,26 @@ async def _stream_response(
             async for event in stream:
                 if not carrier.active:
                     raise asyncio.CancelledError
-                if completed is not None:
-                    raise ModelBehaviorError("SDKRunner received an event after response.completed")
                 serialized_bytes += len(
                     json.dumps(event.model_dump(mode="json"), allow_nan=False).encode()
                 )
                 if serialized_bytes > 4 * 1024 * 1024:
                     raise UserError("SDKRunner's model stream exceeds 4 MiB")
-                if event.type in {
-                    "response.failed",
-                    "response.incomplete",
-                    "error",
-                    "response.error",
-                }:
-                    raise ModelBehaviorError(
-                        "SDKRunner requires a successful completed model stream"
-                    )
                 if isinstance(event, ResponseOutputItemDoneEvent):
                     output_items.append(deepcopy(event.item))
                 if event.type == "response.completed":
                     if (
                         not isinstance(event, ResponseCompletedEvent)
-                        or event.response.status != "completed"
+                        or event.response.status not in (None, "completed")
                         or event.response.error is not None
                         or event.response.incomplete_details is not None
                     ):
                         raise ModelBehaviorError("SDKRunner requires a valid response.completed")
                     # Neither an observer nor a producer reusing event objects can
-                    # edit the response accepted after EOF and iterator cleanup.
+                    # edit the response accepted after iterator cleanup.
                     completed = deepcopy(event)
-                    # The next iterator step may already run an awaiting
-                    # generator finalizer while draining toward EOF.
+                    # Completion ends consumption. Only same-owner cleanup may
+                    # await after this event; never request a remote tail/EOF.
                     settling = True
                 if observer is not None:
                     if not carrier.active:
@@ -439,6 +441,17 @@ async def _stream_response(
                         if inspect.iscoroutine(observed):
                             observed.close()
                         raise TypeError("SDKRunner on_model_event must be synchronous")
+                if event.type in {
+                    "response.failed",
+                    "response.incomplete",
+                    "error",
+                    "response.error",
+                }:
+                    raise ModelBehaviorError(
+                        "SDKRunner requires a successful completed model stream"
+                    )
+                if completed is not None:
+                    break
             if completed is None:
                 raise ModelBehaviorError("SDKRunner model stream ended without response.completed")
         except BaseException as error:
@@ -476,7 +489,7 @@ async def _stream_response(
 
     # Generator finalizers may reset ContextVar tokens or exit task-bound
     # scopes. Keep acquisition, iteration and close in one task. Once a terminal
-    # is accepted or closing starts, protect settlement through EOF and aclose.
+    # is accepted or closing starts, protect settlement through aclose.
     owner = asyncio.create_task(consume())
     try:
         return await asyncio.shield(owner)
@@ -511,7 +524,7 @@ class SDKRunner:
         | None = None,
         session: classic.Session | None = None,
         model: Model | str | None = None,
-        model_settings: ModelSettings | None = None,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
         model_invocation: Literal["response", "stream"] = "response",
         on_model_event: Callable[[TResponseStreamEvent], None] | None = None,
     ) -> SDKRunResult[ContextT]:
@@ -585,6 +598,7 @@ class SDKRunner:
             model_override=model,
             settings_override=model_settings,
         )
+        implicit_settings = starting_agent._uses_implicit_model_settings()
         _check_loopback_route(os.environ, sys.platform, os.name)
         usage = Usage()
         run_context = RunContextWrapper(context=context, usage=usage)
@@ -601,6 +615,13 @@ class SDKRunner:
         )
         if not isinstance(selected_model, Model):
             raise TypeError("model_provider.get_model must return a Classic Model")
+        if implicit_settings:
+            settings = deepcopy(
+                _model_settings_for_resolved_name(
+                    starting_agent, RunConfig(model=selected), selected_model
+                ).resolve(settings)
+            )
+        _validate_model_settings(settings)
         effective_input = input if classic_input is None else classic_input
         projection = _ResultProjection(starting_agent, run_context, effective_input, tools=tools)
         current_calls: dict[str, ResponseFunctionToolCall] = {}
@@ -778,7 +799,7 @@ class SDKRunner:
         | None = None,
         session: classic.Session | None = None,
         model: Model | str | None = None,
-        model_settings: ModelSettings | None = None,
+        model_settings: ModelSettings | dict[str, Any] | None = None,
         model_invocation: Literal["response", "stream"] = "response",
         on_model_event: Callable[[TResponseStreamEvent], None] | None = None,
     ) -> SDKRunResultStreaming[ContextT]:

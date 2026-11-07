@@ -59,7 +59,9 @@ finally:
     await provider.aclose()
 ```
 
-A per-run `model_settings` value overrides the Agent settings through Classic `ModelSettings.resolve`. The adapter validates the effective settings before provider lookup. The adapter does not choose a provider or change your model credentials. It borrows the Model and ModelProvider. Your application remains responsible for their resources, including any client you supply.
+Pass a `ModelSettings` object or dictionary as `model_settings` to override the Agent settings through Classic `ModelSettings.resolve`. If the Agent still uses implicit settings, defaults follow the selected model. Explicit settings and application edits are preserved before applying the run override. The adapter validates supplied settings before provider lookup and effective settings before model execution.
+
+The adapter does not choose a provider or change your model credentials. It borrows the Model and ModelProvider. Your application remains responsible for their resources, including any client you supply.
 
 Run the [complete scripted example](examples/codex/migration.py) from the matching source tree:
 
@@ -262,9 +264,11 @@ If the run fails or is cancelled, `stream_events()` raises before yielding any e
 
 Pass `model_invocation="stream"` to `SDKRunner.run()` or `SDKRunner.run_streamed()`. The adapter calls the selected Model's `stream_response` method. It does not switch providers or fall back to `get_response` if streaming fails. The default remains `model_invocation="response"`, including for `run_streamed()`.
 
-An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `stream_events()`.
+An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive, including failure events. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `stream_events()`.
 
-The Model stream must end normally after exactly one successful `response.completed` event. The adapter rejects failed or incomplete responses, a stream without a completed response, and events after completion. It closes the stream iterator before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. Cancellation joins iterator cleanup. After a successful completion event, it also waits for the stream to end normally. A Model that suppresses cancellation or does not finish after completion can delay the run's cancellation. The application still owns the Model and provider.
+The first successful `response.completed` event ends consumption. Its response can omit `status` or set it to `completed`; explicit failure states or error details are rejected. The adapter also rejects a stream that ends without a completed response. It awaits the iterator's `aclose`, when available, before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. The adapter does not read trailing events or wait for transport EOF.
+
+Cancellation joins iterator cleanup. Put resource cleanup in `finally` or `aclose`; ordinary code after the terminal yield may not run. A Model that suppresses cancellation or whose cleanup does not finish can delay the run's cancellation. The application still owns the Model and provider.
 
 The [application Model example](examples/codex/migration_models.py) uses a named ModelProvider, a per-run model selection, and a real native tool loop without external model requests:
 

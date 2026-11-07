@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from contextvars import ContextVar
 from typing import Any, Literal
 
@@ -378,13 +379,14 @@ async def test_live_delta_is_detached_and_precedes_terminal_and_buffered_result(
     "bad",
     [
         "missing",
-        "duplicate",
-        "after",
         "failed",
         "incomplete",
         "error",
         "status",
-        "eof_error",
+        "failed_status",
+        "terminal_error",
+        "terminal_incomplete_details",
+        "preterminal_error",
         "close_error",
         "unsupported",
         "oversized",
@@ -400,18 +402,26 @@ async def test_invalid_stream_never_dispatches_terminal_tools(bad: str) -> None:
 
     final = await terminal(tools=True)
     events: list[Any] = [final]
-    if bad == "missing":
+    if bad in {"missing", "preterminal_error"}:
         events = [delta()]
-    elif bad == "duplicate":
-        events.append(final)
-    elif bad == "after":
-        events.append(delta())
     elif bad in {"failed", "incomplete", "error"}:
         events = [
             final.model_copy(update={"type": "error" if bad == "error" else f"response.{bad}"})
         ]
     elif bad == "status":
         final.response.status = "incomplete"
+    elif bad == "failed_status":
+        final.response.status = "failed"
+    elif bad == "terminal_error":
+        from openai.types.responses import ResponseError
+
+        final.response.status = None
+        final.response.error = ResponseError(code="server_error", message="provider failure")
+    elif bad == "terminal_incomplete_details":
+        from openai.types.responses.response import IncompleteDetails
+
+        final.response.status = None
+        final.response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
     elif bad == "unsupported":
         final.response.output = [assistant_message("no")]
         final.response.output[0] = final.response.output[0].model_copy(
@@ -427,8 +437,8 @@ async def test_invalid_stream_never_dispatches_terminal_tools(bad: str) -> None:
             try:
                 for event in self.events:
                     yield event
-                if bad == "eof_error":
-                    raise RuntimeError("EOF failure")
+                if bad == "preterminal_error":
+                    raise RuntimeError("preterminal failure")
             finally:
                 self.closed.set()
 
@@ -455,7 +465,7 @@ async def test_cancellation_joins_next_and_close_and_discards_late_events(hold: 
         )
     )
     try:
-        await asyncio.wait_for(model.entered.wait(), 15)
+        await asyncio.wait_for((model.entered if hold == "next" else model.closing).wait(), 15)
         task.cancel()
         if hold == "close":
             await asyncio.wait_for(model.closing.wait(), 15)
@@ -527,8 +537,7 @@ async def test_context_bound_factory_and_generator_cleanup_on_error(
                 tasks.append(asyncio.current_task())
                 token = marker.set("iterating")
                 try:
-                    yield final
-                    yield delta()  # Invalid after the terminal, before native effects.
+                    yield final if failure == "observer" else delta("x" * (4 * 1024 * 1024))
                 finally:
                     tasks.append(asyncio.current_task())
                     marker.reset(token)
@@ -545,7 +554,7 @@ async def test_context_bound_factory_and_generator_cleanup_on_error(
             raise observer_error
 
     model = ContextBoundModel()
-    expected = RuntimeError if failure == "observer" else ModelBehaviorError
+    expected = RuntimeError if failure == "observer" else UserError
     with pytest.raises(expected) as raised:
         await SDKRunner.run(
             Agent("Context", model=model, tools=[effect]),
@@ -559,7 +568,7 @@ async def test_context_bound_factory_and_generator_cleanup_on_error(
     if failure == "observer":
         assert raised.value is observer_error
     else:
-        assert "after response.completed" in str(raised.value)
+        assert "model stream exceeds 4 MiB" in str(raised.value)
     chain: list[BaseException] = []
     error: BaseException | None = raised.value
     while error is not None and error not in chain:
@@ -635,7 +644,7 @@ async def test_context_bound_generator_cleanup_survives_repeated_cancellation(ph
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_cancellation_joins_natural_finalization_after_completed_terminal() -> None:
+async def test_cancellation_joins_explicit_close_after_completed_terminal() -> None:
     marker = ContextVar("stream-terminal-context", default="outside")
     closing, release = asyncio.Event(), asyncio.Event()
     released: list[str] = []
@@ -672,8 +681,8 @@ async def test_cancellation_joins_natural_finalization_after_completed_terminal(
         )
     )
     try:
-        # The completed event was accepted. The next iterator step is now
-        # awaiting natural generator finalization, before it can report EOF.
+        # The completed event was accepted. Direct aclose now awaits the
+        # generator finalizer without reading any post-terminal event.
         await asyncio.wait_for(closing.wait(), 15)
         task.cancel("original cancellation")
         await asyncio.sleep(0.05)
@@ -720,3 +729,342 @@ async def test_native_idle_resume_uses_current_override_and_settings(responses: 
     assert current.calls[0].streamed and current.calls[0].model_settings.temperature == 0.1
     assert "first" in str(current.calls[0].input)
     assert responses.requests == []
+
+
+@pytest.mark.parametrize("selection", ["plain", "direct", "qualified", "explicit", "mutated"])
+async def test_effective_defaults_follow_selection_and_preserve_explicit_settings(
+    selection: str,
+) -> None:
+    class DefaultsModel(ScriptedModel):
+        def get_default_model_settings(self) -> ModelSettings:
+            assert selection == "qualified", "Only qualified selection consults model defaults"
+            return ModelSettings(temperature=0.6, max_tokens=23)
+
+    selected = DefaultsModel([[assistant_message("selected")]])
+    provider = SelectedProvider(selected)
+    agent = Agent("Defaults", model="gpt-5")
+    if selection == "explicit":
+        agent.model_settings = ModelSettings(temperature=0.7, max_tokens=19)
+    elif selection == "mutated":
+        agent.model_settings.max_tokens = 17
+    options: dict[str, Any] = {
+        "model": "qualified/model" if selection == "qualified" else "gpt-5-chat-latest",
+        "model_provider": provider,
+    }
+    if selection == "direct":
+        options = {"model": selected}
+    if selection in {"explicit", "mutated", "qualified"}:
+        options["model_settings"] = ModelSettings(temperature=0.2)
+    result = await SDKRunner.run(agent, "hello", **options)
+    assert result.final_output == "selected"
+    settings = selected.calls[0].model_settings
+    if selection in {"plain", "direct"}:
+        assert settings.reasoning is None and settings.verbosity is None
+    elif selection == "qualified":
+        assert settings.max_tokens == 23 and settings.temperature == 0.2
+    elif selection == "explicit":
+        assert settings.max_tokens == 19 and settings.temperature == 0.2
+    else:
+        assert settings.max_tokens == 17 and settings.temperature == 0.2
+        assert settings.reasoning is not None and settings.reasoning.effort == "low"
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+async def test_dictionary_override_normalizes_and_preserves_agent_precedence(
+    buffered: bool,
+) -> None:
+    selected = ScriptedModel([[assistant_message("dict")]])
+    agent = Agent(
+        "Dictionary", model=selected, model_settings=ModelSettings(max_tokens=29, temperature=0.8)
+    )
+    override = {"temperature": 0.2, "reasoning": {"effort": "low"}}
+    if buffered:
+        result = await SDKRunner.run_streamed(
+            agent, "hello", model_settings=override, model_invocation="stream"
+        ).get_result()
+    else:
+        result = await SDKRunner.run(agent, "hello", model_settings=override)
+    assert result.final_output == "dict"
+    settings = selected.calls[0].model_settings
+    assert settings.temperature == 0.2 and settings.max_tokens == 29
+    assert settings.reasoning is not None and settings.reasoning.effort == "low"
+    assert agent.model_settings.temperature == 0.8 and override["temperature"] == 0.2
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"unknown": 1},
+        {"temperature": "hot"},
+        {"reasoning": {"effort": []}},
+        {"extra_body": {"x": 1}},
+    ],
+)
+async def test_invalid_dictionary_settings_reject_before_provider_lookup(
+    settings: dict[str, Any],
+) -> None:
+    selected = ScriptedModel([[assistant_message("unused")]])
+    provider = SelectedProvider(selected)
+    with pytest.raises((TypeError, ValueError, UserError)):
+        await SDKRunner.run(
+            Agent("Invalid dictionary", model="gpt-5"),
+            "hello",
+            model_provider=provider,
+            model_settings=settings,
+        )
+    assert provider.names == [] and selected.calls == ()
+
+
+async def test_resolved_model_defaults_are_validated_before_execution() -> None:
+    class InvalidDefaults(ScriptedModel):
+        def get_default_model_settings(self) -> ModelSettings:
+            return ModelSettings(extra_body={"unsupported": True})
+
+    selected = InvalidDefaults([[assistant_message("unused")]])
+    provider = SelectedProvider(selected)
+    with pytest.raises(UserError, match="extra_body"):
+        await SDKRunner.run(
+            Agent("Invalid defaults", model="qualified/model"), "hello", model_provider=provider
+        )
+    assert provider.names == ["qualified/model"] and selected.calls == ()
+
+
+@pytest.mark.parametrize("provenance", [False, True])
+async def test_chat_handler_completed_without_status_uses_native_text_path(
+    provenance: bool,
+) -> None:
+    from openai.types.chat import ChatCompletionChunk
+    from openai.types.responses import Response
+
+    from agents.classic.models.chatcmpl_stream_handler import ChatCmplStreamHandler
+
+    template = Response(
+        id="chat-normalized",
+        created_at=0,
+        model="",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=False,
+    )
+
+    async def chunks() -> AsyncIterator[ChatCompletionChunk]:
+        # Empty optional provenance tests supported normalized output. The
+        # populated variant retains provider_data rejection, without claiming
+        # support for an AnyLLM/LiteLLM integration.
+        yield ChatCompletionChunk.model_validate(
+            {
+                "id": "upstream-id" if provenance else "",
+                "model": "upstream-model" if provenance else "",
+                "created": 0,
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"content": "chat answer"}, "finish_reason": "stop"}
+                ],
+            }
+        )
+
+    class ChatModel(BorrowedModel):
+        async def stream_response(
+            self, *args: Any, **kwargs: Any
+        ) -> AsyncIterator[TResponseStreamEvent]:
+            async with aclosing(
+                ChatCmplStreamHandler.handle_stream(template, chunks())  # type: ignore[arg-type]
+            ) as stream:
+                async for event in stream:
+                    yield event
+
+    events: list[TResponseStreamEvent] = []
+    model = ChatModel()
+    operation = SDKRunner.run(
+        Agent("Chat normalized", model=model),
+        "hello",
+        model_invocation="stream",
+        on_model_event=events.append,
+    )
+    if provenance:
+        with pytest.raises(UserError, match="provider_data"):
+            await operation
+    else:
+        result = await operation
+        assert result.final_output == "chat answer" and result.last_response_id == "chat-normalized"
+        assert result.raw_responses[0].usage.requests == 1
+    assert isinstance(events[-1], ResponseCompletedEvent) and events[-1].response.status is None
+    assert not model.closed
+
+
+@pytest.mark.parametrize(
+    "kind", ["response.failed", "response.incomplete", "error", "response.error"]
+)
+async def test_failure_event_is_observed_as_detached_snapshot_before_rejection(kind: str) -> None:
+    from openai.types.responses import (
+        ResponseErrorEvent,
+        ResponseFailedEvent,
+        ResponseIncompleteEvent,
+    )
+
+    final = await terminal(tools=True)
+    if kind == "response.failed":
+        event = ResponseFailedEvent(type=kind, response=final.response, sequence_number=0)
+    elif kind == "response.incomplete":
+        event = ResponseIncompleteEvent(type=kind, response=final.response, sequence_number=0)
+    else:
+        event = ResponseErrorEvent(
+            type="error", message="provider failure", code=None, param=None, sequence_number=0
+        )
+        if kind == "response.error":
+            event = event.model_copy(update={"type": kind})
+    observed: list[TResponseStreamEvent] = []
+    effects: list[str] = []
+
+    @function_tool
+    def effect() -> str:
+        effects.append("ran")
+        return "ran"
+
+    def observe(copy: TResponseStreamEvent) -> None:
+        assert copy.type == kind
+        observed.append(copy)
+        copy.type = "response.completed"
+        if hasattr(copy, "response"):
+            copy.response.output.clear()
+
+    model = GatedModel([event])
+    with pytest.raises(ModelBehaviorError, match="successful completed"):
+        await SDKRunner.run(
+            Agent("Failure events", model=model, tools=[effect]),
+            "hello",
+            model_invocation="stream",
+            on_model_event=observe,
+        )
+    assert len(observed) == 1 and observed[0] is not event and event.type == kind
+    assert (
+        final.response.output
+        and effects == []
+        and model.closed.is_set()
+        and not model.resource_closed
+    )
+
+
+@pytest.mark.parametrize("tail", ["duplicate", "delta", "normal_error"])
+async def test_terminal_tail_is_not_consumed_and_close_still_runs(tail: str) -> None:
+    final = await terminal()
+    tail_reads: list[str] = []
+    closed: list[bool] = []
+
+    async def produce(request: Any) -> AsyncIterator[TResponseStreamEvent]:
+        try:
+            yield final
+            tail_reads.append(tail)
+            if tail == "normal_error":
+                raise RuntimeError("unread tail failure")
+            yield final if tail == "duplicate" else delta()
+        finally:
+            closed.append(True)
+
+    model = ScriptedModel([ModelStep.stream(produce)])
+    observed: list[TResponseStreamEvent] = []
+    result = await SDKRunner.run(
+        Agent("Unread tail", model=model),
+        "hello",
+        model_invocation="stream",
+        on_model_event=observed.append,
+    )
+    assert result.final_output == "done" and closed == [True] and tail_reads == []
+    assert len(observed) == 1 and isinstance(observed[0], ResponseCompletedEvent)
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancel", "close_error"])
+async def test_terminal_close_never_advances_remote_tail_and_joins_same_context_cleanup(
+    outcome: str,
+) -> None:
+    marker = ContextVar("terminal-close-context", default="outside")
+    tail_entered, remote_tail = asyncio.Event(), asyncio.Event()
+    closing, cleanup_release = asyncio.Event(), asyncio.Event()
+    tasks: list[Any] = []
+    released: list[str] = []
+    effects: list[str] = []
+    final = await terminal(tools=True)
+
+    @function_tool
+    def effect() -> str:
+        effects.append("ran")
+        return "ran"
+
+    class TerminalModel(BorrowedModel):
+        invocations = 0
+
+        def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[TResponseStreamEvent]:
+            self.invocations += 1
+            if self.invocations > 1:
+                return super().stream_response(*args, **kwargs)
+            tasks.append(asyncio.current_task())
+            factory_token = marker.set("factory")
+
+            async def produce() -> AsyncIterator[TResponseStreamEvent]:
+                tasks.append(asyncio.current_task())
+                token = marker.set("iterating")
+                try:
+                    yield final
+                    tail_entered.set()
+                    await remote_tail.wait()  # This gate is never released, even in teardown.
+                finally:
+                    tasks.append(asyncio.current_task())
+                    closing.set()
+                    await cleanup_release.wait()
+                    marker.reset(token)
+                    marker.reset(factory_token)
+                    released.append(marker.get())
+                    if outcome == "close_error":
+                        raise RuntimeError("terminal cleanup failed")
+
+            return produce()
+
+    model = TerminalModel([[assistant_message("finished")]])
+    provider = SelectedProvider(model)
+    task = asyncio.create_task(
+        SDKRunner.run(
+            Agent("Terminal close", model="selected", tools=[effect]),
+            "hello",
+            model_provider=provider,
+            model_invocation="stream",
+        )
+    )
+    try:
+        await asyncio.wait_for(closing.wait(), 15)
+        assert not tail_entered.is_set() and not remote_tail.is_set()
+        assert not task.done() and effects == [] and released == []
+        assert len(tasks) == 3 and all(owner is tasks[0] for owner in tasks)
+        if outcome == "cancel":
+            task.cancel("original cancellation")
+            await asyncio.sleep(0.05)
+            task.cancel("repeated cancellation")
+            await asyncio.sleep(0.05)
+            assert not task.done() and effects == [] and released == []
+        cleanup_release.set()
+        if outcome == "cancel":
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await asyncio.wait_for(task, 15)
+            if sys.version_info >= (3, 11):
+                assert raised.value.args == ("original cancellation",)
+            assert effects == []
+        elif outcome == "close_error":
+            with pytest.raises(RuntimeError, match="terminal cleanup failed"):
+                await asyncio.wait_for(task, 15)
+            assert effects == []
+        else:
+            result = await asyncio.wait_for(task, 15)
+            assert result.final_output == "finished" and effects == ["ran"]
+            model.assert_complete()
+        assert released == ["outside"] and marker.get() == "outside"
+        assert not tail_entered.is_set() and not model.closed and not provider.closed
+    finally:
+        cleanup_release.set()
+        if not task.done():
+            task.cancel()
+            # Bound test teardown if a regression reintroduces a remote-tail
+            # read. Cancel the test-owned producer, never release its tail gate.
+            if tasks and not closing.is_set():
+                tasks[0].cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15)
