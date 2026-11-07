@@ -17,6 +17,7 @@ import pytest
 from agents import (
     Agent,
     CustomStorage,
+    LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
     NativeGoals,
@@ -69,6 +70,9 @@ class FaultStore(SQLiteSessionStore):
             finally:
                 super().release(thread_id, successor)
         super().commit(thread_id, token, expected_revision, write_id, payload)
+        if self.mode == "intent-crash" and has_call and not has_result:
+            # Die after durable native intent, before the callback can journal it.
+            os._exit(68)
         if self.mode == "ack-confirm-fail" and has_result:
             raise OSError("injected confirmation failure secret-do-not-expose")
         if self.mode == "ack-loss" and has_result and not self.fired:
@@ -165,6 +169,24 @@ async def _worker() -> None:
             raise turn_error
     except Exception as error:
         print(json.dumps({"error": type(error).__name__, "message": str(error)}), flush=True)
+        if isinstance(error, LocalRecoveryRequired):
+            print(
+                json.dumps(
+                    {
+                        "recovery_calls": [
+                            {
+                                "thread_id": call.thread_id,
+                                "turn_id": call.turn_id,
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                            for call in error.calls
+                        ]
+                    }
+                ),
+                flush=True,
+            )
         if mode in {"intent-fail", "local-intent-fail", "release-fail", "release-before-fail"}:
             # Probe an actual SDK cleanup retry, rather than calling __aexit__
             # again on an already exhausted Python context manager.
@@ -444,6 +466,90 @@ async def test_process_death_with_unknown_effect_blocks_every_resume(responses, 
         assert code != 0 and "unknown" in _row(rows, "message").lower(), (rows, err)
         assert len(responses.requests) == 1
         assert (tmp_path / "effects").read_text() == "unknown:unknown\n"
+
+
+async def test_custom_store_inspects_durable_intent_before_callback_journal(responses, tmp_path):
+    responses.respond(function_call("record", {"key": "undispatched"}, "intent-only-call"))
+    code, rows, err = await _collect(await _start(responses, tmp_path, "intent-crash"))
+    assert code == 68, (rows, err)
+    identity = _row(rows, "opened")
+    assert not (tmp_path / "effects").exists()
+    assert len(responses.requests) == 1
+
+    for _ in range(2):
+        code, rows, err = await _collect(await _start(responses, tmp_path, "hold", identity))
+        assert code != 0, (rows, err)
+        assert _row(rows, "error") == "LocalRecoveryRequired"
+        calls = _row(rows, "recovery_calls")
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["thread_id"] == identity
+        assert call["call_id"] == "intent-only-call"
+        assert call["name"] == "record"
+        assert call["arguments"] == {"key": "undispatched"}
+        assert call["turn_id"]
+        assert len(responses.requests) == 1
+        assert not (tmp_path / "effects").exists()
+
+    await CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite")).reconcile(
+        call["thread_id"],
+        turn_id=call["turn_id"],
+        call_id=call["call_id"],
+        output="Application verified that this effect was not dispatched.",
+    )
+    responses.respond(assistant_output("continued without replay"))
+    code, rows, err = await _collect(await _start(responses, tmp_path, "destination", identity))
+    assert code == 0, (rows, err)
+    assert _row(rows, "output") == "continued without replay"
+    assert len(responses.requests) == 2
+    assert "Application verified" in json.dumps(responses.requests[-1]["input"])
+    assert not (tmp_path / "effects").exists()
+
+
+async def test_custom_recovery_retains_facts_and_public_provider_cleanup(responses, tmp_path):
+    responses.respond(function_call("record", {"key": "undispatched"}, "cleanup-intent"))
+    code, rows, err = await _collect(await _start(responses, tmp_path, "intent-crash"))
+    assert code == 68, (rows, err)
+    identity = _row(rows, "opened")
+
+    class HeldReleaseStore(SQLiteSessionStore):
+        blocked = True
+
+        def release(self, session_id: str, token: str) -> None:
+            if self.blocked:
+                raise OSError("fixture canonical release unavailable")
+            super().release(session_id, token)
+
+    store = HeldReleaseStore(tmp_path / "canonical.sqlite")
+    provider = NativeProvider(
+        base_url=responses.url, api_key="synthetic-recovery", supports_websockets=False
+    )
+    agent = Agent(
+        instructions="Record the requested effect once.", provider=provider, model="gpt-5.1-codex"
+    )
+    try:
+        with pytest.raises(LocalRecoveryRequired) as caught:
+            async with agent.session(storage=CustomStorage(store), resume=identity):
+                pytest.fail("An unresolved intent must not publish a Session")
+        call = caught.value.calls[0]
+        assert call.thread_id == identity
+        assert call.call_id == "cleanup-intent"
+        assert call.arguments == {"key": "undispatched"}
+        competitor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+        with pytest.raises(BlockingIOError):
+            competitor.acquire(identity)
+    finally:
+        store.blocked = False
+        try:
+            await provider.aclose()
+        except RuntimeError:
+            # Canonical failures remain observable even after physical retirement.
+            pass
+    token = competitor.acquire(identity)
+    competitor.release(identity, token)
+    assert caught.value.calls[0] == call
+    assert len(responses.requests) == 1
+    assert not (tmp_path / "effects").exists()
 
 
 @pytest.mark.parametrize("backend", ["custom", "local"])

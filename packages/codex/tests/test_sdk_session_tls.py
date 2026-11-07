@@ -173,10 +173,10 @@ async def completed(peer: HTTPSPeer, agent: Agent[None, str], marker: str) -> No
     peer.respond(assistant_output(marker))
     result = await agent.run(marker)
     assert result.final_output == marker
-    assert result.usage is not None
-    assert result.usage.total_token_usage.input_tokens == 11
-    assert result.usage.total_token_usage.output_tokens == 3
-    assert result.usage.total_token_usage.total_tokens == 14
+    assert result.thread_usage is not None
+    assert result.thread_usage.total_token_usage.input_tokens == 11
+    assert result.thread_usage.total_token_usage.output_tokens == 3
+    assert result.thread_usage.total_token_usage.total_tokens == 14
 
 
 async def wait_for_socket_close(fileno: Callable[[], int]) -> None:

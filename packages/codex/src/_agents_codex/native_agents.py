@@ -15,9 +15,12 @@ from types import MappingProxyType as MappingProxyType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    Generic as Generic,
     Literal as Literal,
     Protocol as Protocol,
 )
+
+from typing_extensions import TypeVar as TypeVar
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import NativeToolCall as NativeToolCall, StopTurn
@@ -27,6 +30,8 @@ if TYPE_CHECKING:
     from ._function_tools import Tool, ToolContext
     from .executor import Environment
     from .tools import ToolRef
+
+ContextT = TypeVar("ContextT", default=Any)
 
 _BUILTIN_ROLES = frozenset({"default", "explorer", "worker"})
 _COLLABORATION_TOOLS = (
@@ -80,9 +85,9 @@ class NativeRole:
             object.__setattr__(self, "model_settings", MappingProxyType(settings))
 
 
-class _ChildBeforeStep(Protocol):
+class _ChildBeforeStep(Protocol[ContextT]):
     def __call__(
-        self, child: ChildInvocation, /, *, step_index: int
+        self, step: ChildStepContext[ContextT], /
     ) -> (
         Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents]
         | None
@@ -94,7 +99,7 @@ class _ChildBeforeStep(Protocol):
 
 
 @dataclass(frozen=True, kw_only=True)
-class NativeAgents:
+class NativeAgents(Generic[ContextT]):
     """Enable native V2 children with the Session's three executor tools.
 
     Include this declaration in Agent tools. Supply the Environment at session opening.
@@ -125,9 +130,10 @@ class NativeAgents:
     identity and application context to select policy. Native child admission
     still applies after approval.
 
-    ``before_step(child, *, step_index)`` selects admitted tools before each
-    native child model request. The child is a ChildInvocation for that exact
-    incarnation and turn. None restores its captured operation defaults; []
+    ``before_step(step)`` selects admitted tools before each
+    native child model request. step.child is a ChildInvocation for that exact
+    incarnation and turn. step.context is the current Session application context.
+    None restores its captured operation defaults; []
     disables every model tool. Root submissions use their own before_step.
     Return StopTurn to stop only this child turn before its next model request
     and join its owned cleanup. The parent and sibling turns keep running;
@@ -143,7 +149,7 @@ class NativeAgents:
         default=None, repr=False
     )
     max_depth: int = 1
-    before_step: _ChildBeforeStep | None = field(default=None, repr=False)
+    before_step: _ChildBeforeStep[ContextT] | None = field(default=None, repr=False)
     interactions: bool = False
 
     def __post_init__(self) -> None:
@@ -188,6 +194,15 @@ class ChildInvocation:
     def submission_id(self) -> str:
         """Stable observation identity; not an application submission handle."""
         return _child_submission_id(self.child_id, self.instance_id, self.turn_id)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChildStepContext(Generic[ContextT]):
+    """Current application context and exact child preparation identity."""
+
+    context: ContextT = field(repr=False)
+    child: ChildInvocation
+    step_index: int
 
 
 _preserve_module_identity(globals(), "agents.native_agents")

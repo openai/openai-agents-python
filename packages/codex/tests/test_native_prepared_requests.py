@@ -150,7 +150,7 @@ async def test_combined_edits_keep_function_and_mcp_effect_owners_and_idle_resto
                     name="records",
                     url=url,
                     tools=["search"],
-                    approval_mode="approve",
+                    approval_mode="preapproved",
                     approval=approve,
                 ),
             ],
@@ -249,7 +249,7 @@ async def test_sampled_enum_never_grants_argument_authority(
                     name="records",
                     url=url,
                     tools=["search"],
-                    approval_mode="approve",
+                    approval_mode="preapproved",
                     approval=approve,
                 ),
             ],
@@ -639,7 +639,7 @@ async def test_mcp_without_application_policy_reaches_server_validation(
             instructions="Use records",
             model="gpt-5.5",
             provider=provider(responses),
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         assert (await agent.run("Try", prepare_request=widen)).final_output == "server denied"
         assert len(peer.calls) == 1 and peer.business_effects == []
@@ -1020,7 +1020,7 @@ async def test_editor_rejects_a_fixed_hosted_registration_with_an_empty_roster(
         agent = Agent(
             model="gpt-5.5",
             instructions="Answer.",
-            tools=[HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")],
+            tools=[HostedVerificationMCP(url=url, tools=["search"], approval_mode="preapproved")],
             provider=provider(responses),
         )
         async with agent.session() as session:

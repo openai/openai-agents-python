@@ -6,7 +6,12 @@ import inspect as inspect
 import json as json
 import re as re
 import sys as sys
-from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
+from collections.abc import (
+    Awaitable as Awaitable,
+    Callable as Callable,
+    Mapping as Mapping,
+    Sequence as Sequence,
+)
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -54,6 +59,9 @@ class MCPCallContext(Generic[ContextT_co]):
     call.call_id is None if native supplied no provider call ID. It is never
     replaced with the outer or nested runtime ID. Neither this value nor the
     paired NativeToolCall grants permission or changes which tool runs.
+    original_arguments and effective_arguments are detached normalized JSON
+    mappings. Before receives the original values; approval receives any
+    replacement values. Mutating a nested view never changes the admitted input.
     """
 
     context: ContextT_co = field(repr=False)
@@ -61,6 +69,8 @@ class MCPCallContext(Generic[ContextT_co]):
     call: ToolCallInfo
     server_name: str
     tool_name: str
+    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)
+    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -86,7 +96,7 @@ class _MCP(Generic[ContextT_contra]):
 
     name: str
     tools: Sequence[str]
-    approval_mode: Literal["auto", "approve"] = "auto"
+    approval_mode: Literal["native", "preapproved"] = "native"
     startup_timeout: float = 10
     execution_timeout: float = 60
     transform_result: (
@@ -118,8 +128,8 @@ class _MCP(Generic[ContextT_contra]):
             raise TypeError("MCP defer_loading must be a bool")
         if not isinstance(self.approval_mode, str):
             raise TypeError("approval_mode must be a string")
-        if self.approval_mode not in ("auto", "approve"):
-            raise ValueError("approval_mode must be 'auto' or 'approve'")
+        if self.approval_mode not in ("native", "preapproved"):
+            raise ValueError("approval_mode must be 'native' or 'preapproved'")
         if (
             not isinstance(self.name, str)
             or re.fullmatch(r"[a-zA-Z0-9_:@/.-]+", self.name) is None
@@ -200,7 +210,7 @@ class _MCP(Generic[ContextT_contra]):
             "startup_timeout_sec": self.startup_timeout,
             "tool_timeout_sec": self.execution_timeout,
         }
-        if self.approval_mode == "approve":
+        if self.approval_mode == "preapproved":
             config["tools"] = {name: {"approval_mode": "approve"} for name in self.tools}
         return config
 
@@ -217,7 +227,7 @@ class StdioMCP(_MCP[ContextT_contra]):
     directory on the host or the Session environment's working directory remotely.
 
     Session owns the connection and process lifetime. Both timeouts are seconds.
-    ``approval_mode="auto"`` keeps native approval rules; "approve" allows the
+    ``approval_mode="native"`` keeps native approval rules; "preapproved" allows the
     selected names subject to native constraints. Neither mode sandboxes the
     server process or limits effects the server does not report.
 
@@ -298,8 +308,8 @@ class HttpMCP(_MCP[ContextT_contra]):
 
     Provide a ``bearer_token`` directly, using ``os.environ`` in application code
     to read credentials from the environment. Session owns the connection. Both timeouts
-    are seconds. ``approval_mode="auto"`` keeps native approval rules;
-    "approve" allows selected names subject to native constraints.
+    are seconds. ``approval_mode="native"`` keeps native approval rules;
+    "preapproved" allows selected names subject to native constraints.
 
     Optional ``approval(context, call)`` receives MCPCallContext and NativeToolCall
     before a selected tool executes. Return True to proceed under native

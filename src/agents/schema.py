@@ -11,6 +11,7 @@ from _agents_codex.schema import (
     OutputSpec as OutputSpec,
     OutputT as OutputT,
     OutputValidationError as OutputValidationError,
+    OutputValidationIssue as OutputValidationIssue,
     PromptedOutput as PromptedOutput,
     TypeAdapter as TypeAdapter,
     TypeAlias as TypeAlias,

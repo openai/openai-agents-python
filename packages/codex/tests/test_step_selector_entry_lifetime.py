@@ -11,12 +11,19 @@ from unittest.mock import patch
 import pytest
 
 from _agents_codex.session import _ChildCallbacks
-from agents import StopTurn
+from agents import ChildInvocation, StopTurn
 from agents.session import Session
 
 
 def owner(callback):
-    state = _ChildCallbacks(handle=object())
+    state = _ChildCallbacks(
+        handle=ChildInvocation(
+            session_id="session",
+            child_id="child-thread",
+            instance_id="child-instance",
+            turn_id="child-turn",
+        )
+    )
     key = (41, "child-thread", "child-instance")
     checks = []
     native = SimpleNamespace(live=True)
@@ -36,6 +43,7 @@ def owner(callback):
         _native=native,
         _native_agents=SimpleNamespace(before_step=callback),
         _catalog=SimpleNamespace(generation=7),
+        _context=None,
     )
     session._select_step_body = Session._select_step_body.__get__(session, Session)
     message = {
@@ -177,8 +185,7 @@ async def test_late_child_step_stop_cannot_claim_retired_owner(expiry):
 
 def settlement(session, state):
     observations = []
-    state.handle = SimpleNamespace(turn_id="child-turn", submission_id="child-submission")
-    session.id = "session"
+    session.id = state.handle.session_id
     session._observations = SimpleNamespace(notify=lambda: None, append=observations.append)
     session._retire_questions = Session._retire_questions
     session._finish_failed_observations = lambda: None

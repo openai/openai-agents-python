@@ -229,7 +229,7 @@ async def test_retained_mcp_result_expiry_stops_old_cell_without_failing_success
         async with Agent(
             instructions="Keep the original cell owner.",
             tools=[
-                HttpMCP(name="gate", url=gate_url, tools=["release"], approval_mode="approve"),
+                HttpMCP(name="gate", url=gate_url, tools=["release"], approval_mode="preapproved"),
                 HttpMCP(
                     name="vault",
                     url=selected_url,

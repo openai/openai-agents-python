@@ -1004,15 +1004,26 @@ class DeferredTools:
             update = await self._provider_update(session, fresh, claim, action, invoke, *args)
             if wait and action == "start" and update is not None and update.status == "pending":
                 claim = replace(claim, update=update)
+                phase: Literal["authorizing", "provider", "recording"] = "authorizing"
+
+                def observing_phase(value: Literal["authorizing", "provider", "recording"]) -> None:
+                    nonlocal phase
+                    phase = value
+
                 try:
                     update = await _wait_for_job(
                         self._provider_update(
-                            session, fresh, claim, "observe", job.provider.observe
+                            session,
+                            fresh,
+                            claim,
+                            "observe",
+                            job.provider.observe,
+                            _phase=observing_phase,
                         ),
                         wait,
                     )
                 except asyncio.TimeoutError:
-                    return "pending"
+                    return "pending" if phase == "provider" else "unknown"
             if update is None:
                 return "unknown"
         if update is None:
@@ -1053,16 +1064,23 @@ class DeferredTools:
         action: _Action,
         invoke: Callable[..., Awaitable[JobUpdate]],
         *args: object,
+        _phase: Callable[[Literal["authorizing", "provider", "recording"]], None] | None = None,
     ) -> JobUpdate | None:
         try:
+            if _phase is not None:
+                _phase("authorizing")
             await self._journal.authorize(claim, action)
             self._live(session, request)
+            if _phase is not None:
+                _phase("provider")
             try:
                 update = await invoke(claim, *args)
             except PermissionError:
                 raise
             except Exception:
                 return None
+            if _phase is not None:
+                _phase("recording")
             return await self._record(claim, update)
         except asyncio.TimeoutError:
             # A journal timeout is uncertain even during the shorter optional wait.

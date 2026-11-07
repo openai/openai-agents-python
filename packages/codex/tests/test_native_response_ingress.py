@@ -26,10 +26,10 @@ async def assert_ingress_outcome(
         first = await s.submit("first")
         result = await (first).get_result()
         assert result.final_output == "authoritative answer"
-        assert result.usage is not None
-        assert result.usage.last_token_usage.input_tokens == 11
-        assert result.usage.last_token_usage.output_tokens == 3
-        assert result.usage.total_token_usage.total_tokens == 14
+        assert result.thread_usage is not None
+        assert result.thread_usage.last_token_usage.input_tokens == 11
+        assert result.thread_usage.last_token_usage.output_tokens == 3
+        assert result.thread_usage.total_token_usage.total_tokens == 14
         assert len(peer.requests) == 1
         deltas = [e.delta async for e in first.events() if isinstance(e, OutputTextDelta)]
         if allow_transient_delta:
@@ -49,9 +49,9 @@ async def assert_ingress_outcome(
         second = await s.submit("follow up")
         followup = await (second).get_result()
         assert followup.final_output == "follow-up answer"
-        assert followup.usage is not None
-        assert followup.usage.last_token_usage.total_tokens == 14
-        assert followup.usage.total_token_usage.total_tokens == 28
+        assert followup.thread_usage is not None
+        assert followup.thread_usage.last_token_usage.total_tokens == 14
+        assert followup.thread_usage.total_token_usage.total_tokens == 28
         assert len(peer.requests) == 2
         replay = json.dumps(peer.requests[1]["input"], ensure_ascii=False)
         assert "authoritative answer" in replay
@@ -127,9 +127,9 @@ async def test_malformed_item_keeps_transient_text_out_of_canonical_history(
         followup = await second.get_result()
         assert second.turn_id != first.turn_id
         assert followup.final_output == "follow-up answer"
-        assert followup.usage is not None
-        assert followup.usage.last_token_usage.total_tokens == 14
-        assert followup.usage.total_token_usage.total_tokens == 14
+        assert followup.thread_usage is not None
+        assert followup.thread_usage.last_token_usage.total_tokens == 14
+        assert followup.thread_usage.total_token_usage.total_tokens == 14
         assert len(responses.requests) == 2
         replay = json.dumps(responses.requests[1]["input"], ensure_ascii=False)
         assert all(text not in replay for text in rejected)

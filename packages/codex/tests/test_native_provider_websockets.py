@@ -277,8 +277,8 @@ async def test_provider_never_shares_generated_session_history() -> None:
                 if frame.get("generate") is not False
             }
             assert server.requests[-1].get("previous_response_id") not in older_generated
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 14
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 14
         assert len(sessions) == 3
         assert not server.http_requests
 
@@ -342,8 +342,8 @@ async def test_fresh_authenticated_socket_keeps_tools_and_history_session_owned(
             handle = await current.submit("use lookup in this session")
             result = await (handle).get_result()
             assert result.final_output == "current answer"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 28
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 28
             stored = json.dumps((await current.save_state()).history)
         assert effects == ["current-lookup"]
         assert len(server.requests) == 3
@@ -445,9 +445,9 @@ async def test_websocket_continuation_stream_tools_usage_and_history() -> None:
                 )
                 assert isinstance(events[-1], TurnFinished)
                 assert events[-1].status == "completed"
-                assert result.usage is not None
-                assert result.usage.total_token_usage.total_tokens == total
-                assert result.usage.last_token_usage.total_tokens == 14
+                assert result.thread_usage is not None
+                assert result.thread_usage.total_token_usage.total_tokens == total
+                assert result.thread_usage.last_token_usage.total_tokens == 14
                 assert (
                     message_text(provider.requests[-1]["input"], "user")
                     == ["first", "second", "tool"][: index + 1]
@@ -612,7 +612,10 @@ async def test_checkpoint_changes_transport_without_rewriting_history_or_current
             handle = await restored.submit("current-input")
             result = await (handle).get_result()
             assert result.final_output == "current-answer"
-            assert result.usage is not None and result.usage.total_token_usage.total_tokens == 56
+            assert (
+                result.thread_usage is not None
+                and result.thread_usage.total_token_usage.total_tokens == 56
+            )
         assert original.calls == ["call_source"] and current.calls == ["call_current"]
         assert len(source.requests) == len(destination.requests) == 2
         assert message_text(destination.requests[0]["input"], "user") == [
@@ -646,7 +649,10 @@ async def test_websocket_session_compaction_keeps_native_summary_and_continues()
             handle = await session.submit("Recall the label.")
             result = await (handle).get_result()
             assert result.final_output == "atlas"
-            assert result.usage is not None and result.usage.last_token_usage.total_tokens == 14
+            assert (
+                result.thread_usage is not None
+                and result.thread_usage.last_token_usage.total_tokens == 14
+            )
         events = [event async for event in stream]
         assert len([event for event in events if isinstance(event, ContextCompacted)]) == 1
         assert len(provider.requests) == 3
@@ -722,9 +728,9 @@ async def test_websocket_transient_observations_do_not_change_accepted_output_or
             second = await session.submit("second")
             result = await (second).get_result()
             assert result.final_output == "follow-up"
-            assert result.usage is not None
-            assert result.usage.last_token_usage.total_tokens == 14
-            assert result.usage.total_token_usage.total_tokens == (
+            assert result.thread_usage is not None
+            assert result.thread_usage.last_token_usage.total_tokens == 14
+            assert result.thread_usage.total_token_usage.total_tokens == (
                 14 if revocation == "malformed-item" else 28
             )
             assert len(provider.requests) == 2

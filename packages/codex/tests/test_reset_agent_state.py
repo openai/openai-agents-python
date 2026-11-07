@@ -314,7 +314,7 @@ async def test_returned_native_question_reply_in_nested_run(kind, accept, respon
             name="records",
             url=url,
             tools=["search"],
-            approval_mode="auto" if kind == "approval" else "approve",
+            approval_mode="native" if kind == "approval" else "preapproved",
         )
         child = Agent(instructions="Search.", tools=[server])
 

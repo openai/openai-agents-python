@@ -119,7 +119,7 @@ def app(responses, url):
     return Agent(
         instructions="",
         provider=provider(responses),
-        tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+        tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
     )
 
 
@@ -167,7 +167,9 @@ async def test_url_consent_waits_for_exact_peer_completion(responses: ResponsesF
             peer.finish.set()
 
 
-async def test_url_completion_timeout_retires_the_issued_request(responses: ResponsesFixture):
+async def test_url_completion_timeout_is_passive_and_expiry_is_explicit(
+    responses: ResponsesFixture,
+):
     peer = CompletionPeer()
     async with timeout(18), peer.serve() as url:
         responses.respond(selected("url-expiry", "ordinary"))
@@ -180,7 +182,13 @@ async def test_url_completion_timeout_retires_the_issued_request(responses: Resp
                 await question.accept_url()
                 with pytest.raises(TimeoutError):
                     await question.wait_url_completion(timeout=0.05)
+                longer = asyncio.create_task(question.wait_url_completion(timeout=8))
+                await asyncio.sleep(0)
+                assert not longer.done()
+                await question.cancel_url_completion()
                 peer.finish.set()
+                with pytest.raises(InteractionExpiredError):
+                    await longer
                 with pytest.raises(InteractionExpiredError):
                     await question.wait_url_completion(timeout=1)
                 assert (await turn.get_result()).final_output == "done"
@@ -333,7 +341,7 @@ async def test_close_retires_url_completion_waiters(responses: ResponsesFixture)
             peer.finish.set()
 
 
-@pytest.mark.parametrize("decision", ["accept", "decline", "timeout"])
+@pytest.mark.parametrize("decision", ["accept", "decline", "timeout_then_cancel"])
 async def test_url_error_batch_is_registered_before_early_completion_and_retires_together(
     responses: ResponsesFixture, decision
 ):
@@ -364,10 +372,28 @@ async def test_url_error_batch_is_registered_before_early_completion_and_retires
                 with pytest.raises(InteractionExpiredError):
                     await first.accept_url()
             else:
-                with pytest.raises(TimeoutError):
-                    await first.wait_url_completion(timeout=0.05)
-                with pytest.raises(InteractionExpiredError):
-                    await second.wait_url_completion(timeout=8)
+                # An observer deadline owns neither consent nor the native batch.
+                sibling = asyncio.create_task(second.wait_url_completion(timeout=8))
+                try:
+                    with pytest.raises(TimeoutError):
+                        await first.wait_url_completion(timeout=0.05)
+                    assert not sibling.done()
+                    assert len(responses.requests) == 1
+                    assert {
+                        request.elicitation_id for request in await session.pending_interactions()
+                    } == {"required-A", "required-B"}
+                    # Explicit owner expiry retires the whole native error batch,
+                    # even though B's peer-completion notification arrived early.
+                    await first.cancel_url_completion()
+                    with pytest.raises(InteractionExpiredError):
+                        await sibling
+                    with pytest.raises(InteractionExpiredError):
+                        await first.accept_url()
+                    with pytest.raises(InteractionExpiredError):
+                        await second.accept_url()
+                finally:
+                    sibling.cancel()
+                    await asyncio.gather(sibling, return_exceptions=True)
             assert (await turn.get_result()).final_output == "batch done"
             assert not peer.answers
             assert not await session.pending_interactions()

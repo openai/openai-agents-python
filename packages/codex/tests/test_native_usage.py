@@ -47,10 +47,10 @@ async def _omit_usage(event: dict[str, Any]) -> None:
 async def check_usage_types(session: Session[object, str], handle: Turn[str]) -> None:
     result = await (handle).get_result()
     assert_type(result, Completed[str])
-    assert_type(result.usage, TokenUsageInfo | None)
-    if result.usage is not None:
-        assert_type(result.usage.last_token_usage, TokenUsage)
-        assert_type(result.usage.model_context_window, int | None)
+    assert_type(result.thread_usage, TokenUsageInfo | None)
+    if result.thread_usage is not None:
+        assert_type(result.thread_usage.last_token_usage, TokenUsage)
+        assert_type(result.thread_usage.model_context_window, int | None)
     async for event in handle.events():
         if event.type == "usage_updated":
             assert_type(event, UsageUpdated)
@@ -75,36 +75,36 @@ async def test_native_multiple_responses_turns_and_repeated_rate_observations(
         first = await session.submit("look up A")
         first_result = await (first).get_result()
         assert first_result.final_output == "first"
-        assert first_result.usage is not None
-        assert first_result.usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
-        assert first_result.usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+        assert first_result.thread_usage is not None
+        assert first_result.thread_usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
+        assert first_result.thread_usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
         first_events = [
             event for event in await collect(first.events()) if isinstance(event, UsageUpdated)
         ]
         assert first_events
         assert first_events[0].usage is not None
         assert first_events[0].usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
-        assert first_events[-1].usage == first_result.usage
+        assert first_events[-1].usage == first_result.thread_usage
         assert all(event.session_id == session.id for event in first_events)
         assert all(event.turn_id == first.turn_id for event in first_events)
         assert all(event.submission_id == first.submission_id for event in first_events)
         assert "not-for-usage-readers" not in repr(first_events)
-        assert "fixture_response" not in repr(first_result.usage)
+        assert "fixture_response" not in repr(first_result.thread_usage)
         with pytest.raises(FrozenInstanceError):
-            first_result.usage.total_token_usage.input_tokens = 0  # type: ignore[misc]
+            first_result.thread_usage.total_token_usage.input_tokens = 0  # type: ignore[misc]
 
         second = await session.submit("next")
         second_result = await (second).get_result()
-        assert second_result.usage is not None
-        assert second_result.usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
-        assert second_result.usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+        assert second_result.thread_usage is not None
+        assert second_result.thread_usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
+        assert second_result.thread_usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
         second_events = [
             event for event in await collect(second.events()) if isinstance(event, UsageUpdated)
         ]
-        assert second_events[-1].usage == second_result.usage
+        assert second_events[-1].usage == second_result.thread_usage
         assert all(event.turn_id == second.turn_id for event in second_events)
         assert (await (first).get_result()) is first_result
-        assert first_result.usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
+        assert first_result.thread_usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
         assert len(responses.requests) == 3
         assert tool_output(responses.requests[1], "lookup-a") == "resolved-A"
         assert "first" in json.dumps(responses.requests[2]["input"])
@@ -152,11 +152,13 @@ async def test_native_multiple_responses_turns_and_repeated_rate_observations(
             event for event in await collect(third.events()) if isinstance(event, UsageUpdated)
         ]
         assert third_result.final_output == "no new counts"
-        assert third_result.usage == second_result.usage
-        assert third_events and all(event.usage == second_result.usage for event in third_events)
+        assert third_result.thread_usage == second_result.thread_usage
+        assert third_events and all(
+            event.usage == second_result.thread_usage for event in third_events
+        )
         assert len(responses.requests) == 4
-    assert first_result.usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
-    assert (await (second).get_result()).usage == second_result.usage
+    assert first_result.thread_usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
+    assert (await (second).get_result()).thread_usage == second_result.thread_usage
 
 
 async def test_native_http_retry_counts_successful_usage_once() -> None:
@@ -182,15 +184,15 @@ async def test_native_http_retry_counts_successful_usage_once() -> None:
             handle = await session.submit("retry the transient transport failure")
             completed = await (handle).get_result()
             assert completed.final_output == "recovered"
-            assert completed.usage is not None
+            assert completed.thread_usage is not None
             expected = TokenUsage(17, 3, 4, 7, 2, 24)
-            assert completed.usage.total_token_usage == expected
-            assert completed.usage.last_token_usage == expected
+            assert completed.thread_usage.total_token_usage == expected
+            assert completed.thread_usage.last_token_usage == expected
             observed = [
                 event for event in await collect(handle.events()) if isinstance(event, UsageUpdated)
             ]
-            assert observed and observed[-1].usage == completed.usage
-            assert all(event.usage in (None, completed.usage) for event in observed)
+            assert observed and observed[-1].usage == completed.thread_usage
+            assert all(event.usage in (None, completed.thread_usage) for event in observed)
             assert len(attempts) == 2
             assert attempts[0] == attempts[1]
             assert len(responses.requests) == 1
@@ -206,7 +208,7 @@ async def test_missing_native_usage_does_not_become_zero(responses: ResponsesFix
         handle = await session.submit("one")
         completed = await (handle).get_result()
         assert completed.final_output == "no counts"
-        assert completed.usage is None
+        assert completed.thread_usage is None
         observed = [
             event for event in await collect(handle.events()) if isinstance(event, UsageUpdated)
         ]
@@ -229,8 +231,8 @@ async def test_native_restore_retains_total_and_separate_roots_do_not_share_usag
         async with agent.session() as original:
             handle = await original.submit("remember this")
             saved_result = await (handle).get_result()
-            assert saved_result.usage is not None
-            assert saved_result.usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+            assert saved_result.thread_usage is not None
+            assert saved_result.thread_usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
             state = await original.save_state()
             saved_turns = [turn async for turn in original.turns()]
             assert saved_turns[0]["usage"] is not None
@@ -239,16 +241,16 @@ async def test_native_restore_retains_total_and_separate_roots_do_not_share_usag
                 other_handle = await unrelated.submit("independent")
                 other = await (other_handle).get_result()
                 assert unrelated.id != original.id
-                assert other.usage is not None
-                assert other.usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+                assert other.thread_usage is not None
+                assert other.thread_usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
         async with agent.session(state=state) as restored:
             assert [turn async for turn in restored.turns()] == saved_turns
             resumed_handle = await restored.submit("continue")
             resumed = await (resumed_handle).get_result()
-            assert resumed.usage is not None
-            assert resumed.usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
-            assert resumed.usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
-            assert saved_result.usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+            assert resumed.thread_usage is not None
+            assert resumed.thread_usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
+            assert resumed.thread_usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+            assert saved_result.thread_usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
         assert len(responses.requests) == 3
         assert "remember this" not in json.dumps(responses.requests[1]["input"])
         assert "remember this" in json.dumps(responses.requests[2]["input"])
@@ -338,8 +340,8 @@ async def test_cancel_joins_pending_native_usage_capture_before_admitting_next_t
             following = await session.submit("now idle")
             result = await (following).get_result()
             assert result.final_output == "next"
-            assert result.usage is not None
-            assert result.usage.total_token_usage == TokenUsage(22, 0, 0, 6, 0, 28)
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage == TokenUsage(22, 0, 0, 6, 0, 28)
             assert len(responses.requests) == 2
             recorded_input = json.dumps(responses.requests[-1]["input"])
             assert "must remain busy" not in recorded_input and "still busy" not in recorded_input

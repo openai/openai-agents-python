@@ -32,7 +32,7 @@ from agents.classic.stream_events import AgentUpdatedStreamEvent, RunItemStreamE
 from agents.classic.tool import ToolOriginType
 from agents.classic.tool_context import ToolContext
 from agents.classic.usage import Usage
-from agents.migration import SDKRunner, SDKRunResult, SDKRunResultStreaming
+from agents.migration import SDKRunHandle, SDKRunner, SDKRunResult
 
 from .test_migration_runner import (
     ScriptedModel,
@@ -112,15 +112,15 @@ async def test_consumers_read_observed_items_usage_and_detached_history(streamed
     agent: Agent[dict[str, str]] = Agent("Greeter", model=model, tools=[greet, empty])
 
     if streamed:
-        handle = SDKRunner.run_streamed(agent, "Greet Ada.", context=context)
-        assert_type(handle, SDKRunResultStreaming[dict[str, str]])
-        events = await consume_events(handle.stream_events())
+        handle = SDKRunner.start(agent, "Greet Ada.", context=context)
+        assert_type(handle, SDKRunHandle[dict[str, str]])
+        events = await consume_events(handle.replay_events())
         assert handle.is_complete
         assert handle.final_output == "Finished."
         result = await handle.get_result()
     else:
         result = await SDKRunner.run(agent, "Greet Ada.", context=context)
-        events = await consume_events(result.stream_events())
+        events = await consume_events(result.replay_events())
     assert_type(result, SDKRunResult[dict[str, str]])
     assert_type(result.new_items, list[RunItem])
     assert_type(result.raw_responses, list[ModelResponse])
@@ -239,11 +239,11 @@ async def test_result_retains_three_positional_arguments() -> None:
 
 async def test_stream_can_settle_without_a_reader_and_reaches_eof() -> None:
     agent = Agent("Model only", model=ScriptedModel([message("complete")]))
-    handle = SDKRunner.run_streamed(agent, "hello")
+    handle = SDKRunner.start(agent, "hello")
     result = await handle.get_result()
     assert handle.is_complete
     assert result.final_output == "complete"
-    events = handle.stream_events()
+    events = handle.replay_events()
     assert isinstance(await anext(events), AgentUpdatedStreamEvent)
     assert isinstance(await anext(events), RunItemStreamEvent)
     with pytest.raises(StopAsyncIteration):
@@ -273,10 +273,10 @@ async def test_stream_buffers_while_tool_approval_is_held(allow: bool) -> None:
     model = ScriptedModel([original_call], [message("finished")])
     replacement = ScriptedModel([message("must not run")])
     agent: Agent[str] = Agent("Approval", model=model, tools=[record])
-    handle = SDKRunner.run_streamed(
+    handle = SDKRunner.start(
         agent, "record Ada", context="app", on_approval=approve, return_state=True
     )
-    events = handle.stream_events()
+    events = handle.replay_events()
     reader = asyncio.ensure_future(anext(events))
     try:
         await asyncio.wait_for(entered.wait(), 15)
@@ -335,9 +335,9 @@ async def test_stream_failure_raises_without_replaying_partial_items() -> None:
             return await super().get_response(*args, **kwargs)
 
     model = FailingModel([call("greet")])
-    handle = SDKRunner.run_streamed(Agent("Failing", model=model, tools=[greet]), "hello")
+    handle = SDKRunner.start(Agent("Failing", model=model, tools=[greet]), "hello")
     with pytest.raises(RuntimeError) as raised:
-        await anext(handle.stream_events())
+        await anext(handle.replay_events())
     assert raised.value is failure
     assert handle.is_complete
     assert effects == ["Ada"]
@@ -348,10 +348,10 @@ async def test_stream_failure_raises_without_replaying_partial_items() -> None:
 
 async def test_stream_cancel_before_first_model_call() -> None:
     model = ScriptedModel([message("should not sample")])
-    handle = SDKRunner.run_streamed(Agent("Cancelled", model=model), "hello")
+    handle = SDKRunner.start(Agent("Cancelled", model=model), "hello")
     handle.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await anext(handle.stream_events())
+        await anext(handle.replay_events())
     assert handle.is_complete
     assert model.requests == []
 
@@ -370,8 +370,8 @@ async def test_stream_cancellation_joins_started_tool(cancel_waiter: bool) -> No
         return value
 
     model = ScriptedModel([call("greet")], [message("should not sample")])
-    handle = SDKRunner.run_streamed(Agent("Cancellable", model=model, tools=[greet]), "hello")
-    reader = asyncio.ensure_future(anext(handle.stream_events()))
+    handle = SDKRunner.start(Agent("Cancellable", model=model, tools=[greet]), "hello")
+    reader = asyncio.ensure_future(anext(handle.replay_events()))
     try:
         await asyncio.wait_for(started.wait(), 10)
         assert handle.final_output is None

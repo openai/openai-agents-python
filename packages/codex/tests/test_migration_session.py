@@ -584,7 +584,7 @@ async def test_cancelled_classic_session_read_is_joined_before_run_exits(streame
     provider = UnreachableProvider()
     handle = None
     if streamed:
-        handle = SDKRunner.run_streamed(agent, "Continue", model_provider=provider, session=store)
+        handle = SDKRunner.start(agent, "Continue", model_provider=provider, session=store)
         waiter = asyncio.create_task(handle.get_result())
     else:
         waiter = asyncio.create_task(
@@ -743,11 +743,11 @@ async def test_session_append_can_commit_before_raising_and_is_never_retried(
 
     store = CommitThenFailSession()
     model = MutatingModel([_new_message("Completed", "msg_committed")])
-    handle = SDKRunner.run_streamed(
+    handle = SDKRunner.start(
         Agent("Append", model=model), "New question", context=context, session=store
     )
     with pytest.raises(OSError, match="store response lost"):
-        await anext(handle.stream_events())
+        await anext(handle.replay_events())
     with pytest.raises(OSError, match="store response lost"):
         await handle.get_result()
     assert calls == ["read", "append"]
@@ -776,8 +776,8 @@ async def test_stream_waits_for_classic_session_append(cancel: bool) -> None:
     stored = HeldAppendSession("stream")
     reply = _new_message("Completed", "msg_streamed")
     agent = Agent("Stream", model=ScriptedModel([reply]))
-    handle = SDKRunner.run_streamed(agent, "Continue", session=stored)
-    reader = asyncio.ensure_future(anext(handle.stream_events()))
+    handle = SDKRunner.start(agent, "Continue", session=stored)
+    reader = asyncio.ensure_future(anext(handle.replay_events()))
     waiter = asyncio.create_task(handle.get_result())
     try:
         await asyncio.wait_for(entered.wait(), 15)

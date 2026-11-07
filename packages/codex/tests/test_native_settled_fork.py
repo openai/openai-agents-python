@@ -59,8 +59,8 @@ async def test_fork_restores_native_history_and_rebinds_independent_destination(
         turn = await original.submit("Do one job.")
         completed = await turn.get_result()
         assert completed.final_output == "original-result"
-        assert completed.usage is not None
-        original_usage = completed.usage.total_token_usage.total_tokens
+        assert completed.thread_usage is not None
+        original_usage = completed.thread_usage.total_token_usage.total_tokens
         forked = await original.fork()
         assert forked.source_session_id != source_id
         assert effects == ["source:receipt"]
@@ -84,8 +84,8 @@ async def test_fork_restores_native_history_and_rebinds_independent_destination(
         assert previous["status"] == "completed" and previous["session_id"] == child.id
         result = await (await child.submit("Do another job.")).get_result()
         assert result.final_output == "destination-result"
-        assert result.usage is not None
-        assert result.usage.total_token_usage.total_tokens > original_usage
+        assert result.thread_usage is not None
+        assert result.thread_usage.total_token_usage.total_tokens > original_usage
         items = [item async for item in child.items()]
     assert effects == ["source:receipt", "new:new"]
     assert len(responses.requests) == 5

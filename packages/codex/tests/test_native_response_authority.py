@@ -68,7 +68,7 @@ async def test_terminal_reasoning_ciphertext_drift_cannot_replace_completed_item
         first = await session.submit("first")
         completed = await (first).get_result()
         assert completed.final_output == "completed answer"
-        assert completed.usage is not None
+        assert completed.thread_usage is not None
         observations = [event async for event in first.events()]
 
         public_items = json.dumps([entry async for entry in session.items()])

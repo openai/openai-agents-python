@@ -5,6 +5,7 @@ from __future__ import annotations
 from _agents_codex.turn import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    ChildTurn as ChildTurn,
     Generic as Generic,
     Iterator as Iterator,
     Literal as Literal,
@@ -13,6 +14,7 @@ from _agents_codex.turn import (
     SteeringReceipt as SteeringReceipt,
     Turn as Turn,
     TurnNeedsAttention as TurnNeedsAttention,
+    TurnT as TurnT,
     TypeVar as TypeVar,
     _child_submission_id as _child_submission_id,
     _child_turn as _child_turn,

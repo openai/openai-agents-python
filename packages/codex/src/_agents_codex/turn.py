@@ -10,8 +10,10 @@ from typing import (
     Any as Any,
     Generic as Generic,
     Literal as Literal,
-    TypeVar as TypeVar,
+    Protocol as Protocol,
 )
+
+from typing_extensions import TypeVar as TypeVar
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
@@ -23,13 +25,14 @@ if TYPE_CHECKING:
     from .session import Completed, NativeError, Session, TurnStoppedError
 
 OutputT = TypeVar("OutputT")
+TurnT = TypeVar("TurnT", default="Turn[OutputT]")
 
 
 @dataclass(frozen=True)
-class PendingRequests(Generic[OutputT]):
+class PendingRequests(Generic[OutputT, TurnT]):
     """Current requests of one Turn. Another consumer may answer first."""
 
-    turn: Turn[OutputT]
+    turn: TurnT
     requests: tuple[Interaction, ...] = field(repr=False)
 
 
@@ -50,7 +53,9 @@ class SteeringReceipt:
 class TurnNeedsAttention:
     """A settled turn and the latest Session-level API limits at read time."""
 
-    reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+    reason: Literal[
+        "interrupted", "connection_lost", "quota_blocked", "rate_limited", "budget_exceeded"
+    ]
     error: NativeError | TurnStoppedError
     rate_limits: ApiRateLimits
 
@@ -106,13 +111,17 @@ class Turn(Generic[OutputT]):
         """
         from .session import NativeError, TurnStoppedError
 
-        reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+        reason: Literal[
+            "interrupted", "connection_lost", "quota_blocked", "rate_limited", "budget_exceeded"
+        ]
         try:
             return await self.wait_for_request_or_result()
         except TurnStoppedError as error:
             return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
         except NativeError as error:
-            if error._interrupted:
+            if error.code == "run_budget_exceeded":
+                reason = "budget_exceeded"
+            elif error._interrupted:
                 reason = "interrupted"
             elif error.category == "connection_failed":
                 reason = "connection_lost"
@@ -202,6 +211,31 @@ class Turn(Generic[OutputT]):
             and completion.done()
             and (step._continuation is None or step._continuation.done())
         )
+
+
+class ChildTurn(Protocol):
+    """Supported view of an exact native child turn. Cancel through Subagent.try_cancel."""
+
+    @property
+    def session_id(self) -> str: ...
+    @property
+    def turn_id(self) -> str | None: ...
+    @property
+    def submission_id(self) -> str: ...
+    @property
+    def child_id(self) -> str | None: ...
+    @property
+    def instance_id(self) -> int | None: ...
+
+    async def get_result(self) -> Completed[str, ChildTurn]: ...
+    async def wait_for_request_or_result(
+        self,
+    ) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn]: ...
+    async def wait_for_attention(
+        self,
+    ) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn] | TurnNeedsAttention: ...
+    async def steer(self, input: UserInput) -> None: ...
+    def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream: ...
 
 
 def _root_turn(

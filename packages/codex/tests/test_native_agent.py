@@ -34,6 +34,8 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         for name in dir(Session)
         if not name.startswith("_") and callable(getattr(Session, name))
     } == {
+        "aclose",
+        "respond",
         "submit",
         "save_state",
         "checkpoint_status",

@@ -62,7 +62,7 @@ from ..classic.usage import (
     _response_usage_to_usage,
     model_usage_to_span_usage,
 )
-from ._result import SDKRunResult, SDKRunResultStreaming, _ResultProjection
+from ._result import SDKRunHandle, SDKRunResult, _ResultProjection
 from ._session_history import _append_completed_history, _load_completed_history
 from ._transport import _CARRIER_MODEL, _ResponseCarrier
 
@@ -723,21 +723,24 @@ class SDKRunner:
             usage.add(response.usage)
             carrier.pending = payload
 
-        async def close() -> None:
-            async def release_provider() -> None:
-                if provider is not None:
-                    await provider.aclose()
+        def retain_cleanup_owner(error: BaseException) -> None:
+            if native_session is not None and not native_session._closed:
+                cast(Any, error).cleanup = native_session
+            elif provider is not None and not vars(provider).get("_closed", False):
+                cast(Any, error).cleanup = provider
+            if provider is not None and not vars(provider).get("_closed", False):
+                cast(Any, error).provider = provider
 
+        async def close() -> None:
             try:
-                try:
-                    if native_session is not None:
-                        await native_session._exit_scope()
-                except BaseException as error:
-                    await _close_after_error(error, release_provider)
-                    raise
-                else:
-                    await release_provider()
-            finally:
+                if native_session is not None:
+                    await native_session.aclose()
+                elif provider is not None:
+                    await provider.aclose()
+            except BaseException as error:
+                await _close_after_error(error, carrier.close)
+                raise
+            else:
                 await carrier.close()
 
         try:
@@ -761,6 +764,9 @@ class SDKRunner:
                 reconciled_calls=reconciliation,
                 _migration_transport=True,
             )
+            # This provider belongs to the migration run, not to the application.
+            # The existing Session owner must retain its final close on retries.
+            native_session._owned_provider = provider
             native_session._fail_unhandled_questions = True
             if state is not None or resume is not None:
                 # Native root records can outlive the context in a Model
@@ -775,10 +781,15 @@ class SDKRunner:
         except BaseException as error:
             carrier.retire()
             await _close_after_error(error, close)
+            retain_cleanup_owner(error)
             raise
         else:
             carrier.retire()
-            await close()
+            try:
+                await _join(asyncio.create_task(close()))
+            except BaseException as error:
+                retain_cleanup_owner(error)
+                raise
             # The single terminal-success boundary for result projection
             # and history consumers. The exact turn and cleanup have settled.
             projected = projection.finish(result)
@@ -789,7 +800,7 @@ class SDKRunner:
             return projected
 
     @staticmethod
-    def run_streamed(
+    def start(
         starting_agent: classic.Agent[ContextT],
         input: str,
         *,
@@ -808,12 +819,12 @@ class SDKRunner:
         model_settings: ModelSettings | dict[str, Any] | None = None,
         model_invocation: Literal["response", "stream"] = "response",
         on_model_event: Callable[[TResponseStreamEvent], None] | None = None,
-    ) -> SDKRunResultStreaming[ContextT]:
+    ) -> SDKRunHandle[ContextT]:
         """Start a run in the current event loop and buffer its semantic events.
 
         The ``session`` parameter follows the same storage and compaction rules as ``run``.
         """
-        return SDKRunResultStreaming(
+        return SDKRunHandle(
             SDKRunner.run(
                 starting_agent,
                 input,

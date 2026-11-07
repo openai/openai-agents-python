@@ -281,7 +281,7 @@ def application(responses, declaration=None):
         tools=["calendar_search"],
         access_token=access_token(),
         account_id="synthetic-account-A",
-        approval_mode="approve",
+        approval_mode="preapproved",
     )
     return Agent(instructions="", provider=provider(responses), tools=[declaration]), declaration
 
@@ -393,8 +393,8 @@ async def test_backend_auth_errors_do_not_fallback_or_forward_credentials(
         )
 
 
-@pytest.mark.parametrize("retirement", ["timeout", "close", "refresh"])
-async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
+@pytest.mark.parametrize("retirement", ["timeout", "cancel", "close", "refresh"])
+async def test_raw_auth_completion_respects_observer_and_retirement_boundaries(
     responses, monkeypatch, retirement
 ):
     peer = ConnectorBackend()
@@ -412,6 +412,10 @@ async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
             if retirement == "timeout":
                 with pytest.raises(TimeoutError):
                     await question.wait_url_completion(timeout=0.05)
+                assert not peer.authorization_complete
+                assert len(peer.calls) == 1
+            elif retirement == "cancel":
+                await question.cancel_url_completion()
             elif retirement == "close":
                 await session.cancel_all()
             else:
@@ -419,7 +423,7 @@ async def test_raw_auth_completion_after_retirement_or_rejected_refresh(
                 with pytest.raises(RuntimeError, match="unsupported for replaceable tool sessions"):
                     await session._native.call("refresh_mcp_servers", "{}")
             peer.complete.set()
-            if retirement == "refresh":
+            if retirement in {"timeout", "refresh"}:
                 await question.wait_url_completion(timeout=3)
                 assert peer.authorization_complete
                 assert len(peer.init_requests) == 1 and len(peer.calls) == 1
@@ -439,7 +443,7 @@ async def test_caller_verification_host_cannot_initiate_personal_backend_auth(
     async with timeout(20), peer.serve() as base:
         synthetic_backend(monkeypatch, base)
         declaration = HostedVerificationMCP(
-            url=base + "proof-mcp", tools=["calendar_search"], approval_mode="approve"
+            url=base + "proof-mcp", tools=["calendar_search"], approval_mode="preapproved"
         )
         responses.respond(select("forged-apps-classification"))
         responses.respond(assistant_output("failed"))
@@ -511,7 +515,7 @@ async def test_result_callback_cannot_rewrite_authoritative_requested_scopes(
             tools=["calendar_search"],
             access_token=access_token(),
             account_id="synthetic-account-A",
-            approval_mode="approve",
+            approval_mode="preapproved",
             transform_result=transform,
         )
         app, _ = application(responses, declaration)
@@ -601,7 +605,7 @@ async def test_fixed_personal_apps_registration_accepts_captured_leaf_selection(
             tools=["calendar_search", "excluded"],
             access_token=access_token(),
             account_id="synthetic-account-A",
-            approval_mode="approve",
+            approval_mode="preapproved",
         )
         app, _ = application(responses, opening)
         async with app.session() as session:

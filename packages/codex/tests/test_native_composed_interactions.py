@@ -70,7 +70,7 @@ async def test_independent_root_question_routing_and_borrowed_provider(
             name="records",
             url=url,
             tools=["search"],
-            approval_mode="auto" if kind == "approval" else "approve",
+            approval_mode="native" if kind == "approval" else "preapproved",
         )
         child = PolicyAgent(instructions="Search in the child's own root.", tools=[server])
         child.sessions = []
@@ -188,7 +188,9 @@ async def test_simultaneous_same_id_forms_cannot_answer_parent_or_sibling_reques
         for name, url in (("left", left), ("right", right)):
             child = PolicyAgent(
                 instructions="Ask locally.",
-                tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+                tools=[
+                    HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
+                ],
             )
             child.sessions = []
             children[name] = child
@@ -279,7 +281,7 @@ async def test_cancelled_child_form_waits_for_handler_cleanup_and_rejects_late_a
     async with timeout(25), peer.serve() as url, shared:
         child = PolicyAgent(
             instructions="Ask.",
-            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")],
+            tools=[HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")],
         )
         child.sessions = []
 

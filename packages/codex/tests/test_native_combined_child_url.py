@@ -83,7 +83,9 @@ async def next_owned_question(session, alpha):
 async def test_actual_child_url_consent_waits_for_its_exact_source(tmp_path, monkeypatch, early):
     peer = CompletionPeer(early=early)
     async with timeout(50), peer.serve() as url:
-        registration = HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")
+        registration = HttpMCP(
+            name="records", url=url, tools=["search"], approval_mode="preapproved"
+        )
         try:
             async with owned_http_child(tmp_path, monkeypatch, registration) as (
                 model,
@@ -132,7 +134,7 @@ async def test_actual_child_proof_submission_is_distinct_from_verifier_acceptanc
     enrollment = Enrollment(tmp_path)
     peer = VerificationPeer(enrollment, hold=True, replay=case == "replay")
     async with timeout(50), peer.serve() as url:
-        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")
+        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="preapproved")
         try:
             async with owned_http_child(tmp_path, monkeypatch, registration) as (
                 model,
@@ -184,7 +186,7 @@ async def test_actual_child_hosted_verification_transforms_its_original_result(
 
     async with timeout(50), peer.serve() as url:
         registration = HostedVerificationMCP(
-            url=url, tools=["search"], approval_mode="approve", transform_result=display
+            url=url, tools=["search"], approval_mode="preapproved", transform_result=display
         )
         async with owned_http_child(tmp_path, monkeypatch, registration) as (
             model,
@@ -229,7 +231,7 @@ async def test_actual_child_apps_completion_retains_original_scopes_and_identity
         tools=["calendar_search"],
         access_token=access_token(),
         account_id="synthetic-account-A",
-        approval_mode="approve",
+        approval_mode="preapproved",
         transform_result=displayed_result,
     )
     async with timeout(60), backend.serve() as base:
@@ -288,7 +290,7 @@ async def test_actual_child_apps_oauth_does_not_sign_a_separate_proof(tmp_path, 
         tools=["calendar_search"],
         access_token=access_token(),
         account_id="synthetic-account-A",
-        approval_mode="approve",
+        approval_mode="preapproved",
     )
     async with timeout(60), backend.serve() as base:
         synthetic_backend(monkeypatch, base)
@@ -320,7 +322,9 @@ async def test_actual_child_url_batch_keeps_original_owner_before_early_notifica
 ):
     peer = RequiredPeer(ids=("required-A", "required-B"))
     async with timeout(50), peer.serve() as url:
-        registration = HttpMCP(name="records", url=url, tools=["search"], approval_mode="approve")
+        registration = HttpMCP(
+            name="records", url=url, tools=["search"], approval_mode="preapproved"
+        )
         async with owned_http_child(tmp_path, monkeypatch, registration) as (
             _model,
             session,
@@ -364,7 +368,7 @@ async def test_original_child_cancellation_rejects_late_application_proof(tmp_pa
     peer = VerificationPeer(enrollment, hold=True)
     entered, release = asyncio.Event(), asyncio.Event()
     async with timeout(50), peer.serve() as url:
-        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")
+        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="preapproved")
         try:
             async with owned_http_child(tmp_path, monkeypatch, registration) as (
                 _model,
@@ -418,7 +422,7 @@ async def test_one_shot_cancel_joins_original_child_signer_and_discards_late_pro
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
-        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")
+        registration = HostedVerificationMCP(url=url, tools=["search"], approval_mode="preapproved")
         original_invoke, original_response, original_hold = (
             model.invoke,
             model.response,

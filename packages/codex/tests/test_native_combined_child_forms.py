@@ -78,7 +78,7 @@ async def test_nested_http_form_reaches_original_child_and_rejects_invalid_reply
                 replace(
                     tool,
                     tools=["search"],
-                    approval_mode="approve",
+                    approval_mode="preapproved",
                     transform_result=check_form_result,
                 )
                 if isinstance(tool, HttpMCP)

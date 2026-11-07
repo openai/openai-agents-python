@@ -8,6 +8,7 @@ from typing import (
     Annotated as Annotated,
     Any as Any,
     Literal as Literal,
+    cast as cast,
 )
 
 from pydantic import (
@@ -34,7 +35,7 @@ from ._public import (
     preserve_module_identity as _preserve_module_identity,
     type_alias_constructor as _type_alias_constructor,
 )
-from .turn import Turn as Turn
+from .turn import ChildTurn as ChildTurn, Turn as Turn
 
 if TYPE_CHECKING:
     from typing_extensions import TypeAliasType as _PublicTypeAliasType
@@ -63,7 +64,7 @@ class Subagent:
     status: Literal["active", "closed"]
     opened_at: int
     closed_at: int | None
-    turn: Turn[str] | None
+    turn: ChildTurn | None
     _session: Session[Any, Any] = field(repr=False, compare=False)
     _instance_id: int | None = field(repr=False, compare=False)
     _incarnation: str | None = field(repr=False, compare=False)
@@ -88,23 +89,23 @@ class Subagent:
             and self._incarnation is not None
         )
 
-    async def start(self, input: UserInput) -> Turn[str]:
+    async def start(self, input: UserInput) -> ChildTurn:
         """Start this child only when idle and return its exact Turn.
 
         Use Turn.steer on a live turn. If input arrives after its final sample,
         a successful turn can start an automatic successor. Follow that turn
         through Session.events() or a fresh Session.subagents() snapshot.
         """
-        return await self._session._start_child(self, input)
+        return cast("ChildTurn", await self._session._start_child(self, input))
 
-    async def try_cancel(self, turn: Turn[str]) -> bool:
+    async def try_cancel(self, turn: ChildTurn) -> bool:
         """Stop this exact turn and join its cooperative callbacks and cells.
 
         True confirms native interruption and joined SDK-owned cleanup. False
         means the native interruption was not confirmed. Cancelling this waiter
         still waits for cleanup; noncooperative callbacks can delay it.
         """
-        return await self._session._try_cancel_child(self, turn)
+        return await self._session._try_cancel_child(self, cast("Turn[str]", turn))
 
 
 def _subagent(

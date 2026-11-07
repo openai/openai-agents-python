@@ -1424,7 +1424,7 @@ async def _child_interaction_policy(directory: Path) -> None:
                         tools=[
                             *agent.tools,
                             HttpMCP(
-                                name="vault", url=url, tools=["search"], approval_mode="approve"
+                                name="vault", url=url, tools=["search"], approval_mode="preapproved"
                             ),
                         ],
                     )

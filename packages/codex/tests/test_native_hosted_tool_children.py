@@ -61,7 +61,7 @@ async def test_managed_child_inherits_hosted_image_grant_and_retains_large_previ
     selected_image = ToolRef("image_generation", "functions")
     children = NativeAgents(
         max_children=1,
-        before_step=lambda child, *, step_index: [selected_image],
+        before_step=lambda step: [selected_image],
     )
     async with (
         timeout(30),

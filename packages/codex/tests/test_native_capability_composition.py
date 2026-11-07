@@ -98,8 +98,8 @@ async def test_policy_usage_compaction_and_updated_checkpoint_authority(
             first = await session.submit("Use both tools and remember atlas.")
             first_result = await (first).get_result()
             assert first_result.final_output == Answer(answer="first")
-            assert first_result.usage is not None
-            assert first_result.usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
+            assert first_result.thread_usage is not None
+            assert first_result.thread_usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
             await session.update(
                 model="gpt-5.2-codex",
                 model_settings={
@@ -112,7 +112,7 @@ async def test_policy_usage_compaction_and_updated_checkpoint_authority(
             saved = await session.save_state()
             page = [entry async for entry in session.items()]
             assert (await (first).get_result()) is first_result
-            assert first_result.usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
+            assert first_result.thread_usage.total_token_usage == TokenUsage(51, 9, 12, 21, 6, 72)
             assert any(row["type"] == "compacted" for row in saved.history)
         events = [event async for event in stream]
         assert any(isinstance(event, ContextCompacted) for event in events)
@@ -126,8 +126,8 @@ async def test_policy_usage_compaction_and_updated_checkpoint_authority(
             next_handle = await restored.submit("Use both tools again.")
             next_result = await (next_handle).get_result()
             assert next_result.final_output == Answer(answer="restored")
-            assert next_result.usage is not None
-            assert next_result.usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
+            assert next_result.thread_usage is not None
+            assert next_result.thread_usage.last_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
             history = [entry async for entry in restored.items()]
 
     assert original.calls == ["original-python", "original-mcp"]

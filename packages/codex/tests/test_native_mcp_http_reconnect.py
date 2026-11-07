@@ -46,7 +46,7 @@ async def test_native_http_reconnect_does_not_replay_uncertain_call(
     responses.respond(assistant_output("done"))
 
     async with timeout(30), peer.serve() as url:
-        descriptor = HttpMCP(name="remote", url=url, tools=["search"], approval_mode="approve")
+        descriptor = HttpMCP(name="remote", url=url, tools=["search"], approval_mode="preapproved")
         async with Agent(
             instructions="Use the selected tool.", tools=[descriptor], provider=provider(responses)
         ).session() as session:

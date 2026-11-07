@@ -294,9 +294,9 @@ async def test_existing_native_retry_retains_failed_and_recovered_response_facts
         handle = await session.submit("recover from one incomplete response")
         completed = await handle.get_result()
         assert completed.final_output == "recovered"
-        assert completed.usage is not None
-        assert completed.usage.total_token_usage.total_tokens == 14
-        assert completed.usage.last_token_usage.total_tokens == 14
+        assert completed.thread_usage is not None
+        assert completed.thread_usage.total_token_usage.total_tokens == 14
+        assert completed.thread_usage.last_token_usage.total_tokens == 14
         turns = [turn async for turn in session.turns()]
         assert turns[0]["status"] == "completed"
         observed = turns[0]["responses"]
@@ -330,8 +330,8 @@ async def test_websocket_terminal_keeps_received_unknown_and_zero_counters() -> 
             handle = await session.submit("use the websocket transport")
             result = await handle.get_result()
             assert result.final_output == "websocket answer"
-            assert result.usage is not None
-            assert result.usage.total_token_usage.total_tokens == 3
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 3
             turns = [turn async for turn in session.turns()]
             assert len(turns[0]["responses"]) == 1
             observed = turns[0]["responses"][0]

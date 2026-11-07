@@ -93,7 +93,7 @@ It needs no model credentials and makes no external model requests. Its scripted
 | MCP, hosted tools, sandbox tools, voice, or realtime | Unsupported |
 | Model streaming | Pass `model_invocation="stream"` to call `Model.stream_response`; the default `"response"` calls `Model.get_response` |
 | Live raw Model events | In stream mode, pass a synchronous `on_model_event` observer; these events are provisional |
-| Buffered semantic events | Use `SDKRunner.run_streamed()` inside async code; these events remain buffered in either Model invocation mode |
+| Buffered semantic events | Use `SDKRunner.start()` inside async code; these events remain buffered in either Model invocation mode |
 | Synchronous execution to completion | Unsupported |
 | Native persistence | Idle portable state, `LocalStorage`, and root-only `CustomStorage` |
 | Classic Session stores | Pass `session` to read and append settled, uncompacted history. `OpenAIResponsesCompactionSession` works as a store. Use `agents.classic.Runner` for automatic compaction or opaque compacted history. |
@@ -169,7 +169,7 @@ If local storage reports an unknown tool outcome, check your application records
 
 ## Continue a completed Classic Session
 
-Pass your existing `agents.classic.Session` to `SDKRunner.run()` or `SDKRunner.run_streamed()`. The selected Model receives the stored messages, reasoning, and complete function call pairs in order. Your new text follows that history. The native loop starts a fresh turn and executes tools for that turn only.
+Pass your existing `agents.classic.Session` to `SDKRunner.run()` or `SDKRunner.start()`. The selected Model receives the stored messages, reasoning, and complete function call pairs in order. Your new text follows that history. The native loop starts a fresh turn and executes tools for that turn only.
 
 A declared `SessionSettings.limit` bounds the stored history that SDKRunner sends to the Model. SDKRunner checks the complete store snapshot first and reserves every stored function call ID. It then takes the latest items in order and omits any function output whose call falls outside that window. With a limit of zero or less, the Model receives only the new input. If the snapshot reaches SDKRunner's read bound, the run stops before calling the Model.
 
@@ -220,7 +220,7 @@ The run waits for the callback and keeps the Model selected at the start of that
 
 ## Read the result and handle failures
 
-`SDKRunner.run()` returns an `SDKRunResult` after the owned native Session closes. Both `SDKRunResult` and `SDKRunResultStreaming` are available from `agents.migration`.
+`SDKRunner.run()` returns an `SDKRunResult` after the owned native Session closes. Both `SDKRunResult` and `SDKRunHandle` are available from `agents.migration`.
 
 | Field | Value |
 | --- | --- |
@@ -240,13 +240,13 @@ Generated native receipt IDs and history from earlier native turns stay with the
 
 ### Consume buffered events
 
-Call `SDKRunner.run_streamed()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval`, `session`, and the native persistence options.
+Call `SDKRunner.start()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval`, `session`, and the native persistence options.
 
 ```python
 from agents.migration import SDKRunner
 
-stream = SDKRunner.run_streamed(agent, "Greet Ada.", context=app_context)
-async for event in stream.stream_events():
+stream = SDKRunner.start(agent, "Greet Ada.", context=app_context)
+async for event in stream.replay_events():
     if event.type == "run_item_stream_event":
         print(event.name)
 
@@ -254,17 +254,17 @@ result = await stream.get_result()
 print(result.final_output)
 ```
 
-The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. To observe live raw Model events and token deltas, use the explicit stream invocation and observer described below.
+The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `replay_events()` on a settled `SDKRunResult`. To observe live raw Model events and token deltas, use the explicit stream invocation and observer described below.
 
 The iterator yields no events while `on_approval` waits for a decision. If the Model completes the turn after a denial, the iterator includes the recorded denial as a `tool_output` event.
 
-If the run fails or is cancelled, `stream_events()` raises before yielding any events. `get_result()` also raises. Call `stream.cancel()` and await `stream.get_result()` to join cleanup. Cancelling a task waiting for either method also cancels the run and joins cleanup.
+If the run fails or is cancelled, `replay_events()` raises before yielding any events. `get_result()` also raises. Call `stream.cancel()` and await `stream.get_result()` to join cleanup. Cancelling a task waiting for either method also cancels the run and joins cleanup.
 
 ### Select streaming on your Model
 
-Pass `model_invocation="stream"` to `SDKRunner.run()` or `SDKRunner.run_streamed()`. The adapter calls the selected Model's `stream_response` method. It does not switch providers or fall back to `get_response` if streaming fails. The default remains `model_invocation="response"`, including for `run_streamed()`.
+Pass `model_invocation="stream"` to `SDKRunner.run()` or `SDKRunner.start()`. The adapter calls the selected Model's `stream_response` method. It does not switch providers or fall back to `get_response` if streaming fails. The default remains `model_invocation="response"`, including for `start()`.
 
-An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive, including failure events. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `stream_events()`.
+An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive, including failure events. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `replay_events()`.
 
 The first successful `response.completed` event ends consumption. Its response can omit `status` or set it to `completed`; explicit failure states or error details are rejected. The adapter also rejects a stream that ends without a completed response. It awaits the iterator's `aclose`, when available, before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. The adapter does not read trailing events or wait for transport EOF.
 
@@ -286,6 +286,8 @@ This integration differs from `NativeProvider(base_url=...)`. A NativeProvider c
 Classic Runner traces are not preserved. The adapter calls the selected Model with `ModelTracing.DISABLED`.
 
 To cancel, cancel the task awaiting `SDKRunner.run` and await that task's completion. The runner closes its response endpoint and native Session. During cancellation or failure, it waits for every started tool invocation to finish, including asynchronous tools. Runner cancellation does not cancel those tool invocations. A tool that never finishes can prevent cleanup from completing. A Model that suppresses cancellation can also delay cleanup.
+
+If native cleanup fails, the original error can carry a retry owner. In your error handler, retain `cleanup = getattr(error, "cleanup", None)`. If `cleanup is not None`, await `cleanup.aclose()` and retain that owner if the retry fails. After admission, this Session also closes the migration-owned native provider. The adapter still leaves your application Model and its provider open.
 
 Your application remains responsible for background work that its callbacks start independently. Cancellation and failure do not undo tool effects. Reconcile those effects before restarting a failed workflow.
 

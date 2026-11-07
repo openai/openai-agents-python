@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     ChildInvocation,
+    ChildStepContext,
     FunctionTool,
     NativeAgents,
     NativeError,
@@ -69,6 +70,7 @@ async def selected_children_peer():
 
 
 async def test_child_step_stop_preserves_sibling_and_allows_successor(tmp_path, monkeypatch):
+    context = {"tenant": "synthetic-tenant"}
     owners = {}
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -76,11 +78,13 @@ async def test_child_step_stop_preserves_sibling_and_allows_successor(tmp_path, 
     allow_successor = False
 
     @function_tool
-    def first(ctx: ToolContext[None]) -> str:
+    def first(ctx: ToolContext[dict[str, str]]) -> str:
         calls.append(ctx.submission)
         return "record found"
 
-    async def select(child: ChildInvocation, *, step_index: int):
+    async def select(step: ChildStepContext[dict[str, str]]):
+        child = step.child
+        assert step.context is context
         if child in calls:
             return []
         owners.setdefault(child.child_id, child)
@@ -102,7 +106,7 @@ async def test_child_step_stop_preserves_sibling_and_allows_successor(tmp_path, 
             model="gpt-5.5",
             tools=[first, NativeAgents(before_step=select, max_children=2)],
             provider=peer.provider(websocket=False),
-        ).session(environment=declaration(executor)) as session:
+        ).session(context=context, environment=declaration(executor)) as session:
             root = await session.submit("Spawn alpha and beta")
             try:
                 await entered.wait()
@@ -162,7 +166,9 @@ async def test_overlapping_native_and_independent_children_keep_own_selected_pla
         calls.append(("second", ctx.submission))
         return "second accepted"
 
-    async def select(child: ChildInvocation, *, step_index: int):
+    async def select(step: ChildStepContext[None]):
+        child = step.child
+        assert step.context is None
         assert isinstance(child, ChildInvocation)
         if any(identity == child for _, identity in calls):
             return []
@@ -302,7 +308,9 @@ async def test_manual_restore_enables_destination_child_selector_with_implicit_d
     )
     selected = []
 
-    async def choose(child: ChildInvocation, *, step_index: int):
+    async def choose(step: ChildStepContext[None]):
+        child = step.child
+        step_index = step.step_index
         selected.append((child, step_index))
         return []
 
