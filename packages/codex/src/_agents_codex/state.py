@@ -191,9 +191,9 @@ class SessionState(BaseModel):
     contains live grants or acquires tools from saved names. Versions 6 and 7
     also retain native CodeMode values and terminal cell observations.
 
-    Verify the checkpoint's integrity before restoring it. Opening with a
-    local executor or explicit writable roots requires a matching saved
-    executor policy digest.
+    Verify the checkpoint's integrity before restoring it. A strict Environment
+    requires a matching saved executor policy digest. Local and remote
+    Environments use strict write policy by default.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
