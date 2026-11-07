@@ -789,8 +789,10 @@ async def test_caller_cancellation_during_managed_entry_joins_rollback_and_propa
         await asyncio.sleep(0)
         assert not running.done()
         release.set()
-        with pytest.raises(asyncio.CancelledError, match="synthetic-caller-cancel"):
+        with pytest.raises(asyncio.CancelledError) as canceled:
             await asyncio.wait_for(running, 5)
+        if sys.version_info >= (3, 11):
+            assert canceled.value.args == ("synthetic-caller-cancel",)
         if canceling is not None:
             await asyncio.wait_for(canceling, 5)
         assert not responses.requests
