@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -250,39 +251,73 @@ async def test_generated_code_receives_structured_matches(
     assert "report.txt:2" in code_output(responses.requests[1], "search-code")
 
 
-@local_search
+@pytest.mark.requires_native_linux_sandbox
 async def test_restore_uses_current_root_and_current_search_grants(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first, second = tmp_path / "first", tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
-    (first / "first.txt").write_text("needle first\n")
-    (second / "second.txt").write_text("needle second\n")
     agent = Agent(instructions="Search the project.", provider=provider(responses))
-    async with timeout(30):
-        async with agent.session(
-            environment=Environment.local(cwd=first, tools=["project_grep"])
-        ) as session:
+    async with timeout(30), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        first, second = peer.root / "first", peer.root / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "first.txt").write_text("needle first\n")
+        (second / "second.txt").write_text("needle second\n")
+        # The implicit remote workspace may move on restore; strict local policies may not.
+        selected = Environment(
+            url=peer.url,
+            cwd=str(first),
+            tools=["project_grep"],
+            headers={"Authorization": "Bearer " + peer.token},
+        )
+        async with agent.session(environment=selected) as session:
             responses.respond(function_call("project_grep", {"pattern": "needle"}, "first"))
             responses.respond(assistant_output("saved"))
             await (await session.submit("Search.")).get_result()
             saved = await session.save_state()
             assert "_sdk_project_search" not in saved.to_json()
         async with agent.session(
-            state=saved, environment=Environment.local(cwd=second, tools=["project_grep"])
+            state=saved, environment=replace(selected, cwd=str(second))
         ) as restored:
             responses.respond(function_call("project_grep", {"pattern": "needle"}, "second"))
             responses.respond(assistant_output("restored"))
             await (await restored.submit("Search again.")).get_result()
             result = json.loads(tool_output(responses.requests[-1], "second"))
             assert [match["path"] for match in result["matches"]] == ["second.txt"]
-        async with agent.session(state=saved, environment=Environment.local(cwd=second)) as revoked:
+        async with agent.session(
+            state=saved, environment=replace(selected, cwd=str(second), tools=[])
+        ) as revoked:
             responses.respond(function_call("project_grep", {"pattern": "needle"}, "revoked"))
             responses.respond(assistant_output("unavailable"))
             await (await revoked.submit("Search again.")).get_result()
             assert not declarations(responses.requests[-1])
             assert "needle second" not in tool_output(responses.requests[-1], "revoked")
+
+
+@local_search
+async def test_local_restore_preserves_policy_and_rechecks_search_grants(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    selected = Environment.local(cwd=first, tools=["project_grep"])
+    agent = Agent(instructions="Search the project.", provider=provider(responses))
+    async with timeout(20):
+        responses.respond(assistant_output("saved"))
+        async with agent.session(environment=selected) as session:
+            await (await session.submit("Describe the available tools.")).get_result()
+            assert ("functions", "project_grep") in declarations(responses.requests[-1])
+            saved = await session.save_state()
+        with pytest.raises(ValueError, match="agree on the applied executor policy"):
+            async with agent.session(state=saved, environment=replace(selected, cwd=second)):
+                pytest.fail("A local restore changed its executor policy")
+        responses.respond(assistant_output("revoked"))
+        async with agent.session(state=saved, environment=replace(selected, tools=[])) as restored:
+            await (await restored.submit("Describe the available tools.")).get_result()
+            assert not declarations(responses.requests[-1])
+        assert len(responses.requests) == 2
 
 
 @local_search
