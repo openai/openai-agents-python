@@ -13,7 +13,8 @@ An Agent declares instructions, tools and final output. Its constructor does not
 ```text
 Agent(*, instructions: str, name=None, tools=None, model=None,
       model_settings=None, provider=None, output_type=None,
-      programmatic_tool_calling=False)
+      programmatic_tool_calling=False, transform_context=None,
+      before_compact=None, before_complete=None)
 
 agent.validate() -> None
 agent.with_output_type(output_type) -> Agent
@@ -28,7 +29,7 @@ agent.run_sync(input, *, context=None, on_interaction=None,
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
               instruction_files=(), reconciled_calls=(),
-              parent_trace=None, trace_options=None)
+              parent_trace=None, trace_options=None, on_interaction=None)
               -> async context manager[Session]
 ```
 
@@ -59,7 +60,9 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
+| `await session.respond(reply)` | Deliver a bound reply prepared by an exact live request. Preparing the reply does not reserve its request. See [retained Session handlers](approvals.md#handle-requests-for-a-retained-session). |
 | `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
+| `await session.aclose()` | Stop owned work and join cleanup. Retry through this same owner if cleanup fails. See [incomplete cleanup](sessions.md#retry-incomplete-cleanup). |
 | `await session.cancel_all(*, mode="force")` | Stop and join roots, descendants and queued work. See [interruption](sessions.md#interrupt-work). |
 | `await session.update(*, model=None, model_settings=None, instructions=None, tools=None)` | Change one idle category. Tool updates replace admitted Python or manual names or MCP server/raw-tool pairs and set defaults. Temporary selections use the last accepted bindings. See [Session updates](sessions.md#update-tools-instructions-and-model-settings). |
 
@@ -90,6 +93,12 @@ History and descendant iterators have no pagination arguments.
 | `session.capabilities.require(feature, allow_limited=False)` | Raise `CapabilityError` for unsupported or, by default, limited coverage. |
 
 `session.capabilities.websockets_allowed` reports provider permission, not negotiated transport. Capability reports describe configuration support. They grant no permissions and do not establish checkpoint readiness. See [conversations and state](sessions.md).
+
+### get_cleanup
+
+Import `get_cleanup` from `agents` for native or migration failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None` finds the retained cleanup owner through the error and its exception context. It returns the existing Session or NativeProvider owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+
+Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
 
 ### PreparedRequest and prepare_request
 
@@ -127,17 +136,19 @@ Turn calls use the Session's opening event loop. After `run_sync()`, that loop h
 
 A `Subagent` record contains a captured descendant's identity, status, `is_live` and optional observed `turn`. A snapshot can become stale.
 
-`await child.start(input)` checks that the child is still the same live instance and returns a `Turn[str]` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](delegation.md#native-children).
+`await child.start(input)` checks that the child is still the same live instance and returns a `ChildTurn` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](delegation.md#native-children).
+
+`ChildTurn` exposes result waits, events, identifiers and ordinary steering. It does not advertise root-only `cancel()` or `steer_exact()`. Use `Subagent.try_cancel(child_turn)` for the weaker native child interruption guarantee. Child results retain the same `ChildTurn` view in `Completed.turn`.
 
 ## Results and usage
 
 ### Completed
 
-A `Completed` result contains `turn`, `final_output`, `usage`, optional `state` and `repair_attempts`. `turn` is the exact root or child `Turn` that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
+A `Completed` result contains `turn`, `final_output`, `thread_usage`, optional `state` and `repair_attempts`. `turn` is the exact root `Turn` or supported `ChildTurn` view that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
 
 Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage excludes children.
 
-`repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
+`repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.thread_usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
 
 ### RecordedTurn and RecordedResponse
 
@@ -147,7 +158,7 @@ Live `ModelRequestDispatching` and `ModelResponseLinked` observations come from 
 
 ### TokenUsageInfo and TokenUsage
 
-Import these immutable data classes from `agents.usage`. `Completed.usage` is a `TokenUsageInfo` or `None`. `TokenUsageInfo` contains `total_token_usage: TokenUsage`, `last_token_usage: TokenUsage` and `model_context_window: int | None`.
+Import these immutable data classes from `agents.usage`. `Completed.thread_usage` is a `TokenUsageInfo` or `None`. `TokenUsageInfo` contains `total_token_usage: TokenUsage`, `last_token_usage: TokenUsage` and `model_context_window: int | None`.
 
 `TokenUsage` contains integer fields `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. Cached and reasoning counts are already included in the totals.
 
@@ -258,19 +269,19 @@ An `ActionRequested` request carries typed arguments and permission to reply to 
 
 The one-shot handler returns the matching request's candidate reply. The SDK checks the reply's identity, validates its value and delivers it. An invalid reply fails the run and closes its Session.
 
-### ApprovalRequest and ElicitationRequest
+### ApprovalRequest, FormRequest and UrlRequest
 
-Both types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
+All three request types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
 
-For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
+For a `FormRequest`, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
 
 Standard forms can use primitive or general schemas, including nested objects and arrays on the general route; see [form schema support](approvals.md#handle-native-approvals-and-forms) for validation limits.
 
-A URL request has an empty schema, plus `url` and `elicitation_id`. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
+A `UrlRequest` exposes `url` and `elicitation_id`, without form methods or a `schema` field. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
 
 In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server's completion notification. Keep the Session open while waiting. Consent does not establish completion, and a server notification does not independently verify the result.
 
-A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](approvals.md#answer-interactions-during-a-one-shot-run).
+A timeout raises `TimeoutError` and stops only that observer. Cancelling the waiter also stops only that wait. Call `await request.cancel_url_completion()` to expire the shared lifecycle; other completion waiters then receive `InteractionExpiredError`. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](approvals.md#answer-interactions-during-a-one-shot-run).
 
 ### VerificationProof and VerificationRequest
 
@@ -286,7 +297,7 @@ Declares selected tools on a Streamable HTTP server:
 
 ```text
 HttpMCP(*, name: str, tools: Sequence[str], url: str,
-        approval_mode="auto", startup_timeout=10, execution_timeout=60,
+        approval_mode="native", startup_timeout=10, execution_timeout=60,
         transform_result=None, transform_result_timeout=None,
         before=None, approval=None, defer_loading=False, bearer_token=None)
 ```
@@ -298,7 +309,7 @@ Declares selected tools on a server process:
 ```text
 StdioMCP(*, name: str, tools: Sequence[str], command: str,
          args=(), env_vars=(), cwd=None, location="host",
-         approval_mode="auto", startup_timeout=10, execution_timeout=60,
+         approval_mode="native", startup_timeout=10, execution_timeout=60,
          transform_result=None, transform_result_timeout=None,
          before=None, approval=None, defer_loading=False)
 ```
@@ -483,3 +494,9 @@ A dictionary with `type="input_text"` and `text`.
 ### InputImage
 
 A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`.
+
+## Migration run handles
+
+The optional `agents.migration` adapter exposes `SDKRunner.start(...) -> SDKRunHandle` for a run that starts in the current event loop. Await `handle.get_result()` for its accepted result, or call `handle.cancel()` and then await settlement to join cleanup. `handle.replay_events()` and `result.replay_events()` yield buffered accepted semantic events after successful completion. They do not provide live model or tool progress. Classic Runner streaming APIs keep their existing behavior.
+
+`agents.migration.get_cleanup` re-exports the same callable as [`agents.get_cleanup`](#get_cleanup). Native callers can import it from `agents` without the optional migration adapter.

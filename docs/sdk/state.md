@@ -29,6 +29,8 @@ In development builds after `0.24.0-alpha.6`, `LocalStorage` rejects `programmat
 
 `CustomStorage`, also added after alpha.6, supports root Sessions with automatic Python tools. Use a [matching development build](installation.md#examples-and-upgrades). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
 
+A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before Core starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
+
 For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).

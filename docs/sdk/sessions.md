@@ -122,13 +122,13 @@ For child work, see [native child turns](#native-child-turns).
 
 ### Wait for a decision or a result
 
-Use `await turn.wait_for_attention()` when the application needs to act only on live requests or a settled outcome. Ordinary tool activity stays on the observation stream.
+Use `await turn.wait_for_attention()` for requests owned by that Turn or a settled outcome. A Turn wait excludes genuinely Session-scoped requests, such as a URL interaction without Turn IDs. Use `agent.session(on_interaction=handler)` for general handling, or own a `session.interactions()` task and propagate that task's failures while awaiting results. Ordinary tool activity stays on the observation stream.
 
 | Return value | What the application receives |
 | --- | --- |
 | `Completed` | The turn's final output and available usage. |
 | `PendingRequests` | Live requests owned by this root. Respond to each exact request. Use `session.interactions()` to include child requests. |
-| `TurnNeedsAttention` | A settled interruption, lost connection, blocking quota, or temporary rate limit. The `reason` distinguishes these outcomes. |
+| `TurnNeedsAttention` | A settled interruption, lost connection, blocking quota, temporary rate limit, or SDK run-budget stop (`reason="budget_exceeded"`). The `reason` distinguishes these outcomes. |
 
 Other failures still raise. If a connection is lost, check retained history and your application's records of tool effects before continuing. To set a deadline, [bound the wait and stop owned work](troubleshooting.md#bound-a-wait-and-stop-owned-work).
 
@@ -544,3 +544,21 @@ After closing the Session, [reopen the local conversation](state.md#reopen-a-con
 <a id="protect-saved-data-and-effects"></a>
 
 [Save and restore pending manual requests](state.md#save-a-settled-manual-request) or [inspect retained planning data](state.md#inspect-retained-planning-data).
+
+## Retry incomplete cleanup
+
+Use `async with agent.session()` as the normal Session lifetime. If cleanup fails before all resources retire, the original error can retain its remaining cleanup owner. Use `get_cleanup` from `agents` to find that owner:
+
+```python
+from agents import get_cleanup
+
+cleanup = get_cleanup(error)
+if cleanup is not None:
+    await cleanup.aclose()
+```
+
+Retain that owner until cleanup succeeds. If another attempt fails, retain both the primary error and the owner for a later retry. The public `aclose()` method retries complete cleanup. For an admitted Session, `aclose()` retries native retirement. It then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. Cleanup preserves the primary failure; linked cleanup errors remain available through its exception context.
+
+[`get_cleanup(error)`](reference.md#get_cleanup) also follows exception contexts. On Python 3.10, a Task boundary can replace a `CancelledError` while retaining the original error in its context. The helper returns the existing owner and does not wrap or replace the cancellation error. It works for native runs without the optional migration adapter.
+
+A retained Session also exposes idempotent `await session.aclose()`. Successful repeated calls do nothing. An interrupted waiter still joins owned cleanup before cancellation propagates. After a failed `run_sync()`, host code outside an event loop can capture `cleanup = get_cleanup(error)`. Call `asyncio.run(cleanup.aclose())` only when `cleanup is not None`. The cleanup owner keeps and drives the original run loop until its remaining resources retire. Do not discard a failed cleanup owner or retry the business operation before checking its effects.
