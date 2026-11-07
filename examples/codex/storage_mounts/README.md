@@ -1,4 +1,4 @@
-# Native local storage mounts
+# Storage mounts for native sessions
 
 `Environment.local(mounts=...)` lets native tools read an existing directory
 outside their writable workspace. On Linux, the native sandbox binds the source
@@ -73,3 +73,87 @@ effective read and write policy.
 Linux isolation tests require a host that can run the native sandbox. Tests
 marked `requires_native_linux_sandbox` skip inside the outer Codex sandbox.
 Those skips do not prove read-only enforcement; use matching native CI coverage.
+
+## Provider storage for native sessions
+
+`agents.sandbox.sandbox_environment` adapts the existing sandbox resource clients
+to native `Agent` sessions. It uses their typed `Manifest` and mount pipeline;
+it does not run a Classic agent or another model loop. The shared resource
+classes keep their existing `agents.classic` identities. Install the dependencies
+required by the selected resource provider.
+
+Pass a client, a manifest, provider options, and `connect`. Manifest dictionaries
+use the existing `Manifest` parser. Provider-option dictionaries require the
+existing `type` discriminator; typed provider options also work. The adapter
+captures the manifest and options before creation. Every mount must specify its
+`mount_strategy`; the adapter does not infer or replace strategies.
+
+`connect(session)` receives the concrete `SandboxSession` returned by that client,
+after `session.start()` completes. It must return an async context manager that
+connects an authenticated native executor gateway to **that exact sandbox** and
+yields an `Environment`. The image and host must support the native executor's
+standard sandbox. An ordinary container may block the nested user namespaces
+that Linux isolation needs. Supplying a URL to an unrelated executor does not
+connect the mounted storage to native tools.
+
+The adapter does not deploy a WSS gateway, install storage drivers, provision
+cloud accounts, or select credentials. The connector owns its gateway and relay
+processes. Native retirement happens before connector exit; the adapter then
+attempts `session.aclose()` and `client.delete(session)`, including when startup
+or an earlier cleanup stage fails. Native Session cancellation joins source
+entry, including a late resource returned by creation. If creation raises before returning a
+session, cleanup of that unreturned resource remains the provider's responsibility.
+
+Selection and disposal follow the client's existing policy. Authorize disposal
+of the selected backend before using the adapter. In particular, Python Modal
+can select an existing sandbox and its current close/delete behavior terminates
+that backend. The adapter does not promise borrowed-resource preservation or
+stronger deletion confirmation than the provider supplies. It accepts no
+snapshot or saved sandbox state. Native checkpoints do not carry provider
+credentials, resource handles, or gateway authority; supply a new source with
+current trusted configuration when restoring a native session.
+
+### Existing supported matrix
+
+These are the existing resource implementations available to the adapter, not
+claims of live cloud qualification. Providers validate strategies and credential
+boundaries before their creation effects. Their credential requirements and
+in-container exposure acknowledgements still apply.
+
+| Backend/strategy | Storage entries | Requirements and limits |
+| --- | --- | --- |
+| Docker `DockerVolumeMountStrategy` | S3, GCS with `rclone` or `mountpoint`; R2, Azure Blob, Box with `rclone` | Matching host volume driver; provider-supported credentials. No S3 Files volume driver. |
+| Docker `InContainerMountStrategy` | S3/GCS with Rclone or Mountpoint patterns; R2/Box with Rclone; Azure Blob with Rclone or Fuse; S3 Files with `S3FilesMountPattern` | Compatible image, mount privileges and tools. S3 Files needs an existing filesystem, identity and network reachability. |
+| Modal `ModalCloudBucketMountStrategy` | S3, R2, GCS | Provider-supported secrets or compatible credentials. |
+| Cloudflare `CloudflareBucketMountStrategy` | S3, R2, GCS | Native bucket API; GCS uses compatible HMAC credentials. |
+| E2B `E2BCloudBucketMountStrategy` / Daytona `DaytonaCloudBucketMountStrategy` | S3, GCS, R2, Azure Blob, Box through Rclone | Compatible FUSE/runtime support and credential exposure policy. No S3 Files path established. |
+| Blaxel `BlaxelCloudBucketMountStrategy` | S3, R2, GCS | Provider FUSE helpers and supported credentials. |
+| Vercel `VercelCloudBucketMountStrategy` | S3 | Provider Mountpoint path; explicit supported credentials. |
+
+Common typed entries, patterns and strategies are re-exported from
+`agents.sandbox`. Provider-specific strategies and clients remain in their
+owning `agents.classic.extensions.sandbox.<provider>` modules. `read_only=True`
+is forwarded to the existing mount implementation; layout guidance alone does
+not enforce access. No live cloud services were used to qualify this adapter.
+
+`render_storage_layout(manifest)` explicitly returns JSON with `workspace` and
+`storage` entries containing `path`, `access` (`read_only` or `read_write`), and
+an optional caller description. It does not serialize credentials, provider
+settings, environment values, or file contents. Descriptions are caller text;
+do not put credentials in them. Add this guidance to instructions only when
+wanted; the adapter does not inject it automatically.
+
+The provider example uses Docker's existing Rclone volume strategy. Prepare the
+host driver and an image that supports the native executor. Supply your trusted
+gateway connector as an importable async context manager:
+
+```sh
+uv run python examples/codex/storage_mounts/provider.py \
+  --connect your_gateway:connect --image YOUR_PREPARED_IMAGE --bucket YOUR_BUCKET
+```
+
+The connector is application code, not a bundled deployment service. It receives
+the created session, uses that session's provider handles to reach its native
+executor, and owns gateway cleanup. Configure model credentials through the
+normal SDK settings. The example reads optional AWS credentials from the
+application environment and passes them only to the storage declaration.
