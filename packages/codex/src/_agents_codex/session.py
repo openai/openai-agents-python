@@ -390,8 +390,8 @@ class Capabilities:
             if s._storage is not None:
                 return FeatureSupport(
                     "unsupported",
-                    "LocalStorage cannot export SessionState",
-                    "Use the existing local storage profile",
+                    "Persistent Sessions cannot export SessionState",
+                    "Use an ephemeral Session for portable state",
                 )
             return FeatureSupport(
                 "supported",
