@@ -309,7 +309,7 @@ async def test_repair_has_effective_updated_model_auth_accounting_and_real_histo
         assert effect.read_text() == "owned once"
         assert len(responses.requests) == 5
         assert len(one.repair_attempts) == 2
-        assert one.usage is not None and one.usage.total_token_usage.total_tokens == 42
+        assert one.thread_usage is not None and one.thread_usage.total_token_usage.total_tokens == 42
         all_turns = [t async for t in session.turns()]
         assert len(all_turns) == 4
         assert tuple(t for t in all_turns if "parent_turn_id" in t) == one.repair_attempts
@@ -600,8 +600,8 @@ async def test_graceful_repair_stops_at_next_attempt_not_at_natural_completion(
                 if correction_valid:
                     result = await turn.get_result()
                     assert result.final_output == Report(label="corrected")
-                    assert result.usage is not None
-                    assert result.usage.total_token_usage.total_tokens == 14
+                    assert result.thread_usage is not None
+                    assert result.thread_usage.total_token_usage.total_tokens == 14
                     assert len(result.repair_attempts) == 1
                 else:
                     with pytest.raises(TurnStoppedError):

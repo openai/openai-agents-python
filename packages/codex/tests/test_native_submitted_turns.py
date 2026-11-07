@@ -316,6 +316,6 @@ async def test_invalid_intermediate_answer_is_not_repaired_and_events_keep_nativ
         assert all(any(t["id"] == turn_id for t in history) for turn_id in starts)
         # Usage is a native cumulative snapshot for the last owned step, not
         # a sum of repeatedly sampled snapshots. No cost is fabricated.
-        assert result.usage is None or result.usage.total_token_usage.total_tokens >= (
-            result.usage.last_token_usage.total_tokens
+        assert result.thread_usage is None or result.thread_usage.total_token_usage.total_tokens >= (
+            result.thread_usage.last_token_usage.total_tokens
         )

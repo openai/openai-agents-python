@@ -443,7 +443,7 @@ async def test_filtered_child_streams_finish_with_their_own_real_text_and_usage(
                 "alpha complete",
                 "beta complete",
             ]
-            assert all(result.usage is not None for result in results)
+            assert all(result.thread_usage is not None for result in results)
             # A shared Turn stream must settle while its Session stays open.
             # Before the repair both real native waits finish, but these
             # consumer-side filters otherwise wait until Session close.
@@ -458,8 +458,8 @@ async def test_filtered_child_streams_finish_with_their_own_real_text_and_usage(
                     == result.final_output
                 )
                 usages = [event.usage for event in events if isinstance(event, UsageUpdated)]
-                assert usages and usages[-1] == result.usage
-            assert results[0].usage != results[1].usage
+                assert usages and usages[-1] == result.thread_usage
+            assert results[0].thread_usage != results[1].thread_usage
             assert await root_result.turn.get_result() is root_result
         retained = [event async for event in all_events]
         for turn in (root, alpha, beta):

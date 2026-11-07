@@ -289,7 +289,7 @@ async def test_final_overshoot_can_save_idle_and_start_a_fresh_budget(
         assert first.final_output == "First"
         assert first.state is not None
         assert first.state.native_continuation is None
-        assert first.usage is not None and first.usage.last_token_usage.total_tokens == 14
+        assert first.thread_usage is not None and first.thread_usage.last_token_usage.total_tokens == 14
         second = await asyncio.to_thread(agent.run_sync, "second", state=first.state, budget=budget)
         assert second.final_output == "Second"
     assert len(responses.requests) == 2
@@ -449,3 +449,20 @@ async def test_prompted_repair_shares_budget_without_root_selector_or_tools(
     assert len(responses.requests) == 2
     assert any(tool["name"] == "lookup" for tool in function_declarations(responses.requests[0]))
     assert function_declarations(responses.requests[1]) == []
+
+
+async def test_budget_stop_is_a_supervisory_outcome(responses: ResponsesFixture) -> None:
+    agent = Agent(instructions="Answer.", provider=provider(responses))
+    async with timeout(15), agent.session() as session:
+        turn = await session.submit("Stop before sampling", budget=RunBudget(max_requests=0))
+        outcome = await turn.wait_for_attention()
+        from agents import TurnNeedsAttention
+
+        assert isinstance(outcome, TurnNeedsAttention)
+        assert outcome.reason == "budget_exceeded"
+        assert isinstance(outcome.error, NativeError)
+        assert outcome.error.code == "run_budget_exceeded"
+        with pytest.raises(NativeError) as original:
+            await turn.get_result()
+        assert original.value is outcome.error
+        assert responses.requests == []

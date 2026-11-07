@@ -72,11 +72,11 @@ async def test_one_shot_preserves_tool_work_usage_and_actual_history() -> None:
         assert len(peer.requests) == 2
         assert all(request["stream"] is True for request in peer.requests)
         assert tool_output(peer.requests[1], "one-shot-tool") == "actual:record"
-        assert result.usage is not None
-        assert result.usage.total_token_usage.input_tokens == 22
-        assert result.usage.total_token_usage.output_tokens == 6
-        assert result.usage.total_token_usage.total_tokens == 28
-        assert result.usage.last_token_usage.total_tokens == 14
+        assert result.thread_usage is not None
+        assert result.thread_usage.total_token_usage.input_tokens == 22
+        assert result.thread_usage.total_token_usage.output_tokens == 6
+        assert result.thread_usage.total_token_usage.total_tokens == 28
+        assert result.thread_usage.last_token_usage.total_tokens == 14
         assert {headers["authorization"] for headers in peer.request_headers} == {
             "Bearer synthetic-one-shot-key"
         }

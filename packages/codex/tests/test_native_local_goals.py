@@ -470,7 +470,7 @@ async def test_goal_native_accounting_and_optional_budget(responses, tmp_path):
         assert "tokenBudget" not in value
         assert value["tokensUsed"] > 0 and value["timeUsedSeconds"] >= 0
         assert 0 < value["createdAt"] <= value["updatedAt"]
-        usage = result.usage
+        usage = result.thread_usage
         assert usage is not None
         # Core is the source of both accounting records, not a Python counter.
         assert value["tokensUsed"] <= usage.total_token_usage.total_tokens

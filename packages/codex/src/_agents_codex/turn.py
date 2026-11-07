@@ -50,7 +50,7 @@ class SteeringReceipt:
 class TurnNeedsAttention:
     """A settled turn and the latest Session-level API limits at read time."""
 
-    reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+    reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited", "budget_exceeded"]
     error: NativeError | TurnStoppedError
     rate_limits: ApiRateLimits
 
@@ -106,13 +106,15 @@ class Turn(Generic[OutputT]):
         """
         from .session import NativeError, TurnStoppedError
 
-        reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+        reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited", "budget_exceeded"]
         try:
             return await self.wait_for_request_or_result()
         except TurnStoppedError as error:
             return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
         except NativeError as error:
-            if error._interrupted:
+            if error.code == "run_budget_exceeded":
+                reason = "budget_exceeded"
+            elif error._interrupted:
                 reason = "interrupted"
             elif error.category == "connection_failed":
                 reason = "connection_lost"

@@ -195,7 +195,7 @@ async def test_final_typed_text_replaces_commentary_and_belongs_to_exact_root_tu
         assert later.turn_id != first.turn_id
         assert (await later.get_result()).final_output == "fresh root answer"
         captured = await first.get_result()
-        assert captured.turn is first and captured.usage == result.usage
+        assert captured.turn is first and captured.thread_usage == result.thread_usage
         assert captured.final_output == result.final_output
         assert len(responses.requests) == 2
         assert result.final_output == expected

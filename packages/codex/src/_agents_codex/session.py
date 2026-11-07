@@ -690,7 +690,7 @@ class _ManualBoundaryLost(RuntimeError):
 class Completed(Generic[OutputT]):
     """One completed root or captured child turn.
 
-    Usage is None when the native runtime has no usage information. It is a
+    thread_usage is None when the native runtime has no usage information. It is a
     cumulative thread snapshot, not a per-submission cost. It remains valid
     after the Session closes or later submissions complete. A child result
     retains its exact Turn[str] and the latest usage reported by that
@@ -698,7 +698,7 @@ class Completed(Generic[OutputT]):
     None; root results do not aggregate child usage.
 
     repair_attempts retains the real RecordedTurn receipts for opted-in
-    prompted-output correction. Their per-turn usage is separate from usage,
+    prompted-output correction. Their per-turn usage is separate from thread_usage,
     which still reports only the original thread. Missing usage remains None.
     final_output may be derived from a repair; native task history stays intact.
     For hosted web search, read citation ranges on each text part from
@@ -709,7 +709,7 @@ class Completed(Generic[OutputT]):
 
     turn: Turn[OutputT]
     final_output: OutputT
-    usage: TokenUsageInfo | None = None
+    thread_usage: TokenUsageInfo | None = None
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
 

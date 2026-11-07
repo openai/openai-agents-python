@@ -239,11 +239,11 @@ async def test_hosted_search_evidence_reaches_history_events_and_next_request(wi
                 assert cited_part["text"][start:end] == "Clear skies"
                 assert observed["message"]["content"] == parts
                 assert observed["message"]["display_text"] == settled.final_output
-                assert settled.usage is not None
-                assert settled.usage.last_token_usage.total_tokens == 14
+                assert settled.thread_usage is not None
+                assert settled.thread_usage.last_token_usage.total_tokens == 14
             else:
                 assert "message" not in observed
-                assert settled.usage is None
+                assert settled.thread_usage is None
             recorded = [turn async for turn in session.turns()]
             received = recorded[0]["responses"][0]
             assert received["usage_source"] == "received"
