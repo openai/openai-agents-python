@@ -1,4 +1,4 @@
-//! Only native acquisition slots and homes live on a Provider, never Python work.
+//! A Provider owns native acquisition slots, homes and uncredentialed HTTP clients, never Python work.
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -9,6 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::{async_bridge, py_error};
 type Closing = Shared<BoxFuture<'static, std::result::Result<(), String>>>;
 type Home = Arc<Mutex<Option<tempfile::TempDir>>>;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
     Opening,
@@ -31,11 +32,13 @@ struct State {
 }
 struct ProviderResource {
     state: Mutex<State>,
+    model_http_pool: codex_http_client::SdkModelHttpPool,
 }
 impl ProviderResource {
     fn new() -> Self {
         Self {
             state: Mutex::new(State::default()),
+            model_http_pool: codex_http_client::SdkModelHttpPool::default(),
         }
     }
 }
@@ -45,6 +48,14 @@ pub(crate) struct Lease {
     cleanup: AsyncMutex<()>,
 }
 impl Lease {
+    pub(crate) fn model_http_pool(&self) -> PyResult<codex_http_client::SdkModelHttpPool> {
+        self.check_live()?;
+        let resource = self
+            .resource
+            .upgrade()
+            .ok_or_else(|| py_error("Provider is closed"))?;
+        Ok(resource.model_http_pool.clone())
+    }
     pub(crate) fn check_live(&self) -> PyResult<()> {
         if !matches!(
             self.record.lock().map_err(py_error)?.phase,
@@ -326,7 +337,10 @@ impl NativeProviderOwner {
                 (state.generation, pending.clone())
             } else {
                 let leases = state.leases.clone();
+                let model_http_pool = self.inner.model_http_pool.clone();
+                let resource = self.inner.clone();
                 let task = pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    let _resource = resource;
                     let mut errors = Vec::new();
                     for lease in leases {
                         if let Err(error) = lease.close_orphan().await {
@@ -336,6 +350,8 @@ impl NativeProviderOwner {
                     if !errors.is_empty() {
                         return Err(errors.join("; additional cleanup failure: "));
                     }
+                    // Scoped owners have joined before pooled clients retire.
+                    model_http_pool.close();
                     Ok(())
                 });
                 let pending = async move { task.await.map_err(|error| error.to_string())? }

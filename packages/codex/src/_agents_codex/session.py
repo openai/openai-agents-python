@@ -1896,6 +1896,12 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if executor is not None:
+                for tool in allowed_tools:
+                    if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
+                        raise ValueError(
+                            f"Python tool collides with enabled environment tool: {tool.name}"
+                        )
             if executor is not None and programmatic_tool_calling:
                 _check_namespaced_tool_collisions(
                     allowed_tools,
@@ -2314,34 +2320,47 @@ class Session(Generic[ContextT, OutputT]):
                             "description": role.description,
                             "config_file": str(role_path),
                         }
-                create_engine = (
-                    native.create_checkpoint_engine
-                    if checkpoint is not None
-                    else native.create_engine
-                )
-                engine = await opening.acquire(
-                    create_engine(
-                        json.dumps(config),
-                        json.dumps(runtime),
-                        # Preserve the captured environment value in API-key mode.
-                        api_key=None if codex_login is not None else (opening.api_key or ""),
-                        provider_lease=provider_lease,
-                        **(
-                            {"canonical_store": storage.backend}
-                            if isinstance(storage, CustomStorage)
-                            else {}
-                        ),
-                        **(
-                            {
-                                "initial_checkpoint": checkpoint,
-                                "initial_specs_json": native_specs,
-                                "initial_options_json": json.dumps(options),
-                            }
-                            if checkpoint is not None
-                            else {}
-                        ),
+
+                async def initialize_engine() -> Any:
+                    create_engine = (
+                        native.create_checkpoint_engine
+                        if checkpoint is not None
+                        else native.create_engine
                     )
-                )
+                    return await opening.acquire(
+                        create_engine(
+                            json.dumps(config),
+                            json.dumps(runtime),
+                            # Preserve the captured environment value in API-key mode.
+                            api_key=None if codex_login is not None else (opening.api_key or ""),
+                            provider_lease=provider_lease,
+                            # One opening snapshot owns the runtime and its first thread.
+                            **(
+                                {
+                                    "_capture_initial_config": True,
+                                    "_share_model_http": not owned_provider and codex_login is None,
+                                }
+                                if checkpoint is None
+                                else {}
+                            ),
+                            **(
+                                {"canonical_store": storage.backend}
+                                if isinstance(storage, CustomStorage)
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "initial_checkpoint": checkpoint,
+                                    "initial_specs_json": native_specs,
+                                    "initial_options_json": json.dumps(options),
+                                }
+                                if checkpoint is not None
+                                else {}
+                            ),
+                        )
+                    )
+
+                engine = await initialize_engine()
 
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.
@@ -2350,7 +2369,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
 
                 thread = await opening.acquire(
-                    engine.start_replaceable_thread(json.dumps(options), native_specs)
+                    engine._start_initial_replaceable_thread(json.dumps(options), native_specs)
                     if checkpoint is None
                     else engine.restore_checkpoint(checkpoint, json.dumps(options), native_specs)
                 )
@@ -7267,7 +7286,10 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     ):
                         continue
-                await asyncio.wait((state.accepted,))
+                if state.accepted.done():
+                    await asyncio.sleep(0)
+                else:
+                    await asyncio.wait((state.accepted,))
                 state.changed.set()
                 handle = state.handle
                 if handle is None:

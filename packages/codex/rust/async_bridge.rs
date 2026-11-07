@@ -1,13 +1,12 @@
-//! Deliver owned Rust results through one physical completion receipt.
+//! Deliver owned Rust results only after their completion owners retire.
 //!
 //! No result publisher enters Python from a runtime worker. The awaiting
 //! Python task converts the result only after all receipt owners have exited.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-#[cfg(not(windows))]
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(not(windows))]
 use std::task::Poll;
@@ -15,14 +14,24 @@ use std::task::Poll;
 use futures_util::FutureExt;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
-use pyo3_async_runtimes::{err::RustPanic, tokio as py_tokio};
+use pyo3_async_runtimes::{TaskLocals, err::RustPanic, tokio as py_tokio};
 use tokio_util::sync::CancellationToken;
 
 use crate::py_error;
 
+#[cfg(target_os = "linux")]
+mod completion_channel;
+
 struct Receipt {
     publishers: AtomicUsize,
-    writer: Mutex<Option<NativeWriter>>,
+    joined: AtomicBool,
+    notification: Mutex<Option<Notification>>,
+}
+
+enum Notification {
+    Socket(NativeWriter),
+    #[cfg(target_os = "linux")]
+    Channel(Arc<completion_channel::State>, u64),
 }
 
 #[cfg(unix)]
@@ -59,16 +68,20 @@ impl Ticket {
 impl Drop for Ticket {
     fn drop(&mut self) {
         if self.0.publishers.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // No Py<>, Python::attach, callback, or bridge future here.
-            // Closing the sole writer is a persistent acknowledgement. A
-            // cancelled Python receive cannot consume and lose this signal.
-            drop(
-                self.0
-                    .writer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take(),
-            );
+            self.0.joined.store(true, Ordering::Release);
+            let notification = self
+                .0
+                .notification
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            // Neither notification enters Python from a runtime worker.
+            match notification {
+                Some(Notification::Socket(writer)) => drop(writer),
+                #[cfg(target_os = "linux")]
+                Some(Notification::Channel(channel, id)) => channel.publish(id),
+                None => {}
+            }
         }
     }
 }
@@ -90,6 +103,29 @@ struct NativeCall {
 
 #[pymethods]
 impl NativeCall {
+    #[cfg(target_os = "linux")]
+    #[staticmethod]
+    fn completion_channel(writer: &Bound<'_, PyAny>) -> PyResult<completion_channel::Channel> {
+        completion_channel::Channel::new(writer)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_shared(&self, channel: &completion_channel::Channel, id: u64) -> PyResult<bool> {
+        if !channel.state.is_open() {
+            return Ok(false);
+        }
+        let starter = self
+            .starter
+            .lock()
+            .map_err(py_error)?
+            .take()
+            .ok_or_else(|| py_error("native call already started"))?;
+        *self.receipt.notification.lock().map_err(py_error)? =
+            Some(Notification::Channel(Arc::clone(&channel.state), id));
+        starter();
+        Ok(true)
+    }
+
     fn start(&self, writer: &Bound<'_, PyAny>) -> PyResult<()> {
         // Take the starter before transferring the socket. A duplicate start
         // must never replace the physical receipt of the original operation.
@@ -100,13 +136,18 @@ impl NativeCall {
             .take()
             .ok_or_else(|| py_error("native call already started"))?;
         let native_writer = take_writer(writer)?;
-        *self.receipt.writer.lock().map_err(py_error)? = Some(native_writer);
+        *self.receipt.notification.lock().map_err(py_error)? =
+            Some(Notification::Socket(native_writer));
         starter();
         Ok(())
     }
 
     fn cancel(&self) {
         self.cancelled.cancel();
+    }
+
+    fn is_joined(&self) -> bool {
+        self.receipt.joined.load(Ordering::Acquire)
     }
 
     fn discard_unstarted(&self, py: Python<'_>) -> PyResult<()> {
@@ -118,7 +159,7 @@ impl NativeCall {
     }
 
     fn discard_result(&self) -> PyResult<()> {
-        if self.receipt.publishers.load(Ordering::Acquire) != 0 {
+        if !self.receipt.joined.load(Ordering::Acquire) {
             return Err(py_error("native completion has not been joined"));
         }
         // Cancellation traceback frames retain NativeCall. Release a ready
@@ -129,9 +170,9 @@ impl NativeCall {
     }
 
     fn take_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Python calls this only after EOF. Retained writer operations may
-        // still own the receipt after the primary result has become ready.
-        if self.receipt.publishers.load(Ordering::Acquire) != 0 {
+        // Python calls this only after the joined notification. Retained writer
+        // operations may outlive the primary result, so readiness is insufficient.
+        if !self.receipt.joined.load(Ordering::Acquire) {
             return Err(py_error("native completion has not been joined"));
         }
         let result = self
@@ -149,22 +190,64 @@ where
     F: Future<Output = PyResult<T>> + Send + 'static,
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
-    let call = new_call(py, fut)?;
+    // Eager callers already own F. Box it before capturing it in the starter,
+    // so neither Make nor the spawned wrappers retain F-sized inline storage.
+    let locals = py_tokio::get_current_locals(py)?;
+    let fut = Box::pin(fut);
+    let call = new_call_made(py, locals, move || fut)?;
+    await_call(py, call)
+}
+
+// Only defer construction of an async block that moves existing captures.
+// Keep input parsing and validation at the caller's original stage.
+pub(crate) fn future_factory_into_py<'py, Make, F, T>(
+    py: Python<'py>,
+    make: Make,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    Make: FnOnce() -> F + Send + 'static,
+    F: Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
+    let call = new_call(py, make)?;
+    await_call(py, call)
+}
+
+fn await_call<'py>(py: Python<'py>, call: Py<NativeCall>) -> PyResult<Bound<'py, PyAny>> {
     // Construct lazily: cancellation before first poll starts no native work.
     py.import("agents._native_async")?
         .getattr("_await_native_completion")?
         .call1((call,))
 }
 
-fn new_call<F, T>(py: Python<'_>, fut: F) -> PyResult<Py<NativeCall>>
+fn new_call<Make, F, T>(py: Python<'_>, make: Make) -> PyResult<Py<NativeCall>>
 where
+    Make: FnOnce() -> F + Send + 'static,
     F: Future<Output = PyResult<T>> + Send + 'static,
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
     let locals = py_tokio::get_current_locals(py)?;
+    // Invoke and box the factory only inside the existing spawned
+    // CURRENT/TaskLocals/panic scopes, at the original make() point.
+    new_call_made(py, locals, move || Box::pin(make()))
+}
+
+// All callers supply one pinned allocation already, including managed reads.
+// Keep the stored awaitable pointer-sized without adding a second read box.
+fn new_call_made<Make, F, T>(
+    py: Python<'_>,
+    locals: TaskLocals,
+    make: Make,
+) -> PyResult<Py<NativeCall>>
+where
+    Make: FnOnce() -> Pin<Box<F>> + Send + 'static,
+    F: Future<Output = PyResult<T>> + Send + 'static + ?Sized,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
     let receipt = Arc::new(Receipt {
         publishers: AtomicUsize::new(0),
-        writer: Mutex::new(None),
+        joined: AtomicBool::new(false),
+        notification: Mutex::new(None),
     });
     let result: Arc<Mutex<Option<ResultConverter>>> = Arc::new(Mutex::new(None));
     let cancelled = CancellationToken::new();
@@ -181,7 +264,7 @@ where
                     let outcome = AssertUnwindSafe(py_tokio::scope(locals, async move {
                         tokio::select! {
                             biased;
-                            value = fut => Some(value),
+                            value = make() => Some(value),
                             _ = task_cancelled.cancelled() => None,
                         }
                     }))
@@ -192,19 +275,7 @@ where
                             value.and_then(|value| value.into_py_any(py))
                         })),
                         Ok(None) => None,
-                        Err(panic) => {
-                            let message = panic
-                                .downcast_ref::<&str>()
-                                .copied()
-                                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                                .unwrap_or("unknown error")
-                                .to_owned();
-                            Some(Box::new(move |_| {
-                                Err(RustPanic::new_err(format!(
-                                    "rust future panicked: {message}"
-                                )))
-                            }))
-                        }
+                        Err(panic) => Some(Box::new(move |_| Err(panic_error(panic)))),
                     };
                     *task_result
                         .lock()
@@ -222,6 +293,16 @@ where
             cancelled,
         },
     )
+}
+
+fn panic_error(panic: Box<dyn std::any::Any + Send>) -> PyErr {
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown error")
+        .to_owned();
+    RustPanic::new_err(format!("rust future panicked: {message}"))
 }
 
 #[cfg(not(windows))]
@@ -253,17 +334,7 @@ fn poll_event_once(mut future: EventFuture) -> EventPoll {
         // Retain the same pin, including work done before Pending.
         // The first spawned poll installs the real task's waker.
         Ok(Poll::Pending) => EventPoll::Pending(future),
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown error")
-                .to_owned();
-            EventPoll::Ready(Err(RustPanic::new_err(format!(
-                "rust future panicked: {message}"
-            ))))
-        }
+        Err(panic) => EventPoll::Ready(Err(panic_error(panic))),
     }
     // On Ready or panic the completed future drops here, without GIL.
 }
@@ -287,7 +358,10 @@ impl ReadyRead {
         let outcome = py.detach(move || poll_event_once(future));
         match outcome {
             EventPoll::Ready(value) => value?.into_py_any(py),
-            EventPoll::Pending(future) => Ok(new_call(py, future)?.into_any()),
+            EventPoll::Pending(future) => {
+                let locals = py_tokio::get_current_locals(py)?;
+                Ok(new_call_made(py, locals, move || future)?.into_any())
+            }
         }
     }
 }
@@ -331,6 +405,9 @@ pub(crate) async fn retain_writer_operation<T: Send + 'static>(
         .map_err(py_error)?
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod shared_completion_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,10 +443,8 @@ mod tests {
         // Continue the retained read under the normal runtime. All original
         // channel rows must still appear exactly once and in order.
         let joined = py_tokio::get_runtime().spawn(read);
-        assert_eq!(
-            py_tokio::get_runtime().block_on(joined).unwrap().unwrap(),
-            "finished"
-        );
+        let value = py_tokio::get_runtime().block_on(joined).unwrap().unwrap();
+        assert_eq!(value, "finished");
         assert_eq!(completed.load(Ordering::Acquire), ITEMS);
     }
 
@@ -391,10 +466,8 @@ mod tests {
             read
         };
         let joined = py_tokio::get_runtime().spawn(read);
-        assert_eq!(
-            py_tokio::get_runtime().block_on(joined).unwrap().unwrap(),
-            "original bridge"
-        );
+        let value = py_tokio::get_runtime().block_on(joined).unwrap().unwrap();
+        assert_eq!(value, "original bridge");
         assert_eq!(polled.load(Ordering::Acquire), 1);
     }
 
@@ -421,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_ready_result_is_dropped_without_conversion_or_traceback_gc() {
+    fn cancelled_socket_ready_result_is_dropped_without_conversion_or_traceback_gc() {
         Python::initialize();
         Python::attach(|py| -> PyResult<()> {
             let dropped = Arc::new(AtomicBool::new(false));
@@ -433,7 +506,7 @@ mod tests {
                     dropped: Arc::clone(&create_dropped),
                     converted: Arc::clone(&create_converted),
                 };
-                future_into_py(args.py(), async move { Ok(value) }).map(Bound::unbind)
+                new_call(args.py(), move || async move { Ok(value) }).map(|call| call.into_any())
             })?;
             let observe = PyCFunction::new_closure(py, None, None, move |args, _| {
                 (
@@ -445,6 +518,7 @@ mod tests {
             let script = std::ffi::CString::new(
                 r#"
 import asyncio
+from _agents_codex._native_async import _await_socket_completion
 
 def check(make, observe):
     async def main():
@@ -459,7 +533,7 @@ def check(make, observe):
             await release.wait()
             return value
         loop.sock_recv = held_receive
-        task = asyncio.create_task(make())
+        task = asyncio.create_task(_await_socket_completion(make()))
         try:
             await asyncio.wait_for(ready.wait(), 5)
             assert observe() == (False, False)
@@ -534,6 +608,144 @@ def check(make, expected):
             .unwrap();
             let module = PyModule::from_code(py, &script, c"bridge_test.py", c"bridge_test")?;
             module.getattr("check")?.call1((make, expected))?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    struct FactoryOwner {
+        dropped: Arc<AtomicUsize>,
+        all_drops_in_runtime: Arc<AtomicBool>,
+    }
+
+    impl Drop for FactoryOwner {
+        fn drop(&mut self) {
+            self.all_drops_in_runtime.fetch_and(
+                tokio::runtime::Handle::try_current().is_ok(),
+                Ordering::AcqRel,
+            );
+            self.dropped.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn factory_preserves_lazy_ownership_panic_and_ready_precedence() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let constructed = Arc::new(AtomicUsize::new(0));
+            let polled = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let all_drops_in_runtime = Arc::new(AtomicBool::new(true));
+            let make_constructed = Arc::clone(&constructed);
+            let make_polled = Arc::clone(&polled);
+            let make_dropped = Arc::clone(&dropped);
+            let make_runtime = Arc::clone(&all_drops_in_runtime);
+            let make = PyCFunction::new_closure(py, None, None, move |args, _| {
+                let mode: u8 = args.get_item(0)?.extract()?;
+                let constructed = Arc::clone(&make_constructed);
+                let polled = Arc::clone(&make_polled);
+                // Match the startup methods' current() owner, including its
+                // runtime-entering Drop on discard outside a Tokio worker.
+                let owner = crate::RuntimeOwned(Some(Arc::new(FactoryOwner {
+                    dropped: Arc::clone(&make_dropped),
+                    all_drops_in_runtime: Arc::clone(&make_runtime),
+                })));
+                let factory = move || {
+                    constructed.fetch_add(1, Ordering::Release);
+                    if mode == 1 {
+                        panic!("synthetic native factory panic");
+                    }
+                    async move {
+                        let _owner = owner;
+                        polled.fetch_add(1, Ordering::Release);
+                        if mode == 3 {
+                            std::future::pending::<()>().await;
+                        }
+                        Ok::<_, PyErr>("factory ready".to_owned())
+                    }
+                };
+                if mode == 1 {
+                    future_factory_into_py(args.py(), factory).map(Bound::unbind)
+                } else {
+                    new_call(args.py(), factory).map(|call| call.into_any())
+                }
+            })?;
+            let observe = PyCFunction::new_closure(py, None, None, move |args, _| {
+                (
+                    constructed.load(Ordering::Acquire),
+                    polled.load(Ordering::Acquire),
+                    dropped.load(Ordering::Acquire),
+                    all_drops_in_runtime.load(Ordering::Acquire),
+                )
+                    .into_py_any(args.py())
+            })?;
+            let script = std::ffi::CString::new(
+                r#"
+import asyncio
+from agents._native_async import _await_native_completion
+
+def check(make, observe):
+    async def main():
+        call = make(0)
+        assert observe() == (0, 0, 0, True)
+        call.cancel()
+        call.discard_unstarted()
+        assert observe() == (0, 0, 1, True)
+        call.discard_unstarted()
+        try:
+            call.start(None)
+        except RuntimeError as caught:
+            assert str(caught) == 'native call already started'
+        else:
+            raise AssertionError('discarded factory started')
+        assert observe() == (0, 0, 1, True)
+        del call
+        assert observe() == (0, 0, 1, True)
+
+        call = make(0)
+        assert observe() == (0, 0, 1, True)
+        del call
+        assert observe() == (0, 0, 2, True)
+
+        operation = make(1)
+        assert observe() == (0, 0, 2, True)
+        try:
+            await asyncio.wait_for(operation, 5)
+        except BaseException as caught:
+            assert type(caught).__name__ == 'RustPanic', type(caught)
+            assert str(caught) == 'rust future panicked: synthetic native factory panic'
+        else:
+            raise AssertionError('constructor panic lost')
+        assert observe() == (1, 0, 3, True)
+
+        call = make(2)
+        call.cancel()
+        assert observe() == (1, 0, 3, True)
+        assert await asyncio.wait_for(_await_native_completion(call), 5) == 'factory ready'
+        assert observe() == (2, 1, 4, True)
+
+        call = make(3)
+        call.cancel()
+        try:
+            await asyncio.wait_for(_await_native_completion(call), 5)
+        except RuntimeError as caught:
+            # Calling cancel directly does not cancel this Python Task. After
+            # the physical EOF join, there is deliberately no native result.
+            assert str(caught) == 'native completion has no result'
+        else:
+            raise AssertionError('pending future ignored cancellation')
+        assert observe() == (3, 2, 5, True)
+    asyncio.run(main())
+"#,
+            )
+            .unwrap();
+            let module = PyModule::from_code(
+                py,
+                &script,
+                c"factory_bridge_test.py",
+                c"factory_bridge_test",
+            )?;
+            module.getattr("check")?.call1((make, observe))?;
             Ok(())
         })
         .unwrap();

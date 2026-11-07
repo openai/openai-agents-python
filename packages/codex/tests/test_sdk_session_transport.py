@@ -131,11 +131,15 @@ async def test_agent_fresh_public_runs_keep_history_isolated_and_close_http(
         effects.append(value)
         return "resolved:" + value
 
-    async with timeout(30), http_peer(expected_model=model or "gpt-6.1-sol") as peer:
+    async with (
+        timeout(30),
+        http_peer(expected_model=model or "gpt-6.1-sol") as peer,
+        peer.provider() as provider,
+    ):
         agent = Agent(
             instructions="Answer precisely.",
             model=model,
-            provider=peer.provider(),
+            provider=provider,
             tools=[lookup] if use_tool else [],
         )
         roots = []
@@ -159,6 +163,7 @@ async def test_agent_fresh_public_runs_keep_history_isolated_and_close_http(
         assert effects == ([f"literal-{index}" for index in range(3)] if use_tool else [])
         assert len(peer.requests) == (6 if use_tool else 3)
         assert peer.finished_bodies == len(peer.requests)
+        await provider.aclose()
         del agent
         gc.collect()
         await disconnected(peer.transports)
@@ -177,8 +182,7 @@ async def test_shared_provider_keeps_fresh_agents_and_model_catalogs_independent
         effects.append("beta:" + value)
         return "second:" + value
 
-    async with timeout(30), http_peer() as peer:
-        connection = peer.provider()
+    async with timeout(30), http_peer() as peer, peer.provider() as connection:
         peer.respond(function_call("alpha", {"value": "apple"}, "shared-provider-call"))
         peer.respond(assistant_output("alpha complete"))
         first = await Agent(
@@ -253,6 +257,7 @@ async def test_shared_provider_keeps_fresh_agents_and_model_catalogs_independent
             headers["authorization"] == "Bearer synthetic-retained-http-key"
             for headers in peer.request_headers
         )
+        await connection.aclose()
         del connection
         gc.collect()
         await disconnected(peer.transports)
@@ -282,8 +287,7 @@ async def test_shared_provider_cancelled_session_does_not_stop_independent_sibli
         await second_release.wait()
         return "independent result"
 
-    async with timeout(30), http_peer() as peer:
-        connection = peer.provider()
+    async with timeout(30), http_peer() as peer, peer.provider() as connection:
         first_agent = Agent(
             model="gpt-5.2", instructions="Only first.", tools=[pending_first], provider=connection
         )
@@ -326,6 +330,7 @@ async def test_shared_provider_cancelled_session_does_not_stop_independent_sibli
             finally:
                 second_release.set()
                 await asyncio.gather(waiting, return_exceptions=True)
+        await connection.aclose()
         del first, second, first_agent, second_agent, connection
         gc.collect()
         await disconnected(peer.transports)
@@ -335,12 +340,16 @@ async def test_shared_provider_cancelled_session_does_not_stop_independent_sibli
 async def test_cancelled_stream_disconnects_then_same_session_can_complete(
     model: str | None,
 ) -> None:
-    async with timeout(30), http_peer(expected_model=model or "gpt-6.1-sol") as peer:
+    async with (
+        timeout(30),
+        http_peer(expected_model=model or "gpt-6.1-sol") as peer,
+        peer.provider() as provider,
+    ):
         gate = asyncio.Event()
         peer.delta_gate = gate
         peer.respond(*text_response("partial", "partial", "must not complete"))
         peer.respond(assistant_output("after cancellation"))
-        agent = Agent(model=model, instructions="Answer.", provider=peer.provider())
+        agent = Agent(model=model, instructions="Answer.", provider=provider)
         try:
             async with agent.session() as session:
                 handle = await session.submit("hold the stream")
@@ -365,6 +374,7 @@ async def test_cancelled_stream_disconnects_then_same_session_can_complete(
             assert peer.transports[0] is not peer.transports[1]
         finally:
             gate.set()
+        await provider.aclose()
         del agent
         gc.collect()
         await disconnected(peer.transports)
@@ -1160,8 +1170,8 @@ async def test_failed_callback_next_live_submission_has_paired_aborted_output(fa
 
 
 async def test_same_agent_model_switch_refreshes_catalog_metadata_and_closes_transport() -> None:
-    async with timeout(30), http_peer() as peer:
-        agent = Agent(model="gpt-5.2", instructions="Answer briefly.", provider=peer.provider())
+    async with timeout(30), http_peer() as peer, peer.provider() as provider:
+        agent = Agent(model="gpt-5.2", instructions="Answer briefly.", provider=provider)
         roots = []
         for index, (model, context_window) in enumerate(
             [("gpt-5.2", None), ("gpt-5.5", 258_400), ("gpt-5.2", None)]
@@ -1187,6 +1197,7 @@ async def test_same_agent_model_switch_refreshes_catalog_metadata_and_closes_tra
                 assert f"model-input-{earlier}" not in json.dumps(request["input"])
         assert len(set(roots)) == 3
         assert len(peer.requests) == peer.finished_bodies == 3
+        await provider.aclose()
         del agent
         gc.collect()
         await disconnected(peer.transports)
@@ -1421,12 +1432,12 @@ async def test_lite_catalog_replacement_and_model_switch_keep_current_declaratio
 
 
 async def test_provider_and_agent_changes_keep_live_sessions_isolated() -> None:
-    async with timeout(30), http_peer() as peer:
+    async with timeout(30), http_peer() as peer, peer.provider() as provider:
         agent = Agent(
             model="gpt-5.2",
             instructions="original instruction",
             model_settings={"reasoning_effort": "low"},
-            provider=peer.provider(),
+            provider=provider,
         )
         first_owner = agent.session()
         first = await first_owner.__aenter__()
@@ -1486,6 +1497,7 @@ async def test_provider_and_agent_changes_keep_live_sessions_isolated() -> None:
             await first_owner.__aexit__(None, None, None)
         assert not original.exists()
         assert await result.turn.get_result() is result
+        await provider.aclose()
         await disconnected(peer.transports)
         ref = weakref.ref(agent)
         del first, first_owner, sibling, replacement, session, result, agent

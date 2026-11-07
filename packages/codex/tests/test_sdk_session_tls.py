@@ -9,6 +9,7 @@ import ssl
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from copy import copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from agents import Agent, NativeError, NativeProvider, TurnStoppedError
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output
 from tests.test_native_provider_websockets import WebSocketPeer
+from tests.test_sdk_session_transport import disconnected, http_peer
 
 pytestmark = pytest.mark.serial
 
@@ -646,3 +648,327 @@ async def test_https_equal_ca_material_at_new_path_and_no_proxy_change_use_new_c
         await completed(peer, agent, "new-no-proxy")
         assert peer.transports[-1] is not selected
         assert len(peer.requests) == 3
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+async def test_provider_http_pool_reuses_socket_with_fresh_auth_and_independent_history(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-pooled-first-key")
+    async with timeout(40), https_peer(tls_files) as peer:
+        provider = NativeProvider(base_url=peer.url, supports_websockets=False)
+        agent = Agent(model="gpt-5.2", instructions="Fixed pooled instructions.", provider=provider)
+        try:
+            await completed(peer, agent, "pooled-first-input")
+            original_transport = peer.transports[-1]
+            original_socket = peer.socket_filenos[-1]
+            assert original_socket() >= 0
+            monkeypatch.setenv("OPENAI_API_KEY", "synthetic-pooled-second-key")
+            await completed(peer, agent, "pooled-second-input")
+            assert len(peer.requests) == 2
+            assert peer.transports[-1] is original_transport
+            assert original_socket() >= 0
+            assert [headers["authorization"] for headers in peer.request_headers] == [
+                "Bearer synthetic-pooled-first-key",
+                "Bearer synthetic-pooled-second-key",
+            ]
+            first_input = str(peer.requests[0]["input"])
+            second_input = str(peer.requests[1]["input"])
+            assert "pooled-first-input" in first_input
+            assert "pooled-second-input" not in first_input
+            assert "pooled-second-input" in second_input
+            assert "pooled-first-input" not in second_input
+        finally:
+            await provider.aclose()
+        await wait_for_socket_close(original_socket)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+async def test_provider_http_pool_reloads_same_path_ca_and_rejects_stale_trust(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trust = tmp_path / "pooled-roots.pem"
+    trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(trust))
+    async with timeout(65), https_peer(tls_files) as peer:
+        provider = NativeProvider(
+            base_url=peer.url, api_key="synthetic-pooled-rotation-key", supports_websockets=False
+        )
+        agent = Agent(model="gpt-5.2", instructions="Fixed pooled instructions.", provider=provider)
+        try:
+            await completed(peer, agent, "pooled-trusted-A")
+            original_transport = peer.transports[-1]
+            original_socket = peer.socket_filenos[-1]
+            assert original_socket() >= 0
+            assert peer.tls_context is not None
+            peer.tls_context.load_cert_chain(tls_files["server-B.pem"], tls_files["server-B.key"])
+            trust.write_bytes(tls_files["ca-B.pem"].read_bytes())
+            await completed(peer, agent, "pooled-trusted-B")
+            second_transport = peer.transports[-1]
+            second_socket = peer.socket_filenos[-1]
+            assert second_transport is not original_transport
+            await wait_for_socket_close(original_socket)
+            assert second_socket() >= 0
+            assert len(peer.requests) == 2
+
+            # An established trusted-B connection must not bypass the next
+            # Session's changed trust file. Require an actual certificate alert.
+            trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
+            await rejected(peer, agent, "pooled-A-must-reject-B")
+            assert len(peer.requests) == 2
+            await wait_for_socket_close(second_socket)
+
+            trust.write_bytes(tls_files["ca-B.pem"].read_bytes())
+            await completed(peer, agent, "pooled-restored-B")
+            assert len(peer.requests) == 3
+            assert peer.transports[-1] is not second_transport
+            assert all(
+                headers["authorization"] == "Bearer synthetic-pooled-rotation-key"
+                for headers in peer.request_headers
+            )
+        finally:
+            await provider.aclose()
+        await wait_for_socket_close(peer.socket_filenos[-1])
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+@pytest.mark.parametrize("duplicate", ["equal", "copy"])
+async def test_provider_http_pool_close_and_duplicate_ownership(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch, duplicate: str
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
+    async with timeout(45), https_peer(tls_files) as peer:
+        first = NativeProvider(
+            base_url=peer.url, api_key="synthetic-independent-pool-key", supports_websockets=False
+        )
+        second = None
+        try:
+            first_agent = Agent(model="gpt-5.2", instructions="First owner.", provider=first)
+            await completed(peer, first_agent, "first-pool-owner")
+            first_transport = peer.transports[-1]
+            first_socket = peer.socket_filenos[-1]
+            # Copy a used owner, so accidentally sharing an existing native
+            # pool fails the same observed-connection assertion as equality.
+            second = (
+                copy(first)
+                if duplicate == "copy"
+                else NativeProvider(
+                    base_url=peer.url,
+                    api_key="synthetic-independent-pool-key",
+                    supports_websockets=False,
+                )
+            )
+            assert first is not second and first == second
+            second_agent = Agent(model="gpt-5.2", instructions="Second owner.", provider=second)
+            await completed(peer, second_agent, "second-pool-owner")
+            second_transport = peer.transports[-1]
+            second_socket = peer.socket_filenos[-1]
+            assert second_transport is not first_transport
+            assert first_socket() >= 0 and second_socket() >= 0
+
+            await first.aclose()
+            await wait_for_socket_close(first_socket)
+            assert second_socket() >= 0
+            await completed(peer, second_agent, "second-owner-still-usable")
+            assert peer.transports[-1] is second_transport
+            assert len(peer.requests) == 3
+            await second.aclose()
+            await wait_for_socket_close(second_socket)
+        finally:
+            try:
+                await first.aclose()
+            finally:
+                if second is not None:
+                    await second.aclose()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+@pytest.mark.parametrize("invalid", ["malformed", "missing"])
+async def test_provider_http_pool_invalid_ca_retires_warm_socket(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, invalid: str
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    trust = tmp_path / "invalidated-pooled-roots.pem"
+    trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
+    monkeypatch.setenv("SSL_CERT_FILE", str(trust))
+    async with timeout(50), https_peer(tls_files) as peer:
+        provider = NativeProvider(
+            base_url=peer.url, api_key="synthetic-invalid-ca-key", supports_websockets=False
+        )
+        agent = Agent(model="gpt-5.2", instructions="Answer.", provider=provider)
+        try:
+            await completed(peer, agent, "valid-before-invalid-ca")
+            original_transport = peer.transports[-1]
+            original_socket = peer.socket_filenos[-1]
+            assert original_socket() >= 0
+            if invalid == "malformed":
+                trust.write_text("not a PEM certificate\n")
+            else:
+                trust.unlink()
+            await rejected(peer, agent, "invalid-file-cannot-reuse-trusted-A")
+            assert len(peer.requests) == 1
+            await wait_for_socket_close(original_socket)
+            trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
+            await completed(peer, agent, "valid-after-invalid-ca")
+            assert len(peer.requests) == 2
+            assert peer.transports[-1] is not original_transport
+        finally:
+            await provider.aclose()
+        await wait_for_socket_close(peer.socket_filenos[-1])
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+async def test_provider_http_pool_no_ca_http_reuses_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    # The module's isolated environment leaves all CA overrides absent.
+    async with timeout(40), http_peer() as peer:
+        provider = NativeProvider(
+            base_url=peer.url, api_key="synthetic-no-ca-http-key", supports_websockets=False
+        )
+        agent = Agent(model="gpt-5.2", instructions="Answer.", provider=provider)
+        try:
+            for marker in ["no-ca-first", "no-ca-second"]:
+                peer.respond(assistant_output(marker))
+                result = await agent.run(marker)
+                assert result.final_output == marker
+            assert len(peer.requests) == 2
+            assert peer.transports[0] is peer.transports[1]
+            assert not peer.transports[0].is_closing()
+        finally:
+            await provider.aclose()
+        await disconnected(peer.transports)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+async def test_provider_http_pool_redirect_strips_auth_and_evicts_before_close(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
+    async with timeout(55), https_peer(tls_files) as target:
+        source_requests = []
+        source_sockets = []
+        source_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        source_context.load_cert_chain(tls_files["server-A.pem"], tls_files["server-A.key"])
+
+        async def redirect(request: web.Request) -> web.StreamResponse:
+            transport = request.transport
+            assert transport is not None
+            assert transport.get_extra_info("ssl_object") is not None
+            sock = transport.get_extra_info("socket")
+            assert sock is not None and sock.fileno() >= 0
+            source_sockets.append(sock.fileno)
+            source_requests.append(
+                (
+                    request.method,
+                    {key.lower(): value for key, value in request.headers.items()},
+                    await request.json(),
+                )
+            )
+            raise web.HTTPTemporaryRedirect(location=target.url + "/responses")
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", redirect)
+        server = TestServer(app, scheme="https")
+        await server.start_server(ssl=source_context)
+        provider = NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-redirect-secret",
+            supports_websockets=False,
+        )
+        agent = Agent(model="gpt-5.2", instructions="Answer.", provider=provider)
+        try:
+            await completed(target, agent, "redirect-preserves-post")
+            assert len(source_requests) == len(target.requests) == 1
+            method, headers, body = source_requests[0]
+            assert method == "POST"
+            assert headers["authorization"] == "Bearer synthetic-redirect-secret"
+            assert body == target.requests[0]
+            assert "authorization" not in target.request_headers[0]
+            # Provider is deliberately still open: redirect retirement, not
+            # final owner cleanup, must release both origins' idle sockets.
+            await wait_for_socket_close(source_sockets[0])
+            await wait_for_socket_close(target.socket_filenos[0])
+        finally:
+            try:
+                await provider.aclose()
+            finally:
+                await server.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
+async def test_provider_http_pool_bounds_live_idle_connections(
+    tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
+    async with timeout(120), https_peer(tls_files) as peer:
+        provider = NativeProvider(
+            base_url=peer.url, api_key="synthetic-bounded-idle-key", supports_websockets=False
+        )
+        agent = Agent(model="gpt-5.2", instructions="Answer.", provider=provider)
+        release = asyncio.Event()
+        all_arrived = asyncio.Event()
+        tasks = []
+
+        async def hold(event):
+            if event["type"] == "response.created":
+                if len(peer.requests) == 34:  # one warm request plus 33 active
+                    all_arrived.set()
+                await release.wait()
+
+        try:
+            await completed(peer, agent, "warm-idle-limit")
+            peer.before_event = hold
+            peer.progress_while_before_event = True
+            tasks = [
+                asyncio.create_task(completed(peer, agent, "identical-idle-limit"))
+                for _ in range(33)
+            ]
+            async with timeout(80):
+                await all_arrived.wait()
+            assert len(peer.requests) == 34
+            concurrent_transports = {id(transport) for transport in peer.transports[1:]}
+            assert len(concurrent_transports) == 33
+            # One deadline covers completion AND observation, below the pool's
+            # 30-second idle expiry so age eviction cannot conceal a broken cap.
+            async with timeout(20):
+                release.set()
+                await asyncio.gather(*tasks)
+                # A warm request can reuse one of the later 33 sockets.
+                # Deduplicate exact owners before observing live idle count.
+                sockets = {
+                    id(transport): fileno
+                    for transport, fileno in zip(peer.transports, peer.socket_filenos, strict=True)
+                }
+                while sum(fileno() >= 0 for fileno in sockets.values()) > 32:
+                    await asyncio.sleep(0.001)
+                assert 0 < sum(fileno() >= 0 for fileno in sockets.values()) <= 32
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                peer.before_event = None
+                await provider.aclose()
+        for fileno in {
+            id(transport): fileno
+            for transport, fileno in zip(peer.transports, peer.socket_filenos, strict=True)
+        }.values():
+            await wait_for_socket_close(fileno)

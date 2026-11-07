@@ -63,6 +63,7 @@ pub struct EngineState {
     extension_events: Arc<extensions::Events>,
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
+    pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
@@ -164,6 +165,7 @@ impl EngineState {
             api_key,
             initial_model,
             None,
+            false,
         )
         .await
     }
@@ -175,17 +177,22 @@ impl EngineState {
         api_key: Option<String>,
         initial_model: Option<String>,
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
+        session_initial_config: bool,
     ) -> anyhow::Result<Self> {
         telemetry::engine_starting().await?;
-        let runtime_json = config::prepare_runtime(&runtime_json)?;
+        let prepared_runtime = config::prepare_runtime(&runtime_json)?;
+        let runtime_json = prepared_runtime;
         let (mut config, cloud_config) = config::load(&config_json, &runtime_json, None).await?;
-        let native_turn_control = config::native_turn_control(&runtime_json)?;
-        let sdk_user_input_enabled = config::sdk_native_config(&runtime_json)?
+        // Capture one typed runtime at the original first accessor decode point.
+        let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
+        let native_turn_control = runtime_options.native_turn_control();
+        let sdk_user_input_enabled = runtime_options
+            .sdk_native_config()
             .then_some(config.experimental_request_user_input_enabled);
         if native_turn_control {
             Self::check_controlled_config(&config)?;
         }
-        let native_agents = config::native_agents(&runtime_json)?;
+        let native_agents = runtime_options.native_agents();
         if native_agents {
             if let Some(model) = &initial_model {
                 config.model = Some(model.clone());
@@ -209,7 +216,7 @@ impl EngineState {
         let local_home = if checkpoint {
             None
         } else {
-            config::native_thread_store(&runtime_json)?
+            runtime_options.native_thread_store()
         };
         if local_home.is_some() {
             ensure!(
@@ -217,7 +224,7 @@ impl EngineState {
                 "native local SDK storage requires non-ephemeral threads"
             );
         }
-        let (auth, codex_account) = if let Some(login) = config::sdk_codex_login(&runtime_json)? {
+        let (auth, codex_account) = if let Some(login) = runtime_options.sdk_codex_login() {
             ensure!(
                 api_key.is_none(),
                 "A saved Codex login cannot use an API key"
@@ -231,7 +238,7 @@ impl EngineState {
         } else {
             (crate::auth::manager(&config, api_key).await?, None)
         };
-        let goals_enabled = config::native_goal_store_enabled(&runtime_json)?;
+        let goals_enabled = runtime_options.native_goal_store_enabled();
         let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
             path: config.sqlite_config().home(),
             persistent_rollouts: local_home.is_some(),
@@ -242,7 +249,7 @@ impl EngineState {
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
         };
-        let environment_options = config::environment(&runtime_json)?;
+        let environment_options = runtime_options.environment()?;
         // A local executor must pass its storage check before the profile opens.
         let local_environment = match (&environment_options, storage_home) {
             (Some(environment), Some(home)) if environment.is_local() => {
@@ -299,7 +306,7 @@ impl EngineState {
                 None => Arc::new(crate::storage::MemoryThreadStore::default()),
             }
         };
-        if let Some(id) = config::sdk_resume_thread_id(&runtime_json)?
+        if let Some(id) = runtime_options.sdk_resume_thread_id()
             && local_checklist_store.is_some()
         {
             let stored = store
@@ -343,7 +350,7 @@ impl EngineState {
                     // Portable imports still use their separately validated model.
                     let requested = if config.model.is_some() {
                         config.model.clone()
-                    } else if let Some(id) = config::sdk_resume_thread_id(&runtime_json)? {
+                    } else if let Some(id) = runtime_options.sdk_resume_thread_id() {
                         ensure!(
                             local_checklist_store.is_some()
                                 || store
@@ -389,7 +396,7 @@ impl EngineState {
             }
             models
         };
-        let deferred_environment = config::deferred_environment(&runtime_json)?.is_some();
+        let deferred_environment = runtime_options.deferred_environment().is_some();
         let (environment, local_environment_error) = match (local_environment, environment_options)
         {
             (Some(environment), _) => (environment, None),
@@ -406,7 +413,7 @@ impl EngineState {
         let installation_id = ThreadId::new().to_string();
         let user_instructions = Arc::new(options::EmptyUserInstructions);
         let extension_events = Arc::new(extensions::Events::new());
-        let code_mode = config::code_mode_provider(&runtime_json, &config)?.or_else(|| {
+        let code_mode = runtime_options.code_mode_provider(&config).or_else(|| {
             // Mirror ThreadManager's pinned default if no package helper was
             // selected, so every enabled native Code Mode session uses the same
             // owning delegate. Disabled Code Mode still uses Core's default.
@@ -415,6 +422,8 @@ impl EngineState {
                     as Arc<dyn codex_code_mode::CodeModeSessionProvider>
             })
         });
+        let project_search = runtime_options.project_search();
+        drop(runtime_options);
         let interception = Arc::new(crate::native_interception::Boundary::new(
             agent_graph.clone(),
         ));
@@ -426,7 +435,6 @@ impl EngineState {
         } else {
             None
         };
-        let project_search = config::project_search(&runtime_json)?;
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
@@ -475,7 +483,7 @@ impl EngineState {
                 None => manager,
             }
         });
-        Ok(Self {
+        let result = Self {
             manager,
             context_gate: Arc::new(AsyncRwLock::new(())),
             context_retired: AtomicBool::new(false),
@@ -501,12 +509,17 @@ impl EngineState {
             extension_events,
             cloud_config,
             service_config: config,
+            model_http_pool: None,
+            // Session opening captures one configuration for its owned runtime
+            // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
-                sdk_user_input_enabled.is_some() && !added_telemetry_warning,
+                (session_initial_config || sdk_user_input_enabled.is_some())
+                    && !added_telemetry_warning,
             ),
             interception,
             restored_creation_times: Mutex::new(HashMap::new()),
-        })
+        };
+        Ok(result)
     }
 
     pub async fn start(
@@ -606,9 +619,12 @@ impl EngineState {
     // The caller holds lifecycle through validation, native import and start.
     pub(crate) async fn start_prepared(
         self: &Arc<Self>,
-        startup: StartThreadOptions,
+        mut startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
+        if let Some(pool) = &self.model_http_pool {
+            startup.thread_extension_init.insert(pool.clone());
+        }
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
                 if let Some(home) = self.native_storage_home()

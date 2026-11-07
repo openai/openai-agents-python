@@ -110,14 +110,19 @@ async fn check_failed_append(compaction: bool, remote: bool) {
         }
         request_arrived.acquire().await.unwrap().forget();
         let store = engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
-        store.fail_appends.store(true, Ordering::SeqCst);
+        assert!(!store.fail_appends.load(Ordering::SeqCst));
+        assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 0);
+        store.fail_response_observation_appends.store(true, Ordering::SeqCst);
         release.add_permits(1);
         let mut errors = 0;
+        let mut error_messages = Vec::new();
         let mut terminals = 0;
         loop {
             let event = state.next_event().await.unwrap();
             if event["msg"]["type"] == "error" {
-                assert_eq!(event["msg"]["message"], "Fatal error: Could not retain response observation");
+                assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 1,
+                    "an unrelated append must not trigger the tested failure");
+                error_messages.push(event["msg"]["message"].as_str().unwrap().to_string());
                 errors += 1;
             }
             if event["msg"]["type"] == "task_complete" {
@@ -131,15 +136,26 @@ async fn check_failed_append(compaction: bool, remote: bool) {
             let event = event.unwrap();
             if event["msg"]["type"] == "error" {
                 errors += 1;
+                error_messages.push(event["msg"]["message"].as_str().unwrap().to_string());
             }
             if event["msg"]["type"] == "task_complete" || event["msg"]["type"] == "turn_complete" {
                 terminals += 1;
             }
         }
-        assert_eq!(errors, 1, "the owning task must publish Fatal exactly once");
+        assert_eq!(errors, 1, "the owning task must publish Fatal exactly once: {error_messages:?}");
+        // Patch 0046 fences canonical history after a failed store append.
+        // Sampling's durability check or compaction task finalization wraps the
+        // original observation error; preserve the current exact public message.
+        assert_eq!(error_messages[0], if compaction {
+            "Fatal error: Canonical thread persistence failed; turn completion stopped"
+        } else {
+            "Fatal error: Canonical thread persistence failed; execution stopped pending recovery"
+        });
         assert_eq!(terminals, 1, "the owning task must settle once");
         assert_eq!(remote_requested.load(Ordering::SeqCst), remote);
-        store.fail_appends.store(false, Ordering::SeqCst);
+        assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 1,
+            "the intended observation append must actually fail exactly once");
+        store.fail_response_observation_appends.store(false, Ordering::SeqCst);
         let history = state.thread.load_history(true).await.unwrap();
         assert!(!history.items.iter().any(|item| matches!(item, RolloutItem::ResponseObservationRecord(_))));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
@@ -297,20 +313,28 @@ async fn failed_observation_append_joins_held_tool_and_preserves_fatal() {
         tools.check_pending(&owner, &key).unwrap();
         tools.enter(&owner, &key).unwrap();
         let store = engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
-        store.fail_appends.store(true, Ordering::SeqCst);
+        assert!(!store.fail_appends.load(Ordering::SeqCst));
+        assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 0);
+        store.fail_response_observation_appends.store(true, Ordering::SeqCst);
         terminal.add_permits(1);
         let mut errors = 0;
+        let mut error_messages = Vec::new();
+        let mut terminals = 0;
+        let errors_at_first_terminal;
         loop {
             let event = state.next_session_event().await.unwrap();
             assert_ne!(event["msg"]["type"], "_sdk_model_generation_failed",
                 "generic integrity rejection must not replace the persistence error");
             if event["msg"]["type"] == "error" {
-                assert_eq!(event["msg"]["message"], "Fatal error: Could not retain response observation");
+                assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 1,
+                    "an unrelated append must not trigger the tested failure");
+                error_messages.push(event["msg"]["message"].as_str().unwrap().to_string());
                 errors += 1;
             }
             if matches!(event["msg"]["type"].as_str(), Some("task_complete" | "turn_complete")) {
                 assert_eq!(event["id"], started["turn_id"]);
-                assert_eq!(errors, 1);
+                terminals += 1;
+                errors_at_first_terminal = errors;
                 break;
             }
             assert_ne!(event["msg"]["type"], "turn_aborted",
@@ -319,8 +343,35 @@ async fn failed_observation_append_joins_held_tool_and_preserves_fatal() {
         assert!(tools.check_pending(&owner, &key).is_err());
         assert!(tools.take_reply(&owner, &key).unwrap().is_none(),
             "the joined callback must refuse a late reply");
+        // Check joined ownership before waiting: the trailing drain must not
+        // hide a callback that retires only after terminal delivery.
+        while let Ok(event) = tokio::time::timeout(Duration::from_millis(50), state.next_session_event()).await {
+            let event = event.unwrap();
+            assert_ne!(event["msg"]["type"], "_sdk_model_generation_failed",
+                "a late integrity rejection must not replace the persistence error");
+            assert_ne!(event["msg"]["type"], "turn_aborted",
+                "the sampling child must not cancel the owning turn after terminal delivery");
+            if event["msg"]["type"] == "error" {
+                assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 1,
+                    "an unrelated append must not trigger the tested failure");
+                errors += 1;
+                error_messages.push(event["msg"]["message"].as_str().unwrap().to_string());
+            }
+            if matches!(event["msg"]["type"].as_str(), Some("task_complete" | "turn_complete")) {
+                assert_eq!(event["id"], started["turn_id"]);
+                terminals += 1;
+            }
+        }
+        assert_eq!(errors_at_first_terminal, 1,
+            "the held tool's Fatal must precede its first terminal: {error_messages:?}");
+        assert_eq!(errors, 1, "the held tool's owning task must publish Fatal once: {error_messages:?}");
+        assert_eq!(terminals, 1, "the held tool's owning task must settle once");
+        assert_eq!(error_messages[0],
+            "Fatal error: Canonical thread persistence failed; execution stopped pending recovery");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        store.fail_appends.store(false, Ordering::SeqCst);
+        assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 1,
+            "the intended observation append must actually fail exactly once");
+        store.fail_response_observation_appends.store(false, Ordering::SeqCst);
         let history = state.thread.load_history(true).await.unwrap();
         assert!(!history.items.iter().any(|item| matches!(item, RolloutItem::ResponseObservationRecord(_))));
         engine.close().await.unwrap();

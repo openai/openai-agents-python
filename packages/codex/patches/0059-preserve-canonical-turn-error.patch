@@ -1,0 +1,459 @@
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 1ec11c720d2dabdafba61f3f1b8213d23d0650d8..b11cc18518eb90841b141e6d2665b99cb50a9b29 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -67,6 +67,8 @@ use codex_model_provider_info::built_in_model_providers;
+ use codex_models_manager::model_info;
+ use codex_models_manager::test_support::construct_model_info_offline_for_tests;
+ use codex_models_manager::test_support::get_model_offline_for_tests;
++use codex_otel::current_span_w3c_trace_context;
++use codex_otel::set_parent_from_w3c_trace_context;
+ use codex_prompts::render_model_instructions;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ResponseItemId;
+@@ -13683,3 +13685,188 @@ async fn response_integrity_reason_tracks_the_originating_terminal_error_event()
+ }
+ #[path = "context_metadata_tests.rs"]
+ mod context_metadata_tests;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn interrupting_regular_error_publication_uses_the_abort_owner() {
++    use crate::session::turn::ReportedTurnError;
++    use tokio::sync::Notify;
++
++    struct ErrorGate {
++        entered: Arc<Notify>,
++        release: Arc<Notify>,
++    }
++    impl codex_extension_api::TurnLifecycleContributor for ErrorGate {
++        fn on_turn_error<'a>(
++            &'a self,
++            _input: codex_extension_api::TurnErrorInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                self.entered.notify_one();
++                self.release.notified().await;
++            })
++        }
++    }
++    struct Dropped(Arc<Notify>);
++    impl Drop for Dropped {
++        fn drop(&mut self) {
++            self.0.notify_one();
++        }
++    }
++    struct ObservedRegularTask(Arc<Notify>);
++    impl SessionTask for ObservedRegularTask {
++        fn kind(&self) -> TaskKind {
++            TaskKind::Regular
++        }
++        fn span_name(&self) -> &'static str {
++            "test.regular_error_publication"
++        }
++        async fn run(
++            self: Arc<Self>,
++            session: Arc<Session>,
++            turn: Arc<TurnContext>,
++            input: Vec<TurnInput>,
++            cancellation: CancellationToken,
++        ) -> SessionTaskResult {
++            let _dropped = Dropped(Arc::clone(&self.0));
++            Arc::new(crate::tasks::RegularTask::new())
++                .run(session, turn, input, cancellation)
++                .await
++        }
++    }
++
++    tokio::time::timeout(Duration::from_secs(30), async {
++        for hold_delivery in [false, true] {
++            let (server, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
++                gate: None,
++                body: responses::sse_failed(
++                    "bounded-error-response",
++                    "server_error",
++                    "bounded fixture failure",
++                ),
++            }]])
++            .await;
++            let mut provider = built_in_model_providers(None)["openai"].clone();
++            provider.base_url = Some(format!("{}/v1", server.uri()));
++            provider.supports_websockets = false;
++            provider.request_max_retries = Some(0);
++            provider.stream_max_retries = Some(0);
++            let uri = server.uri().to_string();
++            let (mut session, turn, _) = make_session_and_context_with_auth_and_config_and_rx(
++                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++                Vec::new(),
++                move |config| {
++                    config.model = Some("gpt-5.2".to_string());
++                    config.model_provider = provider;
++                    config.chatgpt_base_url = uri;
++                    let _ = config.features.disable(Feature::TokenBudget);
++                    let _ = config.features.disable(Feature::EnableRequestCompression);
++                },
++            )
++            .await;
++            let entered = Arc::new(Notify::new());
++            let release = Arc::new(Notify::new());
++            let dropped = Arc::new(Notify::new());
++            let mut builder = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
++            builder.turn_lifecycle_contributor(Arc::new(ErrorGate {
++                entered: Arc::clone(&entered),
++                release: Arc::clone(&release),
++            }));
++            // A bounded event channel lets the test hold Error delivery without
++            // replacing send_event or constructing a publication marker itself.
++            let (tx, events) = async_channel::bounded(1);
++            let inner = Arc::get_mut(&mut session).expect("unshared test session");
++            inner.services.extensions = Arc::new(builder.build());
++            inner.tx_event = tx;
++            session
++                .spawn_task(
++                    Arc::clone(&turn),
++                    vec![TurnInput::UserInput {
++                        metadata: Default::default(),
++                        content: vec![UserInput::Text {
++                            text: "fail one real sampling request".to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                        client_id: None,
++                    }],
++                    ObservedRegularTask(Arc::clone(&dropped)),
++                )
++                .await;
++            let mut observed = Vec::new();
++            loop {
++                tokio::select! {
++                    _ = entered.notified() => break,
++                    event = events.recv() => observed.push(event.expect("turn event").msg),
++                }
++            }
++            while let Ok(event) = events.try_recv() {
++                observed.push(event.msg);
++            }
++            if hold_delivery {
++                session
++                    .tx_event
++                    .try_send(Event {
++                        id: turn.sub_id.clone(),
++                        msg: EventMsg::Warning(WarningEvent {
++                            message: "test delivery gate".to_string(),
++                        }),
++                    })
++                    .expect("fill the single event slot while lifecycle is held");
++                release.notify_one();
++                // send_event sets status before its awaited publication path.
++                // The full channel prevents that Error from reaching its receiver.
++                while turn.terminal_error.lock().await.is_none() {
++                    tokio::task::yield_now().await;
++                }
++            }
++            assert!(turn.extension_data.get::<ReportedTurnError>().is_none());
++            let abort = tokio::spawn({
++                let session = Arc::clone(&session);
++                async move {
++                    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++                }
++            });
++            // Wait for the actual RegularTask future to drop before opening
++            // delivery; it must not publish a late Error when capacity returns.
++            dropped.notified().await;
++            assert!(turn.extension_data.get::<ReportedTurnError>().is_none());
++            loop {
++                let event = events.recv().await.expect("abort owner event");
++                let terminal = matches!(event.msg, EventMsg::TurnAborted(_));
++                observed.push(event.msg);
++                if terminal {
++                    break;
++                }
++            }
++            abort.await.expect("joined abort owner");
++            while let Ok(event) = events.try_recv() {
++                observed.push(event.msg);
++            }
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::Error(_)))
++                    .count(),
++                0
++            );
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::TurnComplete(_)))
++                    .count(),
++                0
++            );
++            assert_eq!(
++                observed
++                    .iter()
++                    .filter(|event| matches!(event, EventMsg::TurnAborted(_)))
++                    .count(),
++                1
++            );
++            assert_eq!(server.requests().await.len(), 1);
++            assert!(session.active_turn.lock().await.is_none());
++            server.shutdown().await;
++        }
++    })
++    .await
++    .expect("bounded real publication cancellation must settle");
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 57e7a2b849610ec5972098e6963646b181561a6a..d37d2d5c629dd0836e69779b7291bb9fdcc1850c 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -142,6 +142,10 @@ use tracing::warn;
+ 
+ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+ 
++/// The regular turn owner finished its error lifecycle and event publication attempt.
++/// Stored only in this turn's live ExtensionData, never in a turn initializer or history.
++pub(crate) struct ReportedTurnError;
++
+ /// Explicit MCP startup requirements retained across restarts within one user turn.
+ #[derive(Default)]
+ pub(crate) struct McpStartupRequirements {
+@@ -220,6 +224,7 @@ pub(crate) async fn run_turn(
+             EventMsg::Error(err.to_error_event(message_prefix)),
+         )
+         .await;
++        turn_context.extension_data.insert(ReportedTurnError);
+         error!("Failed to run pre-sampling compact");
+         return Ok(None);
+     }
+@@ -831,6 +836,7 @@ pub(crate) async fn run_turn(
+                     codex_error_info: Some(error),
+                 });
+                 sess.send_event(&turn_context, event).await;
++                turn_context.extension_data.insert(ReportedTurnError);
+                 break;
+             }
+             Err(e) => {
+@@ -847,6 +853,7 @@ pub(crate) async fn run_turn(
+                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
+                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                 sess.send_event(&turn_context, event).await;
++                turn_context.extension_data.insert(ReportedTurnError);
+                 // let the user continue the conversation
+                 break;
+             }
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index fc66c2bd5207a9fb29c8791b598ee2eea9a319e1..4e7f1e8aff62f22697f06448932421f9373ef01e 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -31,6 +31,7 @@ use crate::context::ContextualUserFragment;
+ use crate::hook_runtime::run_turn_interrupt_hooks;
+ use crate::session::TurnInput;
+ use crate::session::session::Session;
++use crate::session::turn::ReportedTurnError;
+ use crate::session::turn::run_hooks_and_record_inputs;
+ use crate::session::turn_context::NewTurnContextOptions;
+ use crate::session::turn_context::TurnContext;
+@@ -666,18 +667,28 @@ impl Session {
+             }
+             Err(err) => {
+                 warn!(%err, "session task returned an unexpected error");
+-                self.emit_turn_error_lifecycle(
+-                    turn_context.as_ref(),
+-                    err.to_codex_protocol_error(),
+-                    err.details(),
+-                )
+-                .await;
+-                self.track_turn_codex_error(turn_context.as_ref(), &err);
+-                self.send_event(
+-                    turn_context.as_ref(),
+-                    EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+-                )
+-                .await;
++                // A regular turn can report its primary error before the final flush fails.
++                // Preserve that completed publication and its terminal error; the final flush
++                // and child cleanup above still run and retain their failure receipts.
++                if turn_context
++                    .extension_data
++                    .get::<ReportedTurnError>()
++                    .is_none()
++                    || turn_context.terminal_error.lock().await.is_none()
++                {
++                    self.emit_turn_error_lifecycle(
++                        turn_context.as_ref(),
++                        err.to_codex_protocol_error(),
++                        err.details(),
++                    )
++                    .await;
++                    self.track_turn_codex_error(turn_context.as_ref(), &err);
++                    self.send_event(
++                        turn_context.as_ref(),
++                        EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
++                    )
++                    .await;
++                }
+                 (None, None)
+             }
+         };
+diff --git a/codex-rs/core/src/tasks/mod_tests.rs b/codex-rs/core/src/tasks/mod_tests.rs
+index 94c2373519e906c000525bd705d44e36230f5966..6616f1881c56fb4b1c0417a065cd26f80ddbd970 100644
+--- a/codex-rs/core/src/tasks/mod_tests.rs
++++ b/codex-rs/core/src/tasks/mod_tests.rs
+@@ -479,3 +479,160 @@ fn emit_compact_metric_records_auto_local() {
+         ])
+     );
+ }
++
++/// Exercise finalization's observable event/lifecycle ownership separately from
++/// the binding's strict real observation-append failure tests.
++#[tokio::test]
++async fn finalization_preserves_only_a_completed_regular_error_publication() {
++    use crate::session::turn::ReportedTurnError;
++    use codex_protocol::protocol::EventMsg;
++
++    struct Recorder {
++        errors: Arc<std::sync::Mutex<usize>>,
++        idle: Arc<std::sync::Mutex<Vec<codex_extension_api::ThreadIdleCause>>>,
++    }
++    impl codex_extension_api::TurnLifecycleContributor for Recorder {
++        fn on_turn_error<'a>(
++            &'a self,
++            _input: codex_extension_api::TurnErrorInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                *self.errors.lock().unwrap() += 1;
++            })
++        }
++    }
++    impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config> for Recorder {
++        fn on_thread_idle<'a>(
++            &'a self,
++            input: codex_extension_api::ThreadIdleInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                self.idle.lock().unwrap().push(input.cause);
++            })
++        }
++    }
++
++    tokio::time::timeout(std::time::Duration::from_secs(15), async {
++        // (prior error event, completed owner publication): a status marker alone
++        // must not suppress the first required finalization lifecycle callback.
++        // A marker without a terminal payload must not suppress one either.
++        for (prior_event, marker) in [(false, false), (true, false), (true, true), (false, true)] {
++            let reported = prior_event && marker;
++            let (mut session, turn, receiver) = make_session_and_context_with_rx().await;
++            let errors = Arc::new(std::sync::Mutex::new(0));
++            let idle = Arc::new(std::sync::Mutex::new(Vec::new()));
++            let recorder = Arc::new(Recorder {
++                errors: Arc::clone(&errors),
++                idle: Arc::clone(&idle),
++            });
++            let mut builder =
++                codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
++            builder.turn_lifecycle_contributor(recorder.clone());
++            builder.thread_lifecycle_contributor(recorder);
++            Arc::get_mut(&mut session).unwrap().services.extensions = Arc::new(builder.build());
++            session
++                .spawn_task(Arc::clone(&turn), Vec::new(), PendingTask)
++                .await;
++            let primary = CodexErr::InvalidRequest("primary failure".to_string());
++            let primary_event = primary.to_error_event(None);
++            if reported {
++                session
++                    .emit_turn_error_lifecycle(
++                        &turn,
++                        primary.to_codex_protocol_error(),
++                        primary.details(),
++                    )
++                    .await;
++                session.track_turn_codex_error(&turn, &primary);
++            }
++            if prior_event {
++                session
++                    .send_event(&turn, EventMsg::Error(primary_event.clone()))
++                    .await;
++            }
++            if marker {
++                turn.extension_data.insert(ReportedTurnError);
++            }
++            let final_error = CodexErr::Fatal("finalization failure".to_string());
++            let final_event = final_error.to_error_event(None);
++            session
++                .on_task_finished(Arc::clone(&turn), Err(final_error))
++                .await;
++            let mut events = Vec::new();
++            while let Ok(event) = receiver.try_recv() {
++                events.push(event.msg);
++            }
++            let observed = events
++                .iter()
++                .filter_map(|event| match event {
++                    EventMsg::Error(error) => Some(error.message.as_str()),
++                    _ => None,
++                })
++                .collect::<Vec<_>>();
++            let expected = if reported {
++                vec![primary_event.message.as_str()]
++            } else if prior_event {
++                vec![primary_event.message.as_str(), final_event.message.as_str()]
++            } else {
++                vec![final_event.message.as_str()]
++            };
++            assert_eq!(observed, expected);
++            let terminals = events
++                .iter()
++                .filter_map(|event| match event {
++                    EventMsg::TurnComplete(event) => Some(event),
++                    _ => None,
++                })
++                .collect::<Vec<_>>();
++            assert_eq!(terminals.len(), 1);
++            let expected_terminal = if reported {
++                &primary_event.message
++            } else {
++                &final_event.message
++            };
++            assert_eq!(
++                &terminals[0].error.as_ref().unwrap().message,
++                expected_terminal
++            );
++            assert_eq!(*errors.lock().unwrap(), 1);
++            assert_eq!(
++                *idle.lock().unwrap(),
++                vec![codex_extension_api::ThreadIdleCause::Failed]
++            );
++
++            if reported {
++                // A genuinely new turn in the same session must publish its own
++                // failure, even though the previous context stays alive here.
++                let next = session
++                    .new_turn_with_default_settings(
++                        "following-turn".to_string(),
++                        Default::default(),
++                    )
++                    .await;
++                session
++                    .spawn_task(Arc::clone(&next), Vec::new(), PendingTask)
++                    .await;
++                let next_error = CodexErr::Fatal("new turn failure".to_string());
++                let next_message = next_error.to_error_event(None).message;
++                session.on_task_finished(next, Err(next_error)).await;
++                let mut next_errors = Vec::new();
++                let mut next_terminals = 0;
++                while let Ok(event) = receiver.try_recv() {
++                    match event.msg {
++                        EventMsg::Error(error) => next_errors.push(error.message),
++                        EventMsg::TurnComplete(event) => {
++                            next_terminals += 1;
++                            assert_eq!(event.error.unwrap().message, next_message);
++                        }
++                        _ => {}
++                    }
++                }
++                assert_eq!(next_errors, vec![next_message]);
++                assert_eq!(next_terminals, 1);
++                assert_eq!(*errors.lock().unwrap(), 2);
++            }
++        }
++    })
++    .await
++    .expect("finalization ownership checks must finish");
++}

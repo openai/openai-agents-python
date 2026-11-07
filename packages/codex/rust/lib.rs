@@ -313,7 +313,7 @@ impl Engine {
         let options = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
             .map_err(py_error)?;
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
-        async_bridge::future_into_py(py, async move {
+        async_bridge::future_factory_into_py(py, move || async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
             let thread = inner
                 .start_with_tools(options, None, Some(specs), false)
@@ -333,15 +333,23 @@ impl Engine {
         specs_json: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
+        let lease = self
+            .managed_lease
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
         let options = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
             .map_err(py_error)?;
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
-        async_bridge::future_into_py(py, async move {
+        async_bridge::future_factory_into_py(py, move || async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
-            inner
+            let thread = inner
                 .start_with_tools(options, None, Some(specs), true)
                 .await
-                .map_err(py_error)
+                .map_err(py_error)?;
+            if let Some(lease) = lease {
+                lease.register_thread(thread.inner.clone())?;
+            }
+            Ok(thread)
         })
     }
 
@@ -1588,7 +1596,7 @@ impl NativeThread {
             .map_err(|error| PyValueError::new_err(error.to_string()))?
             .unwrap_or_default();
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
+        async_bridge::future_factory_into_py(py, move || async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
             let tools = inner
@@ -2847,7 +2855,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None))]
+#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None, _capture_initial_config=false, _share_model_http=false))]
 fn create_engine<'py>(
     py: Python<'py>,
     config_json: &str,
@@ -2855,24 +2863,49 @@ fn create_engine<'py>(
     api_key: Option<String>,
     provider_lease: Option<PyRef<'py, provider_owner::NativeProviderLease>>,
     canonical_store: Option<Py<PyAny>>,
+    _capture_initial_config: bool,
+    _share_model_http: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    if _share_model_http && (provider_lease.is_none() || api_key.is_none()) {
+        return Err(py_error(
+            "Shared model HTTP requires an API-key Provider lease",
+        ));
+    }
+    if _capture_initial_config && provider_lease.is_none() {
+        return Err(py_error(
+            "Initial Session configuration capture requires a Provider lease",
+        ));
+    }
     let lease = provider_lease.map(|lease| lease.inner.clone());
     let config_json = config_json.to_owned();
     let runtime_json = runtime_json.to_owned();
-    async_bridge::future_into_py(py, async move {
+    async_bridge::future_factory_into_py(py, move || async move {
         if let Some(lease) = &lease {
             lease.check_live()?;
         }
-        let inner = engine::EngineState::new_with_store(
+        // Acquire only the uncredentialed handle before allocating Engine resources.
+        let model_http_pool = if _share_model_http {
+            Some(
+                lease
+                    .as_ref()
+                    .expect("validated Provider lease")
+                    .model_http_pool()?,
+            )
+        } else {
+            None
+        };
+        let mut inner = engine::EngineState::new_with_store(
             config_json,
             runtime_json,
             false,
             api_key,
             None,
             canonical_store,
+            _capture_initial_config,
         )
         .await
         .map_err(py_error)?;
+        inner.model_http_pool = model_http_pool;
         let mut engine = Engine::new(inner);
         if let Some(lease) = lease {
             lease.register_engine(engine.inner.clone())?;

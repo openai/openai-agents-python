@@ -1,6 +1,8 @@
 """The Windows native completion transport must not block the event loop."""
 
 import asyncio
+import errno
+import os
 import socket
 import sys
 import weakref
@@ -246,3 +248,70 @@ async def test_windows_completion_setup_releases_unstarted_native_owner(
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     assert all(sock.fileno() == -1 for sock in allocated)
+
+
+class _ImmediateCompletion:
+    def __init__(self):
+        self.started = False
+        self.discarded = False
+
+    def start(self, writer):
+        self.started = True
+        writer.close()
+
+    def take_result(self):
+        return "completed"
+
+    def discard_unstarted(self):
+        self.discarded = True
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX completion transport")
+@pytest.mark.parametrize("default_timeout", [None, 0.0, 0.25])
+async def test_completion_socket_setup_respects_default_timeout(monkeypatch, default_timeout):
+    original_pair = _native_async._unix_completion_pair
+    original_timeout = socket.getdefaulttimeout()
+    allocated = []
+
+    def pair():
+        sockets = original_pair()
+        reader, _ = sockets
+        assert reader.gettimeout() == 0.0
+        assert not reader.getblocking()
+        assert not os.get_blocking(reader.fileno())
+        for endpoint in sockets:
+            assert not endpoint.get_inheritable()
+        allocated.extend(sockets)
+        return sockets
+
+    monkeypatch.setattr(_native_async, "_unix_completion_pair", pair)
+    try:
+        socket.setdefaulttimeout(default_timeout)
+        call = _ImmediateCompletion()
+        assert await _native_async._await_native_completion(call) == "completed"
+        assert call.started
+        assert len(allocated) == 2
+        assert all(endpoint.fileno() == -1 for endpoint in allocated)
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX completion transport")
+@pytest.mark.parametrize("error_number", [errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EPERM])
+async def test_completion_socket_allocation_failure_is_not_retried(monkeypatch, error_number):
+    error = OSError(error_number, "socket allocation refused")
+    attempts = []
+
+    def pair(*args, **kwargs):
+        attempts.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(socket, "socketpair", pair)
+    call = _ImmediateCompletion()
+    with pytest.raises(OSError) as caught:
+        await _native_async._await_native_completion(call)
+    assert caught.value is error
+    assert len(attempts) == 1
+    assert not call.started
+    assert call.discarded

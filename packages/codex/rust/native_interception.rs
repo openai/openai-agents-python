@@ -895,15 +895,6 @@ impl Control {
         self.native_agents.get().is_some()
     }
 
-    pub(crate) fn active_turn_id(&self) -> Option<String> {
-        self.direct_turn
-            .lock()
-            .expect("interception turn poisoned")
-            .as_ref()
-            .filter(|turn| !turn.cancelled.is_cancelled())
-            .map(|turn| turn.id.clone())
-    }
-
     // Boundary already selected the nearest live native ancestor, including
     // cold resumes. Never start another search here: an opted-out or revoked
     // live intermediate owner must not be skipped for a more permissive root.

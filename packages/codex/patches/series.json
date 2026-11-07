@@ -253,13 +253,25 @@
       "sha256": "ce5c3381285bf830cf3203b7bc031d3b5e6fd33331f2bf69428b8aabe4b8a619"
     },
     {
-      "path": "0057-bounded-nofollow-filesystem.patch",
+      "path": "0057-reuse-model-http-clients.patch",
+      "sha256": "ef6fbc58cde414c42bb083eb62e03485d5971bfda523379303d717aee3031185"
+    },
+    {
+      "path": "0058-reuse-bundled-model-catalog.patch",
+      "sha256": "30789fd66c8592c4a9d94777a62dc8618d3ffbe74800ca5bd2e95d7f1bcf2a96"
+    },
+    {
+      "path": "0059-preserve-canonical-turn-error.patch",
+      "sha256": "67d6e2be6322bf5851f24fd33a0173e2a060edfe1465d943eaac35d79ebd6b42"
+    },
+    {
+      "path": "0060-bounded-nofollow-filesystem.patch",
       "sha256": "d2048388044ec4004ba13d1111b2da602a401fb4c572280ae24474cd6f480bc1"
     },
     {
-      "path": "0058-early-project-search-result-policy.patch",
+      "path": "0061-early-project-search-result-policy.patch",
       "sha256": "ac413ec794493e2047724a5ee0473744c4a0464313d4330ba6975780bda6e5d3"
     }
   ],
-  "result_tree": "43fcb9c0e7c50cbd44b1aa2da20978fe520f4f28"
+  "result_tree": "523577a78bb75d7334cd0f2e6dba82e5250bc552"
 }

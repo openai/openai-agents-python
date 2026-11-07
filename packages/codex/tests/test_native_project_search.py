@@ -77,6 +77,64 @@ local_search = (
 )
 
 
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+@pytest.mark.parametrize(
+    "environment_mode",
+    [None, pytest.param("disabled", marks=local_search), pytest.param("other", marks=local_search)],
+)
+async def test_application_search_names_remain_available_when_native_tool_is_disabled(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    name: ExecutorToolName,
+    environment_mode: str | None,
+) -> None:
+    calls: list[str] = []
+
+    @function_tool(name=name)
+    def application_search() -> str:
+        calls.append(name)
+        return "application result"
+
+    environment = None
+    if environment_mode is not None:
+        other: ExecutorToolName = "project_grep" if name == "project_glob" else "project_glob"
+        environment = Environment.local(
+            cwd=tmp_path, tools=[other] if environment_mode == "other" else []
+        )
+    agent = Agent(
+        instructions="Call the application tool.",
+        tools=[application_search],
+        provider=provider(responses),
+    )
+    assert agent.validate() is None
+    responses.respond(function_call(name, {}, "application-search"))
+    responses.respond(assistant_output("done"))
+    async with timeout(20), agent.session(environment=environment) as session:
+        assert (await (await session.submit("Search.")).get_result()).final_output == "done"
+    assert calls == [name]
+    assert tool_output(responses.requests[-1], "application-search") == "application result"
+
+
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+async def test_enabled_native_search_rejects_application_name_collision(
+    responses: ResponsesFixture, tmp_path: Path, name: ExecutorToolName
+) -> None:
+    @function_tool(name=name)
+    def application_search() -> str:
+        pytest.fail("Colliding application tool must not run")
+
+    agent = Agent(
+        instructions="Reject the ambiguous tool name.",
+        tools=[application_search],
+        provider=provider(responses),
+    )
+    assert agent.validate() is None
+    with pytest.raises(ValueError, match=f"collides with enabled environment tool: {name}"):
+        async with agent.session(environment=Environment.local(cwd=tmp_path, tools=[name])):
+            pytest.fail("Colliding tool must be rejected before opening")
+    assert not responses.requests
+
+
 @local_search
 async def test_nested_projects_and_line_context(
     responses: ResponsesFixture, tmp_path: Path

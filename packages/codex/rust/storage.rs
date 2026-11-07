@@ -97,9 +97,15 @@ pub struct MemoryThreadStore {
     #[cfg(test)]
     pub(crate) fail_appends: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    pub(crate) fail_response_observation_appends: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) failed_response_observation_appends: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(crate) completion_hold: std::sync::Mutex<Option<Arc<CompletionHold>>>,
     #[cfg(test)]
     pub(crate) next_flush_hold: std::sync::Mutex<Option<Arc<CompletionHold>>>,
+    #[cfg(test)]
+    pub(crate) hook_completion_flush_hold: std::sync::Mutex<Option<Arc<HookCompletionFlushHold>>>,
     inner: Arc<dyn ThreadStore>,
     archived: Mutex<HashMap<ThreadId, SystemTime>>,
     // The native in-memory store applies this policy but does not expose it.
@@ -146,9 +152,15 @@ impl Default for MemoryThreadStore {
             #[cfg(test)]
             fail_appends: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
+            fail_response_observation_appends: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            failed_response_observation_appends: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             completion_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
             next_flush_hold: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            hook_completion_flush_hold: std::sync::Mutex::new(None),
             inner: Arc::new(InMemoryThreadStore::default()),
             archived: Mutex::new(HashMap::new()),
             memory_modes: Mutex::new(HashMap::new()),
@@ -634,6 +646,63 @@ impl ThreadStore for MemoryThreadStore {
         Box::pin(async move {
             #[cfg(test)]
             {
+                let hook_hold = self.hook_completion_flush_hold.lock().unwrap().clone();
+                if let Some(hold) = hook_hold
+                    && hold.thread == params.thread_id
+                {
+                    for item in &params.items {
+                        if let RolloutItem::EventMsg(EventMsg::HookStarted(event)) = item
+                            && event.run.event_name == hold.event_name
+                        {
+                            // The initial turn ID is returned by admission. Wait for
+                            // that binding without consuming the one-shot hold.
+                            drop(hold.bound.acquire().await.expect("hook turn binding"));
+                            if event.turn_id.as_deref() == hold.turn_id.get().map(String::as_str) {
+                                let claimed = {
+                                    let pending = self.hook_completion_flush_hold.lock().unwrap();
+                                    pending
+                                        .as_ref()
+                                        .is_some_and(|current| Arc::ptr_eq(current, &hold))
+                                        && hold
+                                            .claimed
+                                            .compare_exchange(
+                                                false,
+                                                true,
+                                                std::sync::atomic::Ordering::AcqRel,
+                                                std::sync::atomic::Ordering::Acquire,
+                                            )
+                                            .is_ok()
+                                };
+                                if claimed {
+                                    hold.run_id
+                                        .set(event.run.id.clone())
+                                        .expect("one hook claim");
+                                }
+                            }
+                        }
+                        if let RolloutItem::EventMsg(EventMsg::HookCompleted(event)) = item
+                            && event.run.event_name == hold.event_name
+                            && event.turn_id.as_deref() == hold.turn_id.get().map(String::as_str)
+                            && hold.run_id.get().is_some_and(|run| run == &event.run.id)
+                        {
+                            let mut completed = hold.completed.lock().unwrap();
+                            if completed.is_none() {
+                                *completed = Some(event.run.status.clone());
+                                if event.run.status
+                                    == codex_protocol::protocol::HookRunStatus::Completed
+                                {
+                                    // These fixtures disable post-turn compaction and legacy
+                                    // notify, and submit no late input until this flush enters.
+                                    // The next same-thread flush follows RegularTask's final
+                                    // pending-input check and precedes finalization's drain.
+                                    let mut pending = self.next_flush_hold.lock().unwrap();
+                                    assert!(pending.is_none(), "fixture flush hold already armed");
+                                    *pending = Some(hold.flush.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 let hold = self.completion_hold.lock().unwrap().clone();
                 if let Some(hold) = hold
                     && hold.parent == params.thread_id
@@ -645,6 +714,21 @@ impl ThreadStore for MemoryThreadStore {
                     hold.entered.add_permits(1);
                     hold.release.acquire().await.unwrap().forget();
                 }
+            }
+            #[cfg(test)]
+            if self
+                .fail_response_observation_appends
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && params
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, RolloutItem::ResponseObservationRecord(_)))
+            {
+                self.failed_response_observation_appends
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(ThreadStoreError::Internal {
+                    message: "synthetic response observation append failure".to_owned(),
+                });
             }
             #[cfg(test)]
             if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
@@ -869,6 +953,58 @@ impl ThreadStore for MemoryThreadStore {
             checklists.remove(&id);
             Ok(())
         })
+    }
+}
+
+// A fixture-only marker that arms one flush hold after an exact successful
+// Stop/SubagentStop hook. The hook itself runs unblocked. Fixtures must disable
+// post-turn compaction/legacy notify and submit input only after flush entry.
+#[cfg(test)]
+pub(crate) struct HookCompletionFlushHold {
+    thread: ThreadId,
+    event_name: codex_protocol::protocol::HookEventName,
+    turn_id: OnceLock<String>,
+    run_id: OnceLock<String>,
+    claimed: std::sync::atomic::AtomicBool,
+    completed: std::sync::Mutex<Option<codex_protocol::protocol::HookRunStatus>>,
+    bound: tokio::sync::Semaphore,
+    pub flush: Arc<CompletionHold>,
+}
+
+#[cfg(test)]
+impl HookCompletionFlushHold {
+    pub fn new(thread: ThreadId, event_name: codex_protocol::protocol::HookEventName) -> Self {
+        Self {
+            thread,
+            event_name,
+            turn_id: OnceLock::new(),
+            run_id: OnceLock::new(),
+            claimed: std::sync::atomic::AtomicBool::new(false),
+            completed: std::sync::Mutex::new(None),
+            bound: tokio::sync::Semaphore::new(0),
+            flush: Arc::new(CompletionHold {
+                parent: thread,
+                entered: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+            }),
+        }
+    }
+
+    pub fn bind(&self, turn_id: &str) {
+        assert!(!turn_id.is_empty());
+        assert!(
+            self.turn_id.set(turn_id.to_owned()).is_ok(),
+            "hook hold already bound"
+        );
+        self.bound.add_permits(1);
+    }
+
+    pub fn assert_completed(&self) {
+        assert_eq!(
+            *self.completed.lock().unwrap(),
+            Some(codex_protocol::protocol::HookRunStatus::Completed),
+            "the matching fixture hook must complete successfully",
+        );
     }
 }
 

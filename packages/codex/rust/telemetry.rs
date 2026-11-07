@@ -25,6 +25,8 @@ static STATE: Mutex<State> = Mutex::const_new(State {
     provider: None,
 });
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Successful process configuration is immutable, including after shutdown.
+static EXPORTS_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 const SERVICE: &str = "codex_agents_python";
@@ -34,6 +36,10 @@ type ExportLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
+}
+
+pub fn exports_enabled() -> bool {
+    EXPORTS_ENABLED.load(Ordering::Acquire)
 }
 
 pub async fn engine_starting() -> Result<()> {
@@ -100,6 +106,7 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             http_mtls_network_policy(&config.application_network_policy);
     }
 
+    let exports_enabled = export_requested(&config);
     codex_otel::sdk_trace::configure_pipeline(false);
     // Claim the subscriber first: losing this race must not modify native OTel globals.
     let (logger, handle) = reload::Layer::new(None::<ExportLayer>);
@@ -146,6 +153,7 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     codex_otel::sdk_trace::configure_pipeline(TRACE_INITIALIZED.load(Ordering::Acquire));
     ACTIVE.store(true, Ordering::Release);
     state.provider = provider;
+    EXPORTS_ENABLED.store(exports_enabled, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }

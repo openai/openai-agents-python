@@ -1095,7 +1095,7 @@ mod steering_capture_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn real_owned_child_gap_continues_once_or_yields_to_graph_stop() {
         use crate::engine::settlement_tests::{ChildSampleHold, Provider};
-        use crate::storage::{CompletionHold, MemoryThreadStore};
+        use crate::storage::{HookCompletionFlushHold, MemoryThreadStore};
         use codex_protocol::user_input::UserInput;
         use tokio::sync::{Semaphore, mpsc};
 
@@ -1139,10 +1139,17 @@ mod steering_capture_tests {
                     "features.instant_interrupt": false,
                     "features.shell_snapshot": false, "features.goals": false,
                     "analytics.enabled": false,
+                    "features.hooks": true,
+                    "model_post_turn_compact_threshold_percent": 0,
+                    "hooks": {"SubagentStop":[{"hooks":[{
+                        "type":"command", "command":"exit 0", "async":false
+                    }]}]},
                 });
                 let runtime = serde_json::json!({
                     "codex_home": directory.path(), "cwd": directory.path(),
                     "_native_agents": true, "_native_turn_control": true,
+                    // Only the literal fixture hook is present in isolated config.
+                    "bypass_hook_trust": true,
                 });
                 let engine = Arc::new(
                     crate::engine::EngineState::new(
@@ -1237,14 +1244,14 @@ mod steering_capture_tests {
                     .as_any()
                     .downcast_ref::<MemoryThreadStore>()
                     .unwrap();
-                let hold = Arc::new(CompletionHold {
-                    parent: child_id,
-                    entered: Semaphore::new(0),
-                    release: Semaphore::new(0),
-                });
-                *store.next_flush_hold.lock().unwrap() = Some(hold.clone());
+                let hold = Arc::new(HookCompletionFlushHold::new(
+                    child_id,
+                    codex_protocol::protocol::HookEventName::SubagentStop,
+                ));
+                hold.bind(original_id);
+                *store.hook_completion_flush_hold.lock().unwrap() = Some(hold.clone());
                 sample.release.add_permits(1);
-                hold.entered.acquire().await.unwrap().forget();
+                hold.flush.entered.acquire().await.unwrap().forget();
                 assert_eq!(
                     child_requests().len(),
                     1,
@@ -1274,13 +1281,18 @@ mod steering_capture_tests {
                 .unwrap();
                 assert!(Arc::ptr_eq(&first, &original));
                 assert!(Arc::ptr_eq(&second, &original));
-                hold.release.add_permits(1);
+                hold.flush.release.add_permits(1);
                 assert_eq!(original.outcome().await.unwrap().result, Ok("done".into()));
+                hold.assert_completed();
                 let receipt = original
                     .sdk_admission
                     .get()
                     .expect("actual SDK steering receipt");
-                assert!(receipt.has_steering_tail());
+                assert!(
+                    receipt.has_steering_tail(),
+                    "child={child_id}; turn={original_id}; requests={}",
+                    serde_json::to_string(&child_requests()).unwrap()
+                );
                 assert_eq!(child_requests().len(), 1);
                 let root_tools = state
                     .thread
