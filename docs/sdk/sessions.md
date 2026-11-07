@@ -547,16 +547,18 @@ After closing the Session, [reopen the local conversation](state.md#reopen-a-con
 
 ## Retry incomplete cleanup
 
-Use `async with agent.session()` as the normal Session lifetime. If cleanup fails before all resources retire, the original error can retain its remaining cleanup owner. The SDK preserves arbitrary primary exception types, so inspect the optional capability with `getattr`:
+Use `async with agent.session()` as the normal Session lifetime. If cleanup fails before all resources retire, the original error can retain its remaining cleanup owner. Use `get_cleanup` from `agents` to find that owner:
 
 ```python
-cleanup = getattr(error, "cleanup", None)
+from agents import get_cleanup
+
+cleanup = get_cleanup(error)
 if cleanup is not None:
     await cleanup.aclose()
 ```
 
-Retain that owner until cleanup succeeds. If another attempt fails, retain both the primary error and the owner for a later retry. The public `aclose()` method retries complete cleanup. For an admitted Session, `aclose()` retries native retirement. It then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. The error's original type and object stay primary; linked cleanup errors remain available through its exception context.
+Retain that owner until cleanup succeeds. If another attempt fails, retain both the primary error and the owner for a later retry. The public `aclose()` method retries complete cleanup. For an admitted Session, `aclose()` retries native retirement. It then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. Cleanup preserves the primary failure; linked cleanup errors remain available through its exception context.
 
-For errors from the optional migration adapter, use [`agents.migration.get_cleanup(error)`](reference.md#migration-run-handles) to find the owner through exception contexts. Direct `error.cleanup` access cannot recover every cancellation owner across Python 3.10 Task boundaries.
+[`get_cleanup(error)`](reference.md#get_cleanup) also follows exception contexts. On Python 3.10, a Task boundary can replace a `CancelledError` while retaining the original error in its context. The helper returns the existing owner and does not wrap or replace the cancellation error. It works for native runs without the optional migration adapter.
 
-A retained Session also exposes idempotent `await session.aclose()`. Successful repeated calls do nothing. An interrupted waiter still joins owned cleanup before cancellation propagates. After a failed `run_sync()`, host code outside an event loop can capture `cleanup = getattr(error, "cleanup", None)`. Call `asyncio.run(cleanup.aclose())` only when `cleanup is not None`. The cleanup owner keeps and drives the original run loop until its remaining resources retire. Do not discard a failed cleanup owner or retry the business operation before checking its effects.
+A retained Session also exposes idempotent `await session.aclose()`. Successful repeated calls do nothing. An interrupted waiter still joins owned cleanup before cancellation propagates. After a failed `run_sync()`, host code outside an event loop can capture `cleanup = get_cleanup(error)`. Call `asyncio.run(cleanup.aclose())` only when `cleanup is not None`. The cleanup owner keeps and drives the original run loop until its remaining resources retire. Do not discard a failed cleanup owner or retry the business operation before checking its effects.
