@@ -22,7 +22,7 @@ from typing import (
 )
 from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
-from typing_extensions import TypeVar as TypeVar
+from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
@@ -35,6 +35,83 @@ if TYPE_CHECKING:
 
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
 ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
+
+
+class MCPResource(TypedDict):
+    """Resource metadata returned by the native MCP transport."""
+
+    uri: str
+    name: str
+    title: NotRequired[str]
+    description: NotRequired[str]
+    mimeType: NotRequired[str]
+    size: NotRequired[int]
+    annotations: NotRequired[dict[str, Any]]
+    icons: NotRequired[list[dict[str, Any]]]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPResourceTemplate(TypedDict):
+    """A URI template advertised by an MCP server."""
+
+    uriTemplate: str
+    name: str
+    title: NotRequired[str]
+    description: NotRequired[str]
+    mimeType: NotRequired[str]
+    annotations: NotRequired[dict[str, Any]]
+    icons: NotRequired[list[dict[str, Any]]]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPTextResourceContents(TypedDict):
+    """Text returned as data, without adding instructions or model context."""
+
+    uri: str
+    text: str
+    mimeType: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPBlobResourceContents(TypedDict):
+    """Binary resource data encoded as a base64 string by the transport."""
+
+    uri: str
+    blob: str
+    mimeType: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPListResourcesResult(TypedDict):
+    """One resource page. Pass nextCursor to request the next page."""
+
+    resources: list[MCPResource]
+    resultType: NotRequired[str]
+    ttlMs: NotRequired[int]
+    cacheScope: NotRequired[Literal["public", "private"]]
+    nextCursor: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPListResourceTemplatesResult(TypedDict):
+    """One resource-template page with a caller-owned continuation cursor."""
+
+    resourceTemplates: list[MCPResourceTemplate]
+    resultType: NotRequired[str]
+    ttlMs: NotRequired[int]
+    cacheScope: NotRequired[Literal["public", "private"]]
+    nextCursor: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPReadResourceResult(TypedDict):
+    """The native transport's resource result, preserving text and blob contents."""
+
+    contents: list[MCPTextResourceContents | MCPBlobResourceContents]
+    resultType: NotRequired[str]
+    ttlMs: NotRequired[int]
+    cacheScope: NotRequired[Literal["public", "private"]]
+    _meta: NotRequired[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -161,8 +238,6 @@ class _MCP(Generic[ContextT_contra]):
         if isinstance(self.tools, (str, bytes)) or not isinstance(self.tools, Sequence):
             raise TypeError("MCP tools must be a sequence of raw tool names")
         names = tuple(self.tools)
-        if not names:
-            raise ValueError("MCP tools must select at least one raw tool name")
         for name in names:
             if not isinstance(name, str) or not name:
                 raise ValueError("MCP tool names must be nonempty strings")
@@ -227,6 +302,8 @@ class StdioMCP(_MCP[ContextT_contra]):
     directory on the host or the Session environment's working directory remotely.
 
     Session owns the connection and process lifetime. Both timeouts are seconds.
+    Use ``tools=[]`` for a resource-only server. Call the Session's resource
+    methods while it is idle; resources are not automatically sent to the model.
     ``approval_mode="native"`` keeps native approval rules; "preapproved" allows the
     selected names subject to native constraints. Neither mode sandboxes the
     server process or limits effects the server does not report.
@@ -310,6 +387,8 @@ class HttpMCP(_MCP[ContextT_contra]):
     to read credentials from the environment. Session owns the connection. Both timeouts
     are seconds. ``approval_mode="native"`` keeps native approval rules;
     "preapproved" allows selected names subject to native constraints.
+    Use ``tools=[]`` for a resource-only server. The idle Session's resource
+    methods return data without adding it to model context.
 
     Optional ``approval(context, call)`` receives MCPCallContext and NativeToolCall
     before a selected tool executes. Return True to proceed under native

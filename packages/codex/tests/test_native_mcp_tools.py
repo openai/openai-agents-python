@@ -592,7 +592,6 @@ async def test_whole_initial_mcp_ceiling_rejects_collisions_before_io(
         {"name": "codex_apps"},
         {"name": "bad space"},
         {"name": ""},
-        {"tools": []},
         {"tools": "read"},
         {"tools": ["find-record", "find_record"]},
         {"tools": ["查找", "__"]},

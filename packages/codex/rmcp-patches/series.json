@@ -7,7 +7,11 @@
     {
       "path": "0002-local-request-context.patch",
       "sha256": "f6582595e12496514ce40ffb88cacea9cebd0a7a01a6017a2c6d9aa21a3c6b0c"
+    },
+    {
+      "path": "0003-fractional-resource-priority.patch",
+      "sha256": "98d1f8e3c8c341c224c3d3231c65d30910cfd4903f8614d0cfbddf3d2cecb4af"
     }
   ],
-  "result_tree": "7d2330f33105e93f96af50ba78b1f8c7da98df6c"
+  "result_tree": "24324fe84298bf5c169e37bcaf8539b29bc6a16c"
 }

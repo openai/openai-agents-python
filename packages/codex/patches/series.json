@@ -275,7 +275,11 @@
     {
       "path": "0062-early-project-search-result-policy.patch",
       "sha256": "ac413ec794493e2047724a5ee0473744c4a0464313d4330ba6975780bda6e5d3"
+    },
+    {
+      "path": "0063-caller-controlled-mcp-resources.patch",
+      "sha256": "6a36e7a5778bd0253cd286ccef32afad19813c913f4310dee576e9cb37e87cac"
     }
   ],
-  "result_tree": "30e2cdc717ca33fdeb473324bf2c84a332d048a7"
+  "result_tree": "e20e19a6aea3e3a9d7b8375cc444715aabac767e"
 }

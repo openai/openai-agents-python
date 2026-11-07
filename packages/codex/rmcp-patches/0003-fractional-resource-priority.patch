@@ -1,0 +1,77 @@
+diff --git a/crates/rmcp/src/model/annotated.rs b/crates/rmcp/src/model/annotated.rs
+index ac3dbd3eddebae18bb5f25d13e6051a05f7ae89a..cc75e26439fdb9c720a6f9535ea7d3abffd5318b 100644
+--- a/crates/rmcp/src/model/annotated.rs
++++ b/crates/rmcp/src/model/annotated.rs
+@@ -17,12 +17,33 @@ use super::Role;
+ pub struct Annotations {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub audience: Option<Vec<Role>>,
+-    #[serde(skip_serializing_if = "Option::is_none")]
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "deserialize_priority"
++    )]
+     pub priority: Option<f32>,
+     #[serde(skip_serializing_if = "Option::is_none", rename = "lastModified")]
+     pub last_modified: Option<String>,
+ }
+ 
++// Untagged result enums buffer JSON numbers before deserializing annotations.
++// With serde_json/arbitrary_precision, fractional numbers use Number's private
++// map representation, which the primitive f32 visitor cannot read directly.
++fn deserialize_priority<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    Option::<serde_json::Number>::deserialize(deserializer)?
++        .map(|number| {
++            number
++                .as_f64()
++                .map(|value| value as f32)
++                .ok_or_else(|| serde::de::Error::custom("priority is outside the supported range"))
++        })
++        .transpose()
++}
++
+ impl Annotations {
+     /// Creates annotations for a resource with priority and an RFC 3339 timestamp.
+     ///
+@@ -70,6 +91,37 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[test]
++    fn fractional_priority_survives_resource_result_union() {
++        use crate::model::ServerResult;
++
++        let result: ServerResult = serde_json::from_str(
++            r#"{"resources":[{"uri":"fixture://report","name":"report","annotations":{"priority":0.5}}]}"#,
++        ).unwrap();
++        let ServerResult::ListResourcesResult(result) = result else {
++            panic!("resource result was misclassified");
++        };
++        assert_eq!(
++            result.resources[0].annotations.as_ref().unwrap().priority,
++            Some(0.5)
++        );
++
++        let result: ServerResult = serde_json::from_str(
++            r#"{"resourceTemplates":[{"uriTemplate":"fixture://{name}","name":"reports","annotations":{"priority":0.5}}]}"#,
++        ).unwrap();
++        let ServerResult::ListResourceTemplatesResult(result) = result else {
++            panic!("resource-template result was misclassified");
++        };
++        assert_eq!(
++            result.resource_templates[0]
++                .annotations
++                .as_ref()
++                .unwrap()
++                .priority,
++            Some(0.5)
++        );
++    }
++
+     fn annotations_of(value: serde_json::Value) -> Annotations {
+         serde_json::from_value::<Annotations>(value).unwrap()
+     }
