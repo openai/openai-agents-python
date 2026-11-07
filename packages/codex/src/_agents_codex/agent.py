@@ -157,6 +157,20 @@ class NativeProvider:
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
+
+    Eligible API-key HTTP Responses calls share idle connections across fresh
+    Sessions on Linux when proxy routing variables are absent. TLS configuration
+    and cached system trust material may remain in use until this explicit
+    Provider closes. OS trust changes,
+    including removed roots, may require a new Provider to refresh construction.
+    With only ``SSL_CERT_FILE`` set,
+    each request rereads and validates that file and changes retire cached
+    connections. Other CA, proxy-policy, cookie and login modes retain fresh
+    transport construction. Closing the Provider joins native owners before
+    releasing its idle clients. Sessions retain fresh auth, settings and history.
+    Synchronize process-environment changes with SDK calls. Changes between
+    calls are supported; client construction does not atomically snapshot the
+    ambient environment.
     """
 
     base_url: str | None = field(default=None, repr=False)

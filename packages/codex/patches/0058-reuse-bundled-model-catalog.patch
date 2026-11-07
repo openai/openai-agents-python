@@ -1,0 +1,108 @@
+diff --git a/codex-rs/models-manager/src/bundled_models_tests.rs b/codex-rs/models-manager/src/bundled_models_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..de632304f37ef9aa021b6111ea9015fd2ca840f1
+--- /dev/null
++++ b/codex-rs/models-manager/src/bundled_models_tests.rs
+@@ -0,0 +1,66 @@
++//! Embedded data can be shared; returned catalog/config ownership cannot.
++use super::*;
++use codex_protocol::openai_models::ModelsResponse;
++use pretty_assertions::assert_eq;
++use std::sync::Arc;
++use std::sync::Barrier;
++
++const EMBEDDED: &str = include_str!("../models.json");
++
++#[test]
++fn cached_catalog_matches_fresh_json_and_returns_independent_owned_models() {
++    let expected: ModelsResponse = serde_json::from_str(EMBEDDED).unwrap();
++    let mut first = bundled_models_response().unwrap();
++    assert_eq!(first, expected);
++    assert!(!first.models.is_empty());
++    first.models[0].slug = "caller-owned-model".to_string();
++    first.models[0]
++        .model_messages
++        .get_or_insert_default()
++        .instructions_template = Some("caller-owned instructions".to_string());
++    first.models.pop();
++    assert_eq!(bundled_models_response().unwrap(), expected);
++}
++
++#[test]
++fn concurrent_calls_preserve_catalogs_and_owned_return_values() {
++    let barrier = Arc::new(Barrier::new(8));
++    let workers = (0..8)
++        .map(|_| {
++            let barrier = barrier.clone();
++            std::thread::spawn(move || {
++                barrier.wait();
++                bundled_models_response().unwrap()
++            })
++        })
++        .collect::<Vec<_>>();
++    let mut results = workers
++        .into_iter()
++        .map(|worker| worker.join().unwrap())
++        .collect::<Vec<_>>();
++    let expected: ModelsResponse = serde_json::from_str(EMBEDDED).unwrap();
++    assert!(results.iter().all(|result| result == &expected));
++    results[0].models.clear();
++    assert!(results[1..].iter().all(|result| result == &expected));
++    assert_eq!(bundled_models_response().unwrap(), expected);
++}
++
++#[test]
++fn per_lookup_model_settings_do_not_modify_the_embedded_seed() {
++    let original = bundled_models_response().unwrap();
++    let selected = original.models.first().unwrap().clone();
++    let overrides = ModelsManagerConfig {
++        base_instructions: Some("current session instructions".to_string()),
++        ..ModelsManagerConfig::default()
++    };
++    let changed = model_info::with_config_overrides(selected, &overrides);
++    assert_eq!(
++        changed
++            .model_messages
++            .unwrap()
++            .instructions_template
++            .as_deref(),
++        Some("current session instructions")
++    );
++    assert_eq!(bundled_models_response().unwrap(), original);
++}
+diff --git a/codex-rs/models-manager/src/lib.rs b/codex-rs/models-manager/src/lib.rs
+index cd7b59a0530b6ead4c3852d0a3217aa7115a4d81..079579e6e4f07215e69648c7e09af448bea2050a 100644
+--- a/codex-rs/models-manager/src/lib.rs
++++ b/codex-rs/models-manager/src/lib.rs
+@@ -1,3 +1,5 @@
++use std::sync::OnceLock;
++
+ pub mod cache;
+ pub mod collaboration_mode_presets;
+ pub(crate) mod config;
+@@ -9,10 +11,16 @@ pub mod test_support;
+ pub use codex_protocol::auth::AuthMode;
+ pub use config::ModelsManagerConfig;
+ 
++static BUNDLED_MODELS: OnceLock<codex_protocol::openai_models::ModelsResponse> = OnceLock::new();
++
+ /// Load the bundled model catalog shipped with `codex-models-manager`.
+ pub fn bundled_models_response()
+ -> std::result::Result<codex_protocol::openai_models::ModelsResponse, serde_json::Error> {
+-    serde_json::from_str(include_str!("../models.json"))
++    if let Some(parsed) = BUNDLED_MODELS.get() {
++        return Ok(parsed.clone());
++    }
++    let parsed = serde_json::from_str(include_str!("../models.json"))?;
++    Ok(BUNDLED_MODELS.get_or_init(move || parsed).clone())
+ }
+ 
+ /// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
+@@ -24,3 +32,7 @@ pub fn client_version_to_whole() -> String {
+         env!("CARGO_PKG_VERSION_PATCH")
+     )
+ }
++
++#[cfg(test)]
++#[path = "bundled_models_tests.rs"]
++mod bundled_models_tests;

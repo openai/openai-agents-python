@@ -444,10 +444,10 @@ async def test_open_preserves_primary_error_and_all_cleanup_failures(
             return getattr(self.owner, name)
 
     class Engine(FailingClose):
-        async def start_replaceable_thread(self, *args: Any, **kwargs: Any) -> Any:
+        async def _start_initial_replaceable_thread(self, *args: Any, **kwargs: Any) -> Any:
             if failure_point == "thread_start":
                 raise primary from original_cause
-            thread = await self.owner.start_replaceable_thread(*args, **kwargs)
+            thread = await self.owner._start_initial_replaceable_thread(*args, **kwargs)
             return FailingClose(thread, "thread", thread_error)
 
     async def create(*args: Any, **kwargs: Any) -> Any:
@@ -1201,7 +1201,27 @@ async def test_native_admission_rejection_prevents_validator_and_callback_effect
 
 
 @pytest.mark.parametrize("operation", ["cancel", "aclose"])
+@pytest.mark.parametrize("eager_tasks", [False, True], ids=["default-tasks", "eager-tasks"])
 async def test_cancel_before_queued_callback_dispatch_prevents_application_effects(
+    responses: ResponsesFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    eager_tasks: bool,
+) -> None:
+    factory = getattr(asyncio, "eager_task_factory", None)
+    if eager_tasks and factory is None:
+        pytest.skip("asyncio.eager_task_factory requires Python 3.12 or later")
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    try:
+        if eager_tasks:
+            loop.set_task_factory(factory)
+        await _check_cancel_before_queued_callback_dispatch(responses, monkeypatch, operation)
+    finally:
+        loop.set_task_factory(previous_factory)
+
+
+async def _check_cancel_before_queued_callback_dispatch(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     effects: list[str] = []

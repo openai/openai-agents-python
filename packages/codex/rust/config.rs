@@ -32,7 +32,7 @@ pub fn decode<T: DeserializeOwned>(value: Value) -> Result<T> {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct RuntimeOptions {
+pub(crate) struct RuntimeOptions {
     // Set by Agent.session before creating the runtime, never by a turn.
     #[serde(rename = "_native_turn_control")]
     native_turn_control: bool,
@@ -141,69 +141,84 @@ fn strict_by_default() -> bool {
     true
 }
 
+impl RuntimeOptions {
+    pub(crate) fn parse(runtime_json: &str) -> Result<Self> {
+        decode(serde_json::from_str(runtime_json)?)
+    }
+
+    pub(crate) fn environment(&mut self) -> Result<Option<crate::environment::EnvironmentOptions>> {
+        anyhow::ensure!(
+            self.deferred_environment.is_none() || self.environment.is_none(),
+            "environment and deferred_environment cannot be combined"
+        );
+        Ok(self.environment.take())
+    }
+
+    pub(crate) fn deferred_environment(
+        &mut self,
+    ) -> Option<crate::environment::DeferredEnvironmentOptions> {
+        self.deferred_environment.take()
+    }
+
+    pub(crate) fn native_turn_control(&self) -> bool {
+        self.native_turn_control
+    }
+
+    pub(crate) fn native_agents(&self) -> bool {
+        self.native_agents
+    }
+
+    pub(crate) fn sdk_native_config(&self) -> bool {
+        self.sdk_native_config
+    }
+
+    pub(crate) fn sdk_codex_login(&mut self) -> Option<crate::auth::SavedCodexLogin> {
+        self.sdk_codex_login.take()
+    }
+
+    pub(crate) fn native_goal_store_enabled(&self) -> bool {
+        self.native_goal_store.is_some()
+    }
+
+    pub(crate) fn native_thread_store(&mut self) -> Option<AbsolutePathBuf> {
+        self.native_thread_store.take()
+    }
+
+    pub(crate) fn sdk_resume_thread_id(&self) -> Option<codex_protocol::ThreadId> {
+        self.sdk_resume_thread_id
+    }
+
+    pub(crate) fn code_mode_provider(
+        &mut self,
+        config: &Config,
+    ) -> Option<Arc<dyn codex_code_mode::CodeModeSessionProvider>> {
+        if !code_mode_host_enabled(config) {
+            return None;
+        }
+        self.code_mode_host_exe.take().map(|program| {
+            Arc::new(
+                codex_code_mode::ProcessOwnedCodeModeSessionProvider::with_host_program(program),
+            ) as Arc<dyn codex_code_mode::CodeModeSessionProvider>
+        })
+    }
+}
+
 pub fn environment(runtime_json: &str) -> Result<Option<crate::environment::EnvironmentOptions>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    anyhow::ensure!(
-        options.deferred_environment.is_none() || options.environment.is_none(),
-        "environment and deferred_environment cannot be combined"
-    );
-    Ok(options.environment)
+    RuntimeOptions::parse(runtime_json)?.environment()
 }
 
 pub fn deferred_environment(
     runtime_json: &str,
 ) -> Result<Option<crate::environment::DeferredEnvironmentOptions>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.deferred_environment)
-}
-
-pub fn native_turn_control(runtime_json: &str) -> Result<bool> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.native_turn_control)
+    Ok(RuntimeOptions::parse(runtime_json)?.deferred_environment())
 }
 
 pub fn native_agents(runtime_json: &str) -> Result<bool> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.native_agents)
-}
-
-pub fn sdk_native_config(runtime_json: &str) -> Result<bool> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.sdk_native_config)
-}
-
-pub fn sdk_codex_login(runtime_json: &str) -> Result<Option<crate::auth::SavedCodexLogin>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.sdk_codex_login)
-}
-
-pub fn native_goal_store_enabled(runtime_json: &str) -> Result<bool> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.native_goal_store.is_some())
-}
-
-pub fn native_thread_store(runtime_json: &str) -> Result<Option<AbsolutePathBuf>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.native_thread_store)
+    Ok(RuntimeOptions::parse(runtime_json)?.native_agents())
 }
 
 pub fn sdk_resume_thread_id(runtime_json: &str) -> Result<Option<codex_protocol::ThreadId>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    Ok(options.sdk_resume_thread_id)
-}
-
-pub fn code_mode_provider(
-    runtime_json: &str,
-    config: &Config,
-) -> Result<Option<Arc<dyn codex_code_mode::CodeModeSessionProvider>>> {
-    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
-    if !code_mode_host_enabled(config) {
-        return Ok(None);
-    }
-    Ok(options.code_mode_host_exe.map(|program| {
-        Arc::new(codex_code_mode::ProcessOwnedCodeModeSessionProvider::with_host_program(program))
-            as Arc<dyn codex_code_mode::CodeModeSessionProvider>
-    }))
+    Ok(RuntimeOptions::parse(runtime_json)?.sdk_resume_thread_id())
 }
 
 pub fn code_mode_host_enabled(config: &Config) -> bool {
@@ -506,4 +521,96 @@ pub async fn load(
         }
     }
     Ok((config, cloud))
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use codex_config::AbsolutePathBufGuard;
+
+    fn conflicting_environment_runtime() -> String {
+        let cwd = AbsolutePathBuf::from_absolute_path(std::env::temp_dir()).unwrap();
+        serde_json::json!({
+            "environment": {
+                "url": "http://127.0.0.1:1",
+                "cwd": codex_utils_path_uri::PathUri::from_abs_path(&cwd),
+            },
+            "deferred_environment": {},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn runtime_owner_still_validates_the_complete_schema() {
+        for invalid in [
+            serde_json::json!({"_native_turn_control": true, "unknown_option": true}),
+            serde_json::json!({"_native_agents": false, "code_mode_host_exe": 42}),
+            serde_json::json!({"loader": {"unknown_loader_option": true}}),
+        ] {
+            assert!(RuntimeOptions::parse(&invalid.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn environment_conflict_stays_at_environment_selection() {
+        let mut options = RuntimeOptions::parse(&conflicting_environment_runtime()).unwrap();
+        assert!(!options.native_turn_control());
+        let error = options.environment().err().expect("conflict must fail");
+        assert_eq!(
+            error.to_string(),
+            "environment and deferred_environment cannot be combined"
+        );
+    }
+
+    #[test]
+    fn runtime_paths_resolve_at_each_owners_parse_boundary() {
+        let first = std::env::temp_dir().join("runtime-owner-first");
+        let second = std::env::temp_dir().join("runtime-owner-second");
+        let encoded = serde_json::json!({"native_thread_store": "relative-store"}).to_string();
+        let mut first_options = {
+            let _guard = AbsolutePathBufGuard::new(&first);
+            RuntimeOptions::parse(&encoded).unwrap()
+        };
+        let mut second_options = {
+            let _guard = AbsolutePathBufGuard::new(&second);
+            RuntimeOptions::parse(&encoded).unwrap()
+        };
+        assert_eq!(
+            first_options.native_thread_store().unwrap().as_path(),
+            first.join("relative-store")
+        );
+        assert_eq!(
+            second_options.native_thread_store().unwrap().as_path(),
+            second.join("relative-store")
+        );
+        assert!(RuntimeOptions::parse(&encoded).is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_config_keeps_priority_over_runtime_schema_error() {
+        let result = crate::engine::EngineState::new_with_model(
+            "[]".into(),
+            serde_json::json!({"unknown_runtime_option": true}).to_string(),
+            false,
+            Some("synthetic-key".into()),
+            None,
+        )
+        .await;
+        let error = result.err().expect("invalid config must fail");
+        assert!(error.to_string().contains("config must be an object"));
+    }
+
+    #[tokio::test]
+    async fn invalid_key_keeps_priority_over_environment_combination() {
+        let result = crate::engine::EngineState::new_with_model(
+            "{}".into(),
+            conflicting_environment_runtime(),
+            false,
+            Some(String::new()),
+            None,
+        )
+        .await;
+        let error = result.err().expect("invalid key must fail");
+        assert!(error.to_string().contains("api_key must not be empty"));
+    }
 }

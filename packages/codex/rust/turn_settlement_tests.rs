@@ -407,6 +407,10 @@ async fn competing_native_turn_retires_the_old_retry() {
                 reason: NotSubmittedReason::NotIdle,
             }
         );
+        // The superseded finisher still owns TaskFinalization while its parent
+        // notification is held. Admission and rejection are now proven; let it
+        // retire before waiting for the competing turn's serialized terminal.
+        fixture.release();
         terminal(&fixture.state, &turn_id).await;
         assert_eq!(fixture.provider.child_requests(fixture.state.id), 2);
         let history = fixture

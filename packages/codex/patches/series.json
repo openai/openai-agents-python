@@ -251,7 +251,19 @@
     {
       "path": "0056-completion-callback.patch",
       "sha256": "ce5c3381285bf830cf3203b7bc031d3b5e6fd33331f2bf69428b8aabe4b8a619"
+    },
+    {
+      "path": "0057-reuse-model-http-clients.patch",
+      "sha256": "ef6fbc58cde414c42bb083eb62e03485d5971bfda523379303d717aee3031185"
+    },
+    {
+      "path": "0058-reuse-bundled-model-catalog.patch",
+      "sha256": "30789fd66c8592c4a9d94777a62dc8618d3ffbe74800ca5bd2e95d7f1bcf2a96"
+    },
+    {
+      "path": "0059-preserve-canonical-turn-error.patch",
+      "sha256": "67d6e2be6322bf5851f24fd33a0173e2a060edfe1465d943eaac35d79ebd6b42"
     }
   ],
-  "result_tree": "8e02342a0ac03ac7c22ce7556988a857cb912f72"
+  "result_tree": "166743702d52bd12853d25873e44046b37a5bfbc"
 }
