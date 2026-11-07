@@ -28,7 +28,8 @@ use codex_protocol::config_types::{
 };
 use codex_protocol::models::{PermissionProfile, PermissionProfileSnapshot};
 use codex_protocol::permissions::{
-    FileSystemAccessMode, FileSystemPath, FileSystemSpecialPath, NetworkSandboxPolicy,
+    FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSpecialPath,
+    NetworkSandboxPolicy,
 };
 use codex_protocol::protocol::{
     AskForApproval, EnvironmentConfig, EnvironmentConfigState, GranularApprovalConfig, Op,
@@ -121,10 +122,33 @@ pub struct EnvironmentOptions {
     connect_timeout: Option<f64>,
     capability_directories: Option<Vec<PathUri>>,
     writable_roots: Option<Vec<PathUri>>,
+    #[serde(default, deserialize_with = "deserialize_mounts")]
+    mounts: Vec<LocalStorageMount>,
     #[serde(default)]
     local_mcp: bool,
     #[serde(default, deserialize_with = "deserialize_network")]
     network: Option<EnvironmentNetworkPolicy>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalStorageMount {
+    source: PathBuf,
+    destination: PathBuf,
+    strategy: String,
+    #[serde(default = "mount_read_only")]
+    read_only: bool,
+}
+
+fn deserialize_mounts<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<LocalStorageMount>, D::Error> {
+    Vec::<LocalStorageMount>::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("invalid storage mounts declaration"))
+}
+
+fn mount_read_only() -> bool {
+    true
 }
 
 #[derive(Default, Deserialize)]
@@ -208,6 +232,7 @@ fn capability_roots(
 #[derive(Clone, Default)]
 pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
+    storage_mounts: bool,
 }
 
 impl StrictExecutorWrites {
@@ -244,7 +269,131 @@ impl StrictExecutorWrites {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn check_storage_mount_file_aliases(
+    mounted: &[AbsolutePathBuf],
+    writable: &[AbsolutePathBuf],
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    const INSPECT_ERROR: &str = "could not inspect storage mounts and writable roots for hard links; required directories must be enumerable";
+    let mut directories = mounted
+        .iter()
+        .map(|path| path.as_path().to_path_buf())
+        .collect::<Vec<_>>();
+    let mut linked_files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).context(INSPECT_ERROR)? {
+            let entry = entry.context(INSPECT_ERROR)?;
+            // DirEntry::metadata does not follow symlinks.
+            let metadata = entry.metadata().context(INSPECT_ERROR)?;
+            // Special nodes can permit IPC through a read-only bind.
+            ensure!(
+                metadata.is_file() || metadata.is_dir() || metadata.is_symlink(),
+                "storage mounts must contain only regular files, directories, or symlinks"
+            );
+            if metadata.is_dir() {
+                directories.push(entry.path());
+            } else if metadata.is_file() && metadata.nlink() > 1 {
+                linked_files.push(entry.path());
+            }
+        }
+    }
+    if linked_files.is_empty() {
+        return Ok(());
+    }
+    let writable = LocalWriteRoots::new(writable).context(INSPECT_ERROR)?;
+    ensure!(
+        !writable
+            .contains_hard_link_to_any(&linked_files)
+            .context(INSPECT_ERROR)?,
+        "storage mounts share a hard-linked file with cwd or writable roots"
+    );
+    Ok(())
+}
+
 impl EnvironmentOptions {
+    /// Check application-owned read grants before providers or helpers start.
+    pub(crate) fn validate_storage_mounts(
+        &self,
+        config: &Config,
+        private_paths: LocalPrivatePaths<'_>,
+    ) -> Result<()> {
+        if self.mounts.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            self.local && cfg!(target_os = "linux"),
+            "storage mounts require a local Linux executor"
+        );
+        ensure!(
+            self.url.is_none() && self.headers.is_empty() && self.connect_timeout.is_none(),
+            "a local executor does not accept connection settings"
+        );
+        let mut mounted = Vec::new();
+        for mount in &self.mounts {
+            ensure!(
+                mount.strategy == "local_bind" && mount.read_only,
+                "storage mounts require strategy='local_bind' and read_only=true"
+            );
+            let path = &mount.source;
+            ensure!(
+                path.as_os_str() == mount.destination.as_os_str()
+                    && path.is_absolute()
+                    && path.parent().is_some(),
+                "storage mounts require the same canonical absolute source and destination"
+            );
+            let canonical = std::fs::canonicalize(path).map_err(|_| {
+                anyhow::anyhow!("storage mounts require existing directories without symlinks")
+            })?;
+            ensure!(
+                canonical.as_os_str() == path.as_os_str() && canonical.is_dir(),
+                "storage mounts require existing canonical directories without symlinks"
+            );
+            // Canonical text alone misses symlinks whose target is an ancestor.
+            for ancestor in path.ancestors() {
+                ensure!(
+                    !std::fs::symlink_metadata(ancestor)?
+                        .file_type()
+                        .is_symlink(),
+                    "storage mounts do not support symlinks"
+                );
+            }
+            mounted.push(AbsolutePathBuf::from_absolute_path(path)?);
+        }
+        for (index, mount) in mounted.iter().enumerate() {
+            let single = std::slice::from_ref(mount);
+            let grant = LocalWriteRoots::new(single)?;
+            for other in &mounted[..index] {
+                ensure!(
+                    !grant.contains_entry(other.as_path())?
+                        && !grant.has_root_at_or_below(other.as_path())?,
+                    "storage mounts must not overlap each other"
+                );
+            }
+        }
+        let grants = LocalWriteRoots::new(&mounted)?;
+        let mut writable = Vec::new();
+        for root in std::iter::once(&self.cwd).chain(self.writable_roots.iter().flatten()) {
+            let path = root.to_abs_path()?;
+            let resolved = check_local_write_root_overlap(
+                path.as_path(),
+                &grants,
+                "storage mounts must not overlap cwd or writable roots",
+            )?;
+            let resolved = AbsolutePathBuf::from_absolute_path(resolved)?;
+            if !writable.contains(&resolved) {
+                writable.push(resolved);
+            }
+        }
+        // Apply the same alias and hard-link checks to reads: private state may
+        // contain credentials even when the caller cannot mutate it.
+        check_local_private_write_roots(&grants, config.codex_home.as_path(), private_paths)?;
+        #[cfg(target_os = "linux")]
+        check_storage_mount_file_aliases(&mounted, &writable)?;
+        Ok(())
+    }
+
     fn id(&self) -> &'static str {
         if self.local {
             LOCAL_ENVIRONMENT_ID
@@ -270,6 +419,7 @@ impl EnvironmentOptions {
         config: &Config,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<EnvironmentManager> {
+        self.validate_storage_mounts(config, private_paths)?;
         self.check_config(config)?;
         if self.local {
             ensure!(
@@ -456,8 +606,9 @@ impl EnvironmentOptions {
         config: &Config,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
+        self.validate_storage_mounts(config, private_paths)?;
         if self.strict_writes() {
-            strict_write_profile(
+            let (profile, workspace_root, mut writes) = strict_write_profile(
                 environment,
                 info,
                 &self.cwd,
@@ -466,7 +617,31 @@ impl EnvironmentOptions {
                 config.codex_home.as_path(),
                 private_paths,
             )
-            .await
+            .await?;
+            let mut policy = profile.file_system_sandbox_policy();
+            let mut mount_paths = self
+                .mounts
+                .iter()
+                .map(|mount| &mount.source)
+                .collect::<Vec<_>>();
+            mount_paths.sort();
+            for source in mount_paths {
+                policy.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path {
+                        path: PathUri::from_host_native_path(source)?,
+                    },
+                    FileSystemAccessMode::Read,
+                ));
+            }
+            writes.storage_mounts = !self.mounts.is_empty();
+            Ok((
+                PermissionProfile::from_runtime_permissions(
+                    &policy,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                workspace_root,
+                writes,
+            ))
         } else {
             Ok((
                 workspace_profile(std::slice::from_ref(&self.cwd)),
@@ -482,6 +657,7 @@ impl EnvironmentOptions {
         manager: &EnvironmentManager,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
+        self.validate_storage_mounts(config, private_paths)?;
         self.check_config(config)?;
         let environment = manager
             .get_environment(self.id())
@@ -1212,6 +1388,10 @@ pub(crate) async fn replace_writable_roots(
     writable_roots: Vec<PathUri>,
     private_paths: LocalPrivatePaths<'_>,
 ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
+    ensure!(
+        !current.storage_mounts,
+        "writable roots cannot change while storage mounts are active"
+    );
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
     check_writable_config(config, local)?;
@@ -1517,6 +1697,10 @@ pub async fn connect_environment(
                 .is_none(),
             "deferred environment is already connected"
         );
+        let config = state.thread.config().await;
+        request
+            .environment
+            .validate_storage_mounts(&config, state.engine.local_private_paths())?;
         let manager = state.engine.manager.environment_manager();
         let environment = request.environment.register(&manager)?;
         environment
@@ -1659,6 +1843,7 @@ mod tests {
         let root = PathUri::from_host_native_path(workspace.canonicalize()?)?;
         let writes = StrictExecutorWrites {
             roots: [(root.clone(), root)].into(),
+            ..Default::default()
         };
 
         assert_eq!(

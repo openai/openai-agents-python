@@ -17,6 +17,13 @@ class RuntimeNetworkPolicy(TypedDict, total=False, closed=True):
     allow_local_binding: bool
 
 
+class RuntimeStorageMount(TypedDict, closed=True):
+    source: str
+    destination: str
+    strategy: Literal["local_bind"]
+    read_only: bool
+
+
 class RuntimeEnvironment(TypedDict, total=False, closed=True):
     """Select the local executor or connect to WSS with a timeout in seconds."""
 
@@ -29,6 +36,7 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
     network: RuntimeNetworkPolicy
     capability_directories: list[str]  # Remote file: URIs; omitted inherits, [] clears.
     writable_roots: list[str]  # Additional write roots, as executor file: URIs.
+    mounts: list[RuntimeStorageMount]
 
 
 class BasicSpecialPath(TypedDict):

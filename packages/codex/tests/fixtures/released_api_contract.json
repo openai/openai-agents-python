@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "bb2589f22434b39184712633c1dd061560e1facd",
+  "baseline_commit": "a995c31f5351f3076e0a5297d8122e7031ffcf6e",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -170,7 +170,8 @@
           "ExecutorToolName = Literal['exec_command', 'write_stdin', 'apply_patch']",
           "@dataclass(frozen=True, kw_only=True)\nclass NetworkPolicy:\n    allowed_domains: Sequence[str] = field(default=(), repr=False)\n    denied_domains: Sequence[str] = field(default=(), repr=False)\n    allow_all_unix_sockets: bool = False\n    allow_local_binding: bool = False",
           "@dataclass(frozen=True)\nclass ExecutorContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    tool_name: ExecutorToolName\n    thread_id: str\n    turn_id: str\n    outer_call_id: str | None\n    cell_id: str | None\n    runtime_tool_call_id: str | None\n    call_id: str | None = None\n    session: Session[Any, Any] = field(repr=False, kw_only=True)\n    agent: Agent[Any, Any] = field(repr=False, kw_only=True)\n    agent_role: str | None = field(default=None, kw_only=True)\n    model: str | None = field(default=None, kw_only=True)",
-          "@dataclass(frozen=True, kw_only=True)\nclass Environment(Generic[ContextT_contra]):\n    _is_local: ClassVar[bool] = False\n    url: str = field(repr=False)\n    cwd: str\n    tools: Sequence[ExecutorToolName] = ()\n    headers: Mapping[str, str] = field(default_factory=dict, repr=False)\n    connect_timeout: float | None = None\n    capability_directories: Sequence[str] | None = None\n    approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    policy_timeout: float = 30\n    network: NetworkPolicy | RuntimeNetworkPolicy | None = None\n    writable_roots: Sequence[str | PathLike[str]] | None = None\n\n    @classmethod\n    def local(cls, *, cwd: str | PathLike[str], tools: Sequence[ExecutorToolName]=(), writable_roots: Sequence[str | PathLike[str]]=(), network: NetworkPolicy | RuntimeNetworkPolicy | None=None, capability_directories: Sequence[str] | None=None, approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None=None, transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, policy_timeout: float=30) -> Environment[ContextT_contra]:\n        pass",
+          "@dataclass(frozen=True)\nclass LocalStorageMount:\n    source: str | PathLike[str]\n    destination: str | PathLike[str]\n    strategy: Literal['local_bind']\n    read_only: bool = True",
+          "@dataclass(frozen=True, kw_only=True)\nclass Environment(Generic[ContextT_contra]):\n    _is_local: ClassVar[bool] = False\n    url: str = field(repr=False)\n    cwd: str\n    tools: Sequence[ExecutorToolName] = ()\n    headers: Mapping[str, str] = field(default_factory=dict, repr=False)\n    connect_timeout: float | None = None\n    capability_directories: Sequence[str] | None = None\n    approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    policy_timeout: float = 30\n    network: NetworkPolicy | RuntimeNetworkPolicy | None = None\n    writable_roots: Sequence[str | PathLike[str]] | None = None\n    mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()\n\n    @classmethod\n    def local(cls, *, cwd: str | PathLike[str], tools: Sequence[ExecutorToolName]=(), writable_roots: Sequence[str | PathLike[str]]=(), network: NetworkPolicy | RuntimeNetworkPolicy | None=None, capability_directories: Sequence[str] | None=None, approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None=None, transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, policy_timeout: float=30, mounts: Sequence[LocalStorageMount | dict[str, Any]]=()) -> Environment[ContextT_contra]:\n        pass",
           "EnvironmentSource: TypeAlias = Environment[ContextT_contra] | AbstractAsyncContextManager[Environment[ContextT_contra]]"
         ],
         "exports": {
@@ -180,6 +181,7 @@
           "EnvironmentSource": "EnvironmentSource",
           "ExecutorContext": "agents.executor.ExecutorContext",
           "ExecutorToolName": "typing.Literal",
+          "LocalStorageMount": "agents.executor.LocalStorageMount",
           "NetworkPolicy": "agents.executor.NetworkPolicy"
         },
         "imports": [
@@ -1031,6 +1033,7 @@
       "InteractionRequired": "agents.session.InteractionRequired",
       "LocalRecoveryRequired": "agents.recovery.LocalRecoveryRequired",
       "LocalStorage": "agents.state.LocalStorage",
+      "LocalStorageMount": "agents.executor.LocalStorageMount",
       "MCPCallContext": "agents.mcp.MCPCallContext",
       "MCPResultContext": "agents.mcp.MCPResultContext",
       "ModelContextSnapshot": "agents.model_context.ModelContextSnapshot",
@@ -1285,6 +1288,7 @@
       "InteractionRequired",
       "LocalRecoveryRequired",
       "LocalStorage",
+      "LocalStorageMount",
       "MCPCallContext",
       "MCPResultContext",
       "ModelContextSnapshot",
@@ -1346,7 +1350,7 @@
       "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
-      "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, NetworkPolicy as NetworkPolicy",
+      "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .input import InputImage as InputImage, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalRequest as ApprovalRequest, ElicitationRequest as ElicitationRequest, Interaction as Interaction, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPCallContext as MCPCallContext, MCPResultContext as MCPResultContext, StdioMCP as StdioMCP",

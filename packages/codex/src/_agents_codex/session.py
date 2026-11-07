@@ -3324,6 +3324,10 @@ class Session(Generic[ContextT, OutputT]):
             if writable_roots is not None:
                 if self._executor is None:
                     raise CapabilityError("Writable roots require a Session Environment")
+                if self._executor.mounts:
+                    raise CapabilityError(
+                        "Writable roots cannot change while storage mounts are active"
+                    )
                 if self._native_agents is not None:
                     raise CapabilityError("Writable roots cannot change with NativeAgents")
                 roots = _writable_roots(writable_roots)
