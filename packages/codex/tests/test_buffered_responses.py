@@ -43,6 +43,7 @@ from tests.test_sdk_session_transport import HTTPPeer, disconnected
 @dataclass
 class JSONPeer(HTTPPeer):
     json_replies: deque[dict[str, Any] | bytes] = field(default_factory=deque)
+    response_statuses: deque[int] = field(default_factory=deque)
     response_headers: dict[str, str] = field(default_factory=dict)
     body_gate: asyncio.Event | None = None
     body_entered: asyncio.Event = field(default_factory=asyncio.Event)
@@ -61,7 +62,8 @@ class JSONPeer(HTTPPeer):
         value = self.json_replies.popleft()
         data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
         response = web.StreamResponse(
-            headers={"Content-Type": "application/json", **self.response_headers}
+            status=self.response_statuses.popleft() if self.response_statuses else 200,
+            headers={"Content-Type": "application/json", **self.response_headers},
         )
         await response.prepare(request)
         gate = self.body_gate
@@ -428,21 +430,44 @@ async def test_buffered_function_tool_uses_core_continuation_once() -> None:
 
 
 @pytest.mark.parametrize("entry,count", [(b"{}", 400_000), (b"0", 1_000_010)])
+@pytest.mark.parametrize("status", [200, 400, 403, 429, 503])
 async def test_buffered_structural_limit_rejects_dense_metadata_without_retry(
-    entry: bytes, count: int
+    entry: bytes, count: int, status: int
 ) -> None:
     async with timeout(30), json_peer() as peer:
         response = json.dumps(
             json_response("ordinary answer", "dense-response", "dense-item")
+            if status == 200
+            else {"error": {"code": "rate_limit_exceeded", "message": "Dense diagnostic"}}
         ).encode()
         body = response[:-1] + b', "ignored": [' + (entry + b",") * (count - 1) + entry + b"]}"
         assert len(body) < 64 * 1024 * 1024
         peer.json_replies.append(body)
+        peer.response_statuses.append(status)
         async with provider(peer) as owner:
             agent = Agent(model="gpt-5.2", instructions="Answer.", provider=owner)
             with pytest.raises(NativeError, match="structural complexity limit"):
                 await agent.run("Reject dense metadata")
             assert len(peer.requests) == 1
+        await disconnected(peer.transports)
+
+
+async def test_buffered_ordinary_http_error_keeps_request_retries() -> None:
+    async with timeout(30), json_peer() as peer:
+        peer.response_statuses.extend([429, 200])
+        peer.response_headers["Retry-After"] = "0"
+        peer.json_replies.extend(
+            [
+                {"error": {"code": "rate_limit_exceeded", "message": "Retry this request"}},
+                json_response("retry succeeded", "http-retry-response", "http-retry-item"),
+            ]
+        )
+        async with provider(peer) as owner:
+            agent = Agent(model="gpt-5.2", instructions="Answer.", provider=owner)
+            result = await agent.run("retry an ordinary HTTP error")
+            assert result.final_output == "retry succeeded"
+            assert len(peer.requests) == 2
+            assert peer.requests[0] == peer.requests[1]
         await disconnected(peer.transports)
 
 

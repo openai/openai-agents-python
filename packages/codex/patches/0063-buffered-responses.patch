@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 61d3e12d4c59edaed9778a9bcc2cc4c65bf7e4e2..3b372ed32ccd1a9b2fbb651cd019e83990db09f9 100644
+index 61d3e12..3b372ed 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -2039,6 +2039,7 @@ dependencies = [
@@ -11,7 +11,7 @@ index 61d3e12d4c59edaed9778a9bcc2cc4c65bf7e4e2..3b372ed32ccd1a9b2fbb651cd019e839
   "bytes",
   "chrono",
 diff --git a/codex-rs/codex-api/Cargo.toml b/codex-rs/codex-api/Cargo.toml
-index 82bec69218844915b5e986fc17d473966466e888..f752991f797c41265d31b3776a7954f41d8dd71f 100644
+index 82bec69..f752991 100644
 --- a/codex-rs/codex-api/Cargo.toml
 +++ b/codex-rs/codex-api/Cargo.toml
 @@ -6,6 +6,7 @@ license.workspace = true
@@ -22,8 +22,24 @@ index 82bec69218844915b5e986fc17d473966466e888..f752991f797c41265d31b3776a7954f4
  base64 = { workspace = true }
  bytes = { workspace = true }
  chrono = { workspace = true }
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index 7e74ac0..f3b9b05 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -279,9 +279,8 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                 CodexErr::ConnectionFailed(ConnectionFailedError { source })
+             }
+             TransportError::Network(msg) | TransportError::Build(msg) => CodexErr::Stream(msg),
+-            error @ TransportError::ResponseTooLarge { .. } => {
+-                CodexErr::InvalidRequest(error.to_string())
+-            }
++            error @ (TransportError::ResponseTooLarge { .. }
++            | TransportError::ResponseTooComplex) => CodexErr::InvalidRequest(error.to_string()),
+         },
+         ApiError::RateLimit(msg) => CodexErr::Stream(msg),
+     }
 diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
-index 77b3054aeeca459f33b679e3165f12652eaeaf53..e846ffec067f08a72319286f2e2ac5c60cbadac6 100644
+index 77b3054..e846ffe 100644
 --- a/codex-rs/codex-api/src/endpoint/mod.rs
 +++ b/codex-rs/codex-api/src/endpoint/mod.rs
 @@ -4,6 +4,7 @@ pub(crate) mod models;
@@ -35,7 +51,7 @@ index 77b3054aeeca459f33b679e3165f12652eaeaf53..e846ffec067f08a72319286f2e2ac5c6
  pub(crate) mod search;
  mod session;
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
-index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..40ff37082281faf6356163819a10b87259f57609 100644
+index 9c41a80..40ff370 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
 @@ -23,6 +23,8 @@ use std::sync::Arc;
@@ -200,7 +216,7 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..40ff37082281faf6356163819a10b872
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6c946a207
+index 0000000..5bd0a05
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
 @@ -0,0 +1,237 @@
@@ -212,6 +228,7 @@ index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6
 +use crate::sse::ResponsesStreamEvent;
 +use crate::sse::process_responses_event;
 +use codex_client::StreamResponse;
++use codex_client::TransportError;
 +use codex_protocol::error::ResponseIntegrityReason;
 +use codex_protocol::models::ContentItem;
 +use codex_protocol::models::ReasoningItemContent;
@@ -272,8 +289,9 @@ index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6
 +                break;
 +            };
 +            let chunk = next.map_err(|error| match error {
-+                error @ (codex_client::TransportError::Policy(_)
-+                | codex_client::TransportError::ResponseTooLarge { .. }) => ApiError::Transport(error),
++                error @ (TransportError::Policy(_)
++                | TransportError::ResponseTooLarge { .. }
++                | TransportError::ResponseTooComplex) => ApiError::Transport(error),
 +                error => ApiError::Stream(error.to_string()),
 +            })?;
 +            body.extend_from_slice(&chunk);
@@ -410,7 +428,7 @@ index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6
 +
 +// Bound tree allocation from dense arrays and objects; quoted payload text is exempt.
 +// serde_json remains responsible for syntax, number and nesting validation.
-+fn check_json_structure(body: &[u8]) -> Result<(), ApiError> {
++pub(super) fn check_json_structure(body: &[u8]) -> Result<(), TransportError> {
 +    let mut in_string = false;
 +    let mut escaped = false;
 +    let mut remaining = MAX_JSON_STRUCTURE_TOKENS;
@@ -424,9 +442,7 @@ index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6
 +        } else if !in_string && matches!(byte, b'{' | b'}' | b'[' | b']' | b',' | b':') {
 +            remaining = remaining
 +                .checked_sub(1)
-+                .ok_or_else(|| ApiError::InvalidRequest {
-+                    message: "Responses JSON exceeds the structural complexity limit".into(),
-+                })?;
++                .ok_or(TransportError::ResponseTooComplex)?;
 +        }
 +    }
 +    Ok(())
@@ -443,10 +459,10 @@ index 0000000000000000000000000000000000000000..e09e587169dc326ceb2f9d133d2ddec6
 +mod tests;
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1cd4e583f223c20b3db41d2a0b9e8a40a6132255
+index 0000000..5672d72
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,587 @@
 +use super::*;
 +use bytes::Bytes;
 +use codex_client::TransportError;
@@ -1017,8 +1033,7 @@ index 0000000000000000000000000000000000000000..1cd4e583f223c20b3db41d2a0b9e8a40
 +        assert_eq!(events.len(), 2);
 +        assert!(matches!(
 +            events.last(),
-+            Some(Err(ApiError::InvalidRequest { message }))
-+                if message == "Responses JSON exceeds the structural complexity limit"
++            Some(Err(ApiError::Transport(TransportError::ResponseTooComplex)))
 +        ));
 +    }
 +}
@@ -1035,8 +1050,44 @@ index 0000000000000000000000000000000000000000..1cd4e583f223c20b3db41d2a0b9e8a40
 +        Some(Ok(ResponseEvent::Completed { .. }))
 +    ));
 +}
+diff --git a/codex-rs/codex-api/src/endpoint/session.rs b/codex-rs/codex-api/src/endpoint/session.rs
+index 7849225..6167272 100644
+--- a/codex-rs/codex-api/src/endpoint/session.rs
++++ b/codex-rs/codex-api/src/endpoint/session.rs
+@@ -1,4 +1,5 @@
+ use crate::auth::SharedAuthProvider;
++use crate::endpoint::responses_json::check_json_structure;
+ use crate::error::ApiError;
+ use crate::provider::Provider;
+ use crate::telemetry::run_with_request_telemetry;
+@@ -133,6 +134,8 @@ impl<T: HttpTransport> EndpointSession<T> {
+         let body = body.map(RequestBody::EncodedJson);
+         let mut request = self.make_request(&method, path, &extra_headers, body.as_ref());
+         configure(&mut request);
++        // Only buffered Responses supplies a body bound on this path.
++        let bounded_json = request.response_body_limit_bytes.is_some();
+         let request = request.into_prepared().map_err(TransportError::Build)?;
+         let make_request = || request.clone();
+
+@@ -145,7 +148,15 @@ impl<T: HttpTransport> EndpointSession<T> {
+                 let transport = &self.transport;
+                 async move {
+                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+-                    transport.stream(req).await
++                    let response = transport.stream(req).await;
++                    if bounded_json
++                        && let Err(TransportError::Http {
++                            body: Some(body), ..
++                        }) = &response
++                    {
++                        check_json_structure(body.as_bytes())?;
++                    }
++                    response
+                 }
+             },
+         )
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index 30bc97b1157daf506f6962f0cddf5fb66bb32532..5b862aa2b6a85c69cf7945b1ee497cfaeecda6e3 100644
+index 30bc97b..5b862aa 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -164,7 +164,7 @@ struct ResponseCompletedOutputTokensDetails {
@@ -1074,7 +1125,7 @@ index 30bc97b1157daf506f6962f0cddf5fb66bb32532..5b862aa2b6a85c69cf7945b1ee497cfa
      pub(crate) fn response_observation(
          &self,
 diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
-index b17da453440ad49cb8e495ea72f21081b99a4ea2..7c529fd838218fae4c404d10d631e40748c25cf7 100644
+index b17da45..7c529fd 100644
 --- a/codex-rs/codex-api/tests/clients.rs
 +++ b/codex-rs/codex-api/tests/clients.rs
 @@ -303,6 +303,41 @@ async fn responses_client_uses_responses_path() -> Result<()> {
@@ -1119,8 +1170,22 @@ index b17da453440ad49cb8e495ea72f21081b99a4ea2..7c529fd838218fae4c404d10d631e407
      Ok(())
  }
  
+diff --git a/codex-rs/codex-client/src/retry.rs b/codex-rs/codex-client/src/retry.rs
+index b10fa50..20b75b0 100644
+--- a/codex-rs/codex-client/src/retry.rs
++++ b/codex-rs/codex-client/src/retry.rs
+@@ -35,7 +35,8 @@ impl RetryOn {
+             TransportError::Build(_)
+             | TransportError::RetryLimit
+             | TransportError::Policy(_)
+-            | TransportError::ResponseTooLarge { .. } => false,
++            | TransportError::ResponseTooLarge { .. }
++            | TransportError::ResponseTooComplex => false,
+         }
+     }
+ }
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 0c5537ebaa01a0286d574cf9f4b720a18232a611..81391ca070ff4ec0574028c86d0a1e05744007dd 100644
+index 0c5537e..81391ca 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -1739,6 +1739,16 @@ impl ModelClientSession {
@@ -1220,7 +1285,7 @@ index 0c5537ebaa01a0286d574cf9f4b720a18232a611..81391ca070ff4ec0574028c86d0a1e05
          let mut transformed = None;
          for contributor in &self.client.request_contributors {
 diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
-index c5ecc4075ef9861c49d760407b4aa8a9d97f0aaa..5958654daba43d24e51cf75d77c24b3f4d949385 100644
+index c5ecc40..5958654 100644
 --- a/codex-rs/core/src/client_common.rs
 +++ b/codex-rs/core/src/client_common.rs
 @@ -20,12 +20,18 @@ use tokio::sync::mpsc;
@@ -1251,7 +1316,7 @@ index c5ecc4075ef9861c49d760407b4aa8a9d97f0aaa..5958654daba43d24e51cf75d77c24b3f
              tool_admission: None,
              sampling_stop: None,
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 4c7dbcfe02bb2b86fae619b2e0d28b644c5a578d..f50892eca9a6505244c582d393d1dee0a93e01be 100644
+index 4c7dbcf..f50892e 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -387,6 +387,11 @@ async fn run_compact_task_inner_impl(
@@ -1267,7 +1332,7 @@ index 4c7dbcfe02bb2b86fae619b2e0d28b644c5a578d..f50892eca9a6505244c582d393d1dee0
              base_instructions: sess.get_prompt_base_instructions().await,
              sampling_stop: sampling_stop.clone(),
 diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
-index 910ffb3661b9327b81d0ae4273a0665420441a59..acd1cb86081d70317c87d615aecae154510cc0ae 100644
+index 910ffb3..acd1cb8 100644
 --- a/codex-rs/core/src/compact_remote_v2_attempt.rs
 +++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
 @@ -86,6 +86,11 @@ pub(super) async fn run_remote_compact_v2_attempt(
@@ -1283,7 +1348,7 @@ index 910ffb3661b9327b81d0ae4273a0665420441a59..acd1cb86081d70317c87d615aecae154
          tools: if step_context.uses_incremental_tools() {
              Arc::default()
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 9e75242032c01f76e101602f539f221721fc8344..4a70340b3d252bcd2ebfcef897013e5dc62a0f45 100644
+index 9e75242..4a70340 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -233,6 +233,7 @@ pub use client::ModelClientSession;
@@ -1295,7 +1360,7 @@ index 9e75242032c01f76e101602f539f221721fc8344..4a70340b3d252bcd2ebfcef897013e5d
  pub use client_common::ResponseEvent;
  pub use client_common::ResponseStream;
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index df043dd20b2c9c25d4838a021ed0530d65788659..965f2112fca580d7374d5d679d9a679f948c45e1 100644
+index df043dd..965f211 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1670,6 +1670,7 @@ pub(crate) fn build_prompt(
@@ -1319,7 +1384,7 @@ index df043dd20b2c9c25d4838a021ed0530d65788659..965f2112fca580d7374d5d679d9a679f
              sess.thread_id.to_string(),
              Arc::clone(&step_context.turn.extension_data),
 diff --git a/codex-rs/ext/extension-api/src/model_request_observation.rs b/codex-rs/ext/extension-api/src/model_request_observation.rs
-index fe2ebeb27bbd9791843db68c9c86135fa494fc2a..266241e3b5452547600d748727256e66fbab43a6 100644
+index fe2ebeb..266241e 100644
 --- a/codex-rs/ext/extension-api/src/model_request_observation.rs
 +++ b/codex-rs/ext/extension-api/src/model_request_observation.rs
 @@ -36,12 +36,14 @@ impl ModelRequestWire {
@@ -1337,3 +1402,62 @@ index fe2ebeb27bbd9791843db68c9c86135fa494fc2a..266241e3b5452547600d748727256e66
              Self::Websocket => "websocket",
          }
      }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+index 4877991..29f3bb3 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+@@ -45,6 +45,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
+             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
+             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
+             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
++            ApiError::Transport(TransportError::ResponseTooComplex) => "response_too_complex",
+             ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
+             ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
+             ApiError::ContextWindowExceeded => "context_window_exceeded",
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+index f026b44..a5d6d83 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+@@ -166,6 +166,7 @@ impl SamplingExecution {
+                 ApiError::Transport(
+                     TransportError::Build(_)
+                     | TransportError::ResponseTooLarge { .. }
++                    | TransportError::ResponseTooComplex
+                     | TransportError::Policy(_),
+                 )
+                 | ApiError::ContextWindowExceeded
+diff --git a/codex-rs/http-client/src/error.rs b/codex-rs/http-client/src/error.rs
+index 181a213..4b78841 100644
+--- a/codex-rs/http-client/src/error.rs
++++ b/codex-rs/http-client/src/error.rs
+@@ -30,6 +30,8 @@ pub enum TransportError {
+     Build(String),
+     #[error("response body exceeds the {max_bytes} byte limit")]
+     ResponseTooLarge { max_bytes: usize },
++    #[error("Responses JSON exceeds the structural complexity limit")]
++    ResponseTooComplex,
+ }
+
+ impl TransportError {
+@@ -43,7 +45,8 @@ impl TransportError {
+             | Self::Connection(_)
+             | Self::Network(_)
+             | Self::Build(_)
+-            | Self::ResponseTooLarge { .. } => None,
++            | Self::ResponseTooLarge { .. }
++            | Self::ResponseTooComplex => None,
+         }
+     }
+ }
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+index 7465286..9c54299 100644
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -62,6 +62,7 @@ pub fn telemetry_transport_error_message(error: &TransportError) -> String {
+         TransportError::Http { status, .. } => format!("http {}", status.as_u16()),
+         TransportError::RetryLimit => "retry limit reached".to_string(),
+         TransportError::ResponseTooLarge { .. } => "response body too large".to_string(),
++        TransportError::ResponseTooComplex => "response JSON too complex".to_string(),
+         TransportError::Timeout => "timeout".to_string(),
+         TransportError::Connection(err) => err.to_string(),
+         TransportError::Network(err) => err.to_string(),
