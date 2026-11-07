@@ -165,7 +165,7 @@ If saving fails, the run fails. Unfinished child work can prevent saving. Live p
 
 #### Portable checkpoints
 
-A portable checkpoint with a local executor or a strict WSS Environment requires the same executor policy on restore, including the strict write mode and last applied roots. New Environments default to strict mode; saved policies retain their original mode.
+A portable checkpoint with a local executor or a strict WSS Environment requires the same executor policy on restore. This includes the strict write mode and last applied roots. New Environments default to strict mode; saved policies retain their original mode.
 
 If the saved WSS Environment used the legacy implicit policy, restore can use a different working directory. Explicitly set `write_policy="legacy"` and leave `writable_roots=None` when restoring that policy, including older checkpoints saved before the strict default.
 
