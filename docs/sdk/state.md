@@ -78,6 +78,8 @@ A process can stop after a tool applies an effect and before the SDK records its
 
 Check each effect against trusted application records or the system that owns the effect. Keep the conversation closed if you cannot confirm an outcome. The SDK supports explicit reconciliation of retained root calls with a missing result. An unresolved child call or an active child whose runtime cannot be restored causes a `RuntimeError` on reopen.
 
+Local history supports root recovery and inspection of settled child history. It does not automatically recover an active child graph or reconcile uncertain child effects. Your application owns external-effect reconciliation and decides whether to start new work. Preserve the refusal when a child outcome remains unknown; do not edit saved history to force reopening.
+
 Suppose `call` is the only unresolved root call. Your application journal confirms that the tool recorded a handoff. Reopen the original profile with a matching result.
 
 ```python
@@ -110,6 +112,8 @@ The SDK rejects later reuse of a reconciled call ID. A new call ID can still req
 
 Restore a portable checkpoint with an SDK pinned to the same Codex revision that saved it. The SDK rejects a different revision for both idle checkpoints and pending manual continuations, even when it recognizes the checkpoint JSON format. Keep the matching SDK wheel available for saved conversations you need to resume. Changing the checkpoint's `codex_revision` field does not migrate its contents.
 
+Portable checkpoints retain native history, including platform-specific absolute paths. Restore validates those paths on the destination platform, so moving a checkpoint between operating systems is not guaranteed. Do not rewrite saved paths to bypass validation.
+
 ```python
 async with agent.session() as session:
     handle = await session.submit("Remember the label atlas.")
@@ -121,6 +125,14 @@ async with agent.session(state=state) as restored:
     handle = await restored.submit("What label did I give you?")
     result = await handle.get_result()
 ```
+
+### Check checkpoint compatibility
+
+Treat `SessionState` JSON as opaque data for this SDK and language. The current reader retains envelope versions 2 through 7 and rejects unknown versions. Versions 2 and 3 retain legacy idle and manual state; versions 4 and 5 add the output contract; versions 6 and 7 also retain settled CodeMode state. Each format still has its own restore requirements. SDK envelope versions and native checkpoint codec versions are separate. Do not edit the version or `codex_revision` to bypass validation.
+
+The [checkpoint capture provenance](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/packages/codex/tests/fixtures/checkpoint_upgrades) records real idle, settled-manual, and CodeMode captures from a preview source snapshot and its matching native wheel. Retained captures qualify later candidates by replaying accepted history and checking current restore refusals. They do not establish a stable-release upgrade, coverage of every historical preview, cross-language conversion, downgrade support, or arbitrary native-revision portability. Keep the producer SDK available until your candidate passes the relevant continuation tests.
+
+A recognized format does not relax the exact Codex-revision restriction or the current host, tool, output, and executor-policy checks below. Saved data supplies no current credentials, callbacks, or execution authority.
 
 ### Supply restore configuration
 
@@ -163,22 +175,26 @@ If saving fails, the run fails. Unfinished child work can prevent saving. Live p
 
 #### Portable checkpoints
 
-A portable checkpoint with a local executor or a WSS Environment that sets `writable_roots` requires the same executor policy on restore, including the strict write mode.
+A portable checkpoint with a local executor or a strict WSS Environment requires the same executor policy on restore. This includes the strict write mode and last applied roots. New Environments default to strict mode; saved policies retain their original mode.
 
-If the saved WSS Environment omitted `writable_roots`, restore can use a different working directory. Keep that implicit write mode when restoring a pending manual checkpoint or a checkpoint with a managed network policy.
+If the saved WSS Environment used the legacy implicit policy, restore can use a different working directory. Explicitly set `write_policy="legacy"` and leave `writable_roots=None` when restoring that policy, including older checkpoints saved before the strict default.
 
-For an idle WSS checkpoint saved with both `writable_roots=None` and `network=None`, restore has two options:
+For an idle legacy WSS checkpoint saved with both `writable_roots=None` and `network=None`, restore has two options:
 
-- Supply a WSS Environment with both settings still set to `None`.
+- Supply a WSS Environment with `write_policy="legacy"` and both settings still set to `None`.
 - Omit the Environment.
 
-The SDK skips the executor policy digest check for this case. To use `Environment.local(...)` or explicit `writable_roots`, open a new Session without this checkpoint.
+The SDK skips the executor policy digest check for this legacy case. To use `Environment.local(...)` or a strict WSS Environment, open a new Session without this checkpoint.
+
+The SDK rejects detectable declaration or mode mismatches before acquiring an executor. Comparing the complete applied policy can require executor inspection, but must succeed before resumed execution.
 
 #### Local profiles
 
-When reopening with `LocalStorage`, check which executor the latest receipt recorded. For a local executor or a WSS Environment with explicit write roots, supply the same working directory, last applied write roots, and network policy. Include any replacement made with `submit(writable_roots=...)`.
+When reopening with `LocalStorage`, check which executor the latest receipt recorded. For a local executor or a strict WSS Environment, supply the same working directory, last applied write roots, and network policy. Include any replacement made with `submit(writable_roots=...)`.
 
-For an implicit WSS Environment (`writable_roots=None`), you can reopen in a different working directory if the rest of the executor policy matches. You can also omit the Environment to reopen for model-only work, including when the recorded executor used a managed network policy.
+Strict local-profile resume requires recorded strict-mode evidence as well as the matching applied policy. A missing marker does not prove how older work was confined, and reopening never automatically upgrades that policy.
+
+For saved legacy or unmarked remote history, explicitly supply `write_policy="legacy"` with `writable_roots=None`. You can reopen in a different working directory if the rest of the executor policy matches. You can also omit the Environment to reopen for model-only work, including when the recorded executor used a managed network policy.
 
 ### Network policy and offline executors
 
