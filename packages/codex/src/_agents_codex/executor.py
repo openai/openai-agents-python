@@ -338,7 +338,7 @@ class Environment(Generic[ContextT_contra]):
         ) = None,
         policy_timeout: float = 30,
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
-        write_policy: Literal["strict", "legacy"] = "strict",
+        write_policy: Literal["strict"] = "strict",
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 

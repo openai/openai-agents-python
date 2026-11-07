@@ -13,7 +13,8 @@ from tests.native_fixtures import ResponsesFixture, responses as responses
 def test_local_and_remote_default_to_strict(tmp_path: Path) -> None:
     remote = Environment(url="wss://executor.invalid", cwd="/workspace")
     local = Environment.local(cwd=tmp_path)
-    for environment in (remote, local):
+    explicit_local = Environment.local(cwd=tmp_path, write_policy="strict")
+    for environment in (remote, local, explicit_local):
         assert environment.write_policy == "strict"
         assert environment.writable_roots == ()
         assert environment._to_native()["writable_roots"] == []
@@ -39,8 +40,9 @@ def test_legacy_requires_explicit_remote_declaration(tmp_path: Path) -> None:
                 write_policy="legacy",
                 writable_roots=roots,
             )
+    legacy_policy: Any = "legacy"
     with pytest.raises(ValueError, match="Legacy write policy requires a remote Environment"):
-        Environment.local(cwd=tmp_path, write_policy="legacy")
+        Environment.local(cwd=tmp_path, write_policy=legacy_policy)
 
 
 @pytest.mark.parametrize("policy", [None, "", "unknown", False])

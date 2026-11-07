@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         model_settings={"reasoning_summary": "auto"},  # pyright: ignore[reportArgumentType]
     )
     Environment(url="wss://executor.invalid", cwd="/workspace", tools=["shell"])  # pyright: ignore[reportArgumentType]
+    Environment.local(cwd="/workspace", write_policy="legacy")  # pyright: ignore[reportArgumentType]
     Environment(
         url="wss://executor.invalid",
         cwd="/workspace",
