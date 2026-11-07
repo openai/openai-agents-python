@@ -124,6 +124,14 @@ async with agent.session(state=state) as restored:
     result = await handle.get_result()
 ```
 
+### Check checkpoint compatibility
+
+Treat `SessionState` JSON as opaque data for this SDK and language. The current reader retains envelope versions 2 through 7 and rejects unknown versions. Versions 2 and 3 retain legacy idle and manual state; versions 4 and 5 add the output contract; versions 6 and 7 also retain settled CodeMode state. Each format still has its own restore requirements. SDK envelope versions and native checkpoint codec versions are separate. Do not edit the version or `codex_revision` to bypass validation.
+
+The [checkpoint capture provenance](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/packages/codex/tests/fixtures/checkpoint_upgrades) records real idle, settled-manual, and CodeMode captures from a preview source snapshot and its matching native wheel. Retained captures qualify later candidates by replaying accepted history and checking current restore refusals. They do not establish a stable-release upgrade, coverage of every historical preview, cross-language conversion, downgrade support, or arbitrary native-revision portability. Keep the producer SDK available until your candidate passes the relevant continuation tests.
+
+A recognized format does not relax the exact Codex-revision restriction or the current host, tool, output, and executor-policy checks below. Saved data supplies no current credentials, callbacks, or execution authority.
+
 ### Supply restore configuration
 
 `save_state()` requires an idle Session and preserves native history and turn identity. Use [`suspend()`](#save-a-settled-manual-request) for supported pending manual requests.
