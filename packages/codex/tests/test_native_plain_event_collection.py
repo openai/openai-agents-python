@@ -494,7 +494,7 @@ async def _before_compact_case(case):
                         await _automatic_compaction_run(fixture, provider, probes, patch)
                     else:
                         assert case == "provider"
-                        await _fresh_provider_compaction(fixture, provider, probes, patch)
+                        await _fresh_provider_compaction(fixture, provider, probes)
         finally:
             await telemetry.shutdown()
 
@@ -587,17 +587,7 @@ async def _automatic_compaction_run(fixture, provider, probes, patch):
     assert probes[0].cancelled_reads == 0
 
 
-async def _fresh_provider_compaction(fixture, provider, probes, patch):
-    from agents import _native
-
-    create = _native.create_engine
-    sharing_requests = []
-
-    def record_sharing(*args, **kwargs):
-        sharing_requests.append(kwargs.get("_share_session_template"))
-        return create(*args, **kwargs)
-
-    patch.setattr(_native, "create_engine", record_sharing)
+async def _fresh_provider_compaction(fixture, provider, probes):
     calls = []
     session_ids = []
     summaries = (
@@ -605,8 +595,7 @@ async def _fresh_provider_compaction(fixture, provider, probes, patch):
         "Keep the violet provider witness.",
     )
     for index, summary in enumerate(summaries):
-        # A fresh closure is part of each Agent declaration. Neither callback
-        # nor its captured summary belongs to the Provider's Config entry.
+        # A fresh closure belongs to each Agent declaration.
         async def compact(request, *, expected=summary, owner=index):
             calls.append((owner, request.session_id, request.trigger))
             assert request.subagent_id is None and request.context is None
@@ -636,7 +625,6 @@ async def _fresh_provider_compaction(fixture, provider, probes, patch):
             assert summaries[1 - index] not in json.dumps(fixture.requests[-1])
         _assert_compaction_session_retired(session)
         assert len(fixture.requests) == request_start + 2
-    assert sharing_requests == [True, True]
     assert len(set(session_ids)) == 2
     assert calls == [(index, session_id, "manual") for index, session_id in enumerate(session_ids)]
     assert len(probes) == 2

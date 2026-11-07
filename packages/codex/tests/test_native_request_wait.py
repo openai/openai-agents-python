@@ -192,6 +192,7 @@ async def test_waiting_native_request_reader_follows_turn_when_session_starts_cl
     peer = Peer(names=("find-record",), annotations=None)
     waiter = None
     closing = None
+    close_entered = asyncio.Event()
     notify = _ObservationBuffer.notify
     scan = Session._manual_request
     close = Session._close
@@ -199,6 +200,10 @@ async def test_waiting_native_request_reader_follows_turn_when_session_starts_cl
     async def hold_close(session):
         # _aclose revoked new input and scheduled this real cleanup task.
         # Keep its ordinary task handoff open until the existing reader scans.
+        assert session._closing
+        close_entered.set()
+        # The existing waiter must rescan after admission has really closed.
+        notify(session._observations)
         await release_close.wait()
         await close(session)
 
@@ -235,7 +240,10 @@ async def test_waiting_native_request_reader_follows_turn_when_session_starts_cl
                 # Start the public scope exit before the already waiting reader
                 # receives this native question's normal observation signal.
                 closing = asyncio.create_task(scope.__aexit__(None, None, None))
-            notify(buffer)
+            # Hold observation wakeups until the real close path has revoked
+            # admission. Merely scheduling scope exit does not establish that.
+            if buffer is not session._observations or close_entered.is_set():
+                notify(buffer)
 
         monkeypatch.setattr(_ObservationBuffer, "notify", closing_on_real_question)
         monkeypatch.setattr(Session, "_manual_request", scanned)
@@ -246,6 +254,7 @@ async def test_waiting_native_request_reader_follows_turn_when_session_starts_cl
             turn = await session.submit("Write once.")
             waiter = asyncio.create_task(turn.wait_for_request_or_result())
             await closing_scan.wait()
+            assert close_entered.is_set()
             assert closing is not None and not closing.done()
             assert not peer.calls and len(responses.requests) == 1
             release_close.set()

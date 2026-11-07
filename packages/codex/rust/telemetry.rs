@@ -120,9 +120,7 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             }))
             .boxed(),
     ];
-    layers.push(
-        OtelProvider::reloadable_tracing_layer_with_trace_enabled(SERVICE, traces_enabled).boxed(),
-    );
+    layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
         .context("Could not claim the process-wide Rust tracing subscriber")?;
     state.claimed = true;

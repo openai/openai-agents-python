@@ -249,73 +249,17 @@
       "sha256": "5cf5df20f97b17d042d91359a2291bee3f0b4a73f7830834d6f7624038291015"
     },
     {
-      "path": "0056-custom-ca-certificate-cache.patch",
-      "sha256": "a949436812ffd27dbeae542e7e5c54f2ae5d13b5e9926e18978a2b4acc6108c6"
+      "path": "0056-reuse-model-http-clients.patch",
+      "sha256": "ef6fbc58cde414c42bb083eb62e03485d5971bfda523379303d717aee3031185"
     },
     {
       "path": "0057-reuse-bundled-model-catalog.patch",
       "sha256": "30789fd66c8592c4a9d94777a62dc8618d3ffbe74800ca5bd2e95d7f1bcf2a96"
     },
     {
-      "path": "0058-borrow-selected-model-metadata.patch",
-      "sha256": "b9596f459f53cec198b5b16d734a05e78f5198bd271b132057ca4b277543899a"
-    },
-    {
-      "path": "0059-reuse-provider-model-http-clients.patch",
-      "sha256": "7d1902f4445d9e31f9ec338e92a5ae2508da17848b88211f0f1291f2b3893b34"
-    },
-    {
-      "path": "0060-skip-unused-project-trust-discovery.patch",
-      "sha256": "f3a2c9455ef754224d194fb3c79818091f125e7572713d986e4619185ebee3ac"
-    },
-    {
-      "path": "0061-restore-session-test-trace-imports.patch",
-      "sha256": "ff98e505472c9d5b1fbfa48e2cb9aac0639b187287f71c551418a5d3a36e5f46"
-    },
-    {
-      "path": "0062-isolate-project-trust-hook-test-config.patch",
-      "sha256": "f46673144fb24128969ec1556319430a3078cbf54ca5ce6088696bc96c4ef05b"
-    },
-    {
-      "path": "0063-share-immutable-bundled-model-seed.patch",
-      "sha256": "93a901af9d0db0c9af1fe7c911509a2556549b6659d8f75fd4d39f8664481326"
-    },
-    {
-      "path": "0064-preserve-canonical-turn-error.patch",
-      "sha256": "cdf0ff2a9239890e7db8e76839b5c36f4cdac91402524fd9213222b1111b1192"
-    },
-    {
-      "path": "0065-cache-successful-ca-parses.patch",
-      "sha256": "1ee10988e73f242a36f6df1a66be1b46ce4f95593359caf60cb44d14255da974"
-    },
-    {
-      "path": "0066-skip-empty-skill-grams.patch",
-      "sha256": "9ab4aed98ba10aa487b3b1cacb62453f92b902757621309a5e6993944a312f0e"
-    },
-    {
-      "path": "0067-avoid-disabled-telemetry-events.patch",
-      "sha256": "f3bad6be36653fdcad54521a585af58b1f7f8d0d7348a61cb0afb47db75b33df"
-    },
-    {
-      "path": "0068-isolate-host-root-marker-test.patch",
-      "sha256": "911fa29fdb80c788c84080e5b3d3fb302837b29aa244ed5c44bc257b66e6514f"
-    },
-    {
-      "path": "0069-share-config-layers.patch",
-      "sha256": "daa5f9c1840a7e9c97a6d1bbee8fd45df3fdfff44d2524f297957d5dc3e30626"
-    },
-    {
-      "path": "0070-borrow-model-presets.patch",
-      "sha256": "0424aaffbd3baf13cf5b9d42b264928bceb8bd9830b7ae33cd1d997523438696"
-    },
-    {
-      "path": "0071-rebind-ephemeral-session-config.patch",
-      "sha256": "a3f7be5ac81e65a4332cad1797f201a74d52f049e58c1f7a39839b3bbd14e0a2"
-    },
-    {
-      "path": "0072-skip-empty-configured-plugins.patch",
-      "sha256": "4cce092a2ba56da095355350816baff9876873e06caebee8ab1a7695b05aaeed"
+      "path": "0058-preserve-canonical-turn-error.patch",
+      "sha256": "67d6e2be6322bf5851f24fd33a0173e2a060edfe1465d943eaac35d79ebd6b42"
     }
   ],
-  "result_tree": "9b3e5bdcf651cdef40dd8219a1b6919e48939f0b"
+  "result_tree": "467916c89562d8c5b7747489c4480c7b32ab8b28"
 }

@@ -35,9 +35,6 @@ pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
-    #[cfg(test)]
-    pub(crate) session_template_witness:
-        Option<std::sync::Weak<crate::provider_owner::SessionTemplate>>,
     pub context_gate: Arc<AsyncRwLock<()>>,
     pub context_retired: AtomicBool,
     pub store: Arc<dyn ThreadStore>,
@@ -169,8 +166,6 @@ impl EngineState {
             initial_model,
             None,
             false,
-            None,
-            false,
         )
         .await
     }
@@ -183,43 +178,11 @@ impl EngineState {
         initial_model: Option<String>,
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
         session_initial_config: bool,
-        session_template_lease: Option<Arc<crate::provider_owner::Lease>>,
-        session_template_config_only: bool,
     ) -> anyhow::Result<Self> {
         telemetry::engine_starting().await?;
         let prepared_runtime = config::prepare_runtime(&runtime_json)?;
-        let recipe = if session_template_lease.is_some()
-            && session_initial_config
-            && !checkpoint
-            && canonical_store.is_none()
-            && api_key.as_ref().is_some_and(|key| !key.trim().is_empty())
-        {
-            config::SdkConfigRecipe::capture(&config_json, &runtime_json, &prepared_runtime)
-        } else {
-            None
-        };
         let runtime_json = prepared_runtime;
-        let cached = match (&recipe, &session_template_lease, &api_key) {
-            (Some(recipe), Some(lease), Some(key)) => {
-                lease.session_template(&crate::provider_owner::SessionTemplate::key(recipe, key))
-            }
-            _ => None,
-        };
-        let mut session_template = None;
-        let bound = match (&recipe, cached) {
-            (Some(recipe), Some(entry)) => match recipe.bind(&entry.config).await {
-                Some(bound) => {
-                    session_template = Some(entry);
-                    Some(bound)
-                }
-                None => None,
-            },
-            _ => None,
-        };
-        let (mut config, mut cloud_config) = match bound {
-            Some(bound) => bound,
-            None => config::load(&config_json, &runtime_json, None).await?,
-        };
+        let (mut config, cloud_config) = config::load(&config_json, &runtime_json, None).await?;
         // Capture one typed runtime at the original first accessor decode point.
         let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
         let native_turn_control = runtime_options.native_turn_control();
@@ -261,32 +224,6 @@ impl EngineState {
                 "native local SDK storage requires non-ephemeral threads"
             );
         }
-        if session_template.is_none()
-            && session_template_lease
-                .as_ref()
-                .is_some_and(|lease| lease.can_prepare_session_template())
-            && let (Some(recipe), Some(key)) = (&recipe, &api_key)
-            && let Some((entry, bound, cloud)) = crate::provider_owner::SessionTemplate::prepare(
-                recipe,
-                &config,
-                key,
-                session_template_config_only,
-            )
-            .await
-        {
-            config = bound;
-            cloud_config = cloud;
-            session_template = Some(entry);
-        }
-        // Config-only requests must not borrow a credentialed entry's
-        // services, including through independently callable private inputs.
-        let shared_services = (!session_template_config_only)
-            .then(|| {
-                session_template
-                    .as_ref()
-                    .and_then(|entry| entry.services.as_ref())
-            })
-            .flatten();
         let (auth, codex_account) = if let Some(login) = runtime_options.sdk_codex_login() {
             ensure!(
                 api_key.is_none(),
@@ -298,8 +235,6 @@ impl EngineState {
                 &format!("{CODEX_LOGIN_PROVIDER_PREFIX}{}", account.binding),
             )?;
             (manager, Some(account))
-        } else if let Some((auth, _)) = shared_services {
-            (auth.clone(), None)
         } else {
             (crate::auth::manager(&config, api_key).await?, None)
         };
@@ -383,16 +318,11 @@ impl EngineState {
                 .await?;
             Self::validate_resume_provider(&stored.model_provider, &config.model_provider_id)?;
         }
-        let models = match shared_services {
-            Some((_, models)) => models.clone(),
-            None => {
-                let provider = codex_model_provider::create_model_provider(
-                    config.model_provider.clone(),
-                    Some(auth.clone()),
-                );
-                provider.models_manager_without_cache(config.model_catalog.clone())
-            }
-        };
+        let provider = codex_model_provider::create_model_provider(
+            config.model_provider.clone(),
+            Some(auth.clone()),
+        );
+        let models = provider.models_manager_without_cache(config.model_catalog.clone());
         models.set_api_key_model_discovery_enabled(
             config.features.enabled(Feature::ApiKeyModelDiscovery),
         );
@@ -577,8 +507,6 @@ impl EngineState {
             extension_events,
             cloud_config,
             service_config: config,
-            #[cfg(test)]
-            session_template_witness: session_template.as_ref().map(Arc::downgrade),
             model_http_pool: None,
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
@@ -589,11 +517,6 @@ impl EngineState {
             interception,
             restored_creation_times: Mutex::new(HashMap::new()),
         };
-        // Publish only after construction succeeds. This cannot add a fallible
-        // step between constructing the Engine and registering its owner.
-        if let (Some(lease), Some(entry)) = (&session_template_lease, &session_template) {
-            lease.publish_session_template(entry);
-        }
         Ok(result)
     }
 

@@ -2844,7 +2844,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None, _capture_initial_config=false, _share_model_http=false, _share_session_template=false, _session_template_config_only=false))]
+#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None, _capture_initial_config=false, _share_model_http=false))]
 fn create_engine<'py>(
     py: Python<'py>,
     config_json: &str,
@@ -2854,24 +2854,7 @@ fn create_engine<'py>(
     canonical_store: Option<Py<PyAny>>,
     _capture_initial_config: bool,
     _share_model_http: bool,
-    _share_session_template: bool,
-    _session_template_config_only: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if _session_template_config_only && !_share_session_template {
-        return Err(py_error(
-            "Config-only reuse requires a shared Session template",
-        ));
-    }
-    if _share_session_template
-        && (provider_lease.is_none()
-            || api_key.is_none()
-            || canonical_store.is_some()
-            || !_capture_initial_config)
-    {
-        return Err(py_error(
-            "Shared Session templates require an in-memory API-key Provider lease",
-        ));
-    }
     if _share_model_http && (provider_lease.is_none() || api_key.is_none()) {
         return Err(py_error(
             "Shared model HTTP requires an API-key Provider lease",
@@ -2908,12 +2891,6 @@ fn create_engine<'py>(
             None,
             canonical_store,
             _capture_initial_config,
-            if _share_session_template {
-                lease.clone()
-            } else {
-                None
-            },
-            _session_template_config_only,
         )
         .await
         .map_err(py_error)?;

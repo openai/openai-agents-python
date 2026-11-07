@@ -1,5 +1,4 @@
 //! Native configuration loading; defaults and precedence stay owned by Codex.
-mod prepared;
 use anyhow::{Context, Result, bail};
 use codex_config::{CloudConfigBundleLoader, LoaderOverrides};
 use codex_core::config::{ConfigBuilder, ConfigOverrides};
@@ -7,7 +6,6 @@ use codex_core_api::{AbsolutePathBuf, Config, SqliteConfig};
 use codex_protocol::config_types::{ApprovalsReviewer, Personality, SandboxMode};
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-pub(crate) use prepared::SdkConfigRecipe;
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::Value;
 use std::path::PathBuf;

@@ -2303,26 +2303,11 @@ class Session(Generic[ContextT, OutputT]):
                             "config_file": str(role_path),
                         }
 
-                async def initialize_engine(provider: NativeProvider) -> Any:
+                async def initialize_engine() -> Any:
                     create_engine = (
                         native.create_checkpoint_engine
                         if checkpoint is not None
                         else native.create_engine
-                    )
-                    # Environment credentials belong only to this opening. Reuse
-                    # its isolated Config without retaining auth/model services.
-                    share_session_template = (
-                        checkpoint is None
-                        and not owned_provider
-                        and opening.api_key is not None
-                        and codex_login is None
-                        and executor is None
-                        and storage is None
-                        and state is None
-                        and resume is None
-                        and native_agents is None
-                        and not programmatic_tool_calling
-                        and all(isinstance(tool, FunctionTool) for tool in agent.tools)
                     )
                     return await opening.acquire(
                         create_engine(
@@ -2336,10 +2321,6 @@ class Session(Generic[ContextT, OutputT]):
                                 {
                                     "_capture_initial_config": True,
                                     "_share_model_http": not owned_provider and codex_login is None,
-                                    "_share_session_template": share_session_template,
-                                    "_session_template_config_only": (
-                                        share_session_template and provider.api_key is None
-                                    ),
                                 }
                                 if checkpoint is None
                                 else {}
@@ -2361,7 +2342,7 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
 
-                engine = await initialize_engine(provider)
+                engine = await initialize_engine()
 
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.

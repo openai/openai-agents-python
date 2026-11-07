@@ -1,8 +1,17 @@
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index becaca522523c0451dd59a0fd38e3abe98fdb0d7..4e483b2eadfe55cae3144bdb8808d248298ec806 100644
+index 1ec11c720d2dabdafba61f3f1b8213d23d0650d8..b11cc18518eb90841b141e6d2665b99cb50a9b29 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13676,3 +13676,188 @@ async fn response_integrity_reason_tracks_the_originating_terminal_error_event()
+@@ -67,6 +67,8 @@ use codex_model_provider_info::built_in_model_providers;
+ use codex_models_manager::model_info;
+ use codex_models_manager::test_support::construct_model_info_offline_for_tests;
+ use codex_models_manager::test_support::get_model_offline_for_tests;
++use codex_otel::current_span_w3c_trace_context;
++use codex_otel::set_parent_from_w3c_trace_context;
+ use codex_prompts::render_model_instructions;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ResponseItemId;
+@@ -13683,3 +13685,188 @@ async fn response_integrity_reason_tracks_the_originating_terminal_error_event()
  }
  #[path = "context_metadata_tests.rs"]
  mod context_metadata_tests;
@@ -192,7 +201,7 @@ index becaca522523c0451dd59a0fd38e3abe98fdb0d7..4e483b2eadfe55cae3144bdb8808d248
 +    .expect("bounded real publication cancellation must settle");
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index fa7194daad33ca97e3776d1c492673e813807dc7..0c570525171415261d669deeb4d0fdea30fd2963 100644
+index 57e7a2b849610ec5972098e6963646b181561a6a..d37d2d5c629dd0836e69779b7291bb9fdcc1850c 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -142,6 +142,10 @@ use tracing::warn;
