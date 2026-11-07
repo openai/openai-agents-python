@@ -31,6 +31,8 @@ In development builds after `0.24.0-alpha.6`, `LocalStorage` rejects `programmat
 
 A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before Core starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
 
+In development builds after `0.24.0-alpha.6`, if reconciliation fails or is cancelled, use `get_cleanup(error)` to retain any remaining storage cleanup owner. Check for `None` before calling `await cleanup.aclose()`. Retry cleanup through this owner if release fails again. Cleanup releases the original lease without repeating reconciliation or running the tool. A release failure can follow a recorded result; do not repeat reconciliation to retry release. See [retry incomplete cleanup](sessions.md#retry-incomplete-cleanup).
+
 For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).

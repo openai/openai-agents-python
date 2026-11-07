@@ -14,7 +14,7 @@ When opening a Session:
 - Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
 - [Portable restore](state.md#save-and-restore-a-portable-checkpoint) keeps the saved model and settings instead.
 
-Development builds after `0.24.0-alpha.6` also support `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching-source setup](installation.md#examples-and-upgrades) for this option.
+Development builds after `0.24.0-alpha.6` also support `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching-source setup](installation.md#examples-and-upgrades) for this option.
 
 An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
 
