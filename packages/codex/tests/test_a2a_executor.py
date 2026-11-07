@@ -624,6 +624,189 @@ async def test_cancel_during_session_open_admits_no_submission(tmp_path, respons
     assert not responses.requests
 
 
+@pytest.mark.parametrize("resume", [False, True], ids=["initial", "manual-resume"])
+@pytest.mark.parametrize("rollback", ["normal", "late-entry", "failure"])
+async def test_cancel_interrupts_managed_environment_entry_and_joins_rollback(
+    tmp_path, responses, monkeypatch, resume, rollback
+):
+    import asyncio
+    from contextvars import ContextVar
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import _native
+
+    entered, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    owner_context = ContextVar("synthetic_environment_owner")
+    owners = []
+
+    @asynccontextmanager
+    async def environment():
+        owners.append(asyncio.current_task())
+        token = owner_context.set("managed-source")
+        try:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if rollback != "late-entry":
+                    raise
+                yield Environment(
+                    url="wss://executor.invalid", cwd="/workspace", write_policy="legacy"
+                )
+                return
+            finally:
+                assert owner_context.get() == "managed-source"
+                owners.append(asyncio.current_task())
+                rolling_back.set()
+                await release.wait()
+                if rollback == "failure":
+                    raise RuntimeError("synthetic-private-entry-rollback")
+        finally:
+            owner_context.reset(token)
+        # A model-only saved session may attach this explicit remote legacy profile.
+        yield Environment(url="wss://executor.invalid", cwd="/workspace", write_policy="legacy")
+
+    decision = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=str
+    )
+    agent = Agent(
+        instructions="Ask for approval.",
+        model="test-model",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        tools=[decision],
+    )
+    selected = not resume
+    executor = NativeA2AExecutor(
+        agent_factory=lambda binding, context: NativeA2AAgent(
+            agent=agent, environment=environment() if selected else None
+        ),
+        store=HostStore(tmp_path),
+    )
+    context = request_context()
+    if resume:
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "approval"))
+        waiting, _ = await invoke(executor, context)
+        proposal = MessageToDict(waiting.task.status.message.parts[0].data)
+        context = request_context(
+            current=waiting.task,
+            reply={
+                "challenge": proposal["challenge"],
+                "generation": proposal["generation"],
+                "result": "approved",
+            },
+        )
+        selected = True
+    requests_before = len(responses.requests)
+    acquisitions = []
+
+    def unexpected_acquisition(*args, **kwargs):
+        acquisitions.append(True)
+        pytest.fail("Canceled Environment entry acquired native work")
+
+    monkeypatch.setattr(_native, "create_engine", unexpected_acquisition)
+    monkeypatch.setattr(_native, "create_checkpoint_engine", unexpected_acquisition)
+    running = asyncio.create_task(invoke(executor, context))
+    queue = EventQueueSource()
+    canceling = []
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        canceling.append(asyncio.create_task(executor.cancel(context, queue)))
+        await asyncio.wait_for(rolling_back.wait(), 5)
+        canceling.append(asyncio.create_task(executor.cancel(context, queue)))
+        await asyncio.sleep(0)
+        assert not running.done() and all(not task.done() for task in canceling)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert executor.store.read(binding).status == "running"
+        assert len(responses.requests) == requests_before and not acquisitions
+        release.set()
+        stored, _ = await asyncio.wait_for(running, 5)
+        cancellations = await asyncio.wait_for(
+            asyncio.gather(*canceling, return_exceptions=True), 5
+        )
+        if rollback == "failure":
+            assert all(isinstance(error, InvalidParamsError) for error in cancellations)
+            expected_status, expected_state = "failed", p.TASK_STATE_FAILED
+        else:
+            assert cancellations == [None, None]
+            expected_status, expected_state = "canceled", p.TASK_STATE_CANCELED
+        assert stored.task.status.state == expected_state
+        assert not stored.task.artifacts
+        saved = executor.store.read(binding)
+        assert (
+            saved.status == expected_status and saved.checkpoint is None and saved.challenge is None
+        )
+        assert saved.acknowledges(stored.task)
+        assert "synthetic-private-entry-rollback" not in str(stored.task)
+        assert binding not in executor._live
+        assert len(owners) == 2 and owners[0] is owners[1]
+        assert len(responses.requests) == requests_before and not acquisitions
+    finally:
+        release.set()
+        for task in (running, *canceling):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(running, *canceling, return_exceptions=True)
+        await queue.close(immediate=True)
+
+
+@pytest.mark.parametrize("explicit_cancel", [False, True])
+async def test_caller_cancellation_during_managed_entry_joins_rollback_and_propagates(
+    tmp_path, responses, explicit_cancel
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    entered, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def environment():
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            rolling_back.set()
+            await release.wait()
+        yield Environment(url="wss://executor.invalid", cwd="/workspace", write_policy="legacy")
+
+    executor = make_executor(tmp_path, responses)
+    original = executor._factory
+    executor._factory = lambda binding, context: replace(
+        original(binding, context), environment=environment()
+    )
+    context = request_context()
+    queue = EventQueueSource()
+    running = asyncio.create_task(executor.execute(context, queue))
+    canceling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if explicit_cancel:
+            canceling = asyncio.create_task(executor.cancel(context, queue))
+            await asyncio.wait_for(rolling_back.wait(), 5)
+        running.cancel("synthetic-caller-cancel")
+        await asyncio.wait_for(rolling_back.wait(), 5)
+        await asyncio.sleep(0)
+        assert not running.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError, match="synthetic-caller-cancel"):
+            await asyncio.wait_for(running, 5)
+        if canceling is not None:
+            await asyncio.wait_for(canceling, 5)
+        assert not responses.requests
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert binding not in executor._live
+    finally:
+        release.set()
+        for task in (running, canceling):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (running, canceling) if task is not None), return_exceptions=True
+        )
+        await queue.close(immediate=True)
+
+
 async def test_foreign_stale_and_repeated_answers_never_acquire_authority(tmp_path, responses):
     tool = FunctionTool(
         name="approve", description="Host approval", input_type=Approval, output_type=str
