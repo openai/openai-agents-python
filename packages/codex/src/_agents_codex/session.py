@@ -2376,6 +2376,17 @@ class Session(Generic[ContextT, OutputT]):
 
                 engine = await initialize_engine()
 
+                if isinstance(storage, CustomStorage) and resume is not None:
+                    # Inspect before Core starts, while the canonical backend's
+                    # original writer still fences every other opener.
+                    history = json.loads(
+                        await opening.acquire(engine._inspect_custom_recovery(resume))
+                    )
+                    uncertain: list[UncertainCall] = []
+                    turns, items = project_history(history, resume, uncertain_calls=uncertain)
+                    if uncertain:
+                        raise LocalRecoveryRequired(tuple(uncertain), tuple(turns), tuple(items))
+
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.
                     opening.api_key = re.sub(
