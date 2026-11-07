@@ -1454,6 +1454,49 @@ async def test_optional_read_preserves_failure_boundary(
     assert len(responses.requests) == 1
 
 
+@pytest.mark.parametrize("phase", ["authorizing", "provider", "recording"])
+async def test_optional_read_deadline_preserves_uncertain_journal_outcome(responses, phase):
+    joined = asyncio.Event()
+    accepted = JobUpdate("pending", "accepted-job-receipt")
+
+    async def block():
+        try:
+            await asyncio.Future()
+        finally:
+            joined.set()
+
+    class Store(Journal):
+        async def authorize(self, claim, action):
+            await super().authorize(claim, action)
+            if phase == "authorizing" and action == "observe":
+                await block()
+
+        async def record(self, claim, update):
+            await super().record(claim, update)
+            if phase == "recording" and update.status == "completed":
+                await block()
+
+    class Backend(Provider):
+        async def observe(self, claim):
+            if phase == "provider":
+                await block()
+            return await super().observe(claim)
+
+    journal, backend = Store(), Backend([accepted, done()])
+    jobs, tool = declared(journal, backend)
+    agent = Agent(instructions="Render.", tools=[tool], provider=provider(responses))
+    async with timeout(5):
+        state, _ = await prepare_one(agent, jobs, tool, responses)
+        async with agent.session(state=state) as session:
+            req = await next_request(session.interactions(), tool)
+            result = await jobs.advance(session, req, wait_seconds=0.05)
+            assert result == ("pending" if phase == "provider" else "unknown")
+            assert joined.is_set()
+    [row] = journal.rows.values()
+    assert row.update.status == ("completed" if phase == "recording" else "pending")
+    assert row.result is None and len(responses.requests) == 1
+
+
 @pytest.mark.parametrize("cancel", [False, True], ids=["total-deadline", "caller-cancel"])
 async def test_optional_read_is_joined_on_total_timeout_or_cancellation(responses, cancel):
     accepted = JobUpdate("pending", "accepted-job-receipt")
