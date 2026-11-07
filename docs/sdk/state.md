@@ -182,7 +182,9 @@ The SDK rejects detectable declaration or mode mismatches before acquiring an ex
 
 When reopening with `LocalStorage`, check which executor the latest receipt recorded. For a local executor or a strict WSS Environment, supply the same working directory, last applied write roots, and network policy. Include any replacement made with `submit(writable_roots=...)`.
 
-For a saved legacy WSS policy, explicitly supply `write_policy="legacy"` with `writable_roots=None`. You can reopen in a different working directory if the rest of the executor policy matches. You can also omit the Environment to reopen for model-only work, including when the recorded executor used a managed network policy.
+Strict local-profile resume requires recorded strict-mode evidence as well as the matching applied policy. A missing marker does not prove how older work was confined, and reopening never automatically upgrades that policy.
+
+For saved legacy or unmarked remote history, explicitly supply `write_policy="legacy"` with `writable_roots=None`. You can reopen in a different working directory if the rest of the executor policy matches. You can also omit the Environment to reopen for model-only work, including when the recorded executor used a managed network policy.
 
 ### Network policy and offline executors
 
