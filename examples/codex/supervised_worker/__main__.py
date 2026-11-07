@@ -471,7 +471,9 @@ async def work(
                         None,
                     ),
                     "completion_ms": trace.completion_ms,
-                    "usage": asdict(result.thread_usage) if result.thread_usage is not None else None,
+                    "usage": asdict(result.thread_usage)
+                    if result.thread_usage is not None
+                    else None,
                     "follow_up_ms": [draft.completion_ms for draft in traces[1:]],
                 }
                 return {"status": "accepted", **accepted}

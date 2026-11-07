@@ -612,7 +612,10 @@ async def test_checkpoint_changes_transport_without_rewriting_history_or_current
             handle = await restored.submit("current-input")
             result = await (handle).get_result()
             assert result.final_output == "current-answer"
-            assert result.thread_usage is not None and result.thread_usage.total_token_usage.total_tokens == 56
+            assert (
+                result.thread_usage is not None
+                and result.thread_usage.total_token_usage.total_tokens == 56
+            )
         assert original.calls == ["call_source"] and current.calls == ["call_current"]
         assert len(source.requests) == len(destination.requests) == 2
         assert message_text(destination.requests[0]["input"], "user") == [
@@ -646,7 +649,10 @@ async def test_websocket_session_compaction_keeps_native_summary_and_continues()
             handle = await session.submit("Recall the label.")
             result = await (handle).get_result()
             assert result.final_output == "atlas"
-            assert result.thread_usage is not None and result.thread_usage.last_token_usage.total_tokens == 14
+            assert (
+                result.thread_usage is not None
+                and result.thread_usage.last_token_usage.total_tokens == 14
+            )
         events = [event async for event in stream]
         assert len([event for event in events if isinstance(event, ContextCompacted)]) == 1
         assert len(provider.requests) == 3

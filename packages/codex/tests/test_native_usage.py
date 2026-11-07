@@ -153,7 +153,9 @@ async def test_native_multiple_responses_turns_and_repeated_rate_observations(
         ]
         assert third_result.final_output == "no new counts"
         assert third_result.thread_usage == second_result.thread_usage
-        assert third_events and all(event.usage == second_result.thread_usage for event in third_events)
+        assert third_events and all(
+            event.usage == second_result.thread_usage for event in third_events
+        )
         assert len(responses.requests) == 4
     assert first_result.thread_usage.total_token_usage == TokenUsage(34, 6, 8, 14, 4, 48)
     assert (await (second).get_result()).thread_usage == second_result.thread_usage

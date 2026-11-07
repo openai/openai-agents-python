@@ -35,7 +35,9 @@ async def completed(
     server.respond(assistant_output(text))
     result = await agent.run(text)
     assert result.final_output == text
-    assert result.thread_usage is not None and result.thread_usage.total_token_usage.total_tokens == 14
+    assert (
+        result.thread_usage is not None and result.thread_usage.total_token_usage.total_tokens == 14
+    )
     assert not server.http_requests
 
 

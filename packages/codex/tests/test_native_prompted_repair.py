@@ -309,7 +309,9 @@ async def test_repair_has_effective_updated_model_auth_accounting_and_real_histo
         assert effect.read_text() == "owned once"
         assert len(responses.requests) == 5
         assert len(one.repair_attempts) == 2
-        assert one.thread_usage is not None and one.thread_usage.total_token_usage.total_tokens == 42
+        assert (
+            one.thread_usage is not None and one.thread_usage.total_token_usage.total_tokens == 42
+        )
         all_turns = [t async for t in session.turns()]
         assert len(all_turns) == 4
         assert tuple(t for t in all_turns if "parent_turn_id" in t) == one.repair_attempts
