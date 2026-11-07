@@ -96,7 +96,7 @@ async def test_selected_provider_overrides_tools_ids_and_borrowing(
         "on_model_event": events.append if invocation == "stream" else None,
     }
     if buffered:
-        running = SDKRunner.run_streamed(agent, "Greet Ada", **kwargs)
+        running = SDKRunner.start(agent, "Greet Ada", **kwargs)
         result = await running.get_result()
     else:
         result = await SDKRunner.run(agent, "Greet Ada", **kwargs)
@@ -336,7 +336,7 @@ async def test_live_delta_is_detached_and_precedes_terminal_and_buffered_result(
         if isinstance(event, ResponseCompletedEvent):
             event.response.output.clear()
 
-    running = SDKRunner.run_streamed(
+    running = SDKRunner.start(
         Agent("Live", model=model),
         "hello",
         model_invocation="stream",
@@ -346,7 +346,7 @@ async def test_live_delta_is_detached_and_precedes_terminal_and_buffered_result(
     semantic_events: list[Any] = []
 
     async def read_events() -> None:
-        async for event in running.stream_events():
+        async for event in running.replay_events():
             semantic_events.append(event)
 
     reader = asyncio.create_task(read_events())
@@ -779,7 +779,7 @@ async def test_dictionary_override_normalizes_and_preserves_agent_precedence(
     )
     override = {"temperature": 0.2, "reasoning": {"effort": "low"}}
     if buffered:
-        result = await SDKRunner.run_streamed(
+        result = await SDKRunner.start(
             agent, "hello", model_settings=override, model_invocation="stream"
         ).get_result()
     else:
