@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shlex
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from agents import (
     Agent,
@@ -20,6 +23,7 @@ from agents import (
     ToolRef,
     TurnStoppedError,
     function_tool,
+    telemetry,
 )
 from agents.executor import ExecutorToolName
 from tests._asyncio import timeout
@@ -493,74 +497,88 @@ async def test_search_result_policy_reaches_generated_code_once(
 
 
 @local_search
-@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX native hook commands")
 @pytest.mark.parametrize("programmatic", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-async def test_search_result_policy_precedes_native_consumers(
-    responses: ResponsesFixture,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    programmatic: bool,
-    fail: bool,
+def test_search_result_policy_precedes_native_logs(
+    tmp_path: Path, programmatic: bool, fail: bool
 ) -> None:
-    from agents import _native
-
-    private = "private-search-result-6bc1"
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "private.txt").write_text(private)
-    observed = tmp_path / "observed.jsonl"
-    hook = tmp_path / "observe.py"
-    hook.write_text(
-        "import json, pathlib, sys\n"
-        f"with pathlib.Path({str(observed)!r}).open('a') as output:\n"
-        "    output.write(json.dumps(json.load(sys.stdin)) + '\\n')\n"
-        "print('{}')\n"
+    # Native telemetry configures once per process. Keep each case independent
+    # of the runner's existing subscriber and capture policy.
+    env = dict(os.environ)
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio, sys; from pathlib import Path; "
+            "from tests.test_native_project_search import _search_result_logs; "
+            "asyncio.run(asyncio.wait_for(_search_result_logs("
+            "Path(sys.argv[1]), sys.argv[2] == 'True', sys.argv[3] == 'True'), 30))",
+            str(tmp_path),
+            str(programmatic),
+            str(fail),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=40,
     )
-    original_create = _native.create_engine
+    assert result.returncode == 0, result.stdout + result.stderr
 
-    async def create_with_observer(config_json: str, runtime_json: str, **kwargs: Any) -> Any:
-        runtime = json.loads(runtime_json)
-        runtime["bypass_hook_trust"] = True
-        Path(runtime["codex_home"], "hooks.json").write_text(
-            json.dumps(
-                {
-                    "hooks": {
-                        "PostToolUse": [
-                            {
-                                "matcher": "project_grep",
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": shlex.join([sys.executable, str(hook)]),
-                                    }
-                                ],
-                            }
-                        ]
-                    }
-                }
-            )
-        )
-        return await original_create(config_json, json.dumps(runtime), **kwargs)
 
-    monkeypatch.setattr(_native, "create_engine", create_with_observer)
+async def _search_result_logs(project: Path, programmatic: bool, fail: bool) -> None:
+    private = "private-search-result-6bc1"
+    private_error = "private-policy-error-927a"
+    (project / "private.txt").write_text(private)
+    responses = ResponsesFixture()
+    batches: list[dict[str, Any]] = []
+
+    async def collect(request: web.Request) -> web.Response:
+        batches.append(await request.json())
+        return web.json_response({})
+
+    async def flushed_results() -> list[dict[str, Any]]:
+        flushed = await telemetry.force_flush()
+        assert flushed.status == "success", flushed
+        assert flushed.dropped_records == 0, flushed
+        assert flushed.failed_deliveries == 0, flushed
+        records = [
+            {field["key"]: next(iter(field["value"].values())) for field in log["attributes"]}
+            for batch in batches
+            for resource in batch["resourceLogs"]
+            for scope in resource["scopeLogs"]
+            for log in scope["logRecords"]
+        ]
+        assert private not in json.dumps(records)
+        assert private_error not in json.dumps(records)
+        return [
+            record
+            for record in records
+            if record.get("event.name") == "codex.tool_result"
+            and record.get("tool_name") == "project_grep"
+        ]
+
     entered, release = asyncio.Event(), asyncio.Event()
     calls = 0
+    accepted = {"matches": [], "redacted": True}
 
     async def redact(context: ExecutorContext[None], value: Any) -> Any:
         nonlocal calls
         calls += 1
+        assert context.tool_name == "project_grep"
         assert private in json.dumps(value)
         entered.set()
         await release.wait()
         if fail:
-            raise ValueError(private)
-        return {"matches": [], "redacted": True}
+            raise ValueError(private_error)
+        return accepted
 
     if programmatic:
         responses.respond(
             code_call(
-                'text(await tools.project_grep({pattern: "private-search"}));', "observed-search"
+                'text(JSON.stringify(await tools.project_grep({pattern: "private-search"})));',
+                "observed-search",
             )
         )
     else:
@@ -569,39 +587,70 @@ async def test_search_result_policy_precedes_native_consumers(
         )
     if not fail:
         responses.respond(assistant_output("done"))
-    async with (
-        timeout(30),
-        Agent(
-            instructions="Search.",
-            provider=provider(responses),
-            programmatic_tool_calling=programmatic,
-        ).session(
-            environment=Environment.local(
-                cwd=project, tools=["project_grep"], transform_result=redact
-            )
-        ) as session,
-    ):
-        turn = await session.submit("Search.")
-        waiter = asyncio.create_task(turn.get_result())
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses.handle)
+    app.router.add_post("/v1/logs", collect)
+    async with TestServer(app) as server:
+        responses.url = str(server.make_url("/v1"))
+        await telemetry.configure(
+            logs=telemetry.OtlpHttp(endpoint=str(server.make_url("/v1/logs")), protocol="json"),
+            tool_result_max_bytes=4096,
+        )
+        native_provider = provider(responses)
         try:
-            await entered.wait()
-            assert not waiter.done()
-            assert not observed.exists(), "Native consumers ran before result policy completed"
-            release.set()
-            if fail:
-                with pytest.raises(NativeError, match="Executor policy failed"):
-                    await waiter
-                assert not observed.exists(), "Failed policy must withhold the result"
-            else:
-                assert (await waiter).final_output == "done"
-                records = [json.loads(line) for line in observed.read_text().splitlines()]
-                assert len(records) == 1
-                assert private not in json.dumps(records)
-                assert '"redacted": true' in json.dumps(records)
-            assert calls == 1
-            assert private not in json.dumps(responses.requests)
+            async with Agent(
+                instructions="Search.",
+                provider=native_provider,
+                programmatic_tool_calling=programmatic,
+            ).session(
+                environment=Environment[None].local(
+                    cwd=project, tools=["project_grep"], transform_result=redact
+                ),
+                trace_options=telemetry.TraceOptions(disabled=False, include_sensitive_data=True),
+            ) as session:
+                turn = await session.submit("Search.")
+                waiter = asyncio.create_task(turn.get_result())
+                try:
+                    await entered.wait()
+                    assert not waiter.done()
+                    # Core logs before returning from the native handler, so
+                    # a late Code Mode transform would already leak here.
+                    assert await flushed_results() == []
+                    release.set()
+                    if fail:
+                        with pytest.raises(NativeError, match="Executor policy failed"):
+                            await waiter
+                        assert all(
+                            record["success"] in (False, "false")
+                            for record in await flushed_results()
+                        )
+                    else:
+                        assert (await waiter).final_output == "done"
+                        records = await flushed_results()
+                        assert len(records) == 1
+                        assert records[0]["call_id"]
+                        if not programmatic:
+                            assert records[0]["call_id"] == "observed-search"
+                        assert records[0]["success"] in (True, "true")
+                        assert records[0]["output_truncated"] is False
+                        assert json.loads(records[0]["output"]) == accepted
+                        output = (
+                            code_output(responses.requests[-1], "observed-search")
+                            if programmatic
+                            else tool_output(responses.requests[-1], "observed-search")
+                        )
+                        if programmatic:
+                            assert json.dumps(accepted, separators=(",", ":")) in output
+                        else:
+                            assert json.loads(output) == accepted
+                    assert calls == 1
+                    assert private not in json.dumps(responses.requests)
+                    assert private_error not in json.dumps(responses.requests)
+                finally:
+                    release.set()
+                    if not waiter.done():
+                        waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
         finally:
-            release.set()
-            if not waiter.done():
-                waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await native_provider.aclose()
+            await telemetry.shutdown()
