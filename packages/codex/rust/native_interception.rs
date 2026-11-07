@@ -1989,6 +1989,21 @@ impl ThreadLifecycleContributor<Config> for Boundary {
 }
 
 impl TurnLifecycleContributor for Boundary {
+    fn before_turn_complete<'a>(
+        &'a self,
+        input: codex_extension_api::TurnCompletionInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<Option<String>, String>> {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<crate::python_tools::PythonTools>() else {
+                return Ok(None);
+            };
+            tools
+                .before_complete(input)
+                .await
+                .map_err(|_| "Completion callback failed".to_owned())
+        })
+    }
+
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Some(control) = input.thread_store.get::<Control>() {

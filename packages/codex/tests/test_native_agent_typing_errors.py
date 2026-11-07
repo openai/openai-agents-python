@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents import (
     Agent,
+    CompletionContext,
     Environment,
     FunctionTool,
     HttpMCP,
@@ -197,3 +198,15 @@ if TYPE_CHECKING:
             await session.submit("input", before_step=invalid_step_turn)  # pyright: ignore[reportArgumentType]
             await session.submit("input", before_step=invalid_step_result)  # pyright: ignore[reportArgumentType]
             await session.submit("input", before_step=incompatible_step_context)  # pyright: ignore[reportArgumentType]
+
+
+if TYPE_CHECKING:
+
+    def invalid_completion_result(request: CompletionContext[Application]) -> str:
+        return "continue"
+
+    def incompatible_completion_context(request: CompletionContext[str]) -> None:
+        return None
+
+    Agent(instructions="Answer.", before_complete=invalid_completion_result)  # pyright: ignore[reportArgumentType]
+    Agent[Application](instructions="Answer.", before_complete=incompatible_completion_context)  # pyright: ignore[reportArgumentType]

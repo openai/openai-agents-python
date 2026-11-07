@@ -548,6 +548,7 @@ impl EngineState {
         let manual_slots = std::mem::take(&mut options.manual_tool_slots);
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let before_complete = options.before_complete;
         let resume = options.sdk_resume_thread_id;
         let sdk_history = options.take_sdk_history(history.is_some(), python_specs.is_some())?;
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
@@ -599,6 +600,7 @@ impl EngineState {
                 &manual_slots,
                 transform_context,
                 before_compact,
+                before_complete,
             )?;
         }
         if let Some(items) = sdk_history {
@@ -794,6 +796,7 @@ impl EngineState {
             .context("local recovery requires native local storage")?;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let before_complete = options.before_complete;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let receipt = receipt.into();
         // Compaction holds the source context lease through this handoff.
@@ -819,6 +822,7 @@ impl EngineState {
             specs,
             transform_context,
             before_compact,
+            before_complete,
         )?;
         // Compare and publish under the same retained writer, including the
         // ordinary missing-result append. Preparation alone is not publication.
@@ -979,6 +983,7 @@ impl EngineState {
         let _guard = self.lifecycle.lock().await;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
+        let before_complete = options.before_complete;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
@@ -1096,6 +1101,7 @@ impl EngineState {
                 specs,
                 transform_context,
                 before_compact,
+                before_complete,
             )?;
         }
         let new = self
