@@ -124,6 +124,23 @@ def test_local_sandbox_examples_keep_default_runner_availability(tmp_path, relat
     assert f"- RUN  examples/classic/{relative_path}" in output
 
 
+def custom_client_readme_namespace():
+    readme = (
+        Path(__file__).resolve().parents[3]
+        / "examples/classic/mcp/streamablehttp_custom_client_example/README.md"
+    )
+    snippet = readme.read_text(encoding="utf-8").split("```python\n", 1)[1].split("```", 1)[0]
+    definitions = ast.parse(snippet, filename=str(readme))
+    definitions.body = [
+        node
+        for node in definitions.body
+        if isinstance(node, ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+    namespace = {}
+    exec(compile(definitions, str(readme), "exec"), namespace)
+    return namespace
+
+
 @pytest.mark.parametrize("stall_response", [False, True])
 @pytest.mark.parametrize("factory_source", ["module", "readme"])
 async def test_custom_mcp_http_client_applies_auth_headers_and_read_timeout(
@@ -136,22 +153,7 @@ async def test_custom_mcp_http_client_applies_auth_headers_and_read_timeout(
     )
 
     if factory_source == "readme":
-        readme = (
-            Path(__file__).resolve().parents[3]
-            / "examples/classic/mcp/streamablehttp_custom_client_example/README.md"
-        )
-        snippet = readme.read_text(encoding="utf-8").split("```python\n", 1)[1].split("```", 1)[0]
-        definitions = ast.parse(snippet, filename=str(readme))
-        definitions.body = [
-            node
-            for node in definitions.body
-            if isinstance(
-                node, ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef
-            )
-        ]
-        namespace = {}
-        exec(compile(definitions, str(readme), "exec"), namespace)
-        create_custom_http_client = namespace["create_custom_http_client"]
+        create_custom_http_client = custom_client_readme_namespace()["create_custom_http_client"]
 
     request_seen = asyncio.get_running_loop().create_future()
     release_response = asyncio.Event()
@@ -200,3 +202,50 @@ async def test_custom_mcp_http_client_applies_auth_headers_and_read_timeout(
             await asyncio.gather(*connections)
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.parametrize("body_source", ["module", "readme"])
+async def test_custom_mcp_examples_configure_real_wrapper_requests(monkeypatch, body_source):
+    from contextlib import nullcontext
+
+    from agents.classic.mcp import MCPServerStreamableHttp
+    from examples.classic.mcp.streamablehttp_custom_client_example import main as example
+    from tests.test_native_mcp_tools import Peer
+
+    namespace = example.__dict__ if body_source == "module" else custom_client_readme_namespace()
+    original_factory = namespace["create_custom_http_client"]
+    request_timeouts = []
+
+    def observe_factory(headers=None, timeout=None, auth=None):
+        client = original_factory(headers=headers, timeout=timeout, auth=auth)
+
+        async def observe_request(request):
+            request_timeouts.append(dict(request.extensions["timeout"]))
+
+        client.event_hooks.setdefault("request", []).append(observe_request)
+        return client
+
+    async def list_tools(server):
+        assert {tool.name for tool in await server.list_tools()} == {"search", "excluded"}
+
+    peer = Peer()
+    async with peer.serve() as url:
+        # Redirect only the endpoint; retain every example-supplied transport parameter.
+        def local_server(*args, params, **kwargs):
+            return MCPServerStreamableHttp(*args, params={**params, "url": url}, **kwargs)
+
+        monkeypatch.setitem(namespace, "MCPServerStreamableHttp", local_server)
+        monkeypatch.setitem(namespace, "create_custom_http_client", observe_factory)
+        if body_source == "module":
+            # Client configuration does not require a model or an exported trace.
+            monkeypatch.setitem(namespace, "run_with_custom_client", list_tools)
+            monkeypatch.setitem(namespace, "trace", lambda **_kwargs: nullcontext())
+        await asyncio.wait_for(namespace["main"](), timeout=10)
+
+    assert any(request.get("method") == "tools/list" for request in peer.requests)
+    credentials = base64.b64encode(b"demo-user:demo-password").decode("ascii")
+    assert peer.auth and all(header == f"Basic {credentials}" for header in peer.auth)
+    assert request_timeouts and all(
+        value == {"connect": 60.0, "read": 120.0, "write": 60.0, "pool": 60.0}
+        for value in request_timeouts
+    )

@@ -10,6 +10,8 @@ This example demonstrates how to use the new `httpx_client_factory` parameter in
 - **Custom Timeouts**: Set custom timeout values for requests
 - **Authentication**: Forward an optional `httpx2.Auth` object to the client
 
+Both examples send the fictional credentials `demo-user` / `demo-password` to demonstrate forwarding. The bundled localhost server ignores these credentials and does not enforce authentication.
+
 The factory preserves TLS certificate verification for HTTPS servers. If your server uses a private certificate authority, create an `ssl.SSLContext` with that authority's certificate and pass it as `verify` when constructing the client. The bundled server uses plain HTTP on localhost.
 
 ## Running the Example
@@ -54,6 +56,10 @@ async def main() -> None:
         name="Custom Client Server",
         params={
             "url": "http://localhost:8000/mcp",
+            "timeout": 60.0,
+            "sse_read_timeout": 120.0,
+            # Fictional demo credentials; the bundled localhost server ignores them.
+            "auth": httpx2.BasicAuth("demo-user", "demo-password"),
             "httpx_client_factory": create_custom_http_client,
         },
     ) as server:

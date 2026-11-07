@@ -611,3 +611,107 @@ async def test_storage_mount_main_reads_without_mutating_caller_data(
     assert source.read_text() == "caller data\n"
     assert (workspace / "observed.txt").read_text() == "read-only verified"
     assert not responses.replies
+
+
+@pytest.mark.parametrize("failure", ["", "start"], ids=["success", "startup-failure"])
+async def test_provider_storage_example_main_owns_gateway_and_api(
+    responses, tmp_path, monkeypatch, capsys, failure
+):
+    import functools
+    import sys
+    import types
+    from contextlib import asynccontextmanager
+
+    import docker
+
+    from agents import Agent, Environment
+    from agents.classic.sandbox.sandboxes import docker as implementation
+    from examples.codex.storage_mounts import provider as example
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_agent import provider
+    from tests.test_native_child_agents import trust
+    from tests.test_sandbox_environment import Client
+
+    # Resource creation is synthetic; the native gateway and session lifetime are real.
+    # This test does not establish S3 data access or Rclone mount enforcement.
+    events = []
+    client = Client(events, failure)
+    api = types.SimpleNamespace(close=lambda: events.append("api.close"))
+    monkeypatch.setattr(docker, "from_env", lambda: api)
+
+    def client_for_api(actual):
+        assert actual is api
+        return client
+
+    monkeypatch.setattr(implementation, "DockerSandboxClient", client_for_api)
+    gateway = types.ModuleType("synthetic_provider_gateway")
+
+    @asynccontextmanager
+    async def connect(session):
+        assert session is client.session
+        assert session.state.manifest.root == "/workspace"
+        async with ExecutorPeer(tmp_path / "executor").serve() as peer:
+            trust(peer, tmp_path, monkeypatch)
+            events.append("connect")
+            yield Environment(
+                url=peer.url, cwd=str(peer.root), headers={"Authorization": "Bearer " + peer.token}
+            )
+            await peer.wait_disconnected()
+            assert not any(
+                req.get("method") in {"process/start", "fs/writeFile"} for req in peer.requests
+            )
+            events.append("retired")
+
+    gateway.connect = connect
+    monkeypatch.setitem(sys.modules, gateway.__name__, gateway)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "provider.py",
+            "--connect",
+            gateway.__name__ + ":connect",
+            "--image",
+            "prepared-fixture-image",
+            "--bucket",
+            "example-bucket",
+        ],
+    )
+    for key, value in [
+        ("AWS_ACCESS_KEY_ID", "example-id-sentinel"),
+        ("AWS_SECRET_ACCESS_KEY", "example-secret-sentinel"),
+        ("AWS_SESSION_TOKEN", "example-token-sentinel"),
+    ]:
+        monkeypatch.setenv(key, value)
+    responses.respond(assistant_output("Synthetic listing: data.csv"))
+    async with provider(responses) as owner:
+        monkeypatch.setattr(example, "Agent", functools.partial(Agent, provider=owner))
+        if failure:
+            with pytest.raises(RuntimeError, match="start failed"):
+                await example.main()
+            assert responses.requests == []
+        else:
+            await example.main()
+            assert capsys.readouterr().out == "Synthetic listing: data.csv\n"
+            wire = json.dumps(responses.requests)
+            assert "/workspace/data" in wire and "read_only" in wire
+            for secret in (
+                "example-id-sentinel",
+                "example-secret-sentinel",
+                "example-token-sentinel",
+            ):
+                assert secret not in wire
+    assert client.manifest is not None
+    mount = client.manifest.entries["data"]
+    assert mount.bucket == "example-bucket" and mount.read_only is True
+    assert mount.access_key_id == "example-id-sentinel"
+    assert mount.secret_access_key == "example-secret-sentinel"
+    assert mount.session_token == "example-token-sentinel"
+    assert mount.mount_strategy.driver == "rclone"
+    assert isinstance(client.options, implementation.DockerSandboxClientOptions)
+    assert client.options.image == "prepared-fixture-image"
+    assert events == (
+        ["create", "start", "close", "delete", "api.close"]
+        if failure
+        else ["create", "start", "connect", "retired", "close", "delete", "api.close"]
+    )

@@ -88,6 +88,10 @@ async def main():
         name="Streamable HTTP with Custom Client",
         params={
             "url": STREAMABLE_HTTP_URL,
+            "timeout": 60.0,
+            "sse_read_timeout": 120.0,
+            # Fictional demo credentials; the bundled localhost server ignores them.
+            "auth": httpx2.BasicAuth("demo-user", "demo-password"),
             "httpx_client_factory": create_custom_http_client,
         },
     ) as server:

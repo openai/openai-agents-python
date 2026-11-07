@@ -156,7 +156,7 @@ host driver and an image that supports the native executor. Supply your trusted
 gateway connector as an importable async context manager:
 
 ```sh
-uv run python examples/codex/storage_mounts/provider.py \
+python examples/codex/storage_mounts/provider.py \
   --connect your_gateway:connect --image YOUR_PREPARED_IMAGE --bucket YOUR_BUCKET
 ```
 
