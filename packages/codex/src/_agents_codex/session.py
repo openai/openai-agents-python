@@ -176,6 +176,7 @@ from .recovery import (
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
+    OutputValidationIssue as OutputValidationIssue,
     _prepare_spec as _prepare_spec,
     _PreparedOutput as _PreparedOutput,
 )
@@ -6217,6 +6218,7 @@ class Session(Generic[ContextT, OutputT]):
             transform_context=self._opening_agent.transform_context,
             before_compact=self._opening_agent.before_compact,
         )
+        issues: tuple[OutputValidationIssue, ...] = ()
         for _ in range(state.output.max_retries):
             # The original native turn has already settled. Its owner can
             # still request a graceful stop before another correction starts.
@@ -6299,10 +6301,10 @@ class Session(Generic[ContextT, OutputT]):
             text = result.final_output
             try:
                 return self._validate_traced_output(state, text)
-            except OutputValidationError:
-                pass
+            except OutputValidationError as error:
+                issues = error.issues
         # Never expose validator inputs through an attached exception context.
-        raise OutputValidationError(text)
+        raise OutputValidationError(text, issues)
 
     def _finish_failed_observations(self) -> None:
         """Close a failed stream after every already-known owner has settled."""

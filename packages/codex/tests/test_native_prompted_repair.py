@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+import traceback
 from contextlib import AsyncExitStack
 from itertools import groupby
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agents import (
     Agent,
@@ -19,6 +20,7 @@ from agents import (
     NativeError,
     NativeProvider,
     OutputValidationError,
+    OutputValidationIssue,
     PromptedOutput,
     Session,
     SessionBusyError,
@@ -248,6 +250,9 @@ async def test_exhaustion_never_replays_and_repeated_waits_stay_settled(
             with pytest.raises(OutputValidationError) as failure:
                 await turn.get_result()
             assert json.loads(failure.value.raw_output) == {"label": str(failures - 1)}
+            assert failure.value.issues == (
+                OutputValidationIssue(code="string_too_short", path=("label",)),
+            )
             assert "label" not in str(failure.value)
             assert failure.value.__context__ is None
         assert effect.read_text() == "once\n"
@@ -267,6 +272,49 @@ async def test_exhaustion_never_replays_and_repeated_waits_stay_settled(
             actual = json.dumps(request)
             for private in ("private-task", "private-instructions", "private-effect-receipt"):
                 assert private not in actual
+
+
+@pytest.mark.parametrize("budget", [1, 2])
+async def test_exhaustion_preserves_final_diagnostics_without_validator_context(responses, budget):
+    validations = []
+
+    class BatchReport(BaseModel):
+        label: str
+        items: list[int]
+
+        @model_validator(mode="before")
+        @classmethod
+        def record_validation(cls, value):
+            validations.append(value)
+            return value
+
+    final = '{"label":"synthetic-private-label","items":["synthetic-private-value"]}'
+    responses.respond(assistant_output("{}"))
+    for _ in range(budget - 1):
+        responses.respond(assistant_output('{"label":1,"items":[]}'))
+    responses.respond(assistant_output(final))
+    agent = Agent(
+        instructions="Return a report.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        output_type=PromptedOutput(BatchReport, max_retries=budget),
+    )
+    async with timeout(30), agent.session() as session:
+        turn = await session.submit("Report")
+        for _ in range(2):
+            with pytest.raises(OutputValidationError) as failed:
+                await turn.get_result()
+            error = failed.value
+            assert error.issues == (OutputValidationIssue(code="int_parsing", path=("items", 0)),)
+            assert error.raw_output == final
+            assert error.__cause__ is None
+            assert error.__context__ is None
+            assert all(not isinstance(value, BaseException) for value in vars(error).values())
+            display = str(error) + repr(error) + "".join(traceback.format_exception(error))
+            assert "synthetic-private" not in display
+            assert "int_parsing" not in display
+            assert "items" not in display
+    assert len(responses.requests) == 1 + budget
+    assert len(validations) == 1 + budget
 
 
 async def test_repair_has_effective_updated_model_auth_accounting_and_real_history(
