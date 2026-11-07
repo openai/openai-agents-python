@@ -92,7 +92,7 @@ async def test_managed_child_inherits_hosted_image_grant_and_retains_large_previ
                 assert result.turn is child
                 assert result.final_output == "Child image complete."
 
-                events = [event async for event in child.events()]
+                events = [event async for event in child.events(include_execution_details=True)]
                 progress = [e for e in events if isinstance(e, HostedToolCallProgress)]
                 assert len(progress) == 1
                 preview = progress[0]

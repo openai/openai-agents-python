@@ -22,8 +22,10 @@ python -m examples.codex.hosted_tools.image_generation.edit
 ```
 
 The edit requests one partial image. The provider can return fewer previews.
-Partial-image events carry `partial_image_b64` and `partial_image_index`;
-they do not replace the final result. These scripts save only the completed
+With `include_execution_details=True`, partial-image events carry
+`partial_image_b64` and `partial_image_index`. Default event readers receive
+only the provider event type. Partial images do not replace the final result.
+These scripts save only the completed
 `image_generation_call.result`. The final value contains base64 image bytes,
 not a file path or a download URL.
 
