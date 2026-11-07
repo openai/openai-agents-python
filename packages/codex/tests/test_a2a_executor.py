@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Annotated
@@ -193,7 +194,11 @@ async def test_managed_environment_reopens_for_model_only_a2a_continuation(
                 yield Environment(
                     url=peer.url,
                     cwd=str(peer.root),
-                    writable_roots=[],
+                    **(
+                        {"write_policy": "legacy"}
+                        if sys.platform == "win32"
+                        else {"writable_roots": []}
+                    ),
                     headers={"Authorization": "Bearer " + peer.token},
                     tools=["exec_command"],
                 )

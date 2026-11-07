@@ -351,6 +351,7 @@ async def worker() -> None:
             context="original-context",
             environment=Environment(
                 url=request["executor_url"],
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=request["cwd"],
                 headers={"Authorization": "Bearer " + request["executor_token"]},
                 tools=["exec_command", "write_stdin", "apply_patch"],
@@ -407,6 +408,7 @@ async def worker() -> None:
             state=saved,
             environment=Environment(
                 url=request["executor_url"],
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=request["cwd"],
                 headers={"Authorization": "Bearer " + request["executor_token"]},
                 tools=["exec_command", "write_stdin", "apply_patch"],

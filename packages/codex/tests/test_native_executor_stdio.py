@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 from aiohttp import web
@@ -162,6 +163,7 @@ async def test_remote_stdio_uses_executor_cwd_and_variables_and_closes_process(
         else:
             environment = Environment(
                 url=peer.url,
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=str(peer.root),
                 headers={"Authorization": "Bearer " + peer.token},
                 **({"tools": []} if selection == "empty" else {}),

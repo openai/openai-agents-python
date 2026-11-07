@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
@@ -90,6 +91,8 @@ async def test_selected_remote_process_uses_wss_and_current_directory(
 
 
 def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
+    if sys.platform == "win32" and "writable_roots" not in kwargs:
+        kwargs.setdefault("write_policy", "legacy")
     return Environment(
         url=peer.url,
         cwd=str(peer.root),

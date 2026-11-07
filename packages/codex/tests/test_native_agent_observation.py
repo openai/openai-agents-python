@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import sys
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError, fields
@@ -540,6 +541,7 @@ async def test_late_root_completion_reports_evicted_owner(
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty"))
         selected = Environment(
             url=peer.url,
+            **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
             cwd=str(peer.root),
             tools=["exec_command"],
             headers={"Authorization": "Bearer " + peer.token},

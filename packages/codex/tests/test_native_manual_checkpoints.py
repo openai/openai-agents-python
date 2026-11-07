@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from pathlib import Path
@@ -531,6 +532,7 @@ async def test_unused_native_declarations_keep_manual_checkpoint_and_current_rep
             monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-ca"))
             environment = Environment(
                 url=executor.url,
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=str(executor.root),
                 headers={"Authorization": "Bearer " + executor.token},
                 tools=["exec_command", "write_stdin", "apply_patch"],

@@ -45,6 +45,7 @@ from tests.test_native_mcp_tools import declarations
 def remote(peer: ExecutorPeer, *roots: Path) -> Environment[object]:
     return Environment(
         url=peer.url,
+        **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
         cwd=str(peer.root),
         headers={"Authorization": "Bearer " + peer.token},
         capability_directories=[str(root) for root in roots],
