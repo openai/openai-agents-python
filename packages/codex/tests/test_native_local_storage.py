@@ -391,7 +391,9 @@ async def test_local_cannot_export_portable_state(responses, tmp_path):
     process = await _start(responses, tmp_path, "export")
     code, rows, err = await _collect(process)
     assert code == 0, (rows, err)
-    assert "local" in rows[1]["rejected"].lower(), rows
+    message = rows[1]["rejected"]
+    assert "cannot export portable SessionState" in message, rows
+    assert "Session.id" in message and "same storage backend" in message, rows
     assert not responses.requests
 
 
@@ -472,8 +474,8 @@ async def test_local_manual_export_rejects_before_sealing_or_spending_grants(res
         turn = await session.submit("Begin")
         request = await next_request(session.interactions(), lookup)
         status = await session.checkpoint_status(kind="manual_wait")
-        assert status.status == "not_ready" and "local" in status.reasons[0].lower()
-        with pytest.raises(ValueError, match="Native local storage"):
+        assert status.status == "not_ready" and "persistent storage" in status.reasons[0].lower()
+        with pytest.raises(ValueError, match="Persistent storage"):
             await session.suspend()
         await request.respond("known receipt")
         assert (await turn.get_result()).final_output == "still-live"

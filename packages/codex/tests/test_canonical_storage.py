@@ -50,6 +50,26 @@ def test_sqlite_canonical_store_retains_committed_history(tmp_path: Path) -> Non
     reopened.release("thread", next_token)
 
 
+def test_sqlite_obsolete_release_preserves_reacquired_writer(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "history.sqlite")
+    first = store.acquire("thread")
+    store.release("thread", first)
+    second = store.acquire("thread")
+    payload = json.dumps({"revision": 1, "write_id": "successor", "items": ["saved"]})
+    try:
+        store.commit("thread", second, 0, "successor", payload)
+        store.release("thread", first)
+        store.release("thread", first)
+        assert store.read("thread", second) == payload
+        store.flush("thread", second)
+        with pytest.raises(RuntimeError, match="stale or closed"):
+            store.read("thread", first)
+        with pytest.raises(RuntimeError, match="stale or closed"):
+            store.commit("thread", first, 1, "obsolete", "{}")
+    finally:
+        store.release("thread", second)
+
+
 @pytest.mark.parametrize("alias", ["same", "symlink"])
 def test_sqlite_excludes_competing_process_and_releases_writer(tmp_path: Path, alias: str) -> None:
     path = tmp_path / "history.sqlite"

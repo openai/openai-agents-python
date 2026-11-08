@@ -127,8 +127,9 @@ def implementation(candidate: Path, name: str) -> Path:
         ),
         (
             "_function_tools.py",
-            "Callable[[ToolContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]",
-            "Callable[[ToolContextT, FunctionTool[Any, Any, Any]], Any]",
+            "Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], "
+            "_CapturedFunction]",
+            "Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], Any]",
         ),
         ("_function_tools.py", "    | FunctionTool[Any, Any]\n", ""),
         (

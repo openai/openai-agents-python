@@ -47,6 +47,7 @@ pub(crate) struct CanonicalStore {
     inner: InMemoryThreadStore,
     writers: Mutex<HashMap<ThreadId, Writer>>,
     failed: AtomicBool,
+    cleanup_failed: AtomicBool,
 }
 
 impl CanonicalStore {
@@ -57,10 +58,14 @@ impl CanonicalStore {
             inner: InMemoryThreadStore::default(),
             writers: Mutex::new(HashMap::new()),
             failed: AtomicBool::new(false),
+            cleanup_failed: AtomicBool::new(false),
         }
     }
 
     fn acquire(&self, id: ThreadId) -> ThreadStoreResult<String> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(failure());
+        }
         Python::attach(|py| {
             self.backend
                 .bind(py)
@@ -356,7 +361,9 @@ impl CanonicalStore {
                 error = Some(err);
             }
         }
-        if self.failed.load(Ordering::Acquire) {
+        // Core shutdown may already have observed and consumed a store error.
+        // Report that cleanup failure once without making later close sticky.
+        if self.cleanup_failed.swap(false, Ordering::AcqRel) {
             return Err(failure());
         }
         error.map_or(Ok(()), Err)
@@ -536,26 +543,29 @@ impl ThreadStore for CanonicalStore {
         Box::pin(async move {
             let mut writers = self.writers.lock().await;
             let Some(writer) = writers.get_mut(&id) else {
-                return if self.failed.load(Ordering::Acquire) {
-                    Err(failure())
-                } else {
-                    Ok(())
-                };
+                return Ok(());
             };
-            let flushed = Python::attach(|py| {
-                self.backend
-                    .bind(py)
-                    .call_method1("flush", (id.to_string(), writer.token.as_str()))
-                    .map(|_| ())
-            });
+            // A failed writer is fenced. Retry only its unfinished release,
+            // without replaying flush or any operation that already failed.
+            let flushed = if writer.failed {
+                Ok(())
+            } else {
+                Python::attach(|py| {
+                    self.backend
+                        .bind(py)
+                        .call_method1("flush", (id.to_string(), writer.token.as_str()))
+                        .map(|_| ())
+                })
+            };
             let released = self.release(id, &writer.token);
-            let failed = writer.failed || flushed.is_err() || released.is_err();
+            let failed = flushed.is_err() || released.is_err();
             if released.is_ok() {
                 writers.remove(&id);
             } else {
                 writer.failed = true;
             }
             if failed {
+                self.cleanup_failed.store(true, Ordering::Release);
                 self.failed.store(true, Ordering::Release);
                 return Err(failure());
             }
@@ -569,6 +579,7 @@ impl ThreadStore for CanonicalStore {
             if let Some(writer) = writers.get_mut(&id) {
                 if self.release(id, &writer.token).is_err() {
                     writer.failed = true;
+                    self.cleanup_failed.store(true, Ordering::Release);
                     self.failed.store(true, Ordering::Release);
                     return Err(failure());
                 }

@@ -358,7 +358,7 @@ async def test_storage_cannot_export_even_when_manual_turn_would_otherwise_be_su
         assert report["native_output_manual_restore"].status == "unsupported"
         with pytest.raises(CapabilityError, match="Persistent Sessions cannot export SessionState"):
             session.capabilities.require("native_output_manual_restore")
-        with pytest.raises(ValueError, match="LocalStorage|local storage"):
+        with pytest.raises(ValueError, match="Persistent storage"):
             await session.suspend()
     await borrowed.aclose()
 

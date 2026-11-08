@@ -359,7 +359,8 @@ class SQLiteSessionStore:
         if sys.platform == "win32":
             raise RuntimeError("SQLiteSessionStore requires POSIX file locking")
         with self._mutex:
-            if session_id not in self._owners:
+            owner = self._owners.get(session_id)
+            if owner is None or owner[0] != token:
                 return
             self._check(session_id, token)
             _, descriptor, _ = self._owners.pop(session_id)

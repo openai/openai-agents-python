@@ -37,7 +37,7 @@ __all__ = ("MCPNamespace", "select_mcp_tools")
 
 ContextT = TypeVar("ContextT")
 _Arguments = RootModel[dict[str, Any]]
-_Binder = Callable[[ContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]
+_Binder = Callable[[ContextT, ContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]
 _Approval = Callable[[ToolContext[ContextT]], Allow | Deny | Awaitable[Allow | Deny]]
 _MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -273,8 +273,11 @@ def _capture_tool(
         raise RuntimeError("Selected MCP tool invocation failed")
 
     def bind(
-        session_context: ContextT, declaration: FunctionTool[Any, Any, Any]
+        session_context: ContextT,
+        policy_context: ContextT,
+        declaration: FunctionTool[Any, Any, Any],
     ) -> _CapturedFunction:
+        assert session_context is policy_context
         declaration._check_context(session_context)
         if declaration.input_type is not _Arguments or declaration.output_type is not ToolOutput:
             raise TypeError("Selected MCP tool input and output types are fixed")

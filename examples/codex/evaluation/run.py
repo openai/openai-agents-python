@@ -115,7 +115,7 @@ async def trial(config: Configuration, case: Case, mode: str, repeat: int) -> di
     }
 
 
-def compare(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+def validate_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> None:
     for field in ("cases_sha256", "catalog_sha256", "repeats", "mode", "scoring_version"):
         if current[field] != baseline[field]:
             raise ValueError(
@@ -125,6 +125,11 @@ def compare(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]
     prior = {(row["case_id"], row["repeat"]): row for row in baseline["trials"]}
     if len(prior) != len(baseline["trials"]) or set(prior) != set(keys):
         raise ValueError("Baseline trial identities differ")
+
+
+def compare(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    validate_baseline(current, baseline)
+    prior = {(row["case_id"], row["repeat"]): row for row in baseline["trials"]}
     regressions = [
         {"case_id": row["case_id"], "repeat": row["repeat"], "score": name}
         for row in current["trials"]
@@ -140,7 +145,12 @@ def compare(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]
 
 
 async def evaluate(
-    config: Configuration, cases: list[Case], mode: str, repeats: int
+    config: Configuration,
+    cases: list[Case],
+    mode: str,
+    repeats: int,
+    *,
+    baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if mode not in {"scripted", "live"} or repeats < 1:
         raise ValueError("Select scripted/live mode and at least one repeat")
@@ -150,13 +160,8 @@ async def evaluate(
         raise ValueError(
             "Live mode requires OPENAI_API_KEY; use scripted mode to check the harness"
         )
-    trials = [
-        await trial(config, case, mode, repeat)
-        for case in cases
-        for repeat in range(1, repeats + 1)
-    ]
     config_data = config.model_dump()
-    return {
+    artifact = {
         "scoring_version": SCORING_VERSION,
         "mode": mode,
         "evidence": "harness_only" if mode == "scripted" else "live_model_trials",
@@ -170,8 +175,20 @@ async def evaluate(
         "cases": [case.model_dump() for case in cases],
         "cases_sha256": fingerprint([case.model_dump() for case in cases]),
         "repeats": repeats,
-        "trials": trials,
+        "trials": [
+            {"case_id": case.id, "repeat": repeat}
+            for case in cases
+            for repeat in range(1, repeats + 1)
+        ],
     }
+    if baseline is not None:
+        validate_baseline(artifact, baseline)
+    artifact["trials"] = [
+        await trial(config, case, mode, repeat)
+        for case in cases
+        for repeat in range(1, repeats + 1)
+    ]
+    return artifact
 
 
 def main() -> None:
@@ -186,10 +203,13 @@ def main() -> None:
     args = parser.parse_args()
     config = Configuration.model_validate_json(args.config.read_text())
     cases = [Case.model_validate(case) for case in json.loads(args.cases.read_text())]
-    artifact = asyncio.run(evaluate(config, cases, args.mode, args.repeats))
-    if args.baseline:
-        artifact["comparison"] = compare(artifact, json.loads(args.baseline.read_text()))
+    baseline = json.loads(args.baseline.read_text()) if args.baseline else None
+    artifact = asyncio.run(evaluate(config, cases, args.mode, args.repeats, baseline=baseline))
+    # Keep completed trial evidence even if comparison later rejects score data.
     args.output.write_text(json.dumps(artifact, indent=2) + "\n")
+    if baseline is not None:
+        artifact["comparison"] = compare(artifact, baseline)
+        args.output.write_text(json.dumps(artifact, indent=2) + "\n")
     print(
         json.dumps(
             {

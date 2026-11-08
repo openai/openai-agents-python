@@ -82,3 +82,79 @@ async def test_live_mode_never_silently_falls_back_without_credentials(monkeypat
         await evaluate(config, [case], "live", 1)
     with pytest.raises(ValueError, match="unique"):
         await evaluate(config, [case, case], "scripted", 1)
+
+
+@pytest.mark.parametrize("invalid", ["repeats", "identities", "duplicate", "missing-file"])
+def test_cli_preflights_baseline_before_trials(monkeypatch, tmp_path, invalid):
+    from examples.codex.evaluation import run
+
+    cases = [
+        Case.model_validate(value) for value in json.loads((FOLDER / "cases.json").read_text())
+    ]
+    baseline = {
+        "cases_sha256": run.fingerprint([case.model_dump() for case in cases]),
+        "catalog_sha256": run.fingerprint(run.CATALOG),
+        "repeats": 1,
+        "mode": "scripted",
+        "scoring_version": run.SCORING_VERSION,
+        "trials": [{"case_id": case.id, "repeat": 1} for case in cases],
+    }
+    if invalid == "repeats":
+        baseline["repeats"] = 2
+    elif invalid == "identities":
+        baseline["trials"][0]["case_id"] = "unknown"
+    elif invalid == "duplicate":
+        baseline["trials"].append(baseline["trials"][0])
+    path = tmp_path / "baseline.json"
+    if invalid != "missing-file":
+        path.write_text(json.dumps(baseline))
+    output = tmp_path / "candidate.json"
+    monkeypatch.setattr(
+        "sys.argv", ["evaluation", "--baseline", str(path), "--output", str(output)]
+    )
+
+    async def unexpected_trial(*args):
+        pytest.fail("Baseline was rejected after candidate work started")
+
+    monkeypatch.setattr(run, "trial", unexpected_trial)
+    with pytest.raises(FileNotFoundError if invalid == "missing-file" else ValueError):
+        run.main()
+    assert not output.exists()
+
+
+def test_cli_retains_completed_candidate_when_comparison_fails(monkeypatch, tmp_path):
+    from examples.codex.evaluation import run
+
+    config = Configuration.model_validate_json((FOLDER / "config.json").read_text())
+    cases = [
+        Case.model_validate(value) for value in json.loads((FOLDER / "cases.json").read_text())
+    ]
+    baseline = {
+        "cases_sha256": run.fingerprint([case.model_dump() for case in cases]),
+        "catalog_sha256": run.fingerprint(run.CATALOG),
+        "repeats": 1,
+        "mode": "scripted",
+        "scoring_version": run.SCORING_VERSION,
+        "trials": [{"case_id": case.id, "repeat": 1, "scores": {}} for case in cases],
+    }
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps(baseline))
+    output = tmp_path / "candidate.json"
+    monkeypatch.setattr(
+        "sys.argv", ["evaluation", "--baseline", str(path), "--output", str(output)]
+    )
+    completed = []
+
+    async def completed_trial(config, case, mode, repeat):
+        completed.append(case.id)
+        return {"case_id": case.id, "repeat": repeat, "scores": {"completed": True}, "passed": True}
+
+    monkeypatch.setattr(run, "trial", completed_trial)
+    with pytest.raises(KeyError, match="completed"):
+        run.main()
+    artifact = json.loads(output.read_text())
+    assert completed == [case.id for case in cases]
+    assert artifact["config"] == config.model_dump()
+    assert len(artifact["trials"]) == len(cases)
+    assert all(row["passed"] for row in artifact["trials"])
+    assert "comparison" not in artifact

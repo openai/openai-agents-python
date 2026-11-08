@@ -390,7 +390,7 @@ class Capabilities:
             if s._storage is not None:
                 return FeatureSupport(
                     "limited",
-                    "LocalStorage supports prompted output with max_retries=0",
+                    "Persistent storage supports prompted output with max_retries=0",
                     "Use an ephemeral Session for nonzero retries",
                 )
             return FeatureSupport(
@@ -414,8 +414,8 @@ class Capabilities:
             if s._storage is not None:
                 return FeatureSupport(
                     "unsupported",
-                    "LocalStorage cannot export SessionState",
-                    "Use the existing local storage profile",
+                    "Persistent storage cannot export SessionState",
+                    "Retain Session.id and reopen with the same storage backend",
                 )
             if not s._catalog.manual_slots():
                 return FeatureSupport("unsupported", "No active manual function", "Current roster")
@@ -750,7 +750,7 @@ def _future() -> asyncio.Future[Any]:
 @dataclass
 class _Submission:
     output: _PreparedOutput
-    accepted: asyncio.Future[Any] = field(default_factory=_future)
+    accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
@@ -870,7 +870,7 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
             ToolRef
             | Tool[_SelectionContextT_contra]
             | Environment[_SelectionContextT_contra]
-            | NativeAgents
+            | NativeAgents[_SelectionContextT_contra]
         ]
         | None
         | StopTurn
@@ -879,7 +879,7 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
                 ToolRef
                 | Tool[_SelectionContextT_contra]
                 | Environment[_SelectionContextT_contra]
-                | NativeAgents
+                | NativeAgents[_SelectionContextT_contra]
             ]
             | None
             | StopTurn
@@ -950,7 +950,9 @@ class _OpeningOwner:
     async def acquire(self, operation: Any) -> Any:
         pending = asyncio.ensure_future(operation)
         try:
-            return await asyncio.shield(pending)
+            if not pending.done():
+                await asyncio.wait((pending,))
+            return pending.result()
         except BaseException:
             with suppress(BaseException):
                 await _join(pending)
@@ -1129,7 +1131,7 @@ def _fixed_tool_refs(
     tools: Sequence[Tool[Any]],
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
-    native_agents: NativeAgents | None,
+    native_agents: NativeAgents[Any] | None,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
     from .native_agents import _COLLABORATION_TOOLS
@@ -1168,16 +1170,18 @@ class _MCPResourceRef:
 
 def _split_tools(
     tools: Sequence[
-        ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents
+        ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]
     ],
     programmatic_tool_calling: bool = False,
     *,
     available: Sequence[Tool[ContextT]] | None = None,
     environment: Environment[Any] | None = None,
-    native_agents: NativeAgents | None = None,
+    native_agents: NativeAgents[Any] | None = None,
     ceiling: Sequence[Tool[ContextT]] | None = None,
     rebind: bool = False,
-) -> tuple[tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents | None]:
+) -> tuple[
+    tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
+]:
     opening = ceiling if ceiling is not None else tools if available is None else available
     admitted: dict[ToolRef, FunctionTool[Any, Any, Any] | HttpMCP[Any] | StdioMCP[Any]] = {}
     mcp_raw_names: dict[ToolRef, str] = {}
@@ -1375,7 +1379,7 @@ def _split_tools(
 
 
 def _check_buffered_native_agents(
-    native_agents: NativeAgents | None, provider: NativeProvider | None
+    native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
     if native_agents is not None and provider is not None and provider.response_mode == "buffered":
         raise CapabilityError("Buffered Responses do not support native child agents")
@@ -1388,7 +1392,7 @@ def _selected_tool_refs(
     *,
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
-    native_agents: NativeAgents | None,
+    native_agents: NativeAgents[Any] | None,
 ) -> tuple[ToolRef, ...]:
     """Normalize admitted declarations through the same identities as dispatch."""
     refs = {tool.ref for tool in python}
@@ -1534,7 +1538,7 @@ def _check_namespaced_tool_collisions(
     programmatic_tool_calling: bool,
     *,
     environment: Environment[Any] | None = None,
-    native_agents: NativeAgents | None = None,
+    native_agents: NativeAgents[Any] | None = None,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
     namespaced = {ref for ref in python_refs if ref.namespace is not None}
@@ -1724,10 +1728,10 @@ def _validate_storage_opening(
     if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
         raise TypeError("storage must be LocalStorage or CustomStorage")
     if state is not None and (storage is not None or resume is not None):
-        raise ValueError("Portable state cannot be combined with native local storage or resume")
+        raise ValueError("Portable state cannot be combined with persistent storage or resume")
     if resume is not None:
         if storage is None:
-            raise ValueError("resume requires the original LocalStorage profile")
+            raise ValueError("resume requires the original storage backend")
         if not isinstance(resume, str) or not resume:
             raise TypeError("resume must be a nonempty native Session ID")
     reconciliation = tuple(reconciled_calls)
@@ -2901,7 +2905,11 @@ class Session(Generic[ContextT, OutputT]):
         )
         self._default_tools: (
             tuple[
-                ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents,
+                ToolRef
+                | _MCPResourceRef
+                | Tool[ContextT]
+                | Environment[ContextT]
+                | NativeAgents[ContextT],
                 ...,
             ]
             | None
@@ -2909,7 +2917,7 @@ class Session(Generic[ContextT, OutputT]):
         self._executor: Environment[Any] | None = None
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
-        self._native_agents: NativeAgents | None = None
+        self._native_agents: NativeAgents[Any] | None = None
         self._interception: _NativeInterception | None = None
         self._context = context
         self._default_output = output
@@ -3370,7 +3378,7 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
@@ -3387,7 +3395,7 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: OutputSpec[_TurnT],
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
@@ -3419,7 +3427,7 @@ class Session(Generic[ContextT, OutputT]):
         input: UserInput,
         *,
         output_type: OutputSpec[Any] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
@@ -3590,7 +3598,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise StaleTurnError("Turn is no longer active")
             if state.stopping or state.failure.done() or state.restored_pending or state.repairing:
                 raise RuntimeError("Current turn cannot accept steering input")
-            handle = await asyncio.shield(state.accepted)
+            if not state.accepted.done():
+                await asyncio.wait((state.accepted,))
+            handle = state.accepted.result()
             if self._owned_submission(turn) is not state:
                 continue
             if state.stopping or state.failure.done() or state.restored_pending or state.repairing:
@@ -4354,7 +4364,9 @@ class Session(Generic[ContextT, OutputT]):
         handle = await self._start(None, self._default_output)
         try:
             assert handle._completion is not None
-            await asyncio.shield(handle._completion)
+            if not handle._completion.done():
+                await asyncio.wait((handle._completion,))
+            handle._completion.result()
         except asyncio.CancelledError as error:
             if self._active is not None and self._active.handle is handle:
                 await _close_after_error(error, lambda: self._cancel(handle))
@@ -4820,7 +4832,11 @@ class Session(Generic[ContextT, OutputT]):
         output: _PreparedOutput,
         *,
         tools: Sequence[
-            ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents
+            ToolRef
+            | _MCPResourceRef
+            | Tool[ContextT]
+            | Environment[ContextT]
+            | NativeAgents[ContextT]
         ]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
@@ -4850,7 +4866,7 @@ class Session(Generic[ContextT, OutputT]):
                 _check_output(output)
             if output.max_retries and self._storage is not None:
                 raise CapabilityError(
-                    "LocalStorage cannot retain prompted-output repair receipts; "
+                    "Persistent storage cannot retain prompted-output repair receipts; "
                     "use a separate ephemeral Session or max_retries=0"
                 )
             if prepare_request is not None:
@@ -4942,7 +4958,9 @@ class Session(Generic[ContextT, OutputT]):
                 self._promote()
                 raise startup_error
             try:
-                return await asyncio.shield(state.accepted)
+                if not state.accepted.done():
+                    await asyncio.wait((state.accepted,))
+                return state.accepted.result()
             except asyncio.CancelledError as error:
                 await _close_after_error(error, self._aclose)
                 raise
@@ -5045,7 +5063,7 @@ class Session(Generic[ContextT, OutputT]):
     async def update(
         self,
         *,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         model: None = None,
         model_settings: None = None,
@@ -5058,7 +5076,7 @@ class Session(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         instructions: str | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
     ) -> None:
         """Update one idle category: tools, model/settings, or instructions.
@@ -5440,7 +5458,9 @@ class Session(Generic[ContextT, OutputT]):
             # A cancelled passive waiter need not be present at settlement.
             result.add_done_callback(lambda task: None if task.cancelled() else task.exception())
             object.__setattr__(submission, "_result", result)
-        return await asyncio.shield(result)
+        if not result.done():
+            await asyncio.wait((result,))
+        return result.result()
 
     async def _wait_for_request_or_result(
         self, submission: Turn[_TurnT]
@@ -5613,7 +5633,9 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
         pending.add_done_callback(finished)
-        await asyncio.shield(accepted)
+        if not accepted.done():
+            await asyncio.wait((accepted,))
+        accepted.result()
         await _join(pending)
 
     async def _try_cancel_child(self, child: Subagent, turn: Turn[str]) -> bool:
@@ -8455,32 +8477,46 @@ class Session(Generic[ContextT, OutputT]):
             raw_arguments = message["arguments"]
             if isinstance(raw_arguments, str):
                 raw_arguments = json.loads(raw_arguments)
-            context = ToolContext(
-                entry.context,
-                state.handle,
-                message["callId"],
-                MappingProxyType(deepcopy(raw_arguments)),
-                _snapshot_function_arguments(kwargs),
-                trace_context=_native_trace_context(message.get("_sdk_trace")),
-                call=ToolCallInfo(
-                    tool=ref,
-                    session_id=self.id,
-                    turn_id=state.handle.turn_id,
-                    call_id=message["callId"] if code_origin is None else None,
-                    child_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
-                    child_incarnation=(
-                        state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
+            context = None
+            if (
+                entry.context_parameter is not None
+                or entry.before is not None
+                or entry.after is not None
+                or (
+                    entry.callback_timeout is not None
+                    and entry.timeout_behavior == "error_as_result"
+                    and entry.timeout_error_function is not None
+                )
+            ):
+                context = ToolContext(
+                    entry.context,
+                    state.handle,
+                    message["callId"],
+                    MappingProxyType(deepcopy(raw_arguments)),
+                    _snapshot_function_arguments(kwargs),
+                    trace_context=_native_trace_context(message.get("_sdk_trace")),
+                    call=ToolCallInfo(
+                        tool=ref,
+                        session_id=self.id,
+                        turn_id=state.handle.turn_id,
+                        call_id=message["callId"] if code_origin is None else None,
+                        child_id=state.handle.child_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        child_incarnation=(
+                            state.handle.instance_id if isinstance(state, _ChildCallbacks) else None
+                        ),
+                        role=None,
+                        model=message.get("_sdk_model"),
+                        route="direct" if code_origin is None else "code",
+                        cell_id=code_origin["cell_id"] if code_origin is not None else None,
+                        nested_call_id=(
+                            code_origin["nested_call_id"] if code_origin is not None else None
+                        ),
                     ),
-                    role=None,
-                    model=message.get("_sdk_model"),
-                    route="direct" if code_origin is None else "code",
-                    cell_id=code_origin["cell_id"] if code_origin is not None else None,
-                    nested_call_id=(
-                        code_origin["nested_call_id"] if code_origin is not None else None
-                    ),
-                ),
-            )
+                )
             if entry.before is not None:
+                assert context is not None
                 decision = await _call_callback(
                     entry.before, lambda: self._admit_tool(state, request), context
                 )
@@ -8512,6 +8548,7 @@ class Session(Generic[ContextT, OutputT]):
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:
+                assert context is not None
                 args = (context,)
             if not self._admit_tool(state, request):
                 return
@@ -8604,6 +8641,7 @@ class Session(Generic[ContextT, OutputT]):
                     # under the still-live parent's native admission.
                     text = str(timeout_error)
                     if entry.timeout_error_function is not None:
+                        assert context is not None
                         text = await _call_callback(
                             entry.timeout_error_function,
                             lambda: self._admit_tool(state, request),
@@ -8670,6 +8708,7 @@ class Session(Generic[ContextT, OutputT]):
                     del request, message, raw_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             if entry.after is not None and timeout_output is None:
+                assert context is not None
                 output = await _call_callback(
                     entry.after, lambda: self._admit_tool(state, request), context, output
                 )
@@ -8878,7 +8917,7 @@ class Session(Generic[ContextT, OutputT]):
         Open the result with Agent.session(state=...). The source remains
         usable; subsequent source turns are not part of the fork. The new
         Agent supplies current tools, credentials, context, and environment.
-        LocalStorage profiles, unsettled work and conversations with native
+        Persistent storage, unsettled work and conversations with native
         descendants cannot be copied this way. Use save_state() for an idle
         conversation snapshot that includes settled descendants.
         """
@@ -8964,8 +9003,8 @@ class Session(Generic[ContextT, OutputT]):
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         if self._storage is not None:
             raise CapabilityError(
-                "Native local storage cannot export portable SessionState; "
-                "retain Session.id and reopen from its LocalStorage profile"
+                "Persistent storage cannot export portable SessionState; "
+                "retain Session.id and reopen with the same storage backend"
             )
         if self._repair_receipts_incomplete:
             raise CapabilityError("Cannot export an incomplete prompted-output repair receipt")

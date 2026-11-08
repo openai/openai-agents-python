@@ -809,7 +809,8 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
-        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
+        | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -831,7 +832,8 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
-        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
+        | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -853,7 +855,7 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
@@ -876,7 +878,10 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
-            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+            ToolRef
+            | Tool[SessionContextT]
+            | Environment[SessionContextT]
+            | NativeAgents[SessionContextT]
         ]
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
@@ -1157,7 +1162,8 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
-        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
+        | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -1179,7 +1185,8 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
-        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
+        | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -1201,7 +1208,7 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
@@ -1224,7 +1231,10 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
-            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+            ToolRef
+            | Tool[SessionContextT]
+            | Environment[SessionContextT]
+            | NativeAgents[SessionContextT]
         ]
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
