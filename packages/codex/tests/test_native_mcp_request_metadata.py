@@ -291,3 +291,78 @@ async def test_metadata_restore_uses_fresh_declaration_without_replaying_effect(
         "old-metadata-5911",
         "current-metadata-5911",
     ]
+
+
+@pytest.mark.parametrize("failure", ["exception", "reserved"])
+async def test_metadata_failure_joins_entered_work_and_allows_an_explicit_successor(
+    responses: ResponsesFixture, tmp_path, failure
+):
+    import asyncio
+
+    from agents import function_tool
+    from tests.native_fixtures import function_call
+
+    log = tmp_path / "fatal-join"
+    entered, cancelled, release, cleaned = (asyncio.Event() for _ in range(4))
+    effects = []
+    secret = "private-rejected-metadata-9217"
+
+    @function_tool
+    async def held() -> str:
+        effects.append("entered once")
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+            return "unaccepted-held-output-9217"
+        finally:
+            cleaned.set()
+
+    async def metadata(ctx):
+        await entered.wait()
+        if failure == "exception":
+            raise LookupError(secret)
+        return {"codex/sandbox-state-meta": secret}
+
+    responses.respond(
+        function_call("held", {}, "held-call"),
+        mcp_call("search", "mcp__local", "rejected-meta-call"),
+    )
+    responses.respond(assistant_output("explicit successor"))
+    async with (
+        timeout(30),
+        Agent(
+            instructions="Use the declared tools.",
+            provider=provider(responses),
+            tools=[held, stdio(log, request_metadata=metadata)],
+        ).session() as session,
+    ):
+        turn = await session.submit("Run the controlled batch.")
+        waiter = asyncio.create_task(turn.get_result())
+        try:
+            await entered.wait()
+            await cancelled.wait()
+            assert not waiter.done()
+            assert not cleaned.is_set()
+            assert effects == ["entered once"]
+            assert len(responses.requests) == 1
+            assert not any(
+                row.get("message", {}).get("method") == "tools/call" for row in records(log)
+            )
+        finally:
+            release.set()
+            await asyncio.gather(waiter, return_exceptions=True)
+        with pytest.raises(NativeError) as caught:
+            await waiter
+        assert secret not in str(caught.value)
+        assert cleaned.is_set()
+        assert "unaccepted-held-output-9217" not in json.dumps(
+            [item async for item in session.items()]
+        )
+        assert (
+            await (await session.submit("Now continue explicitly.")).get_result()
+        ).final_output == ("explicit successor")
+        assert len(responses.requests) == 2
+        assert effects == ["entered once"]

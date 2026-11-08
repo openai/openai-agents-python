@@ -483,8 +483,8 @@ pub(crate) fn publish_mcp_result(
     }
 }
 
-// Claim only an unanswered deadline. An on-time accepted reply remains valid
-// even when its native receiver resumes after the timer becomes ready.
+// Claim an unanswered deadline or a rejected live reservation. The caller
+// validates the exact unresolved obligation before stopping its captured owner.
 pub(crate) fn expire_mcp_result(
     thread_store: &ExtensionData,
     turn_store: &ExtensionData,
