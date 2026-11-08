@@ -57,6 +57,31 @@ Configure the server's process environment as follows:
 
 Restore uses the application's current server declarations and Environment.
 
+## Reuse an application-owned MCP client
+
+If your application already owns a classic `MCPServer` connection, `agents.migration.mcp` can select its tools for a native Agent. This independent adapter remains available after SDKRunner removal. It requires the [classic dependencies](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md#install-from-the-matching-source) and a matching development build newer than alpha.6.
+
+The following async fragment assumes `client` is a connected `agents.classic.mcp.MCPServer` that provides `search`, and `app_context` is your application context:
+
+```python
+from agents import Agent
+from agents.migration.mcp import MCPNamespace, select_mcp_tools
+
+selected = await select_mcp_tools(
+    MCPNamespace(name="docs", server=client),
+    context=app_context,
+    tool_names=["search"],
+)
+agent = Agent(instructions="Search the documentation before answering.", tools=selected)
+result = await agent.run("Find the installation requirements.", context=app_context)
+```
+
+Pass the same context object during selection and execution. Your application opens and closes the client; native Session cleanup leaves it open. Keep its authentication scope stable while the selected tools are in use. A new selection refreshes supported client caches for future bindings.
+
+Selection retains the client's filters. A callable classic filter also needs `filter_context=(run_context, classic_agent)` with the matching classic run context and Agent. Omitted `tool_names` selects all tools that pass the filter; an empty list selects none. A requested tool that is missing or filtered out fails selection.
+
+Use `approval=` for a per-call native `ToolContext` policy that returns `Allow()` or `Deny(reason)`. The adapter rejects classic approval requirements, tool guardrails, metadata/result hooks, and custom error policies rather than silently dropping them. Keep workflows that need those contracts on classic until you port their policies. Direct `HttpMCP` and `StdioMCP` declarations above remain the starting point for new integrations.
+
 ## Configure MCP approval
 
 MCP selection and approval are separate. The default `approval_mode="native"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a [one-shot handler](approvals.md#handle-native-approvals-and-forms). A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.

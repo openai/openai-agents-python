@@ -1,6 +1,8 @@
-# Migrate existing workflows with the classic API
+# Stage a migration with the classic API
 
-The source on this branch includes `agents.classic`. It retains the v0 Python runner and its integrations. The root `agents` API continues to use native Codex. This addition is not available in the previously published preview wheels.
+Prefer [migrating directly from v0 to native v1](MIGRATION.md). Use classic only when you need to upgrade the package before a workflow can adopt native execution. You can also keep that workflow on v0; upgrading is optional.
+
+The source on this branch includes `agents.classic`. It retains the v0 Python runner and its integrations. The root `agents` API uses native Codex. Classic is not available in the previously published preview wheels.
 
 The classic source comes from v0 `main` commit `814de8b1cfdaf6c70212dca9ca23563dd0b789ac`, with v0.24.0 as the released compatibility baseline. It includes later fixes from that pinned commit. Its namespace changes do not move execution onto Codex.
 
@@ -36,7 +38,7 @@ The `classic-sqlalchemy` extra includes the classic runtime and `asyncpg` for Po
 
 `agents.classic.extensions.experimental.codex` runs the Codex CLI as a separate process. Install the CLI separately and make `codex` available on `PATH`, or select its executable with `CODEX_PATH` or `Codex(codex_path_override="/absolute/path/to/codex")`. This distribution does not bundle that CLI. The native SDK helper executables serve the root `agents` API and are not replacements for the CLI used by this integration.
 
-## Change imports before changing behavior
+## Stage the package and import change
 
 Change imports for each existing workflow together:
 
@@ -51,7 +53,9 @@ Change imports for each existing workflow together:
 | `from agents.extensions import ...` | `from agents.classic.extensions import ...` |
 | `from agents.testing import ...` | `from agents.classic.testing import ...` |
 
-The same prefix change applies to other public v0 submodules. Keep each workflow's Agent, tools, Runner, configuration, tracing, and session objects within classic. Libraries that import `agents` internally also need an update before they can work with classic objects. An import change in your application does not rewrite those libraries.
+Use the same prefix for other retained public v0 submodules. Keep each workflow's Agent, tools, Runner, configuration, tracing, and session objects within classic. Libraries that import `agents` internally also need an update before they can work with classic objects. An import change in your application does not rewrite those libraries.
+
+Check optional integrations against the matching source before upgrading. For example, this classic tree does not include v0.24.0's `agents.extensions.sandbox.runloop` integration. Keep a workflow that requires it on v0 until you can port that integration.
 
 Run `python examples/codex/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
 
@@ -64,12 +68,16 @@ from agents import Agent as NativeAgent
 from agents.classic import Agent as ClassicAgent, Runner
 ```
 
-Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions, or RunState objects into native APIs. A direct port to native declarations starts a fresh native conversation; the package does not automatically convert Classic persisted data to native checkpoints. To continue settled Classic Session history through the native loop, use the supported SDKRunner path below.
+Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions, or RunState objects into native APIs. Keep existing conversations in classic; start a fresh native conversation when porting a workflow. This package provides no automatic conversion to native checkpoints.
 
-For a supported single-agent workflow, the experimental [SDKRunner migration adapter](MIGRATION.md) can run an existing Classic Agent and function tools through the native loop. It has a narrower contract than the Classic Runner. Unsupported declarations fail before execution; Model responses are validated as they arrive. Keep workflows that require those features on Classic until you port them to the native API.
+When the workflow can adopt native execution, follow the [native migration guide](MIGRATION.md#port-the-execution-and-tool-declarations). Port its declarations, provider settings, policies, event consumers, and state handling together. Classic does not automatically translate these contracts into native behavior.
 
 Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings, and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
 
 Keep a copy of persisted data and the previous dependency lock while migrating. Returning to the prior v0 environment remains an application deployment decision; do not write native checkpoints into a classic store.
 
 The [Classic example collection](examples/classic/README.md) includes the established runtime examples, with explicit `agents.classic` imports.
+
+## Classic lifecycle
+
+Classic is retained in v1 and is not deprecated by this change. The intended sequence is deprecation in a later v1 minor release, followed by removal in v2. No specific release or date is set here. Use the staging period to complete the native port; see [the migration plan](MIGRATION.md#use-classic-only-when-staging-is-necessary).

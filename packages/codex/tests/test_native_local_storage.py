@@ -228,47 +228,6 @@ async def test_unknown_local_receipt_never_replays_or_starts_model(responses, tm
     assert len(responses.requests) == request_count
 
 
-async def test_sdk_runner_uses_native_local_recovery(responses, tmp_path, monkeypatch):
-    from agents.classic import Agent as ClassicAgent, function_tool as classic_function_tool
-    from agents.migration import SDKRunner
-    from tests.test_migration_runner import ScriptedModel, message
-
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    monkeypatch.setenv("no_proxy", "127.0.0.1")
-    responses.respond(function_call("record", {"key": "unknown-effect"}, "missing-receipt"))
-    code, rows, err = await _collect(await _start(responses, tmp_path, "unknown"))
-    assert code == 67 and rows and "opened" in rows[0], (rows, err)
-    resume = rows[0]["opened"]
-    storage = LocalStorage(tmp_path / "profile")
-
-    @classic_function_tool
-    async def record(key: str) -> str:
-        pytest.fail("recorded call ran again")
-
-    model = ScriptedModel([message("reconciled")])
-    agent = ClassicAgent("Record", model=model, tools=[record])
-    with pytest.raises(LocalRecoveryRequired, match="unknown tool outcome") as error:
-        await SDKRunner.run(agent, "continue", storage=storage, resume=resume)
-    assert model.requests == []
-    (missing,) = error.value.calls
-    assert (missing.thread_id, missing.call_id) == (resume, "missing-receipt")
-    assert (tmp_path / "effects").read_text() == "unknown:unknown-effect\n"
-
-    result = await SDKRunner.run(
-        agent,
-        "continue",
-        storage=storage,
-        resume=resume,
-        reconciled_calls=[missing.reconcile(outcome="applied", result="verified receipt")],
-    )
-    assert result.final_output == "reconciled"
-    assert result.native_result.turn.session_id == resume
-    [request] = model.requests
-    receipt = next(item for item in request["input"] if item["type"] == "function_call_output")
-    assert (receipt["call_id"], receipt["output"]) == ("missing-receipt", "verified receipt")
-    assert (tmp_path / "effects").read_text() == "unknown:unknown-effect\n"
-
-
 @pytest.mark.parametrize("custom_input", ["null", "42", "{}", "", '  "quoted"\n'])
 def test_unknown_custom_call_preserves_exact_input(custom_input: str) -> None:
     history = [
