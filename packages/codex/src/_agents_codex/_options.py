@@ -29,6 +29,7 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
 
     url: str
     local: bool
+    read_only: bool
     cwd: Required[str]
     headers: dict[str, str]
     connect_timeout: float | None

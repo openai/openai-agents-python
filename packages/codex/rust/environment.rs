@@ -122,6 +122,8 @@ pub struct EnvironmentOptions {
     connect_timeout: Option<f64>,
     capability_directories: Option<Vec<PathUri>>,
     writable_roots: Option<Vec<PathUri>>,
+    #[serde(default)]
+    read_only: bool,
     #[serde(default, deserialize_with = "deserialize_mounts")]
     mounts: Vec<LocalStorageMount>,
     #[serde(default)]
@@ -233,6 +235,7 @@ fn capability_roots(
 pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
     storage_mounts: bool,
+    read_only: bool,
 }
 
 impl StrictExecutorWrites {
@@ -526,6 +529,20 @@ impl EnvironmentOptions {
     }
 
     fn check_config(&self, config: &Config) -> Result<()> {
+        if self.read_only {
+            ensure!(
+                self.strict_writes(),
+                "read-only execution requires strict write policy"
+            );
+            ensure!(
+                self.writable_roots.as_ref().is_none_or(Vec::is_empty),
+                "read-only execution does not accept writable_roots"
+            );
+            ensure!(
+                !self.local || cfg!(any(target_os = "linux", target_os = "macos")),
+                "read-only local execution requires Linux or macOS"
+            );
+        }
         if self.strict_writes() {
             check_writable_config(config, /*local_session_proxy*/ false)?;
         }
@@ -616,6 +633,7 @@ impl EnvironmentOptions {
                 self.local,
                 config.codex_home.as_path(),
                 private_paths,
+                self.read_only,
             )
             .await?;
             let mut policy = profile.file_system_sandbox_policy();
@@ -886,6 +904,7 @@ async fn strict_write_profile(
     local: bool,
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
+    read_only: bool,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -897,7 +916,10 @@ async fn strict_write_profile(
     // Resolve on the executor, so controller path aliases cannot change the grant.
     let filesystem = environment.get_filesystem();
     let mut roots = Vec::with_capacity(additional.len() + 1);
-    let mut writes = StrictExecutorWrites::default();
+    let mut writes = StrictExecutorWrites {
+        read_only,
+        ..Default::default()
+    };
     for root in std::iter::once(cwd).chain(additional) {
         ensure!(
             root.infer_path_convention() == Some(PathConvention::Posix) && root.parent().is_some(),
@@ -959,15 +981,20 @@ async fn strict_write_profile(
         entry.access != FileSystemAccessMode::Read
             || !matches!(&entry.path, FileSystemPath::Path { path } if roots.contains(path))
     });
+    // Intersect the completed strict policy; never replace its read scope.
+    let profile = PermissionProfile::from_runtime_permissions(
+        &filesystem_policy,
+        NetworkSandboxPolicy::Restricted,
+    );
+    let profile = if read_only {
+        profile
+            .intersect_with_read_only()
+            .context("read-only execution requires managed filesystem enforcement")?
+    } else {
+        profile
+    };
     // The first resolved root is always the implicit working directory grant.
-    Ok((
-        PermissionProfile::from_runtime_permissions(
-            &filesystem_policy,
-            NetworkSandboxPolicy::Restricted,
-        ),
-        roots[0].clone(),
-        writes,
-    ))
+    Ok((profile, roots[0].clone(), writes))
 }
 
 fn check_local_private_write_roots(
@@ -1392,6 +1419,10 @@ pub(crate) async fn replace_writable_roots(
         !current.storage_mounts,
         "writable roots cannot change while storage mounts are active"
     );
+    ensure!(
+        !current.read_only || writable_roots.is_empty(),
+        "read-only execution does not accept writable_roots"
+    );
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
     check_writable_config(config, local)?;
@@ -1412,6 +1443,7 @@ pub(crate) async fn replace_writable_roots(
         local,
         config.codex_home.as_path(),
         private_paths,
+        current.read_only,
     )
     .await?;
     ensure!(

@@ -1909,6 +1909,7 @@ class Session(Generic[ContextT, OutputT]):
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
             payload.pop("codex_login_binding", None)
+            payload.pop("executor_read_only", None)
             if saved.format_version in (4, 5, 6, 7):
                 payload["format_version"] = saved.format_version - 2
             payload.pop("operation_tools", None)
@@ -2097,6 +2098,8 @@ class Session(Generic[ContextT, OutputT]):
                     native_agents=native_agents,
                 )
             if state is not None:
+                if saved.executor_read_only != (executor is not None and executor.read_only):
+                    raise ValueError("Checkpoint and Environment must agree on read-only execution")
                 current_policy = executor._network_policy_digest() if executor is not None else None
                 if saved.network_policy_digest != current_policy:
                     raise ValueError(
@@ -2110,6 +2113,8 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )
+            if native_agents is not None and executor is not None and executor.read_only:
+                raise ValueError("Read-only execution does not support NativeAgents")
             if native_agents is not None and (
                 executor is None
                 or not {"exec_command", "write_stdin", "apply_patch"}.issubset(executor.tools)
@@ -3540,6 +3545,8 @@ class Session(Generic[ContextT, OutputT]):
                 if self._native_agents is not None:
                     raise CapabilityError("Writable roots cannot change with NativeAgents")
                 roots = _writable_roots(writable_roots)
+                if self._executor.read_only and roots:
+                    raise CapabilityError("Read-only execution does not accept writable roots")
             if output.mode == "prompted":
                 parts.append(
                     {
@@ -9283,6 +9290,8 @@ class Session(Generic[ContextT, OutputT]):
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
             payload["executor_policy_digest"] = executor_policy_digest
+            if self._executor is not None and self._executor.read_only:
+                payload["executor_read_only"] = True
             _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)

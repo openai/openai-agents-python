@@ -48,9 +48,35 @@ SDK version `0.24.0-alpha.7` or later supports `Environment.local(mounts=[...])`
 
 Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlapping mounts, overlaps with `cwd`, write roots, or SDK storage, and files hard-linked to writable directories. Keep the mount paths stable while the Session runs. Active mounts prohibit per-turn `writable_roots` replacement, including an empty list. Restore requires the same applied executor policy, including the mounted directories. Mounts do not copy files into a checkpoint or limit the application's Python callbacks.
 
+### Inspect a read-only workspace
+
+This option is available in current source builds and is intended for a forthcoming preview. The older `0.24.0-alpha.7` preview referenced above does not include it.
+
+Set `read_only=True` to let native commands read the workspace while denying changes to its files. Select command tools explicitly; the default tool list is empty. Use an existing absolute workspace outside the SDK installation, and configure the model provider as described above.
+
+```python
+from pathlib import Path
+
+from agents import Agent, Environment
+
+environment = Environment.local(
+    cwd=Path("/jobs/worker/work"),
+    tools=("exec_command",),
+    read_only=True,
+)
+agent = Agent(model="gpt-5.5", instructions="Summarize the assigned workspace.")
+async with agent.session(environment=environment) as session:
+    turn = await session.submit("Read README.md and summarize it.")
+    print((await turn.get_result()).final_output)
+```
+
+This option keeps the selected read and network scope. It rejects `apply_patch`, `NativeAgents`, `write_policy="legacy"`, and nonempty `writable_roots`. An empty root list remains valid and cannot remove the read-only ceiling. Restore requires the same read-only mode and applied executor policy. Use a separate ordinary strict Environment for work that needs to edit files.
+
+Local execution requires the supported Linux or macOS sandbox described above. A compatible strict WSS Environment accepts the same option, with enforcement owned by the trusted executor. Python callbacks and MCP services retain their own permissions. The SDK still manages its private runtime state.
+
 ### Replace write roots between turns
 
-The executor limits writes to `cwd` and any additional `writable_roots`, while preserving native metadata protections. Linux commands can also write to a private temporary filesystem whose contents disappear when the sandbox exits. Paths resolve on the executor. If a linked Git worktree must update Git state, explicitly grant its required Git directories after checking which paths those grants expose.
+With the default `read_only=False`, the executor limits writes to `cwd` and any additional `writable_roots`, while preserving native metadata protections. Linux commands can also write to a private temporary filesystem whose contents disappear when the sandbox exits. Paths resolve on the executor. If a linked Git worktree must update Git state, explicitly grant its required Git directories after checking which paths those grants expose.
 
 In `0.24.0-alpha.7` or later, new local and remote Environments default to `write_policy="strict"`. Set the initial `writable_roots` to opt into extra directories:
 
