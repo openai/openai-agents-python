@@ -1506,13 +1506,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
+        extraction_root = self._files.workspace_root(self.state.manifest)
 
         def _extract_workspace() -> None:
-            root.mkdir(parents=True, exist_ok=True)
             with tarfile.open(fileobj=data, mode="r:*") as tar:
                 safe_extract_tarfile(
                     tar,
-                    root=root,
+                    root=extraction_root,
                     allow_external_symlink_targets=False,
                 )
 

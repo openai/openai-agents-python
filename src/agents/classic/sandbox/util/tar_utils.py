@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import errno
 import io
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import cast
 
@@ -354,27 +357,29 @@ def _restored_regular_file_mode(mode: int) -> int:
     return restored | 0o600
 
 
-def _ensure_no_symlink_parents(*, root: Path, dest: Path, check_leaf: bool = True) -> None:
-    """
-    Ensure that no existing parent directory in `dest` is a symlink.
-
-    This helps prevent writing outside `root` via pre-existing symlink components.
-    """
-
-    root_resolved = root.resolve()
-    path_to_resolve = dest if check_leaf else dest.parent
-    dest_resolved = path_to_resolve.resolve()
-    if not (dest_resolved == root_resolved or dest_resolved.is_relative_to(root_resolved)):
-        raise UnsafeTarMemberError(
-            member=dest.as_posix(), reason="path escapes root after resolution"
-        )
-
-    rel = dest.relative_to(root)
-    cur = root
-    for part in rel.parts[:-1]:
-        cur = cur / part
-        if cur.exists() and cur.is_symlink():
-            raise UnsafeTarMemberError(member=str(rel.as_posix()), reason="symlink in parent path")
+def _open_directory_without_symlinks(
+    path: Path, *, flags: int, create_parents: bool = False
+) -> int:
+    """Pin an absolute directory without following a replaceable ancestor."""
+    fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            try:
+                child_fd = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create_parents:
+                    raise
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def validate_tarfile(
@@ -507,12 +512,11 @@ def safe_extract_tarfile(
     - non-regular-file and non-directory members (devices, fifos, etc.)
     - archive members nested underneath archive symlink members
 
-    It also ensures extraction doesn't traverse through existing symlink parents
+    It pins the workspace root and each member parent without following symlinks,
     and creates archive symlinks only after directories and regular files.
     """
 
-    root.mkdir(parents=True, exist_ok=True)
-    root_resolved = root.resolve()
+    root = Path(os.path.abspath(root))
 
     members = tar.getmembers()
     validate_tarfile(
@@ -520,75 +524,109 @@ def safe_extract_tarfile(
         allow_external_symlink_targets=allow_external_symlink_targets,
     )
 
-    def _prepare_replaceable_leaf(*, dest: Path, rel_path: Path, name: str) -> None:
-        _ensure_no_symlink_parents(root=root_resolved, dest=dest, check_leaf=False)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.is_dir() and not dest.is_symlink():
+    @contextmanager
+    def _parent(rel_path: Path) -> Iterator[tuple[int, str]]:
+        fd = os.dup(root_fd)
+        try:
+            for part in rel_path.parts[:-1]:
+                try:
+                    child_fd = os.open(part, directory_flags, dir_fd=fd)
+                except FileNotFoundError:
+                    try:
+                        os.mkdir(part, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    child_fd = os.open(part, directory_flags, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise UnsafeTarMemberError(
+                            member=rel_path.as_posix(),
+                            reason="symlink or non-directory in parent path",
+                        ) from exc
+                    raise
+                os.close(fd)
+                fd = child_fd
+            yield fd, rel_path.name
+        finally:
+            os.close(fd)
+
+    def _prepare_replaceable_leaf(parent_fd: int, leaf: str, *, rel_path: Path) -> None:
+        try:
+            mode = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
             raise UnsafeTarMemberError(
-                member=name,
+                member=rel_path.as_posix(),
                 reason=f"destination directory already exists: {rel_path.as_posix()}",
             )
         try:
-            dest.unlink()
+            os.unlink(leaf, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
 
-    def _prepare_directory_leaf(*, dest: Path) -> None:
-        _ensure_no_symlink_parents(root=root_resolved, dest=dest, check_leaf=False)
-        if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
-            dest.unlink()
-
-    def _write_file(member: tarfile.TarInfo, *, dest: Path, rel_path: Path, name: str) -> None:
+    def _write_file(member: tarfile.TarInfo, *, rel_path: Path) -> None:
         fileobj = tar.extractfile(member)
         if fileobj is None:
-            raise UnsafeTarMemberError(member=name, reason="missing file payload")
+            raise UnsafeTarMemberError(member=member.name, reason="missing file payload")
 
-        _prepare_replaceable_leaf(dest=dest, rel_path=rel_path, name=name)
-
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(dest, flags, 0o600)
-        try:
+        with fileobj, _parent(rel_path) as (parent_fd, leaf):
+            _prepare_replaceable_leaf(parent_fd, leaf, rel_path=rel_path)
+            fd = os.open(
+                leaf,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
             with os.fdopen(fd, "wb") as out:
                 shutil.copyfileobj(fileobj, out)
                 out.flush()
                 if hasattr(os, "fchmod"):
-                    # Restore the archived permissions so a workspace snapshot round-trip keeps
-                    # executable scripts executable. This runs on the still-open descriptor,
-                    # after the payload is written and flushed: the file keeps its private
-                    # creation mode while it holds partial data, and a failed copy leaves the
-                    # partial file at 0o600 instead of its final readable/executable mode.
+                    # Keep partial data private before restoring safe archived permissions.
                     os.fchmod(out.fileno(), _restored_regular_file_mode(member.mode))
-        finally:
-            try:
-                fileobj.close()
-            except Exception:
-                pass
 
-    for member in members:
-        name = member.name
-        rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
-        if rel_path is None:
-            continue
-        if member.issym():
-            continue
+    directory_flags = (
+        getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY)) | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    root_fd = _open_directory_without_symlinks(root, flags=directory_flags, create_parents=True)
 
-        dest = root_resolved / rel_path
+    try:
+        for member in members:
+            rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
+            if rel_path is None or member.issym():
+                continue
 
-        if member.isdir():
-            _prepare_directory_leaf(dest=dest)
-            dest.mkdir(parents=True, exist_ok=True)
-            continue
+            if member.isdir():
+                with _parent(rel_path) as (parent_fd, leaf):
+                    try:
+                        mode = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if not stat.S_ISDIR(mode):
+                            os.unlink(leaf, dir_fd=parent_fd)
+                    try:
+                        os.mkdir(leaf, dir_fd=parent_fd)
+                    except FileExistsError:
+                        if not stat.S_ISDIR(
+                            os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False).st_mode
+                        ):
+                            raise UnsafeTarMemberError(
+                                member=member.name,
+                                reason="destination directory is not a directory",
+                            ) from None
+                continue
 
-        _write_file(member, dest=dest, rel_path=rel_path, name=name)
+            _write_file(member, rel_path=rel_path)
 
-    for member in members:
-        if not member.issym():
-            continue
-        rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
-        if rel_path is None:
-            continue
-        dest = root_resolved / rel_path
-        _prepare_replaceable_leaf(dest=dest, rel_path=rel_path, name=member.name)
-        os.symlink(member.linkname, dest)
+        for member in members:
+            if not member.issym():
+                continue
+            rel_path = safe_tar_member_rel_path(member, allow_symlinks=True)
+            if rel_path is None:
+                continue
+            with _parent(rel_path) as (parent_fd, leaf):
+                _prepare_replaceable_leaf(parent_fd, leaf, rel_path=rel_path)
+                os.symlink(member.linkname, leaf, dir_fd=parent_fd)
+    finally:
+        os.close(root_fd)
