@@ -6,6 +6,7 @@ import io
 import os
 import shutil
 import stat
+import sys
 import tarfile
 import tempfile
 from collections.abc import Iterable, Iterator
@@ -515,6 +516,9 @@ def safe_extract_tarfile(
     It pins the workspace root and each member parent without following symlinks,
     and creates archive symlinks only after directories and regular files.
     """
+
+    if sys.platform == "win32":
+        raise NotImplementedError("Safe tar extraction requires Unix directory descriptors.")
 
     root = Path(os.path.abspath(root))
 
