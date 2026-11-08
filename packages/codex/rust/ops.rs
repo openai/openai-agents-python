@@ -114,6 +114,8 @@ pub const OPERATIONS: &[&str] = &[
     "call_mcp_tool",
     "read_mcp_resource",
     "list_mcp_resources",
+    "list_mcp_prompts",
+    "get_mcp_prompt",
     "list_mcp_resource_templates",
     "read_mcp_resource_for_call",
     "environment_ready",
@@ -875,6 +877,20 @@ params!(McpListParams {
     server: String,
     params: Option<rmcp::model::PaginatedRequestParams>
 });
+params!(McpPromptParams {
+    name: String,
+    arguments: Option<HashMap<String, String>>
+});
+params!(McpPromptListOptions {});
+params!(McpPromptListParams {
+    server: String,
+    #[serde(rename = "params")]
+    _params: McpPromptListOptions
+});
+params!(McpGetPromptParams {
+    server: String,
+    params: McpPromptParams
+});
 params!(McpCallReadParams {
     call_id: String,
     uri: String
@@ -1191,6 +1207,20 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     .call_mcp_tool(&p.server, &p.tool, p.arguments, p.meta)
                     .await?,
             )?);
+        }
+        "list_mcp_prompts" => {
+            let p: McpPromptListParams = decode(params)?;
+            return thread
+                .list_mcp_prompts(&p.server)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
+        }
+        "get_mcp_prompt" => {
+            let p: McpGetPromptParams = decode(params)?;
+            return thread
+                .get_mcp_prompt(&p.server, &p.params.name, p.params.arguments)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}"));
         }
         "list_mcp_resources" => {
             let p: McpListParams = decode(params)?;

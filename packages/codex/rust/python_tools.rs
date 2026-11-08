@@ -5615,6 +5615,8 @@ pub fn check_raw_operation(operation: &str) -> Result<()> {
                 | "list_background_terminals"
                 | "read_mcp_resource"
                 | "list_mcp_resources"
+                | "list_mcp_prompts"
+                | "get_mcp_prompt"
                 | "list_mcp_resource_templates"
                 | "read_mcp_resource_for_call"
                 | "environment_ready"

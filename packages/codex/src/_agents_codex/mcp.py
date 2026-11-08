@@ -114,6 +114,92 @@ class MCPReadResourceResult(TypedDict):
     _meta: NotRequired[dict[str, Any]]
 
 
+class MCPPromptArgument(TypedDict):
+    """An argument advertised by an MCP prompt."""
+
+    name: str
+    title: NotRequired[str]
+    description: NotRequired[str]
+    required: NotRequired[bool]
+
+
+class MCPPrompt(TypedDict):
+    """Prompt metadata returned in a complete native catalog."""
+
+    name: str
+    title: NotRequired[str]
+    description: NotRequired[str]
+    arguments: NotRequired[list[MCPPromptArgument]]
+    icons: NotRequired[list[dict[str, Any]]]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class _MCPPromptContentMetadata(TypedDict):
+    annotations: NotRequired[dict[str, Any]]
+    _meta: NotRequired[dict[str, Any]]
+
+
+class MCPPromptTextContent(_MCPPromptContentMetadata):
+    """Text returned as caller data."""
+
+    type: Literal["text"]
+    text: str
+
+
+class MCPPromptImageContent(_MCPPromptContentMetadata):
+    """An image whose data remains base64 encoded."""
+
+    type: Literal["image"]
+    data: str
+    mimeType: str
+
+
+class MCPPromptAudioContent(_MCPPromptContentMetadata):
+    """Audio whose data remains base64 encoded."""
+
+    type: Literal["audio"]
+    data: str
+    mimeType: str
+
+
+class MCPPromptResourceContent(_MCPPromptContentMetadata):
+    """Embedded text or blob resource contents, including nested metadata."""
+
+    type: Literal["resource"]
+    resource: MCPTextResourceContents | MCPBlobResourceContents
+
+
+class MCPPromptResourceLink(MCPResource):
+    """Resource metadata tagged as a prompt content link."""
+
+    type: Literal["resource_link"]
+
+
+MCPPromptContent = (
+    MCPPromptTextContent
+    | MCPPromptImageContent
+    | MCPPromptAudioContent
+    | MCPPromptResourceContent
+    | MCPPromptResourceLink
+)
+
+
+class MCPPromptMessage(TypedDict):
+    """A prompt message that the application chooses how to use."""
+
+    role: Literal["user", "assistant"]
+    content: MCPPromptContent
+
+
+class MCPGetPromptResult(TypedDict):
+    """Rendered prompt messages without automatic model-context insertion."""
+
+    messages: list[MCPPromptMessage]
+    description: NotRequired[str]
+    _meta: NotRequired[dict[str, Any]]
+    resultType: NotRequired[str]
+
+
 @dataclass(frozen=True)
 class MCPResultContext(Generic[ContextT_co]):
     """Application context and the actual native MCP call identity.
@@ -302,8 +388,8 @@ class StdioMCP(_MCP[ContextT_contra]):
     directory on the host or the Session environment's working directory remotely.
 
     Session owns the connection and process lifetime. Both timeouts are seconds.
-    Use ``tools=[]`` for a resource-only server. Call the Session's resource
-    methods while it is idle; resources are not automatically sent to the model.
+    Use ``tools=[]`` for a resource-only or prompt-only server. Call the Session's
+    resource or prompt methods while idle; returned data is not sent to the model.
     ``approval_mode="native"`` keeps native approval rules; "preapproved" allows the
     selected names subject to native constraints. Neither mode sandboxes the
     server process or limits effects the server does not report.
@@ -387,7 +473,7 @@ class HttpMCP(_MCP[ContextT_contra]):
     to read credentials from the environment. Session owns the connection. Both timeouts
     are seconds. ``approval_mode="native"`` keeps native approval rules;
     "preapproved" allows selected names subject to native constraints.
-    Use ``tools=[]`` for a resource-only server. The idle Session's resource
+    Use ``tools=[]`` for a resource-only or prompt-only server. The idle Session's resource
     methods return data without adding it to model context.
 
     Optional ``approval(context, call)`` receives MCPCallContext and NativeToolCall

@@ -1,0 +1,254 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager/resources.rs b/codex-rs/codex-mcp/src/connection_manager/resources.rs
+index fbb5889d058037dfe1dc9c537e29947dc7536ab2..6fd8d7f2de270fccff486ff4757630f3acbc5571 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/resources.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/resources.rs
+@@ -21,6 +21,30 @@ use crate::resource_client::McpResourceServerCacheKey;
+ use crate::rmcp_client::ManagedClient;
+ 
+ impl McpConnectionSet {
++    pub async fn list_prompts(&self, server: &str) -> Result<Vec<rmcp::model::Prompt>> {
++        let (managed, timeout) = self.client_by_name(server).await?;
++        let client = &managed.client;
++        collect_paginated("prompts/list", timeout, |params| async move {
++            let response = client.list_prompts(params, timeout).await?;
++            Ok((response.prompts, response.next_cursor))
++        })
++        .await
++        .with_context(|| format!("prompts/list failed for `{server}`"))
++    }
++
++    pub async fn get_prompt(
++        &self,
++        server: &str,
++        params: rmcp::model::GetPromptRequestParams,
++    ) -> Result<rmcp::model::GetPromptResult> {
++        let (managed, timeout) = self.client_by_name(server).await?;
++        managed
++            .client
++            .get_prompt(params, timeout)
++            .await
++            .with_context(|| format!("prompts/get failed for `{server}`"))
++    }
++
+     pub(crate) fn resource_cache_key(
+         &self,
+         server: &str,
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index aab8d78af148dbf066dd738b05c6c82c69eea709..5d9528648238f7dc86a17ce3bb0a648f9778e08a 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -841,6 +841,21 @@ impl McpRuntime {
+             .await
+     }
+ 
++    pub async fn latest_list_prompts(
++        &self,
++        server: &str,
++    ) -> anyhow::Result<Vec<rmcp::model::Prompt>> {
++        self.latest_connections().list_prompts(server).await
++    }
++
++    pub async fn latest_get_prompt(
++        &self,
++        server: &str,
++        params: rmcp::model::GetPromptRequestParams,
++    ) -> anyhow::Result<rmcp::model::GetPromptResult> {
++        self.latest_connections().get_prompt(server, params).await
++    }
++
+     pub async fn latest_list_resources(
+         &self,
+         server: &str,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 06f66b9388ad1bd888aab82938ddde84bb50cfae..ad7f9481b2723c6693644fb11382527712b3d413 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1188,6 +1188,42 @@ impl CodexThread {
+         self.session.inspect_selected_capability_roots()
+     }
+ 
++    /// Returns the complete prompt catalog as caller-owned data.
++    pub async fn list_mcp_prompts(&self, server: &str) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_list_prompts(server)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
++    /// Gets prompt messages without inserting them into the conversation.
++    pub async fn get_mcp_prompt(
++        &self,
++        server: &str,
++        name: &str,
++        arguments: Option<std::collections::HashMap<String, String>>,
++    ) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let mut params = rmcp::model::GetPromptRequestParams::new(name);
++        params.arguments = arguments.map(|values| {
++            values
++                .into_iter()
++                .map(|(key, value)| (key, serde_json::Value::String(value)))
++                .collect()
++        });
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_get_prompt(server, params)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
+     /// Returns one resource page from this thread's current MCP connection.
+     pub async fn list_mcp_resources(
+         &self,
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index e1fd3e65398ddd452fdaf74bacf9336ac4712ad1..b4aa24d0f71a3886cc839a7daa72089b32ffd8e2 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -40,7 +40,10 @@ use rmcp::model::ElicitRequestParams;
+ use rmcp::model::ElicitResult;
+ use rmcp::model::ElicitationAction;
+ use rmcp::model::Extensions;
++use rmcp::model::GetPromptRequestParams;
++use rmcp::model::GetPromptResult;
+ use rmcp::model::InitializeRequestParams;
++use rmcp::model::ListPromptsResult;
+ use rmcp::model::ListResourceTemplatesResult;
+ use rmcp::model::ListResourcesResult;
+ use rmcp::model::ListToolsResult;
+@@ -1096,6 +1099,69 @@ impl RmcpClient {
+             .map(str::to_string)
+     }
+ 
++    pub async fn list_prompts(
++        &self,
++        params: Option<PaginatedRequestParams>,
++        timeout: Option<Duration>,
++    ) -> Result<ListPromptsResult> {
++        let params = crate::trace_context::traced_pagination(params);
++        self.refresh_oauth_if_needed().await?;
++        let result = self
++            .run_service_operation("prompts/list", timeout, move |service| {
++                let params = params.clone();
++                async move {
++                    let info = service.peer().peer_info().ok_or_else(|| {
++                        ServiceError::McpError(rmcp::model::ErrorData::invalid_request(
++                            "prompts/list requires an initialized MCP client",
++                            None,
++                        ))
++                    })?;
++                    if info.capabilities.prompts.is_none() {
++                        return Ok(ListPromptsResult::with_all_items(Vec::new()));
++                    }
++                    service.peer().list_prompts(params).await
++                }
++                .boxed()
++            })
++            .await?;
++        self.persist_oauth_tokens().await;
++        Ok(result)
++    }
++
++    pub async fn get_prompt(
++        &self,
++        mut params: GetPromptRequestParams,
++        timeout: Option<Duration>,
++    ) -> Result<GetPromptResult> {
++        params.meta = crate::trace_context::with_current_trace(params.meta);
++        self.refresh_oauth_if_needed().await?;
++        let result = self
++            .run_service_operation("prompts/get", timeout, move |service| {
++                let params = params.clone();
++                async move {
++                    let info = service.peer().peer_info().ok_or_else(|| {
++                        ServiceError::McpError(rmcp::model::ErrorData::invalid_request(
++                            "prompts/get requires an initialized MCP client",
++                            None,
++                        ))
++                    })?;
++                    if info.capabilities.prompts.is_none() {
++                        return Err(ServiceError::McpError(
++                            rmcp::model::ErrorData::invalid_request(
++                                "prompts/get is unsupported by this MCP server",
++                                None,
++                            ),
++                        ));
++                    }
++                    service.peer().get_prompt(params).await
++                }
++                .boxed()
++            })
++            .await?;
++        self.persist_oauth_tokens().await;
++        Ok(result)
++    }
++
+     pub async fn list_resources(
+         &self,
+         params: Option<PaginatedRequestParams>,
+diff --git a/codex-rs/rmcp-client/tests/resources.rs b/codex-rs/rmcp-client/tests/resources.rs
+index da280ee29145613f9699a3371150d8b31cb440e0..cd263e0aca9db97f841e7896264f52a5adda104f 100644
+--- a/codex-rs/rmcp-client/tests/resources.rs
++++ b/codex-rs/rmcp-client/tests/resources.rs
+@@ -142,3 +142,56 @@ async fn rmcp_client_preserves_each_resource_error() -> anyhow::Result<()> {
+     }
+     Ok(())
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
++async fn prompt_operations_reject_uninitialized_and_closed_clients() -> anyhow::Result<()> {
++    let client = RmcpClient::new_stdio_client(
++        stdio_server_bin()?.into(),
++        Vec::<OsString>::new(),
++        None,
++        &[],
++        None,
++        Arc::new(LocalStdioServerLauncher::new(std::env::current_dir()?)),
++    )
++    .await?;
++    for expected in ["not initialized", "shut down"] {
++        let list = client
++            .list_prompts(None, Some(Duration::from_secs(5)))
++            .await
++            .unwrap_err();
++        assert!(list.to_string().contains(expected), "{list:#}");
++        let get = client
++            .get_prompt(
++                rmcp::model::GetPromptRequestParams::new(""),
++                Some(Duration::from_secs(5)),
++            )
++            .await
++            .unwrap_err();
++        assert!(get.to_string().contains(expected), "{get:#}");
++        client.shutdown().await;
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
++async fn missing_prompt_capability_is_empty_for_list_and_unsupported_for_get() -> anyhow::Result<()>
++{
++    let client = resource_client().await?;
++    assert!(
++        client
++            .list_prompts(None, Some(Duration::from_secs(5)))
++            .await?
++            .prompts
++            .is_empty()
++    );
++    let error = client
++        .get_prompt(
++            rmcp::model::GetPromptRequestParams::new(""),
++            Some(Duration::from_secs(5)),
++        )
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("unsupported"), "{error:#}");
++    client.shutdown().await;
++    Ok(())
++}

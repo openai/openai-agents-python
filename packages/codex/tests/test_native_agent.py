@@ -53,6 +53,8 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "list_mcp_resources",
         "list_mcp_resource_templates",
         "read_mcp_resource",
+        "list_mcp_prompts",
+        "get_mcp_prompt",
         "compact",
         "update",
         "events",
