@@ -778,8 +778,15 @@ class NativeA2AExecutor(AgentExecutor):
             record = await self._load(lease, binding)
             if record is None:
                 return None
-            if record.status == "running":
-                task = record.task()
+            task = record.task()
+            if record.status == "running" or (
+                record.status == "unknown"
+                and (
+                    task.status.state != p.TASK_STATE_FAILED
+                    or "agents.a2a.outcome" not in task.metadata
+                    or task.metadata["agents.a2a.outcome"] != "unknown"
+                )
+            ):
                 task.status.CopyFrom(p.TaskStatus(state=p.TASK_STATE_FAILED))
                 task.metadata.update({"agents.a2a.outcome": "unknown"})
                 snapshot = _bytes(task)

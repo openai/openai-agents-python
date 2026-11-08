@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -132,8 +133,9 @@ async def test_stale_snapshot_cannot_replace_newer_public_task(tmp_path, respons
 
 
 @pytest.mark.parametrize("publication_failure", [None, "before_save", "lost_ack"])
+@pytest.mark.parametrize("legacy_unknown", [False, True], ids=["running", "legacy-unknown"])
 async def test_running_claim_publishes_unknown_without_replay(
-    tmp_path, monkeypatch, publication_failure
+    tmp_path, monkeypatch, publication_failure, legacy_unknown
 ):
     store = HostStore(tmp_path)
     record = NativeA2ATask(
@@ -153,6 +155,20 @@ async def test_running_claim_publishes_unknown_without_replay(
         prev_version=TaskVersion.MISSING,
         context=call_context(),
     )
+    if legacy_unknown:
+        # The earlier recovery implementation changed only the private status
+        # and generation, retaining and publishing the original WORKING snapshot.
+        record = replace(record, generation=2, status="unknown")
+        async with store.own(binding()) as lease:
+            await lease.commit(record, expected_generation=1)
+        await store.save(
+            record.task(),
+            event=record.task(),
+            prev=record.task(),
+            prev_version=(await store.get("task-a", call_context())).version,
+            context=call_context(),
+        )
+    expected_generation = 3 if legacy_unknown else 2
 
     save = store.save
     attempts = 0
@@ -162,6 +178,10 @@ async def test_running_claim_publishes_unknown_without_replay(
         attempts += 1
         assert store.read(binding()).status == "unknown"
         assert store.read(binding()).acknowledges(task)
+        assert store.read(binding()).generation == expected_generation
+        assert store.read(binding()).checkpoint is store.read(binding()).challenge is None
+        assert task.status.state == p.TASK_STATE_FAILED
+        assert task.metadata["agents.a2a.outcome"] == "unknown"
         if attempts == 1 and publication_failure == "before_save":
             raise OSError("Synthetic publication failure")
         result = await save(task, **kwargs)
@@ -179,10 +199,10 @@ async def test_running_claim_publishes_unknown_without_replay(
         with pytest.raises(OSError, match="Synthetic"):
             await fresh.recover(binding(), call_context())
         retained = store.read(binding())
-        assert retained.status == "unknown" and retained.generation == 2
+        assert retained.status == "unknown" and retained.generation == expected_generation
     recovered = await fresh.recover(binding(), call_context())
     assert recovered.status == "unknown"
-    assert recovered.generation == 2
+    assert recovered.generation == expected_generation
     assert recovered.checkpoint is recovered.challenge is None
     published = await store.get("task-a", call_context())
     assert published.task.status.state == p.TASK_STATE_FAILED
