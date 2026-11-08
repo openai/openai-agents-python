@@ -461,7 +461,9 @@ class EventStream(AsyncIterator[Observation]):
                         sequence=self._after,
                         first_sequence=first,
                     )
-                for event, _, _ in records:
+                # Retained sequences are contiguous; start after this reader's cursor.
+                for index in range(self._after - oldest + 1, len(records)):
+                    event, _, _ = records[index]
                     if event.sequence > self._after:
                         self._after = event.sequence
                         if isinstance(event, ModelOutputItemCompleted):
