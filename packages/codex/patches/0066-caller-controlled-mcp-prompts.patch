@@ -1,0 +1,846 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager/resources.rs b/codex-rs/codex-mcp/src/connection_manager/resources.rs
+index fbb5889d058037dfe1dc9c537e29947dc7536ab2..112604412870106971284bc9f7e29e5710dd30e8 100644
+--- a/codex-rs/codex-mcp/src/connection_manager/resources.rs
++++ b/codex-rs/codex-mcp/src/connection_manager/resources.rs
+@@ -16,11 +16,70 @@ use tokio::task::JoinSet;
+ use tracing::warn;
+ 
+ use super::McpConnectionSet;
++use crate::pagination::MAX_MCP_CATALOG_ITEMS;
+ use crate::pagination::collect_paginated;
++use crate::pagination::collect_paginated_with_page_check;
+ use crate::resource_client::McpResourceServerCacheKey;
+ use crate::rmcp_client::ManagedClient;
+ 
++const MAX_MCP_PROMPT_CATALOG_BYTES: usize = 8 * 1024 * 1024;
++
++// Count serialized page arrays without retaining a second copy of the catalog.
++// Array punctuation makes this a conservative bound on the final combined array.
++struct PromptCatalogBudget(usize);
++
++impl std::io::Write for PromptCatalogBudget {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        if bytes.len() > self.0 {
++            return Err(std::io::Error::other("prompt catalog byte limit exceeded"));
++        }
++        self.0 -= bytes.len();
++        Ok(bytes.len())
++    }
++
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
+ impl McpConnectionSet {
++    pub async fn list_prompts(&self, server: &str) -> Result<Vec<rmcp::model::Prompt>> {
++        let (managed, timeout) = self.client_by_name(server).await?;
++        let client = &managed.client;
++        let mut budget = PromptCatalogBudget(MAX_MCP_PROMPT_CATALOG_BYTES);
++        collect_paginated_with_page_check(
++            "prompts/list",
++            timeout,
++            MAX_MCP_CATALOG_ITEMS,
++            |params| async move {
++                let response = client.list_prompts(params, timeout).await?;
++                Ok((response.prompts, response.next_cursor))
++            },
++            |page| {
++                serde_json::to_writer(&mut budget, page).with_context(|| {
++                    format!(
++                        "prompts/list exceeded the catalog byte limit of {MAX_MCP_PROMPT_CATALOG_BYTES} bytes"
++                    )
++                })
++            },
++        )
++        .await
++        .with_context(|| format!("prompts/list failed for `{server}`"))
++    }
++
++    pub async fn get_prompt(
++        &self,
++        server: &str,
++        params: rmcp::model::GetPromptRequestParams,
++    ) -> Result<rmcp::model::GetPromptResult> {
++        let (managed, timeout) = self.client_by_name(server).await?;
++        managed
++            .client
++            .get_prompt(params, timeout)
++            .await
++            .with_context(|| format!("prompts/get failed for `{server}`"))
++    }
++
+     pub(crate) fn resource_cache_key(
+         &self,
+         server: &str,
+@@ -186,3 +245,47 @@ impl McpConnectionSet {
+         Ok((client, view.tool_timeout))
+     }
+ }
++
++#[cfg(test)]
++mod prompt_budget_tests {
++    use super::PromptCatalogBudget;
++
++    #[test]
++    fn counts_all_serialized_prompt_fields_and_accepts_the_exact_limit() -> anyhow::Result<()> {
++        let page: Vec<rmcp::model::Prompt> = serde_json::from_value(serde_json::json!([{
++            "name": "review",
++            "description": "quoted \"text\" and 日本語",
++            "arguments": [{"name": "topic", "description": "nested\ntext"}],
++            "icons": [{"src": "https://example.invalid/icon.svg"}],
++            "_meta": {"nested": {"value": "λ\\escaped"}}
++        }]))?;
++        let size = serde_json::to_vec(&page)?.len();
++        let mut exact = PromptCatalogBudget(size);
++        serde_json::to_writer(&mut exact, &page)?;
++        assert_eq!(exact.0, 0);
++        let mut short = PromptCatalogBudget(size - 1);
++        let error = serde_json::to_writer(&mut short, &page)
++            .expect_err("one byte over the budget must fail");
++        assert!(
++            error
++                .to_string()
++                .contains("prompt catalog byte limit exceeded")
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn retains_one_budget_across_individually_small_pages() -> anyhow::Result<()> {
++        let first = serde_json::json!([{"name": "first", "_meta": {"data": "metadata"}}]);
++        let second = serde_json::json!([{"name": "second", "description": "more data"}]);
++        let total = serde_json::to_vec(&first)?.len() + serde_json::to_vec(&second)?.len();
++        let mut exact = PromptCatalogBudget(total);
++        serde_json::to_writer(&mut exact, &first)?;
++        serde_json::to_writer(&mut exact, &second)?;
++        assert_eq!(exact.0, 0);
++        let mut short = PromptCatalogBudget(total - 1);
++        serde_json::to_writer(&mut short, &first)?;
++        assert!(serde_json::to_writer(&mut short, &second).is_err());
++        Ok(())
++    }
++}
+diff --git a/codex-rs/codex-mcp/src/pagination.rs b/codex-rs/codex-mcp/src/pagination.rs
+index 9b22b3453e0d09494c1d6abd7c92cff16e61b3bc..3c17a4914b19f24235857be2292f6804cb1fee9f 100644
+--- a/codex-rs/codex-mcp/src/pagination.rs
++++ b/codex-rs/codex-mcp/src/pagination.rs
+@@ -25,14 +25,29 @@ where
+ }
+ 
+ pub(crate) async fn collect_paginated_with_limit<T, F, Fut>(
++    method: &str,
++    overall_timeout: Option<Duration>,
++    max_items: usize,
++    fetch: F,
++) -> Result<Vec<T>>
++where
++    F: FnMut(Option<PaginatedRequestParams>) -> Fut,
++    Fut: Future<Output = Result<(Vec<T>, Option<String>)>>,
++{
++    collect_paginated_with_page_check(method, overall_timeout, max_items, fetch, |_| Ok(())).await
++}
++
++pub(crate) async fn collect_paginated_with_page_check<T, F, Fut, C>(
+     method: &str,
+     overall_timeout: Option<Duration>,
+     max_items: usize,
+     mut fetch: F,
++    mut check_page: C,
+ ) -> Result<Vec<T>>
+ where
+     F: FnMut(Option<PaginatedRequestParams>) -> Fut,
+     Fut: Future<Output = Result<(Vec<T>, Option<String>)>>,
++    C: FnMut(&[T]) -> Result<()>,
+ {
+     let collect = async {
+         let mut collected = Vec::new();
+@@ -56,6 +71,7 @@ where
+                     "{method} exceeded the catalog limit of {max_items} items"
+                 ));
+             }
++            check_page(&items)?;
+             collected.extend(items);
+ 
+             let Some(next_cursor) = next_cursor else {
+diff --git a/codex-rs/codex-mcp/src/pagination_tests.rs b/codex-rs/codex-mcp/src/pagination_tests.rs
+index 709acd299a06894c63769fefad1daefeb4822fed..e1ccb2507eb0a5e78583672a259b2e50fb6a2b91 100644
+--- a/codex-rs/codex-mcp/src/pagination_tests.rs
++++ b/codex-rs/codex-mcp/src/pagination_tests.rs
+@@ -11,6 +11,35 @@ use super::MAX_MCP_CATALOG_ITEMS;
+ use super::MAX_MCP_CATALOG_PAGES;
+ use super::MAX_MCP_PAGINATION_CURSOR_BYTES;
+ use super::collect_paginated;
++use super::collect_paginated_with_page_check;
++
++#[tokio::test]
++async fn a_rejected_page_aborts_the_catalog_before_fetching_another_page() {
++    let mut requests = 0;
++    let mut checked = 0;
++    let error = collect_paginated_with_page_check(
++        "prompts/list",
++        None,
++        MAX_MCP_CATALOG_ITEMS,
++        |_| {
++            requests += 1;
++            let page_number = requests;
++            async move { Ok((vec![page_number], Some(page_number.to_string()))) }
++        },
++        |_| {
++            checked += 1;
++            if checked == 2 {
++                return Err(anyhow!("catalog byte limit"));
++            }
++            Ok(())
++        },
++    )
++    .await
++    .expect_err("a rejected page must not return a partial catalog");
++    assert_eq!(error.to_string(), "catalog byte limit");
++    assert_eq!(requests, 2);
++    assert_eq!(checked, 2);
++}
+ 
+ #[tokio::test]
+ async fn collects_all_pages_including_an_empty_cursor() {
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index aab8d78af148dbf066dd738b05c6c82c69eea709..5d9528648238f7dc86a17ce3bb0a648f9778e08a 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -841,6 +841,21 @@ impl McpRuntime {
+             .await
+     }
+ 
++    pub async fn latest_list_prompts(
++        &self,
++        server: &str,
++    ) -> anyhow::Result<Vec<rmcp::model::Prompt>> {
++        self.latest_connections().list_prompts(server).await
++    }
++
++    pub async fn latest_get_prompt(
++        &self,
++        server: &str,
++        params: rmcp::model::GetPromptRequestParams,
++    ) -> anyhow::Result<rmcp::model::GetPromptResult> {
++        self.latest_connections().get_prompt(server, params).await
++    }
++
+     pub async fn latest_list_resources(
+         &self,
+         server: &str,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 06f66b9388ad1bd888aab82938ddde84bb50cfae..ad7f9481b2723c6693644fb11382527712b3d413 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1188,6 +1188,42 @@ impl CodexThread {
+         self.session.inspect_selected_capability_roots()
+     }
+ 
++    /// Returns the complete prompt catalog as caller-owned data.
++    pub async fn list_mcp_prompts(&self, server: &str) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_list_prompts(server)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
++    /// Gets prompt messages without inserting them into the conversation.
++    pub async fn get_mcp_prompt(
++        &self,
++        server: &str,
++        name: &str,
++        arguments: Option<std::collections::HashMap<String, String>>,
++    ) -> anyhow::Result<serde_json::Value> {
++        self.session.refresh_mcp_if_dirty().await;
++        let mut params = rmcp::model::GetPromptRequestParams::new(name);
++        params.arguments = arguments.map(|values| {
++            values
++                .into_iter()
++                .map(|(key, value)| (key, serde_json::Value::String(value)))
++                .collect()
++        });
++        let result = self
++            .session
++            .services
++            .mcp_runtime
++            .latest_get_prompt(server, params)
++            .await?;
++        Ok(serde_json::to_value(result)?)
++    }
++
+     /// Returns one resource page from this thread's current MCP connection.
+     pub async fn list_mcp_resources(
+         &self,
+diff --git a/codex-rs/rmcp-client/src/http_client_adapter.rs b/codex-rs/rmcp-client/src/http_client_adapter.rs
+index aa1239e0a4431e4e98404d6722146298933d3a05..67b8ea656d19e1f39037ffc4f7fa0dfcb81ccefc 100644
+--- a/codex-rs/rmcp-client/src/http_client_adapter.rs
++++ b/codex-rs/rmcp-client/src/http_client_adapter.rs
+@@ -49,6 +49,7 @@ use rmcp::transport::common::http_header::HEADER_MCP_PROTOCOL_VERSION;
+ use rmcp::transport::streamable_http_client::AuthRequiredError;
+ use rmcp::transport::streamable_http_client::InsufficientScopeError;
+ use rmcp::transport::streamable_http_client::StreamableHttpClient;
++use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+ use rmcp::transport::streamable_http_client::StreamableHttpError;
+ use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
+ use sse_stream::Sse;
+@@ -183,6 +184,8 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         }
+ 
+         let is_discovery_request = mcp_method.as_deref() == Some(DiscoverRequestMethod::VALUE);
++        let is_prompt_request =
++            matches!(mcp_method.as_deref(), Some("prompts/list" | "prompts/get"));
+         let is_event_stream_request = mcp_method.as_deref() == Some("events/stream");
+         let uses_modern_protocol = headers
+             .get(HEADER_MCP_PROTOCOL_VERSION)
+@@ -191,7 +194,8 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+         let maximum_response_bytes = if is_event_stream_request {
+             Some(MAX_EVENT_NOTIFICATION_BYTES)
+         } else {
+-            (is_discovery_request || uses_modern_protocol).then_some(MAX_MCP_STDIO_LINE_BYTES)
++            (is_discovery_request || is_prompt_request || uses_modern_protocol)
++                .then_some(MAX_MCP_STDIO_LINE_BYTES)
+         };
+         let redirect_policy = if is_discovery_request {
+             HttpRedirectPolicy::Stop
+@@ -515,6 +519,29 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+     ) -> std::result::Result<
+         BoxStream<'static, std::result::Result<Sse, sse_stream::Error>>,
+         StreamableHttpError<Self::Error>,
++    > {
++        self.get_stream_with_max_sse_event_size(
++            uri,
++            session_id,
++            last_event_id,
++            auth_token,
++            custom_headers,
++            StreamableHttpClientTransportConfig::default().max_sse_event_size,
++        )
++        .await
++    }
++
++    async fn get_stream_with_max_sse_event_size(
++        &self,
++        uri: Arc<str>,
++        session_id: Option<Arc<str>>,
++        last_event_id: Option<String>,
++        auth_token: Option<String>,
++        custom_headers: HashMap<HeaderName, HeaderValue>,
++        max_sse_event_size: usize,
++    ) -> std::result::Result<
++        BoxStream<'static, std::result::Result<Sse, sse_stream::Error>>,
++        StreamableHttpError<Self::Error>,
+     > {
+         let mut headers = self.default_headers.clone();
+         headers.extend(custom_headers);
+@@ -597,8 +624,17 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
+             .get(HEADER_MCP_PROTOCOL_VERSION)
+             .and_then(|value| value.to_str().ok())
+             .is_some_and(|version| version == ProtocolVersion::V_2026_07_28.as_str());
+-        let maximum_response_bytes = uses_modern_protocol.then_some(MAX_MCP_STDIO_LINE_BYTES);
+-        Ok(sse_stream_from_body(body_stream, maximum_response_bytes))
++        // A prompt POST stream can resume through GET. Honor the transport's
++        // raw-event limit here too, while retaining the stricter modern limit.
++        let maximum_response_bytes = if uses_modern_protocol {
++            max_sse_event_size.min(MAX_MCP_STDIO_LINE_BYTES)
++        } else {
++            max_sse_event_size
++        };
++        Ok(sse_stream_from_body(
++            body_stream,
++            Some(maximum_response_bytes),
++        ))
+     }
+ }
+ 
+diff --git a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
+index c3effd99831abccd3fbf8b6665a6af38555f0f10..1b09fe85c72c2da85b4349f82e96e62ae731968d 100644
+--- a/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
++++ b/codex-rs/rmcp-client/src/http_client_adapter_tests.rs
+@@ -1,4 +1,20 @@
++use std::collections::HashMap;
+ use std::io::ErrorKind;
++use std::sync::Arc;
++use std::sync::Mutex;
++use std::time::Duration;
++
++use codex_exec_server::ExecServerError;
++use codex_exec_server::HttpClient;
++use codex_exec_server::HttpRequestParams;
++use codex_exec_server::HttpRequestResponse;
++use codex_exec_server::HttpResponseBodyStream;
++use futures::StreamExt;
++use futures::future::BoxFuture;
++use rmcp::transport::streamable_http_client::StreamableHttpClient;
++use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
++use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
++use serde_json::json;
+ 
+ use codex_exec_server::HttpRedirectPolicy;
+ use http::HeaderMap;
+@@ -8,6 +24,7 @@ use pretty_assertions::assert_eq;
+ 
+ use super::HttpHeader;
+ use super::SseEventSizeLimit;
++use super::StreamableHttpClientAdapter;
+ use super::StreamableHttpRedirectMode;
+ use super::mcp_redirect_policy;
+ use super::protocol_headers;
+@@ -231,12 +248,12 @@ fn multiline_data_counts_parser_inserted_newlines() {
+ }
+ 
+ #[test]
+-fn legacy_sse_streams_remain_unlimited() {
++fn an_explicitly_unbounded_raw_sse_limiter_remains_unlimited() {
+     let mut limit = SseEventSizeLimit::new(/*maximum_bytes*/ None);
+ 
+     limit
+         .observe(&[b'x'; 128])
+-        .expect("legacy SSE streams must not gain a message limit");
++        .expect("an explicitly unbounded limiter must not reject data");
+ 
+     assert_eq!(
+         (
+@@ -283,3 +300,209 @@ fn size_accounting_saturates_without_overflow() {
+ 
+     assert_eq!((error.kind(), limit.failed), (ErrorKind::InvalidData, true));
+ }
++
++// Use the shared HTTP capability mock so chunk boundaries are deterministic.
++#[derive(Default)]
++struct SseHttpClient {
++    chunks: Mutex<Vec<Vec<u8>>>,
++    requests: Mutex<Vec<HttpRequestParams>>,
++}
++
++impl HttpClient for SseHttpClient {
++    fn http_request(
++        &self,
++        _params: HttpRequestParams,
++    ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
++        Box::pin(async { panic!("expected a streaming HTTP request") })
++    }
++
++    fn http_request_stream(
++        &self,
++        params: HttpRequestParams,
++    ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>> {
++        self.requests.lock().expect("request lock").push(params);
++        let chunks = std::mem::take(&mut *self.chunks.lock().expect("body lock"));
++        Box::pin(async move {
++            Ok((
++                HttpRequestResponse {
++                    status: 200,
++                    headers: vec![HttpHeader {
++                        name: "content-type".to_string(),
++                        value: "text/event-stream".to_string(),
++                        value_env_var: None,
++                    }],
++                    body: Vec::new().into(),
++                },
++                HttpResponseBodyStream::from_chunks(chunks),
++            ))
++        })
++    }
++}
++
++fn sse_adapter(chunks: Vec<Vec<u8>>) -> (StreamableHttpClientAdapter, Arc<SseHttpClient>) {
++    let http = Arc::new(SseHttpClient {
++        chunks: Mutex::new(chunks),
++        ..Default::default()
++    });
++    let adapter = StreamableHttpClientAdapter::new(
++        http.clone(),
++        HeaderMap::new(),
++        None,
++        false,
++        StreamableHttpRedirectMode::Legacy,
++        Arc::new(Mutex::new(None)),
++    );
++    (adapter, http)
++}
++
++fn sse_protocol_headers(modern: bool) -> HashMap<http::HeaderName, HeaderValue> {
++    HashMap::from([(
++        http::HeaderName::from_static("mcp-protocol-version"),
++        HeaderValue::from_static(if modern { "2026-07-28" } else { "2025-06-18" }),
++    )])
++}
++
++#[tokio::test]
++async fn initial_and_resumed_get_reject_split_unterminated_events_at_configured_limit() {
++    for modern in [false, true] {
++        for last_event_id in [None, Some("resume-1".to_string())] {
++            let (adapter, http) = sse_adapter(vec![b"data: 1234".to_vec(), b"5678901".to_vec()]);
++            let mut events = adapter
++                .get_stream_with_max_sse_event_size(
++                    Arc::from("https://mcp.example/mcp"),
++                    Some(Arc::from("session-1")),
++                    last_event_id.clone(),
++                    None,
++                    sse_protocol_headers(modern),
++                    16,
++                )
++                .await
++                .expect("open SSE stream");
++            let error = tokio::time::timeout(Duration::from_secs(1), events.next())
++                .await
++                .expect("raw limit must not wait for an event terminator")
++                .expect("oversized unterminated event must produce an error")
++                .expect_err("configured limit must apply before parsing");
++            assert!(
++                error
++                    .to_string()
++                    .contains("MCP response body exceeds 16 bytes"),
++                "{error}"
++            );
++
++            let requests = http.requests.lock().expect("request lock");
++            assert_eq!(requests.len(), 1);
++            assert_eq!(requests[0].method, "GET");
++            let header = |name: &str| {
++                requests[0]
++                    .headers
++                    .iter()
++                    .find(|header| header.name.eq_ignore_ascii_case(name))
++                    .map(|header| header.value.as_str())
++            };
++            assert_eq!(header("last-event-id"), last_event_id.as_deref());
++            assert_eq!(header("mcp-session-id"), Some("session-1"));
++        }
++    }
++}
++
++#[tokio::test]
++async fn get_limit_applies_per_event_rather_than_to_the_stream_total() {
++    for modern in [false, true] {
++        let (adapter, _) = sse_adapter(vec![b"data: a\n\ndata: b\n\ndata: c\n\n".to_vec()]);
++        let mut events = adapter
++            .get_stream_with_max_sse_event_size(
++                Arc::from("https://mcp.example/mcp"),
++                None,
++                None,
++                None,
++                sse_protocol_headers(modern),
++                16,
++            )
++            .await
++            .expect("open SSE stream");
++        for expected in ["a", "b", "c"] {
++            let event = events
++                .next()
++                .await
++                .expect("each event must be delivered")
++                .expect("stream total must not exhaust the per-event budget");
++            assert_eq!(event.data.as_deref(), Some(expected));
++        }
++        assert!(events.next().await.is_none());
++    }
++}
++
++#[tokio::test]
++async fn ordinary_get_uses_default_limit_and_retains_stricter_modern_limit() {
++    let default_limit = StreamableHttpClientTransportConfig::default().max_sse_event_size;
++    assert_eq!(default_limit, 16 * 1024 * 1024);
++    for (modern, padding_bytes, rejected_limit) in [
++        (false, 9 * 1024 * 1024, None),
++        (false, default_limit + 1, Some(default_limit)),
++        (true, 9 * 1024 * 1024, Some(8 * 1024 * 1024)),
++    ] {
++        let (adapter, _) = sse_adapter(vec![
++            format!("data: {}\n\n", "x".repeat(padding_bytes)).into_bytes(),
++        ]);
++        let mut events = adapter
++            .get_stream(
++                Arc::from("https://mcp.example/mcp"),
++                None,
++                Some("resume-1".to_string()),
++                None,
++                sse_protocol_headers(modern),
++            )
++            .await
++            .expect("open SSE stream");
++        let event = events.next().await.expect("event or size error");
++        if let Some(limit) = rejected_limit {
++            let error = event.expect_err("event above the effective limit must fail");
++            assert!(
++                error
++                    .to_string()
++                    .contains(&format!("MCP response body exceeds {limit} bytes")),
++                "{error}"
++            );
++        } else {
++            let event = event.expect("legacy events between 8 and 16 MiB must remain accepted");
++            assert_eq!(event.data.as_deref().map(str::len), Some(padding_bytes));
++        }
++    }
++}
++
++#[tokio::test]
++async fn legacy_prompt_post_sse_rejects_raw_oversized_events() {
++    for method in ["prompts/list", "prompts/get"] {
++        // No terminator: the raw limit must reject before the SSE parser emits a message.
++        let (adapter, _) = sse_adapter(vec![b"data: ".to_vec(), vec![b'x'; 8 * 1024 * 1024]]);
++        let mut request = json!({"jsonrpc": "2.0", "id": 1, "method": method});
++        if method == "prompts/get" {
++            request["params"] = json!({"name": "large"});
++        }
++        let response = adapter
++            .post_message(
++                Arc::from("https://mcp.example/mcp"),
++                serde_json::from_value(request).expect("prompt request"),
++                None,
++                None,
++                sse_protocol_headers(false),
++            )
++            .await
++            .expect("open POST SSE stream");
++        let StreamableHttpPostResponse::Sse(mut events, _) = response else {
++            panic!("expected POST SSE response");
++        };
++        let error = events
++            .next()
++            .await
++            .expect("raw size error")
++            .expect_err("oversized prompt event must fail before parsing");
++        assert!(
++            error
++                .to_string()
++                .contains("MCP response body exceeds 8388608 bytes"),
++            "{error}"
++        );
++    }
++}
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index e1fd3e65398ddd452fdaf74bacf9336ac4712ad1..b4aa24d0f71a3886cc839a7daa72089b32ffd8e2 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -40,7 +40,10 @@ use rmcp::model::ElicitRequestParams;
+ use rmcp::model::ElicitResult;
+ use rmcp::model::ElicitationAction;
+ use rmcp::model::Extensions;
++use rmcp::model::GetPromptRequestParams;
++use rmcp::model::GetPromptResult;
+ use rmcp::model::InitializeRequestParams;
++use rmcp::model::ListPromptsResult;
+ use rmcp::model::ListResourceTemplatesResult;
+ use rmcp::model::ListResourcesResult;
+ use rmcp::model::ListToolsResult;
+@@ -1096,6 +1099,69 @@ impl RmcpClient {
+             .map(str::to_string)
+     }
+ 
++    pub async fn list_prompts(
++        &self,
++        params: Option<PaginatedRequestParams>,
++        timeout: Option<Duration>,
++    ) -> Result<ListPromptsResult> {
++        let params = crate::trace_context::traced_pagination(params);
++        self.refresh_oauth_if_needed().await?;
++        let result = self
++            .run_service_operation("prompts/list", timeout, move |service| {
++                let params = params.clone();
++                async move {
++                    let info = service.peer().peer_info().ok_or_else(|| {
++                        ServiceError::McpError(rmcp::model::ErrorData::invalid_request(
++                            "prompts/list requires an initialized MCP client",
++                            None,
++                        ))
++                    })?;
++                    if info.capabilities.prompts.is_none() {
++                        return Ok(ListPromptsResult::with_all_items(Vec::new()));
++                    }
++                    service.peer().list_prompts(params).await
++                }
++                .boxed()
++            })
++            .await?;
++        self.persist_oauth_tokens().await;
++        Ok(result)
++    }
++
++    pub async fn get_prompt(
++        &self,
++        mut params: GetPromptRequestParams,
++        timeout: Option<Duration>,
++    ) -> Result<GetPromptResult> {
++        params.meta = crate::trace_context::with_current_trace(params.meta);
++        self.refresh_oauth_if_needed().await?;
++        let result = self
++            .run_service_operation("prompts/get", timeout, move |service| {
++                let params = params.clone();
++                async move {
++                    let info = service.peer().peer_info().ok_or_else(|| {
++                        ServiceError::McpError(rmcp::model::ErrorData::invalid_request(
++                            "prompts/get requires an initialized MCP client",
++                            None,
++                        ))
++                    })?;
++                    if info.capabilities.prompts.is_none() {
++                        return Err(ServiceError::McpError(
++                            rmcp::model::ErrorData::invalid_request(
++                                "prompts/get is unsupported by this MCP server",
++                                None,
++                            ),
++                        ));
++                    }
++                    service.peer().get_prompt(params).await
++                }
++                .boxed()
++            })
++            .await?;
++        self.persist_oauth_tokens().await;
++        Ok(result)
++    }
++
+     pub async fn list_resources(
+         &self,
+         params: Option<PaginatedRequestParams>,
+diff --git a/codex-rs/rmcp-client/tests/mcp_2026_message_limits.rs b/codex-rs/rmcp-client/tests/mcp_2026_message_limits.rs
+index 785aa4e1956c95a1b3319315ce1b135be6e0f713..035777d5e80906c043804982aaf72ebf99a7074c 100644
+--- a/codex-rs/rmcp-client/tests/mcp_2026_message_limits.rs
++++ b/codex-rs/rmcp-client/tests/mcp_2026_message_limits.rs
+@@ -230,6 +230,78 @@ async fn legacy_http_keeps_existing_large_json_response_behavior() -> anyhow::Re
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn legacy_http_rejects_oversized_prompt_json_and_post_sse() -> anyhow::Result<()> {
++    for prompt_method in ["prompts/list", "prompts/get"] {
++        for sse in [false, true] {
++            let server = MockServer::start().await;
++            let padding = Arc::new("x".repeat(MAX_MCP_MESSAGE_BYTES + 1));
++            Mock::given(method("POST"))
++                .and(path("/mcp"))
++                .respond_with(move |request: &Request| {
++                    let body: Value = request.body_json().expect("JSON-RPC request");
++                    match body["method"].as_str() {
++                        Some("initialize") => ResponseTemplate::new(200).set_body_json(json!({
++                            "jsonrpc": "2.0",
++                            "id": body["id"],
++                            "result": {
++                                "protocolVersion": "2025-06-18",
++                                "capabilities": {"prompts": {}},
++                                "serverInfo": {"name": "legacy-prompt-limit", "version": "1.0.0"},
++                            },
++                        })),
++                        Some("notifications/initialized" | "notifications/cancelled") => {
++                            ResponseTemplate::new(202)
++                        }
++                        Some(method) if method == prompt_method => {
++                            let result = if method == "prompts/list" {
++                                json!({"prompts": [{"name": "large", "description": padding.as_str()}]})
++                            } else {
++                                json!({"messages": [{"role": "user", "content": {
++                                    "type": "text", "text": padding.as_str(),
++                                }}]})
++                            };
++                            let response = json!({"jsonrpc": "2.0", "id": body["id"], "result": result});
++                            if sse {
++                                ResponseTemplate::new(200).set_body_raw(
++                                    format!("event: message\ndata: {response}\n\n"),
++                                    "text/event-stream",
++                                )
++                            } else {
++                                ResponseTemplate::new(200).set_body_json(response)
++                            }
++                        }
++                        other => panic!("unexpected legacy MCP method {other:?}"),
++                    }
++                })
++                .mount(&server)
++                .await;
++
++            let client = http_client(&server, McpProtocolMode::Legacy).await?;
++            initialize(&client).await?;
++            let timeout = Some(Duration::from_secs(5));
++            let result = if prompt_method == "prompts/list" {
++                client.list_prompts(None, timeout).await.map(|_| ())
++            } else {
++                client
++                    .get_prompt(rmcp::model::GetPromptRequestParams::new("large"), timeout)
++                    .await
++                    .map(|_| ())
++            };
++            let error = result.expect_err("oversized prompt response must be rejected");
++            let error = format!("{error:#}");
++            // RMCP can surface a rejected POST SSE stream as a closed transport or timeout.
++            assert!(
++                error.contains("8388608 bytes")
++                    || (sse && (error.contains("timed out") || error.contains("Transport closed"))),
++                "unexpected {prompt_method} error (sse={sse}): {error}"
++            );
++            client.shutdown().await;
++        }
++    }
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn modern_local_and_executor_stdio_reject_oversized_lines() -> anyhow::Result<()> {
+     let server = codex_utils_cargo_bin::cargo_bin("test_mcp_2026_stdio_server")?;
+diff --git a/codex-rs/rmcp-client/tests/resources.rs b/codex-rs/rmcp-client/tests/resources.rs
+index da280ee29145613f9699a3371150d8b31cb440e0..cd263e0aca9db97f841e7896264f52a5adda104f 100644
+--- a/codex-rs/rmcp-client/tests/resources.rs
++++ b/codex-rs/rmcp-client/tests/resources.rs
+@@ -142,3 +142,56 @@ async fn rmcp_client_preserves_each_resource_error() -> anyhow::Result<()> {
+     }
+     Ok(())
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
++async fn prompt_operations_reject_uninitialized_and_closed_clients() -> anyhow::Result<()> {
++    let client = RmcpClient::new_stdio_client(
++        stdio_server_bin()?.into(),
++        Vec::<OsString>::new(),
++        None,
++        &[],
++        None,
++        Arc::new(LocalStdioServerLauncher::new(std::env::current_dir()?)),
++    )
++    .await?;
++    for expected in ["not initialized", "shut down"] {
++        let list = client
++            .list_prompts(None, Some(Duration::from_secs(5)))
++            .await
++            .unwrap_err();
++        assert!(list.to_string().contains(expected), "{list:#}");
++        let get = client
++            .get_prompt(
++                rmcp::model::GetPromptRequestParams::new(""),
++                Some(Duration::from_secs(5)),
++            )
++            .await
++            .unwrap_err();
++        assert!(get.to_string().contains(expected), "{get:#}");
++        client.shutdown().await;
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
++async fn missing_prompt_capability_is_empty_for_list_and_unsupported_for_get() -> anyhow::Result<()>
++{
++    let client = resource_client().await?;
++    assert!(
++        client
++            .list_prompts(None, Some(Duration::from_secs(5)))
++            .await?
++            .prompts
++            .is_empty()
++    );
++    let error = client
++        .get_prompt(
++            rmcp::model::GetPromptRequestParams::new(""),
++            Some(Duration::from_secs(5)),
++        )
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("unsupported"), "{error:#}");
++    client.shutdown().await;
++    Ok(())
++}

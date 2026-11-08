@@ -130,8 +130,10 @@ from .mcp import (
     ChatGPTAppsMCP as ChatGPTAppsMCP,
     HostedVerificationMCP as HostedVerificationMCP,
     HttpMCP as HttpMCP,
+    MCPGetPromptResult as MCPGetPromptResult,
     MCPListResourcesResult as MCPListResourcesResult,
     MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
+    MCPPrompt as MCPPrompt,
     MCPReadResourceResult as MCPReadResourceResult,
     MCPResultContext as MCPResultContext,
     StdioMCP as StdioMCP,
@@ -4117,6 +4119,37 @@ class Session(Generic[ContextT, OutputT]):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
+    async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:
+        """Return all prompts from a selected ordinary MCP server while idle.
+
+        Native pagination either completes or raises without returning a partial
+        list. Native catalog limits are 100 pages, 2,048 items, 64 KiB per cursor,
+        8 MiB across serialized JSON prompt arrays, and the configured execution
+        timeout for collection.
+        MCP declarations default that timeout to 60 seconds. Activation and
+        cleanup have their own lifetimes.
+        Missing prompt capability returns an empty list. Results never enter
+        model context. Lifetime and cleanup rules match ``read_mcp_resource``.
+        """
+        return cast(list[MCPPrompt], await self._mcp_request("list_mcp_prompts", server, {}))
+
+    async def get_mcp_prompt(
+        self, server: str, name: str, arguments: Mapping[str, str] | None = None
+    ) -> MCPGetPromptResult:
+        """Get caller-owned prompt messages without submitting model work.
+
+        Arguments are copied before activation; omitted arguments and
+        an explicit empty mapping remain distinct. The server validates prompt
+        names and required arguments. Missing prompt capability raises an error.
+        HTTP POST responses are limited to 8 MiB. Legacy SSE continuations use
+        the transport's per-event limit, which defaults to 16 MiB.
+        Lifetime and cleanup rules match ``read_mcp_resource``.
+        """
+        params: dict[str, Any] = {"name": name}
+        if arguments is not None:
+            params["arguments"] = dict(arguments)
+        return cast(MCPGetPromptResult, await self._mcp_request("get_mcp_prompt", server, params))
+
     async def list_mcp_resources(
         self, server: str, cursor: str | None = None
     ) -> MCPListResourcesResult:
@@ -4130,7 +4163,7 @@ class Session(Generic[ContextT, OutputT]):
         params = {} if cursor is None else {"cursor": cursor}
         return cast(
             MCPListResourcesResult,
-            await self._mcp_resource_request("list_mcp_resources", server, params),
+            await self._mcp_request("list_mcp_resources", server, params),
         )
 
     async def list_mcp_resource_templates(
@@ -4145,7 +4178,7 @@ class Session(Generic[ContextT, OutputT]):
         params = {} if cursor is None else {"cursor": cursor}
         return cast(
             MCPListResourceTemplatesResult,
-            await self._mcp_resource_request("list_mcp_resource_templates", server, params),
+            await self._mcp_request("list_mcp_resource_templates", server, params),
         )
 
     async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:
@@ -4159,12 +4192,10 @@ class Session(Generic[ContextT, OutputT]):
         """
         return cast(
             MCPReadResourceResult,
-            await self._mcp_resource_request("read_mcp_resource", server, {"uri": uri}),
+            await self._mcp_request("read_mcp_resource", server, {"uri": uri}),
         )
 
-    async def _mcp_resource_request(
-        self, operation: str, server: str, params: dict[str, str]
-    ) -> dict[str, Any]:
+    async def _mcp_request(self, operation: str, server: str, params: dict[str, Any]) -> Any:
         self._check_idle_update()
         assert self._opening_agent is not None
         opening = self._opening_agent
@@ -4176,7 +4207,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
         )
-        resource_server = next(
+        selected_server = next(
             (
                 item
                 for item in selected_mcp
@@ -4184,11 +4215,11 @@ class Session(Generic[ContextT, OutputT]):
             ),
             None,
         )
-        if resource_server is None:
-            raise ValueError("Resource operations require a currently selected ordinary MCP server")
-        resource_server._check_context(self._context)
+        if selected_server is None:
+            raise ValueError("MCP operations require a currently selected ordinary MCP server")
+        selected_server._check_context(self._context)
 
-        async def request() -> dict[str, Any]:
+        async def request() -> Any:
             try:
                 if not any(item.name == server for item in self._mcp_tools):
                     # Session opening is lazy. Activate only this server and
@@ -4197,7 +4228,7 @@ class Session(Generic[ContextT, OutputT]):
                     candidate = _ToolCatalog(self._catalog.generation + 1, self._catalog.tools)
                     await self._replace_tools(
                         candidate,
-                        (*self._mcp_tools, replace(resource_server, tools=())),
+                        (*self._mcp_tools, replace(selected_server, tools=())),
                         allowed_mcp,
                         candidate.native_specs(),
                     )
@@ -4206,13 +4237,13 @@ class Session(Generic[ContextT, OutputT]):
                 )
             except InteractionRequired as error:
                 raise InteractionRequired(
-                    "MCP resource requests cannot handle interaction while the Session is idle"
+                    "MCP requests cannot handle interaction while the Session is idle"
                 ) from error
             except NativeError:
                 raise
             except RuntimeError as error:
                 raise NativeError(str(error)) from error
-            return cast(dict[str, Any], json.loads(result))
+            return json.loads(result)
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
 

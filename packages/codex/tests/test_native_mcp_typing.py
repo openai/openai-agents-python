@@ -13,8 +13,11 @@ from agents import (
     HttpMCP,
     MCPBlobResourceContents,
     MCPCallContext,
+    MCPGetPromptResult,
     MCPListResourcesResult,
     MCPListResourceTemplatesResult,
+    MCPPrompt,
+    MCPPromptContent,
     MCPReadResourceResult,
     MCPResource,
     MCPResourceTemplate,
@@ -142,3 +145,18 @@ async def read_resources(session: Session[Application, Answer]) -> None:
     assert_type(text["uri"], str)
     if "mimeType" in blob:
         assert_type(blob["mimeType"], str)
+
+
+async def read_prompts(session: Session[Application, Answer], args: Mapping[str, str]) -> None:
+    prompts = await session.list_mcp_prompts("resources")
+    assert_type(prompts, list[MCPPrompt])
+    result = await session.get_mcp_prompt("resources", "review", args)
+    assert_type(result, MCPGetPromptResult)
+    assert_type(await session.get_mcp_prompt("resources", "", {}), MCPGetPromptResult)
+    assert_type(await session.get_mcp_prompt("resources", "welcome"), MCPGetPromptResult)
+    for message in result["messages"]:
+        assert_type(message["role"], Literal["user", "assistant"])
+        assert_type(message["content"], MCPPromptContent)
+        if message["content"]["type"] == "text":
+            assert_type(message["content"]["text"], str)
+    await session.get_mcp_prompt("resources", "review", {"language": 1})  # pyright: ignore[reportArgumentType]

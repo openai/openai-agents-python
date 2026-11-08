@@ -287,7 +287,11 @@
     {
       "path": "0065-buffered-responses.patch",
       "sha256": "f26b628dc280a965259ecbd1c29d58d316a236955400e211b0cab6d4a27aa361"
+    },
+    {
+      "path": "0066-caller-controlled-mcp-prompts.patch",
+      "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
     }
   ],
-  "result_tree": "c6fe9f04d9a0f7ce4e38be865d6b93d87bd447b8"
+  "result_tree": "62fd05c563d1e0f54d96226de086c2824f3e6c98"
 }
