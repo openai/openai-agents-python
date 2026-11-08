@@ -35,6 +35,7 @@ def assert_private_frames(error: BaseException) -> None:
     assert inspected > 0
 
 
+@pytest.mark.parametrize("empty", [False, True])
 @pytest.mark.parametrize(
     "declaration,field,options",
     [
@@ -44,12 +45,12 @@ def assert_private_frames(error: BaseException) -> None:
     ],
 )
 def test_captured_values_support_dataclass_and_standard_copies(
-    declaration: type[Any], field: str, options: dict[str, Any]
+    declaration: type[Any], field: str, options: dict[str, Any], empty: bool
 ) -> None:
-    supplied = {"X_SECRET": _SECRET}
+    supplied = {} if empty else {"X_SECRET": _SECRET}
+    expected = dict(supplied)
     server = declaration(**options, **{field: supplied})
     supplied["X_SECRET"] = "later"
-    expected = {"X_SECRET": _SECRET}
     assert asdict(server)[field] == expected
     assert json.loads(json.dumps(asdict(server)))[field] == expected
     for cloned in (copy.copy(server), copy.deepcopy(server), pickle.loads(pickle.dumps(server))):
@@ -66,6 +67,7 @@ def test_captured_values_support_dataclass_and_standard_copies(
             lambda mapping: mapping.setdefault("NEW", "changed"),
             lambda mapping: mapping.update({"NEW": "changed"}),
             lambda mapping: operator.ior(mapping, {"NEW": "changed"}),
+            lambda mapping: mapping.__init__({"NEW": _SECRET}),
         ]
         for mutate in mutations:
             with pytest.raises(TypeError) as error:

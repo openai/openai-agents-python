@@ -44,6 +44,17 @@ ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
 class _McpValues(dict[str, str]):
     """An immutable capture that retains ordinary dataclass copy support."""
 
+    __slots__ = ("_initialized",)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        try:
+            if getattr(self, "_initialized", False):
+                self._immutable()
+            super().__init__(*args, **kwargs)
+            self._initialized = True
+        finally:
+            del self, args, kwargs
+
     def _immutable(self: object, *args: Any, **kwargs: Any) -> _NoReturn:
         del self, args, kwargs
         raise TypeError("MCP configuration values are immutable")
