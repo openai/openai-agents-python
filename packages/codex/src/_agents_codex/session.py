@@ -5462,23 +5462,24 @@ class Session(Generic[ContextT, OutputT]):
                 while (request := self._manual_request(owner_id, seen)) is not None:
                     seen.add(request._invocation)
                     requests.append(request)
-                if (
-                    state is not None
-                    and not state.stopping
-                    and not state.failure.done()
-                    and not state.terminal.done()
-                ):
+                owners = (
+                    self._callbacks_for_child(submission)
+                    if submission.child_id is not None
+                    else (() if state is None else (state,))
+                )
+                for question_owner in owners:
+                    if (
+                        question_owner.stopping
+                        or question_owner.failure.done()
+                        or question_owner.terminal.done()
+                    ):
+                        continue
                     requests.extend(
                         cast(Interaction, question)
-                        for question in state.questions.values()
+                        for question in question_owner.questions.values()
                         if question.submission_id == owner_id
                     )
                 if requests:
-                    owners = (
-                        self._callbacks_for_child(submission)
-                        if submission.child_id is not None
-                        else (() if state is None else (state,))
-                    )
                     if any(owner.stopping or owner.failure.done() for owner in owners):
                         return await self._wait(submission)
                     try:

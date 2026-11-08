@@ -14,6 +14,7 @@ from agents import (
     HttpMCP,
     InteractionExpiredError,
     NativeAgents,
+    PendingRequests,
 )
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
@@ -104,6 +105,11 @@ async def test_owned_child_approvals_use_equal_call_ids_without_sibling_authorit
             assert alpha.submission_id == children[alpha.subagent_id].submission_id
             assert alpha.turn_id == children[alpha.subagent_id].turn_id
             assert beta.turn_id == children[beta.subagent_id].turn_id
+            for request in (alpha, beta):
+                pending = await children[request.subagent_id].wait_for_request_or_result()
+                assert isinstance(pending, PendingRequests)
+                assert pending.turn is children[request.subagent_id]
+                assert pending.requests == (request,)
             assert not effect.exists()
             await alpha.respond("allow_once")
             assert (await children[alpha.subagent_id].get_result()).final_output == "alpha complete"
