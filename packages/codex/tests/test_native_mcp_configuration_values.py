@@ -98,6 +98,23 @@ def assert_private_frames(
         assert inspected > 0
 
 
+@pytest.mark.parametrize("tool_source", ["agent", "override"])
+def test_session_argument_errors_are_immediate_and_keep_credentials_private(
+    tool_source: str,
+) -> None:
+    server = HttpMCP(
+        name="credentials", url="http://127.0.0.1:1/mcp", tools=[], headers={"X-Token": _SECRET}
+    )
+    agent = Agent(instructions="test", tools=[server] if tool_source == "agent" else [])
+    arguments: dict[str, Any] = {"unknown_option": True}
+    if tool_source == "override":
+        arguments["tools"] = [server]
+    with pytest.raises(TypeError, match="unknown_option") as caught:
+        agent.session(**arguments)
+    assert_private_frames(caught.value)
+    assert server.headers == {"X-Token": _SECRET}
+
+
 @pytest.mark.parametrize("route", ["session", "run", "sync"])
 @pytest.mark.parametrize("preceding_http_server", [False, True])
 @pytest.mark.parametrize("tool_source", ["agent", "override"])

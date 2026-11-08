@@ -25,7 +25,14 @@ def _strip_mcp_frames(error: BaseException) -> None:
         retained = []
         traceback = current.__traceback__
         while traceback is not None:
-            if not traceback.tb_frame.f_globals.get("__name__", "").startswith("_agents_codex."):
+            frame = traceback.tb_frame
+            module = frame.f_globals.get("__name__", "")
+            factory = frame.f_locals.get("func") if module == "contextlib" else None
+            sdk_factory = inspect.isfunction(factory) and factory.__globals__.get(
+                "__name__", ""
+            ).startswith("_agents_codex.")
+            # contextlib also holds the arguments when an SDK factory rejects them.
+            if not module.startswith("_agents_codex.") and not sdk_factory:
                 retained.append(traceback)
             traceback = traceback.tb_next
         rebuilt = None
@@ -43,11 +50,15 @@ def _strip_mcp_frames(error: BaseException) -> None:
 def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Declarations) -> bool:
     from .mcp import _MCP
 
-    try:
-        if any(isinstance(tool, _MCP) for tool in kwargs.get("tools", ())):
+    tools = kwargs.get("tools")
+    if tools is not None:
+        # Error cleanup must not consume an unaccepted caller-owned sequence.
+        # Built-in storage is safe to inspect without invoking custom iterators.
+        if not isinstance(tools, (list, tuple)):
             return True
-    except TypeError:
-        pass
+        values = list.__iter__(tools) if isinstance(tools, list) else tuple.__iter__(tools)
+        if any(isinstance(tool, _MCP) for tool in values):
+            return True
     owner = args[0] if args else kwargs.get("self")
     try:
         return any(isinstance(tool, _MCP) for tool in declarations(owner))
@@ -79,12 +90,12 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
 
     if inspect.isasyncgenfunction(getattr(function, "__wrapped__", None)):
 
-        @wraps(function)
         @asynccontextmanager
-        async def context(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            manager, value = None, None
+        async def protected_context(
+            manager: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> AsyncIterator[Any]:
+            value = None
             try:
-                manager = function(*args, **kwargs)
                 async with manager as value:
                     yield value
             except BaseException as error:
@@ -94,6 +105,19 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
                 raise
             finally:
                 del args, kwargs, manager, value
+
+        @wraps(function)
+        def context(*args: Any, **kwargs: Any) -> Any:
+            try:
+                # Preserve argument validation at the original factory call.
+                return protected_context(function(*args, **kwargs), args, kwargs)
+            except BaseException as error:
+                if _uses_mcp(args, kwargs, declarations):
+                    _strip_mcp_frames(error)
+                    raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
+                raise
+            finally:
+                del args, kwargs
 
         return cast(_Function, context)
 
