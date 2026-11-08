@@ -317,10 +317,12 @@ async def _decide(
 def _usage(raw: Any) -> TokenUsage | None:
     if not isinstance(raw, dict):
         return None
-    details_in, details_out = (
-        raw.get("input_tokens_details") or {},
-        raw.get("output_tokens_details") or {},
-    )
+    details_in = raw.get("input_tokens_details")
+    details_out = raw.get("output_tokens_details")
+    if details_in is None:
+        details_in = {}
+    if details_out is None:
+        details_out = {}
     if not isinstance(details_in, dict) or not isinstance(details_out, dict):
         return None
     values = (

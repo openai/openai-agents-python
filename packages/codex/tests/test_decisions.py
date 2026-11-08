@@ -766,3 +766,54 @@ async def test_real_openai_client_preserves_normal_http_failures(compiler):
                     )
                 )
     assert caught.value.request_id == "req_limited" and caught.value.status_code == 429
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("field", ["input_tokens_details", "output_tokens_details"])
+@pytest.mark.parametrize(
+    ("details", "known_usage"),
+    [
+        pytest.param([], False, id="empty-list"),
+        pytest.param("", False, id="empty-string"),
+        pytest.param(0, False, id="zero"),
+        pytest.param(False, False, id="false"),
+        pytest.param(None, True, id="null"),
+        pytest.param({}, True, id="empty-dict"),
+        pytest.param(Ellipsis, True, id="omitted"),
+    ],
+)
+async def test_adapter_usage_details_keep_invalid_containers_unknown(
+    compiler, fallback, field, details, known_usage
+):
+    compiler["supported"] = not fallback
+    usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    if details is not Ellipsis:
+        usage[field] = details
+    data = {"usage": usage}
+    if fallback:
+        data.update(
+            status="completed",
+            output=[{"content": [{"type": "output_text", "text": '{"response":true}'}]}],
+        )
+    else:
+        data["answers"] = [{"probability": 1}]
+    client = Client(data)
+    async with OpenAIDecisions(
+        client=client, fallback_model="generative-fallback" if fallback else None
+    ) as provider:
+        response = await provider.get_decision(
+            DecisionRequest(
+                question="Allowed?",
+                input="evidence",
+                output_schema={
+                    "type": "object",
+                    "properties": {"response": {"type": "boolean"}},
+                    "required": ["response"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+    assert response.value == {"response": True}
+    assert response.usage == (TokenUsage(7, 0, 0, 3, 0, 10) if known_usage else None)
+    assert len(client.requests) == 1
+    assert client.requests[0][0] == ("/responses" if fallback else "/decisions")
