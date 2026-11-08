@@ -391,7 +391,9 @@ async def test_local_cannot_export_portable_state(responses, tmp_path):
     process = await _start(responses, tmp_path, "export")
     code, rows, err = await _collect(process)
     assert code == 0, (rows, err)
-    assert "local" in rows[1]["rejected"].lower(), rows
+    message = rows[1]["rejected"]
+    assert "cannot export portable SessionState" in message, rows
+    assert "Session.id" in message and "same storage backend" in message, rows
     assert not responses.requests
 
 

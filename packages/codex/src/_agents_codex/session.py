@@ -750,7 +750,7 @@ def _future() -> asyncio.Future[Any]:
 @dataclass
 class _Submission:
     output: _PreparedOutput
-    accepted: asyncio.Future[Any] = field(default_factory=_future)
+    accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
