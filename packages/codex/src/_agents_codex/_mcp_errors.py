@@ -38,7 +38,8 @@ def _strip_mcp_frames(error: BaseException) -> None:
         rebuilt = None
         for entry in reversed(retained):
             rebuilt = TracebackType(rebuilt, entry.tb_frame, entry.tb_lasti, entry.tb_lineno)
-        current.__traceback__ = rebuilt
+        # Frozen application exceptions may reject ordinary attribute assignment.
+        BaseException.with_traceback(current, rebuilt)
         pending.extend(
             cause for cause in (current.__cause__, current.__context__) if cause is not None
         )
