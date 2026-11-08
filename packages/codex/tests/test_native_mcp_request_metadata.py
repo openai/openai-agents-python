@@ -357,6 +357,7 @@ async def test_metadata_failure_joins_entered_work_and_allows_an_explicit_succes
         with pytest.raises(NativeError) as caught:
             await waiter
         assert secret not in str(caught.value)
+        assert "MCP result policy" in str(caught.value)
         assert cleaned.is_set()
         assert "unaccepted-held-output-9217" not in json.dumps(
             [item async for item in session.items()]
