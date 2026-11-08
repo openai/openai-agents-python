@@ -45,7 +45,11 @@ def main() -> None:
         "start",
         cwd=os.getcwd(),
         selected_env=os.environ.get(options.env_var),
-        observed_env={name: os.environ.get(name) for name in options.observe_env},
+        **(
+            {"observed_env": {name: os.environ.get(name) for name in options.observe_env}}
+            if options.observe_env
+            else {}
+        ),
     )
     calls = 0
     pending_call = None
