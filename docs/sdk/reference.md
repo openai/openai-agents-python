@@ -97,7 +97,9 @@ History and descendant iterators have no pagination arguments.
 
 ### get_cleanup
 
-Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None` finds the retained cleanup owner through the error and its exception context. It returns the existing Session or NativeProvider owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None` finds the retained cleanup owner through the error and its exception context. It returns the existing owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+
+In development builds after `0.24.0-alpha.6`, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner, also exported from `agents`. Its `aclose()` retries release of the original storage lease without repeating reconciliation.
 
 Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
 
