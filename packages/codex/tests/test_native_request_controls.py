@@ -222,7 +222,7 @@ async def test_named_target_cannot_widen_or_revive_a_removed_or_deferred_tool(re
             ).session() as session:
                 options = {"tools": []} if removed == "operation" else {}
                 if removed == "before_step":
-                    options["before_step"] = lambda _: []
+                    options["before_step"] = lambda _, *, step_index: []
                 await (await session.submit("must reject", **options)).get_result()
     assert responses.requests == []
 
