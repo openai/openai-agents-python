@@ -46,6 +46,7 @@ def owner(callback):
         _context=None,
     )
     session._select_step_body = Session._select_step_body.__get__(session, Session)
+    session._call_decision_callback = Session._call_decision_callback.__get__(session, Session)
     message = {
         "step_id": key[0],
         "thread": key[1],
