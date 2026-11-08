@@ -3476,7 +3476,7 @@ index 029325c141922401ace817474580c5740927c089..5573a793bd7b69fb80860973f14cc693
  
      /// Whether this thread requires an awaited context policy before sending input.
 diff --git a/codex-rs/ext/extension-api/src/model_request_observation.rs b/codex-rs/ext/extension-api/src/model_request_observation.rs
-index 266241e3b5452547600d748727256e66fbab43a6..dde3c84df865c2ab058a747a845ec14484defd31 100644
+index 266241e3b5452547600d748727256e66fbab43a6..6961e755096823aa92661abf126c88c3e96d368c 100644
 --- a/codex-rs/ext/extension-api/src/model_request_observation.rs
 +++ b/codex-rs/ext/extension-api/src/model_request_observation.rs
 @@ -23,12 +23,14 @@ impl ModelRequestEffort {
@@ -3491,22 +3491,6 @@ index 266241e3b5452547600d748727256e66fbab43a6..dde3c84df865c2ab058a747a845ec144
              Self::Responses => "responses",
              Self::ResponsesLite => "responses_lite",
 +            Self::Decisions => "decisions",
-         }
-     }
- }
-@@ -38,6 +40,7 @@ pub enum ModelRequestTransport {
-     HttpSse,
-     HttpJson,
-     Websocket,
-+    HttpJson,
- }
- impl ModelRequestTransport {
-     fn as_str(self) -> &'static str {
-@@ -45,6 +48,7 @@ impl ModelRequestTransport {
-             Self::HttpSse => "http_sse",
-             Self::HttpJson => "http_json",
-             Self::Websocket => "websocket",
-+            Self::HttpJson => "http_json",
          }
      }
  }
