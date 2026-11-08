@@ -14,6 +14,7 @@ from agents import (
     HostedVerificationMCP,
     HttpMCP,
     InteractionExpiredError,
+    PendingRequests,
     VerificationRequest,
 )
 from tests._asyncio import timeout
@@ -77,6 +78,44 @@ async def next_owned_question(session, alpha):
     assert request.turn_id == alpha.turn_id
     assert request.submission_id == alpha.submission_id
     return request
+
+
+@pytest.mark.parametrize("wait_method", ["wait_for_request_or_result", "wait_for_attention"])
+async def test_exact_child_wait_returns_its_live_url_request(tmp_path, monkeypatch, wait_method):
+    peer = CompletionPeer(early=False)
+    async with timeout(30), peer.serve() as url:
+        registration = HttpMCP(
+            name="records", url=url, tools=["search"], approval_mode="preapproved"
+        )
+        try:
+            async with owned_http_child(tmp_path, monkeypatch, registration) as (
+                model,
+                session,
+                alpha,
+                children,
+            ):
+                original = await next_owned_question(session, alpha)
+                beta = next(child for child in children.values() if child is not alpha)
+                assert (await getattr(beta, wait_method)()).final_output == "beta complete"
+                async with timeout(3):
+                    pending = await getattr(alpha, wait_method)()
+                assert isinstance(pending, PendingRequests)
+                assert pending.turn is alpha
+                assert pending.requests == (original,)
+                request = pending.requests[0]
+                assert isinstance(request, ElicitationRequest)
+                await request.accept_url()
+                await peer.answered.wait()
+                peer.finish.set()
+                result = await getattr(alpha, wait_method)()
+                assert result.final_output == "alpha complete"
+                with pytest.raises(InteractionExpiredError):
+                    await request.accept_url()
+                for child in children.values():
+                    await child.get_result()
+                assert not await session.pending_interactions()
+        finally:
+            peer.finish.set()
 
 
 @pytest.mark.parametrize("early", [False, True])

@@ -95,8 +95,9 @@ class Turn(Generic[OutputT]):
         """Wait for this turn's result or its own live, answerable requests.
 
         Use Session.interactions() to also receive requests from other turns.
-        Like get_result(), cancelling this waiter leaves the Turn alive. Only this
-        root's owned continuation requests are included, never child requests.
+        Like get_result(), cancelling this waiter leaves the Turn alive. A root
+        includes its owned continuation requests, never descendant requests.
+        A child includes only requests owned by that exact child turn.
         """
         return await self._session._wait_for_request_or_result(self)
 
