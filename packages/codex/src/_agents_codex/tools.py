@@ -18,6 +18,7 @@ from pydantic import (
 from typing_extensions import NotRequired, Required, TypedDict
 
 from ._events import FunctionCallResponse as FunctionCallResponse
+from ._media import ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
 from .manual import _CapturedManual as _CapturedManual
 
@@ -278,56 +279,139 @@ class ToolOutputText:
 
 @dataclass(frozen=True)
 class ToolOutputImage:
-    """An inline base64 image data URL, decoded and processed by Core."""
+    """A provider image reference. Core owns actual-model preparation."""
 
-    image_url: str
+    image_url: str | None = None
+    file_id: str | None = field(default=None, kw_only=True)
+    detail: ImageDetail | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.image_url, str):
-            raise TypeError("ToolOutputImage requires a base64 image data URL")
-        header, separator, data = self.image_url.partition(",")
-        if not (
-            header.startswith("data:image/") and header.endswith(";base64") and separator and data
-        ):
-            raise ValueError(
-                "ToolOutputImage requires a base64 image data URL; remote URLs, "
-                "file IDs and local paths are unsupported"
-            )
+        _capture_image(
+            {
+                key: value
+                for key, value in {
+                    "image_url": self.image_url,
+                    "file_id": self.file_id,
+                    "detail": self.detail,
+                }.items()
+                if value is not None
+            }
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolOutputFile:
+    """Exactly one provider file source, without host reads, fetch or upload."""
+
+    file_id: str | None = None
+    file_data: str | None = None
+    file_url: str | None = None
+    filename: str | None = None
+
+    def __post_init__(self) -> None:
+        _capture_file(
+            {
+                key: value
+                for key, value in {
+                    "file_id": self.file_id,
+                    "file_data": self.file_data,
+                    "file_url": self.file_url,
+                    "filename": self.filename,
+                }.items()
+                if value is not None
+            }
+        )
 
 
 @dataclass
 class ToolOutput:
     """A mutable native response of content items, with optional explicit failure."""
 
-    content_items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] | list[dict[str, Any]]
+    content_items: (
+        list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile]
+        | list[dict[str, Any] | ToolOutputText | ToolOutputImage]
+        | list[dict[str, Any]]
+    )
     success: bool = True
 
     @classmethod
     def text(cls, value: str) -> ToolOutput:
-        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] = [ToolOutputText(value)]
+        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile] = [
+            ToolOutputText(value)
+        ]
         return cls(items)
 
     @classmethod
-    def image(cls, image_url: str) -> ToolOutput:
-        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] = [
-            ToolOutputImage(image_url)
+    def image(
+        cls,
+        image_url: str | None = None,
+        *,
+        file_id: str | None = None,
+        detail: ImageDetail | None = None,
+    ) -> ToolOutput:
+        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile] = [
+            ToolOutputImage(image_url, file_id=file_id, detail=detail)
+        ]
+        return cls(items)
+
+    @classmethod
+    def file(
+        cls,
+        *,
+        file_id: str | None = None,
+        file_data: str | None = None,
+        file_url: str | None = None,
+        filename: str | None = None,
+    ) -> ToolOutput:
+        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile] = [
+            ToolOutputFile(
+                file_id=file_id, file_data=file_data, file_url=file_url, filename=filename
+            )
         ]
         return cls(items)
 
     @classmethod
     def error(cls, message: str) -> ToolOutput:
-        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] = [ToolOutputText(message)]
+        items: list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile] = [
+            ToolOutputText(message)
+        ]
         return cls(items, success=False)
 
     def to_native(self) -> dict[str, Any]:
         parts: list[dict[str, Any]] = []
         for part in self.content_items:
             if isinstance(part, ToolOutputText):
-                parts.append({"type": "inputText", "text": part.text})
+                raw = {"type": "inputText", "text": part.text}
             elif isinstance(part, ToolOutputImage):
-                parts.append({"type": "inputImage", "imageUrl": part.image_url})
+                raw = {
+                    "type": "inputImage",
+                    **{
+                        key: value
+                        for key, value in {
+                            "imageUrl": part.image_url,
+                            "fileId": part.file_id,
+                            "detail": part.detail,
+                        }.items()
+                        if value is not None
+                    },
+                }
+            elif isinstance(part, ToolOutputFile):
+                raw = {
+                    "type": "inputFile",
+                    **{
+                        key: value
+                        for key, value in {
+                            "file_id": part.file_id,
+                            "file_data": part.file_data,
+                            "file_url": part.file_url,
+                            "filename": part.filename,
+                        }.items()
+                        if value is not None
+                    },
+                }
             else:
-                parts.append(part)
+                raw = part
+            parts.append(_capture_tool_part(raw))
         return {"contentItems": parts, "success": self.success}
 
     def _validate(self) -> None:
@@ -360,6 +444,7 @@ class _CapturedFunction:
     after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None
     context: Any = field(repr=False)
     namespace: str | None = None
+    finish_turn: bool = False
 
     @property
     def _requires_live_manual_session(self) -> bool:
@@ -388,6 +473,17 @@ class _ToolCatalog:
 
     def manual_slots(self) -> list[int]:
         return [slot for slot, tool in enumerate(self.tools) if isinstance(tool, _CapturedManual)]
+
+    def finish_slots(self) -> list[int]:
+        return [
+            slot
+            for slot, tool in enumerate(self.tools)
+            if (
+                tool.declaration.finish_turn
+                if isinstance(tool, _CapturedManual)
+                else tool.finish_turn
+            )
+        ]
 
     def native_specs(self) -> str:
         return json.dumps([json.loads(tool.spec_json) for tool in self.tools])

@@ -43,9 +43,10 @@ struct Entry {
     spec: ToolSpec,
     exposure: ToolExposure,
     manual: bool,
+    finish_turn: bool,
 }
 
-struct Generation {
+pub(crate) struct Generation {
     id: u64,
     entries: Vec<Entry>,
     specs: Vec<DynamicToolSpec>,
@@ -56,7 +57,21 @@ struct StepReply {
     stop: crate::native_interception::CapturedTurnStop,
 }
 
+pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
+
 impl Generation {
+    fn set_finish(&mut self, slots: &[usize]) -> Result<()> {
+        for &slot in slots {
+            let entry = self
+                .entries
+                .get_mut(slot)
+                .context("Invalid terminal tool slot")?;
+            ensure!(!entry.finish_turn, "Duplicate terminal tool slot");
+            entry.finish_turn = true;
+        }
+        Ok(())
+    }
+
     fn set_manual(&mut self, slots: &[usize]) -> Result<()> {
         for &slot in slots {
             let entry = self
@@ -147,7 +162,18 @@ pub(crate) enum ModelContextUpdate {
     Replace(Vec<ResponseItem>),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ToolCompletionReply {
+    Accept { final_output: Value },
+    Continue { feedback: Option<String> },
+}
+
 enum PreparationReply {
+    ToolCompletion {
+        reply: oneshot::Sender<std::result::Result<ToolCompletionReply, ()>>,
+        stop: crate::native_interception::CapturedTurnStop,
+    },
     Step(StepReply),
     Context(oneshot::Sender<Option<ModelContextUpdate>>),
     Compaction(oneshot::Sender<std::result::Result<Option<String>, ()>>),
@@ -160,6 +186,7 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::ToolCompletion { reply, .. } => reply.is_closed(),
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
             Self::Compaction(reply) => reply.is_closed(),
@@ -196,6 +223,7 @@ enum QueuedRequest {
         incarnation: String,
     },
     GracefulFailure(Weak<PythonTools>, Weak<TurnAdmission>),
+    ToolCompletionFailure(Weak<PythonTools>, Weak<TurnAdmission>),
     ModelFailure {
         owner: Weak<PythonTools>,
         receipt: Weak<TurnAdmission>,
@@ -282,6 +310,8 @@ pub(crate) struct TurnAdmission {
     // Idle notification and terminal delivery are different native boundaries.
     // Reopening must never trust an idle hint alone for a fenced new turn.
     terminal: AtomicBool,
+    tool_completion_proposed: AtomicBool,
+    tool_completion_failed: AtomicBool,
     local_command_cleanup_failed: AtomicBool,
     input_recorded: AtomicBool,
     // Private namespace for SDK steers of this exact runtime, including same-ID recovery.
@@ -407,6 +437,8 @@ impl TurnAdmission {
     }
 
     pub(crate) fn generation(&self) {
+        self.tool_completion_proposed
+            .store(false, Ordering::Release);
         self.steering_tail.store(false, Ordering::Release);
     }
 
@@ -461,7 +493,14 @@ enum Phase {
     Parked,
 }
 
+#[derive(Clone)]
+pub(crate) struct NativeMediaContext {
+    pub(crate) model_info: Arc<codex_protocol::openai_models::ModelInfo>,
+    pub(crate) profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy,
+}
+
 struct PendingCall {
+    media: Option<NativeMediaContext>,
     _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     invocation: u64,
     manual_request: Option<Value>,
@@ -1182,6 +1221,9 @@ impl PythonTools {
         };
         let mut seed = tools.prepare(0, specs)?;
         seed.set_manual(manual_slots)?;
+        if let Some(slots) = startup.thread_extension_init.get::<FinishToolSlots>() {
+            seed.set_finish(&slots.0)?;
+        }
         *tools.current.write().expect("Python catalog poisoned") = Arc::new(seed);
         startup.thread_extension_init.insert(tools);
         Ok(())
@@ -1271,6 +1313,7 @@ impl PythonTools {
             };
             entries.push(Entry {
                 manual: false,
+                finish_turn: false,
                 name,
                 spec,
                 exposure: if tool.defer_loading {
@@ -1475,6 +1518,23 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Expired completion callback"))
     }
 
+    pub(crate) fn reply_tool_completion(
+        self: &Arc<Self>,
+        id: u64,
+        decision: std::result::Result<ToolCompletionReply, ()>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let PreparationReply::ToolCompletion { reply, .. } =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid terminal tool proposal reply");
+        };
+        reply
+            .send(decision)
+            .map_err(|_| anyhow::anyhow!("Expired terminal tool proposal"))
+    }
+
     pub(crate) fn retire_steps(&self) {
         self.retire_prepared_requests();
         // Dropping the owned senders wakes blocked selectors with no authority.
@@ -1511,6 +1571,12 @@ impl PythonTools {
                     return false;
                 }
                 pending.stop
+            }
+            Ok(PreparationReply::ToolCompletion { reply, stop }) => {
+                if reply.send(Err(())).is_err() {
+                    return false;
+                }
+                stop
             }
             Ok(PreparationReply::Completion { reply, stop }) => {
                 if reply.send(Err(())).is_err() {
@@ -1634,6 +1700,14 @@ impl PythonTools {
                 .filter_map(|(slot, entry)| entry.manual.then_some(slot))
                 .collect::<Vec<_>>(),
         )?;
+        seed.set_finish(
+            &current
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| entry.finish_turn.then_some(slot))
+                .collect::<Vec<_>>(),
+        )?;
         *current = Arc::new(seed);
         Ok(())
     }
@@ -1645,8 +1719,21 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
     ) -> Result<u64> {
+        self.replace_terminal(thread, id, specs, manual_slots, &[])
+            .await
+    }
+
+    pub async fn replace_terminal(
+        &self,
+        thread: &CodexThread,
+        id: u64,
+        specs: Vec<DynamicToolSpec>,
+        manual_slots: &[usize],
+        finish_slots: &[usize],
+    ) -> Result<u64> {
         let mut candidate = self.prepare(id, specs)?;
         candidate.set_manual(manual_slots)?;
+        candidate.set_finish(finish_slots)?;
         self.check_idle(thread).await?;
         self.publish(candidate)
     }
@@ -1715,6 +1802,38 @@ impl PythonTools {
             "Expired or invalid managed Python tool request"
         );
         Ok(())
+    }
+
+    pub(crate) fn restored_media_model(
+        &self,
+        key: &PendingKey,
+        response: &DynamicToolResponse,
+    ) -> Result<Option<String>> {
+        if !response.content_items.iter().any(|part| {
+            matches!(
+                part,
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputFile { .. }
+            )
+        }) {
+            return Ok(None);
+        }
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get(key) else {
+            return Ok(None);
+        };
+        if !call.reentry {
+            return Ok(None);
+        }
+        match &call.manual_request {
+            Some(request) => Ok(Some(
+                request["msg"]["_sdk_model"]
+                    .as_str()
+                    .context("restored file reply lacks its admitted original model")?
+                    .to_owned(),
+            )),
+            // Fresh SDK approval reentry uses the current native thread configuration.
+            None => Ok(None),
+        }
     }
 
     pub(crate) fn is_reentry(&self, key: &PendingKey) -> bool {
@@ -1983,9 +2102,10 @@ impl PythonTools {
         grant: &ManualToolGrant,
         response: DynamicToolResponse,
     ) -> bool {
+        let generation = self.snapshot();
         if !matches!(&grant.owner, ManualOwner::Core(owner) if owner.ptr_eq(&Arc::downgrade(self)))
             || grant.key.reply.thread != owner
-            || grant.key.reply.generation != self.snapshot().id
+            || grant.key.reply.generation != generation.id
         {
             return false;
         }
@@ -2014,7 +2134,7 @@ impl PythonTools {
                 .and_then(|owner| owner.upgrade())
             {
                 if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                    frame.record(&grant.key, &receipt);
+                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt);
                 }
             }
         }
@@ -2062,6 +2182,7 @@ impl PythonTools {
             &ToolCallSource::Direct,
             model,
             true,
+            None,
         )
         .map(|(_, _, receiver)| receiver)
     }
@@ -2158,6 +2279,18 @@ impl PythonTools {
                         "msg": {"type": "shutdown_complete"},
                     });
                 }
+                Some(QueuedRequest::ToolCompletionFailure(owner, receipt)) => {
+                    if let (Some(owner), Some(receipt)) = (owner.upgrade(), receipt.upgrade())
+                        && Arc::ptr_eq(&self.family, &owner.family)
+                        && owner.owns_admission(&receipt)
+                        && *receipt.state.borrow() == AdmissionState::Ready
+                    {
+                        return json!({"id":receipt.turn_id,"msg":{
+                            "type":"_sdk_tool_completion_failed", "turn_id":receipt.turn_id,
+                            "thread":receipt.thread_id,"instance":owner.instance,
+                        }});
+                    }
+                }
                 Some(QueuedRequest::GracefulFailure(owner, receipt)) => {
                     if let (Some(owner), Some(receipt)) = (owner.upgrade(), receipt.upgrade())
                         && std::ptr::eq(self, owner.as_ref())
@@ -2215,6 +2348,15 @@ impl PythonTools {
         }
     }
 
+    /// Data from the exact native pending receipt, never SDK-observed call metadata.
+    pub(crate) fn native_media(&self, key: &PendingKey) -> Option<NativeMediaContext> {
+        self.pending
+            .lock()
+            .expect("managed replies poisoned")
+            .get(key)
+            .and_then(|call| call.media.clone())
+    }
+
     // Take the live sender only once. The binding retains it while its writer
     // commits the real result; a failed commit cannot be mistaken for success.
     pub(crate) fn take_reply(
@@ -2250,6 +2392,7 @@ impl PythonTools {
         source: &ToolCallSource,
         model: Option<&str>,
         reentry: bool,
+        media: Option<NativeMediaContext>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<DynamicToolResponse>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -2300,6 +2443,7 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    media,
                     _tracing: tracing,
                     invocation,
                     manual_request: entry.manual.then(|| {
@@ -2376,6 +2520,7 @@ impl PythonTools {
             &ToolCallSource::Direct,
             None,
             true,
+            None,
         )
         .map(|(key, _, receiver)| (key, receiver))
     }
@@ -2521,7 +2666,111 @@ pub struct PythonContributor {
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
 }
+type AcceptedToolCalls = Arc<Mutex<HashMap<PendingKey, u64>>>;
+
+/// Live fresh receipts are never serialized into a checkpoint.
+pub(crate) struct FreshTerminalReceipts {
+    generation: Arc<Generation>,
+    calls: Mutex<Option<HashMap<PendingKey, u64>>>,
+}
+
+impl FreshTerminalReceipts {
+    pub(crate) fn record(
+        target: &mut Option<Self>,
+        generation: Arc<Generation>,
+        key: &PendingKey,
+        invocation: u64,
+    ) {
+        if !generation
+            .entries
+            .get(key.reply.slot)
+            .is_some_and(|entry| entry.finish_turn)
+        {
+            return;
+        }
+        let fresh = target.get_or_insert_with(|| Self {
+            generation: generation.clone(),
+            calls: Mutex::new(Some(HashMap::new())),
+        });
+        fresh
+            .calls
+            .lock()
+            .expect("fresh terminal receipts poisoned")
+            .as_mut()
+            .expect("fresh terminal receipts already adopted")
+            .insert(key.clone(), invocation);
+    }
+    pub(crate) fn check(&self, tools: &PythonTools) -> Result<()> {
+        ensure!(
+            Arc::ptr_eq(&self.generation, &tools.snapshot()),
+            "Expired recovered terminal generation"
+        );
+        Ok(())
+    }
+    fn adopt(&self, tools: &PythonTools, step: &StepCatalog) -> Result<()> {
+        self.check(tools)?;
+        ensure!(
+            Arc::ptr_eq(&self.generation, &step.generation),
+            "Recovered terminal step generation changed"
+        );
+        if let Some(calls) = self
+            .calls
+            .lock()
+            .expect("fresh terminal receipts poisoned")
+            .take()
+        {
+            step.accepted
+                .lock()
+                .expect("terminal receipts poisoned")
+                .extend(calls);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct RecoveredToolCompletionSeed {
+    turn: String,
+    pending: Mutex<
+        Option<(
+            crate::manual_checkpoint::ToolOutcomes,
+            FreshTerminalReceipts,
+        )>,
+    >,
+}
+
+impl RecoveredToolCompletionSeed {
+    pub(crate) fn new(
+        turn: String,
+        outcomes: crate::manual_checkpoint::ToolOutcomes,
+        fresh: FreshTerminalReceipts,
+    ) -> Self {
+        Self {
+            turn,
+            pending: Mutex::new(Some((outcomes, fresh))),
+        }
+    }
+    pub(crate) fn attach(self, init: &mut codex_extension_api::ExtensionDataInit) {
+        init.insert(self);
+    }
+    fn consume(&self, input: &TurnStartInput<'_>) {
+        if self.turn != input.turn_id {
+            return;
+        }
+        // Take on the first matching start, including starts cancelled before sampling.
+        if let Some((outcomes, fresh)) = self
+            .pending
+            .lock()
+            .expect("terminal recovery seed poisoned")
+            .take()
+        {
+            input.turn_store.insert(outcomes.candidates(input.turn_id));
+            input.turn_store.insert(fresh);
+        }
+    }
+}
+
 struct StepCatalog {
+    accepted: AcceptedToolCalls,
     generation: Arc<Generation>,
     use_deferred_specs: bool,
     slots: Vec<usize>,
@@ -2553,9 +2802,145 @@ impl ToolLifecycleContributor for PythonContributor {
 }
 
 impl TurnLifecycleContributor for PythonContributor {
+    fn propose_tool_completion<'a>(
+        &'a self,
+        input: codex_extension_api::ToolCompletionInput<'a>,
+    ) -> ExtensionFuture<
+        'a,
+        std::result::Result<Option<codex_extension_api::ToolCompletionDecision>, String>,
+    > {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(None);
+            };
+            let Some(step) = input.step_store.get::<StepCatalog>() else {
+                return Ok(None);
+            };
+            let ResponseItem::FunctionCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            } = input.call
+            else {
+                return Ok(None);
+            };
+            if let Some(fresh) = input.turn_store.get::<FreshTerminalReceipts>() {
+                fresh
+                    .adopt(&tools, &step)
+                    .map_err(|error| error.to_string())?;
+            }
+            let qualified_name = ToolName::new(namespace.clone(), name.clone());
+            let receipt = step
+                .accepted
+                .lock()
+                .expect("Terminal receipts poisoned")
+                .iter()
+                .find(|(key, _)| {
+                    key.call == *call_id
+                        && step
+                            .generation
+                            .entries
+                            .get(key.reply.slot)
+                            .is_some_and(|entry| entry.name == qualified_name)
+                })
+                .map(|(key, invocation)| (key.clone(), *invocation));
+            let Some((key, invocation)) = receipt else {
+                return Ok(None);
+            };
+            let verify = || -> Result<()> {
+                ensure!(
+                    Arc::ptr_eq(&step.generation, &tools.snapshot()),
+                    "Expired terminal tool generation"
+                );
+                let entry = step
+                    .generation
+                    .entries
+                    .get(key.reply.slot)
+                    .context("Invalid terminal tool slot")?;
+                ensure!(
+                    entry.finish_turn
+                        && entry.name == qualified_name
+                        && key.reply.thread == input.thread_store.level_id()
+                        && key.turn == input.turn_id
+                        && key.call == *call_id
+                        && key.reply.generation == step.generation.id
+                        && key.reply.instance == tools.instance,
+                    "Invalid terminal tool receipt identity"
+                );
+                ensure!(
+                    step.accepted
+                        .lock()
+                        .expect("Terminal receipts poisoned")
+                        .get(&key)
+                        .is_some_and(|current_invocation| *current_invocation == invocation),
+                    "Expired terminal tool receipt"
+                );
+                Ok(())
+            };
+            verify().map_err(|e| e.to_string())?;
+            let ResponseItem::FunctionCallOutput { output, .. } = input.output else {
+                return Err("Invalid terminal tool output".into());
+            };
+            let text = match &output.body {
+                FunctionCallOutputBody::Text(text) => Some(text.clone()),
+                FunctionCallOutputBody::ContentItems(items) => match items.as_slice() {
+                    [FunctionCallOutputContentItem::InputText { text }] => Some(text.clone()),
+                    _ => None,
+                },
+            };
+            let owner = tools
+                .admission_ready(input.turn_id)
+                .map_err(|e| e.to_string())?;
+            let stop =
+                crate::native_interception::capture_step_stop(input.thread_store, input.turn_store)
+                    .ok_or("Terminal tool completion owner unavailable")?;
+            let decision = tools
+                .exchange_preparation(
+                    owner.clone(),
+                    [
+                        "Expired terminal tool owner",
+                        "Terminal tool reader closed",
+                        "Terminal tool proposal cancelled",
+                    ],
+                    |reply| PreparationReply::ToolCompletion { reply, stop },
+                    |id| {
+                        json!({"id":input.turn_id,"msg":{
+                            "type":"_sdk_tool_completion", "turn_id":input.turn_id,
+                            "thread":input.thread_store.level_id(),"instance":tools.instance,
+                            "step_id":id,"model":input.model,"text":text,"call_id":call_id,
+                            "name":name,"namespace":namespace,"generation":step.generation.id,
+                            "slot":key.reply.slot, "invocation":invocation,
+                        }})
+                    },
+                    |decision| {
+                        decision.map_err(|_| anyhow::anyhow!("Terminal tool validation failed"))
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            verify().map_err(|e| e.to_string())?;
+            Ok(Some(match decision {
+                ToolCompletionReply::Accept { final_output } => {
+                    owner
+                        .tool_completion_proposed
+                        .store(true, Ordering::Release);
+                    codex_extension_api::ToolCompletionDecision::Accept { final_output }
+                }
+                ToolCompletionReply::Continue { feedback } => {
+                    codex_extension_api::ToolCompletionDecision::Continue { feedback }
+                }
+            }))
+        })
+    }
+
     // The default BeforeTaskRegistration phase includes compaction tasks.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            if let Some(seed) = input.turn_store.get::<RecoveredToolCompletionSeed>() {
+                seed.consume(&input);
+            }
+
             let tracing = input.turn_store.get_or_init(|| {
                 input
                     .thread_store
@@ -2609,6 +2994,8 @@ impl TurnLifecycleContributor for PythonContributor {
                     sampling_stop: input.turn_store.get_or_init(TurnSamplingStop::default),
                     graph_fenced: graph.fenced,
                     terminal: AtomicBool::new(false),
+                    tool_completion_proposed: AtomicBool::new(false),
+                    tool_completion_failed: AtomicBool::new(false),
                     local_command_cleanup_failed: AtomicBool::new(false),
                     input_recorded: AtomicBool::new(false),
                     steering_namespace: format!(
@@ -2646,6 +3033,11 @@ impl TurnLifecycleContributor for PythonContributor {
                 && let Some(receipt) = tools.admitted_turn(input.turn_store)
                 && receipt.turn_id == input.turn_id
             {
+                if receipt.tool_completion_proposed.load(Ordering::Acquire) {
+                    receipt
+                        .tool_completion_failed
+                        .store(true, Ordering::Release);
+                }
                 // A later error, including a non-provider error, replaces the
                 // earlier metadata. Capturing this never marks a turn failed.
                 *receipt
@@ -2979,6 +3371,19 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                         false
                     }
                 });
+                if input.cause == codex_extension_api::ThreadIdleCause::Failed
+                    && receipt.tool_completion_failed.swap(false, Ordering::AcqRel)
+                {
+                    // Core deliberately emitted no replacement terminal fact.
+                    // This exact idle receipt settles SDK waiters with failure only.
+                    let _ = tools
+                        .family
+                        .requests
+                        .send(QueuedRequest::ToolCompletionFailure(
+                            Arc::downgrade(&tools),
+                            Arc::downgrade(receipt),
+                        ));
+                }
                 tools.family.graph_changed.send_replace(());
             }
         })
@@ -3027,6 +3432,7 @@ impl PythonContributor {
         generation: Arc<Generation>,
         use_deferred_specs: bool,
         slots: &[usize],
+        accepted: Option<AcceptedToolCalls>,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         slots
             .iter()
@@ -3034,6 +3440,7 @@ impl PythonContributor {
             .map(|slot| {
                 Arc::new(PythonExecutor {
                     managed_calls: self.managed_calls.clone(),
+                    accepted: accepted.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -3063,7 +3470,7 @@ impl ToolContributor for PythonContributor {
             .as_ref()
             .is_some_and(|receipt| receipt.use_deferred_specs);
         let slots = (0..generation.entries.len()).collect::<Vec<_>>();
-        self.executors(thread, tools, generation, use_deferred_specs, &slots)
+        self.executors(thread, tools, generation, use_deferred_specs, &slots, None)
     }
 
     fn tools_for_step(
@@ -3078,6 +3485,7 @@ impl ToolContributor for PythonContributor {
         let snapshot = step.get_or_init(|| {
             let generation = tools.snapshot();
             StepCatalog {
+                accepted: Default::default(),
                 slots: {
                     let defaults = tools.step_defaults.read().expect("Step defaults poisoned");
                     let mut slots = defaults
@@ -3113,6 +3521,7 @@ impl ToolContributor for PythonContributor {
             snapshot.generation.clone(),
             snapshot.use_deferred_specs,
             &snapshot.slots,
+            Some(snapshot.accepted.clone()),
         )
     }
 
@@ -3185,6 +3594,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    accepted: Option<AcceptedToolCalls>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
@@ -3248,6 +3658,10 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     &call.source,
                     Some(&call.model),
                     false,
+                    Some(NativeMediaContext {
+                        model_info: Arc::clone(&call.model_info),
+                        profile: call.provider_reference_profile,
+                    }),
                 )
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
             // A rejected enqueue never reaches application code. Keep Core's
@@ -3271,6 +3685,18 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 {
                     hold.entered.add_permits(1);
                     hold.release.acquire().await.unwrap().forget();
+                }
+            }
+            if call.source == ToolCallSource::Direct
+                && response.success
+                && self.generation.entries[self.slot].finish_turn
+                && Arc::ptr_eq(&self.generation, &self.tools.snapshot())
+            {
+                if let Some(accepted) = &self.accepted {
+                    accepted
+                        .lock()
+                        .expect("Terminal receipts poisoned")
+                        .insert(key, invocation);
                 }
             }
             Ok(Box::new(PythonOutput(response)) as Box<dyn ToolOutput>)
@@ -5010,6 +5436,47 @@ pub(crate) mod managed_tests {
         assert!(next.wait().await.is_err());
     }
 
+    #[tokio::test]
+    async fn native_receipt_metadata_does_not_reopen_a_consumed_sender() {
+        let tools = catalog(
+            ToolPolicy::default(),
+            DynamicToolSpec::Function(function("lookup")),
+        );
+        let model = Arc::new(codex_models_manager::model_info::model_info_from_slug(
+            "gpt-5.5",
+        ));
+        let context = NativeMediaContext {
+            model_info: Arc::clone(&model),
+            profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses,
+        };
+        let source = ToolCallSource::CodeMode {
+            cell_id: "1".into(),
+            runtime_tool_call_id: "nested".into(),
+        };
+        let (key, _, _receive) = tools
+            .enqueue(
+                "root",
+                &tools.snapshot(),
+                0,
+                "turn",
+                "call",
+                json!({}),
+                &source,
+                Some("gpt-5.5"),
+                false,
+                Some(context),
+            )
+            .unwrap();
+        // The existing pending owner retains data without a live root-turn query.
+        let captured = tools.native_media(&key).unwrap();
+        assert!(Arc::ptr_eq(&captured.model_info, &model));
+        let _sender = tools.take_reply("root", &key).unwrap().unwrap();
+        assert!(tools.native_media(&key).is_none());
+        assert!(tools.take_reply("root", &key).unwrap().is_none());
+        // A detached metadata clone still carries no publication capability.
+        assert_eq!(captured.model_info.slug, "gpt-5.5");
+    }
+
     fn catalog(policy: ToolPolicy, spec: DynamicToolSpec) -> Arc<PythonTools> {
         let tools = Arc::new(PythonTools {
             current: RwLock::new(Arc::new(Generation {
@@ -5143,6 +5610,7 @@ pub(crate) mod managed_tests {
     fn executor(tools: Arc<PythonTools>) -> PythonExecutor {
         PythonExecutor {
             managed_calls: None,
+            accepted: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
@@ -5182,6 +5650,8 @@ pub(crate) mod managed_tests {
                 call_id: key.call.clone(),
                 tool_name: ToolName::new(None, "lookup"),
                 model: "test-model".into(),
+                model_info: Arc::new(codex_models_manager::model_info::model_info_from_slug("test-model")),
+                provider_reference_profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::PrepareInline,
                 codex_turn_metadata: None,
                 truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(1000),
                 source: ToolCallSource::Direct,
@@ -5249,6 +5719,7 @@ pub(crate) mod managed_tests {
                     &ToolCallSource::Direct,
                     None,
                     false,
+                    None,
                 )
                 .unwrap();
             replies.push((id, key, receiver));
@@ -5291,6 +5762,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert!(root.owner("root", &key).is_some());
@@ -5322,6 +5794,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert!(root.owner("root", &key).is_none());
@@ -5375,6 +5848,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         let old = PendingReply {
@@ -5416,6 +5890,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         drop(old);
@@ -5435,6 +5910,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(tools.next_request().await["msg"]["callId"], "other");

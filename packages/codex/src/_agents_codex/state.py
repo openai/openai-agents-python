@@ -167,6 +167,15 @@ class _PendingManual(BaseModel):
     arguments: str
 
 
+class _ToolOutcomes(BaseModel):
+    """Ordinary final sibling data; current native grants stay outside JSON."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    response_observation_id: str = Field(min_length=1)
+    call_ids: list[str]
+    outcomes: list[tuple[str, bool]]
+
+
 class _ManualContinuation(BaseModel):
     """Native receipt order at a settled manual boundary, never live grants."""
 
@@ -177,6 +186,7 @@ class _ManualContinuation(BaseModel):
     reply_order: list[str]
     accepted_replies: dict[str, dict[str, Any]]
     pending_manual: list[_PendingManual]
+    tool_outcomes: _ToolOutcomes | None = None
     output_schema: dict[str, Any] | None = None
 
 

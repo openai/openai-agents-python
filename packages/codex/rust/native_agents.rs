@@ -294,6 +294,7 @@ pub struct Turn {
 
 #[derive(Clone)]
 struct Outcome {
+    tool_completion: Option<codex_protocol::protocol::ToolTurnCompletion>,
     result: Result<String, String>,
     terminal: bool,
     usage: Option<TokenUsageInfo>,
@@ -325,6 +326,16 @@ impl Turn {
         terminal: bool,
         usage: Option<TokenUsageInfo>,
     ) {
+        self.finish_with_tool_completion(result, terminal, usage, None);
+    }
+
+    fn finish_with_tool_completion(
+        &self,
+        result: Result<String, String>,
+        terminal: bool,
+        usage: Option<TokenUsageInfo>,
+        tool_completion: Option<codex_protocol::protocol::ToolTurnCompletion>,
+    ) {
         self.result.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -335,6 +346,7 @@ impl Turn {
                 result,
                 terminal,
                 usage,
+                tool_completion,
             });
             true
         });
@@ -353,6 +365,13 @@ impl Turn {
                 .context("Native child result is unavailable")?;
         }
     }
+    pub(crate) fn tool_completion(&self) -> Option<codex_protocol::protocol::ToolTurnCompletion> {
+        self.result
+            .borrow()
+            .as_ref()
+            .and_then(|outcome| outcome.tool_completion.clone())
+    }
+
     pub async fn wait(&self) -> anyhow::Result<(String, Option<TokenUsageInfo>)> {
         let outcome = self.outcome().await?;
         Ok((outcome.result.map_err(anyhow::Error::msg)?, outcome.usage))
@@ -407,6 +426,24 @@ impl Instance {
             self.submitted.insert(turn_id.to_owned(), turn.clone());
         }
         turn
+    }
+
+    pub(crate) fn fail_tool_completion(&self, turn_id: &str, incarnation: &str) {
+        if self.incarnation.as_deref() != Some(incarnation) {
+            return;
+        }
+        let turn = self
+            .turn
+            .as_ref()
+            .filter(|turn| turn.turn_id == turn_id)
+            .or_else(|| self.submitted.get(turn_id));
+        if let Some(turn) = turn {
+            turn.finish(
+                Err("Terminal tool persistence failed; recovery required".into()),
+                true,
+                self.usage.clone(),
+            );
+        }
     }
 
     pub fn retire(&self) {
@@ -512,9 +549,15 @@ impl Instance {
                             .get::<crate::python_tools::PythonTools>()
                     })
                     .is_some_and(|tools| tools.take_failed(&turn.turn_id));
-                turn.finish(
+                turn.finish_with_tool_completion(
                     if end.error.is_some() || mcp_failed || python_failed {
                         Err("Native child turn failed".into())
+                    } else if let Some(completion) = &end.tool_completion {
+                        completion
+                            .final_output
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "Native child tool completion is not plain text".into())
                     } else if turn.last_assistant_had_blank_final.load(Ordering::Relaxed) {
                         Ok(String::new())
                     } else {
@@ -531,6 +574,7 @@ impl Instance {
                     },
                     true,
                     self.usage.clone(),
+                    end.tool_completion.clone(),
                 );
                 return turn
                     .result
@@ -624,9 +668,12 @@ pub async fn submit(
         !input.input.is_empty()
             && input.input.iter().all(|part| matches!(
                 part,
-                UserInput::Text { .. } | UserInput::Image { .. } | UserInput::LocalImage { .. }
+                UserInput::Text { .. }
+                    | UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::File { .. }
             )),
-        "Child submission requires text or image user input"
+        "Child submission requires text, image or file user input"
     );
     // Serialize SDK admission and close operations; Core still owns admission
     // against concurrently submitted native followups and steers.
@@ -1059,6 +1106,7 @@ mod steering_capture_tests {
             id: turn_id.to_owned(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_owned(),
+                tool_completion: None,
                 last_agent_message: Some("original answer".into()),
                 error: None,
                 started_at: None,

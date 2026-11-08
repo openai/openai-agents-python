@@ -42,6 +42,8 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
+from .initial_messages import _capture_initial_messages
+from .input import InitialMessage
 from .model_context import _ContextTransform
 from .usage import RunBudget
 
@@ -604,6 +606,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -625,6 +628,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -646,6 +650,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -667,6 +672,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -682,6 +688,14 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        initial_messages seeds settled user messages and assistant text without
+        starting a model turn. It accepts UserMessage media through the current
+        native route; Core can normalize images. Pass it only for a fresh opening,
+        without state or resume, even when the sequence is empty. The Session
+        becomes usable after native publication and its durability fence. An
+        in-memory store adds no crash guarantee. Failed startup can leave accepted
+        history in persistent storage; recover it instead of resubmitting seeds.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -762,6 +776,7 @@ class Agent(Generic[ContextT, OutputT]):
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state, resume=resume)
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .mcp import _MCP
@@ -780,6 +795,7 @@ class Agent(Generic[ContextT, OutputT]):
                 self,
                 context=context,
                 state=state,
+                initial_messages=initial_messages,
                 storage=storage,
                 resume=resume,
                 environment=environment,
@@ -841,6 +857,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -864,6 +881,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -887,6 +905,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -914,6 +933,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -964,6 +984,7 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state)
         options: dict[str, Any] = {}
         try:
             from .prepared_request import _check_output, _check_profile, _check_tools
@@ -1071,6 +1092,8 @@ class Agent(Generic[ContextT, OutputT]):
             # Capture before opening. An override may expose the Session and its
             # observations, including when it delegates to the original method.
             session_factory = self.session
+            if initial_messages is not None:
+                options["initial_messages"] = initial_messages
             if on_interaction is not None:
                 options["on_interaction"] = on_interaction
             if parent_trace is not None:
@@ -1194,6 +1217,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1217,6 +1241,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1240,6 +1265,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1267,6 +1293,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1285,6 +1312,7 @@ class Agent(Generic[ContextT, OutputT]):
         retry cleanup. Explicit providers remain the caller's responsibility and
         are not attached to the error.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -1298,6 +1326,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["trace_options"] = trace_options
                 if state is not None:
                     options["state"] = state
+                if initial_messages is not None:
+                    options["initial_messages"] = initial_messages
                 if return_state is not False:
                     options["return_state"] = return_state
                 if on_interaction is not None:

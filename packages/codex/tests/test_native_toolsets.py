@@ -87,7 +87,7 @@ async def test_reserved_python_tools_bind_context_and_preserve_bare_identity(
 
 
 @pytest.mark.parametrize("manual", [False, True])
-@pytest.mark.parametrize("kind", ["text", "image", "error", "parts", "native"])
+@pytest.mark.parametrize("kind", ["text", "image", "image_id", "file", "error", "parts", "native"])
 async def test_native_typed_output_parts_and_manual_grants(
     responses: ResponsesFixture, manual: bool, kind: str
 ) -> None:
@@ -100,6 +100,10 @@ async def test_native_typed_output_parts_and_manual_grants(
             return ToolOutput.text("accepted")
         if kind == "image":
             return ToolOutput.image(IMAGE)
+        if kind == "image_id":
+            return ToolOutput.image(file_id="opaque-manual-image", detail="low")
+        if kind == "file":
+            return ToolOutput.file(file_id="opaque-manual-file", filename="manual.pdf")
         if kind == "error":
             return ToolOutput.error("failure receipt")
         if kind == "native":
@@ -127,7 +131,10 @@ async def test_native_typed_output_parts_and_manual_grants(
     async with (
         timeout(15),
         Agent(
-            instructions="Use picture.", tools=[selected], provider=provider(responses)
+            instructions="Use picture.",
+            tools=[selected],
+            provider=provider(responses),
+            model="gpt-5.5" if kind in {"image_id", "file"} else None,
         ).session() as session,
     ):
         turn = await session.submit("read")
@@ -155,6 +162,16 @@ async def test_native_typed_output_parts_and_manual_grants(
         )
         result = item["output"]
         encoded = json.dumps(result)
+        if kind == "image_id":
+            assert result == [
+                {"type": "input_image", "file_id": "opaque-manual-image", "detail": "low"}
+            ]
+            assert "opaque-manual-image" in json.dumps(history)
+        if kind == "file":
+            assert result == [
+                {"type": "input_file", "file_id": "opaque-manual-file", "filename": "manual.pdf"}
+            ]
+            assert "opaque-manual-file" in json.dumps(history)
         if kind in ("image", "parts"):
             assert IMAGE in encoded
             assert IMAGE in json.dumps(history)
@@ -164,9 +181,9 @@ async def test_native_typed_output_parts_and_manual_grants(
             assert "failure receipt" in encoded
 
 
-@pytest.mark.parametrize("image", ["https://example.invalid/image.png", "file-id", "/tmp/pic.png"])
-def test_tool_output_image_admits_only_inline_data_urls(image: str) -> None:
-    with pytest.raises(ValueError, match="base64 image data URL"):
+@pytest.mark.parametrize("image", ["file-id", "/tmp/pic.png"])
+def test_tool_output_image_rejects_bare_ids_and_paths(image: str) -> None:
+    with pytest.raises(ValueError, match="Image URL"):
         ToolOutput.image(image)
 
 

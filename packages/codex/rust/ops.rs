@@ -620,6 +620,7 @@ pub async fn recover_prepared(
     turn_id: String,
     original_call_ids: Vec<String>,
     value: Value,
+    terminal: Option<crate::python_tools::RecoveredToolCompletionSeed>,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
     let thread = &state.thread;
@@ -630,6 +631,9 @@ pub async fn recover_prepared(
             .seed(&mut init, submission, state.id.to_string());
     }
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
+    if let Some(terminal) = terminal {
+        terminal.attach(&mut init);
+    }
     let seed = crate::turn_settlement::Seed::attach(&mut init);
     let submission = thread
         .recover_turn_if_idle(WithTurnExtensionData::new(

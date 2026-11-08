@@ -109,7 +109,8 @@ from .executor import (
     _writable_roots as _writable_roots,
 )
 from .history import RecordedTurn as RecordedTurn
-from .input import UserInput as UserInput, _native_input as _native_input
+from .initial_messages import _capture_initial_messages
+from .input import InitialMessage, UserInput as UserInput, _native_input as _native_input
 from .manual import (
     _FORM_MODES as _FORM_MODES,
     _URL_ACCEPT as _URL_ACCEPT,
@@ -739,12 +740,33 @@ class Completed(Generic[OutputT, TurnT]):
     thread_usage: TokenUsageInfo | None = None
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
+    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
 
 
 def _future() -> asyncio.Future[Any]:
     future = asyncio.get_running_loop().create_future()
     future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
     return future
+
+
+@dataclass(frozen=True)
+class _ToolCompletionProposal:
+    """Provisional converted value; only a matching native terminal acknowledges it."""
+
+    step_id: int
+    call: ToolCallInfo
+    wire: Any = field(repr=False)
+    value: Any = field(repr=False)
+
+    def matches(self, payload: Mapping[str, Any]) -> bool:
+        return (
+            payload.get("call_id") == self.call.call_id
+            and payload.get("name") == self.call.tool.name
+            and (payload.get("namespace") or "functions")
+            == (self.call.tool.namespace or "functions")
+            and json.dumps(payload.get("final_output"), sort_keys=True, allow_nan=False)
+            == json.dumps(self.wire, sort_keys=True, allow_nan=False)
+        )
 
 
 @dataclass
@@ -759,6 +781,8 @@ class _Submission:
     task: asyncio.Task[None] | None = None
     callbacks: set[asyncio.Task[None]] = field(default_factory=set)
     function_admission: asyncio.Semaphore | None = None
+    tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    completion_continuations: int = 0
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
     stopping: bool = False
@@ -824,6 +848,8 @@ class _ChildCallbacks:
     native_instance: int | None = None
     callbacks: set[asyncio.Task[None]] = field(default_factory=set)
     function_admission: asyncio.Semaphore | None = None
+    tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    completion_continuations: int = 0
     calls: set[str] = field(default_factory=set)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
@@ -1818,6 +1844,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
@@ -1833,6 +1860,7 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
+        initial_messages = _capture_initial_messages(initial_messages, state=state, resume=resume)
         if max_function_concurrency is not None and (
             isinstance(max_function_concurrency, bool)
             or not isinstance(max_function_concurrency, int)
@@ -2393,6 +2421,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
+                    "_terminal_tool_slots": catalog.finish_slots(),
                     **(
                         {
                             "_native_agent_roles": [
@@ -2541,7 +2570,15 @@ class Session(Generic[ContextT, OutputT]):
                     )
 
                 thread = await opening.acquire(
-                    engine._start_initial_replaceable_thread(json.dumps(options), native_specs)
+                    engine._start_initial_replaceable_thread(
+                        json.dumps(options),
+                        native_specs,
+                        **(
+                            {"initial_messages_json": json.dumps(initial_messages)}
+                            if initial_messages is not None
+                            else {}
+                        ),
+                    )
                     if checkpoint is None
                     else engine.restore_checkpoint(checkpoint, json.dumps(options), native_specs)
                 )
@@ -4420,6 +4457,7 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
+            options["_terminal_tool_slots"] = self._catalog.finish_slots()
             current_options = json.loads(change.options())
             options["_sdk_instruction_files"] = current_options["instruction_files"]
             applied_roots = current_options["executor_writable_roots"]
@@ -5364,10 +5402,8 @@ class Session(Generic[ContextT, OutputT]):
             mcp_published = True
         try:
             manual_slots = candidate.manual_slots()
-            acknowledgement = await (
-                self._native._replace_tools(candidate.generation, specs, manual_slots)
-                if manual_slots
-                else self._native._replace_tools(candidate.generation, specs)
+            acknowledgement = await self._native._replace_tools(
+                candidate.generation, specs, manual_slots, candidate.finish_slots()
             )
         except BaseException as error:
             # Binding RuntimeErrors reject before publication. Transport failures
@@ -5443,9 +5479,37 @@ class Session(Generic[ContextT, OutputT]):
                             native_error._interrupted = True
             if native_error is not None:
                 raise native_error
+            payload_json = submission._native._tool_completion()
+            tool_call = None
+            if payload_json is not None:
+                payload = json.loads(payload_json)
+                if (
+                    not isinstance(payload.get("final_output"), str)
+                    or payload["final_output"] != output
+                ):
+                    raise NativeError("Invalid plain child tool completion")
+                turn_id = submission.turn_id
+                if turn_id is None:
+                    raise NativeError("Missing child tool completion owner")
+                tool_call = ToolCallInfo(
+                    tool=ToolRef(payload["name"], payload.get("namespace")),
+                    session_id=self.id,
+                    turn_id=turn_id,
+                    call_id=payload["call_id"],
+                    child_id=submission.child_id,
+                    child_incarnation=submission._native.incarnation,
+                    role=None,
+                    model=None,
+                    route="direct",
+                )
             return cast(
                 Completed[_TurnT],
-                Completed(submission, cast(_TurnT, output), _token_usage_info(json.loads(usage))),
+                Completed(
+                    submission,
+                    cast(_TurnT, output),
+                    _token_usage_info(json.loads(usage)),
+                    tool_call=tool_call,
+                ),
             )
         if self._owned_submission(submission) is not None or any(
             state.issued is submission for state, _ in self._pending
@@ -6181,7 +6245,13 @@ class Session(Generic[ContextT, OutputT]):
                 # Preserve single validation and its established error ordering
                 # unless correction is explicitly enabled. A correction can
                 # start only after all original callbacks and usage have settled.
-                if not state.unsampled_steering and not state.output.max_retries:
+                tool_payload = terminal.get("tool_completion")
+                proposal = state.tool_completion
+                if tool_payload is not None:
+                    if proposal is None or not proposal.matches(tool_payload):
+                        raise NativeError("Terminal tool completion has no matching live proposal")
+                    output = proposal.value
+                elif not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
                 assert usage_request is not None
                 await asyncio.wait(
@@ -6191,7 +6261,11 @@ class Session(Generic[ContextT, OutputT]):
                 # Drain work admitted during usage before committing an outcome.
                 await state.wait_for_callbacks()
                 usage = _token_usage_info(json.loads(usage_request.result()))
-                if not state.unsampled_steering and state.output.max_retries:
+                if (
+                    tool_payload is None
+                    and not state.unsampled_steering
+                    and state.output.max_retries
+                ):
                     if state.cleanup_error is not None:
                         raise state.cleanup_error
                     invalid = False
@@ -6216,6 +6290,9 @@ class Session(Generic[ContextT, OutputT]):
                         handle,
                         output,
                         usage,
+                        tool_call=proposal.call
+                        if tool_payload is not None and proposal is not None
+                        else None,
                         repair_attempts=tuple(
                             deepcopy(t)
                             for t in self._repair_turns
@@ -6408,6 +6485,7 @@ class Session(Generic[ContextT, OutputT]):
                 else None,
             )
             state.tracing = None
+        state.tool_completion = None
         self._retire_questions(state)
         state.manual_inputs.clear()
         if self._active is state:
@@ -6944,6 +7022,7 @@ class Session(Generic[ContextT, OutputT]):
             await asyncio.gather(*state.callbacks, return_exceptions=True)
         finally:
             state.stopping = True
+            state.tool_completion = None
             state.request_keys.clear()
             state.callbacks.clear()
             state.manual_inputs.clear()
@@ -7356,6 +7435,127 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _propose_tool_completion(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> None:
+        state.tool_completion = None
+        proposal: _ToolCompletionProposal | None = None
+
+        def admitted() -> bool:
+            self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            return not state.stopping and not state.failure.done()
+
+        async def convert(_: object) -> dict[str, Any]:
+            nonlocal proposal
+            if message["generation"] != self._catalog.generation:
+                raise NativeError("Expired terminal tool generation")
+            entry = self._catalog.tools[message["slot"]]
+            declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
+            if (
+                not declared.finish_turn
+                or entry.name != message["name"]
+                or (entry.namespace or "functions") != (message.get("namespace") or "functions")
+            ):
+                raise NativeError("Invalid captured terminal tool identity")
+            child = isinstance(state, _ChildCallbacks)
+            assert state.handle is not None
+            if (
+                message["turn_id"] != state.handle.turn_id
+                or message["thread"] != (state.handle.child_id if child else self.id)
+                or message["instance"] != (state.handle.instance_id if child else None)
+            ):
+                raise NativeError("Invalid terminal tool owner")
+            text = message["text"]
+            if not isinstance(text, str):
+                raise OutputValidationError("")
+            output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
+            value, wire = output.terminal_value(text)
+            # JSON persistence must never silently accept NaN or Infinity.
+            try:
+                json.dumps(wire, allow_nan=False)
+            except (TypeError, ValueError):
+                raise OutputValidationError(text) from None
+            call = ToolCallInfo(
+                tool=ToolRef(entry.name, entry.namespace),
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                call_id=message["call_id"],
+                child_id=message["thread"] if child else None,
+                child_incarnation=message["instance"] if child else None,
+                role=None,
+                model=message["model"],
+                route="direct",
+            )
+            callback = (
+                self._opening_agent.before_complete if self._opening_agent is not None else None
+            )
+            if callback is not None:
+                decision = await _call_callback(
+                    callback,
+                    admitted,
+                    CompletionContext(
+                        context=self._context,
+                        text=None,
+                        session_id=self.id,
+                        turn_id=message["turn_id"],
+                        subagent_id=call.child_id,
+                        model=message["model"],
+                        continuation_count=state.completion_continuations,
+                        tool_call=call,
+                        final_output=deepcopy(value),
+                    ),
+                )
+                if isinstance(decision, StopTurn):
+                    return {"action": "stop"}
+                if decision is not None:
+                    if not isinstance(decision, ContinueTurn):
+                        raise TypeError(
+                            "before_complete must return ContinueTurn, StopTurn or None"
+                        )
+                    if (
+                        not isinstance(decision.instructions, str)
+                        or not decision.instructions.strip()
+                    ):
+                        raise ValueError("ContinueTurn instructions must be a nonempty string")
+                    return {"action": "continue", "feedback": decision.instructions}
+            proposal = _ToolCompletionProposal(message["step_id"], call, wire, value)
+            return {"action": "accept", "final_output": wire}
+
+        def prepare() -> tuple[Callable[..., Any], object]:
+            return convert, None
+
+        def reply(decision: dict[str, Any]) -> None:
+            if decision["action"] == "stop":
+                if self._native._stop_step(
+                    message["step_id"], message["thread"], message["instance"]
+                ):
+                    state.policy_stop = "requested"
+                    state.stopping = True
+                    state.failure.set_result(NativeError("Turn stopped by policy"))
+                return
+            self._native._reply_tool_completion(
+                message["step_id"],
+                json.dumps(decision, allow_nan=False),
+                message["thread"],
+                message["instance"],
+            )
+            if decision["action"] == "accept":
+                state.tool_completion = proposal
+            else:
+                state.completion_continuations += 1
+
+        def reject() -> None:
+            state.tool_completion = None
+            self._native._reply_tool_completion(
+                message["step_id"],
+                None,
+                message["thread"],
+                message["instance"],
+                error=True,
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
     async def _before_complete(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span(
             "completion callback", "callback", message.get("tracing_context")
@@ -7365,6 +7565,8 @@ class Session(Generic[ContextT, OutputT]):
                 tracing.set_outcome(status="error", category="callback_error")
 
     async def _before_complete_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        state.tool_completion = None
+
         def prepare() -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
             assert self._opening_agent is not None
             callback = self._opening_agent.before_complete
@@ -7377,7 +7579,7 @@ class Session(Generic[ContextT, OutputT]):
                 turn_id=message["turn_id"],
                 subagent_id=message["thread"] if message["instance"] is not None else None,
                 model=message["model"],
-                continuation_count=message["continuation_count"],
+                continuation_count=state.completion_continuations,
             )
 
         def reply(decision: Any) -> None:
@@ -7401,6 +7603,8 @@ class Session(Generic[ContextT, OutputT]):
             self._native._reply_completion(
                 message["step_id"], instructions, message["thread"], message["instance"]
             )
+            if instructions is not None:
+                state.completion_continuations += 1
 
         def reject() -> None:
             self._native._reply_completion(
@@ -7416,6 +7620,7 @@ class Session(Generic[ContextT, OutputT]):
                 tracing.set_outcome(status="error", category="callback_error")
 
     async def _select_step_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        state.tool_completion = None
         try:
             self._native._check_step(message["step_id"], message["thread"], message["instance"])
         except RuntimeError:
@@ -7584,6 +7789,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_complete": self._before_complete,
+            "_sdk_tool_completion": self._propose_tool_completion,
         }
         try:
             while True:
@@ -7623,6 +7829,34 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     ):
                         self._settle_url_completion(url_question, message["completed"] is True)
+                    continue
+                if message.get("type") == "_sdk_tool_completion_failed":
+                    failed: _CallbackState | None
+                    if message["thread"] == self.id:
+                        failed = self._active
+                        if (
+                            failed is None
+                            or failed.handle is None
+                            or failed.handle.turn_id != message["turn_id"]
+                        ):
+                            continue
+                    else:
+                        failed = self._child_callbacks.get(
+                            (message["thread"], message["instance"], message["turn_id"])
+                        )
+                        if failed is None:
+                            continue
+                    failed.tool_completion = None
+                    if not failed.failure.done():
+                        failed.failure.set_result(
+                            NativeError("Terminal tool persistence failed; recovery required")
+                        )
+                    # A private failed-idle receipt settles local ownership. It is
+                    # neither a canonical terminal record nor a successful event.
+                    if not failed.terminal.done():
+                        failed.terminal.set_result(message)
+                    self._broken = True
+                    self._observations.notify()
                     continue
                 if message.get("type") == "sdk_subagent_lifecycle":
                     self._observations.append(

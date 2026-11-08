@@ -291,7 +291,11 @@
     {
       "path": "0066-caller-controlled-mcp-prompts.patch",
       "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
+    },
+    {
+      "path": "0090-native-session-media-history.patch",
+      "sha256": "525cb176bb40c3fc4f37fc5b0cf3dc8d11e9234ea4348f1a3c9020f280919ca3"
     }
   ],
-  "result_tree": "62fd05c563d1e0f54d96226de086c2824f3e6c98"
+  "result_tree": "e24c3f221cbfb394fa124ed625d0669c34552351"
 }

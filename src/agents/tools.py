@@ -31,6 +31,7 @@ from _agents_codex.tools import (
     Sequence as Sequence,
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
+    ToolOutputFile as ToolOutputFile,
     ToolOutputImage as ToolOutputImage,
     ToolOutputText as ToolOutputText,
     ToolRef as ToolRef,
