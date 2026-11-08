@@ -117,16 +117,18 @@ def test_unsupported_buffered_connection_fails_before_startup(
         NativeProvider(response_mode="buffered", **options)
 
 
-async def test_buffered_native_children_fail_before_startup(forbid_native_startup):
+@pytest.mark.parametrize("override", [False, True], ids=["agent-provider", "session-provider"])
+async def test_buffered_native_children_fail_before_startup(override, forbid_native_startup):
+    buffered = NativeProvider(response_mode="buffered")
     agent = Agent(
         instructions="Answer.",
-        provider=NativeProvider(response_mode="buffered"),
+        provider=NativeProvider() if override else buffered,
         tools=[NativeAgents()],
     )
     with pytest.raises(
         CapabilityError, match="Buffered Responses do not support native child agents"
     ):
-        async with agent.session():
+        async with agent.session(provider=buffered if override else None):
             pytest.fail("Buffered native children reached Session startup")
 
 
