@@ -196,7 +196,32 @@ class SandboxConcurrencyLimits:
 
 @dataclass
 class SandboxArchiveLimits:
-    """Resource limits for sandbox archive extraction."""
+    """Resource limits for sandbox archive extraction.
+
+    Classic applies SDK defaults when the run or session has no limits object.
+    This differs from v0, where missing configuration disabled SDK archive limits.
+    Setting an individual field to ``None`` disables only that field's limit;
+    fields left out of this constructor keep their defaults. In particular, setting
+    only the three v0 fields to ``None`` leaves the five parser/decoder limits active.
+
+    Trusted applications that need to disable every configurable SDK archive budget
+    can use the dataclass fields of the installed SDK version::
+
+        from dataclasses import fields
+        from agents.classic.sandbox import SandboxArchiveLimits, SandboxRunConfig
+
+        unlimited = SandboxArchiveLimits(
+            **{field.name: None for field in fields(SandboxArchiveLimits)}
+        )
+        sandbox = SandboxRunConfig(archive_limits=unlimited)
+
+    This disables all eight current configurable budgets. Pass ``unlimited`` to
+    ``session.extract(..., archive_limits=unlimited)`` for a per-call override.
+    Passing ``None`` to ``extract`` instead inherits the session configuration,
+    then SDK defaults when the session has none. Raising only the needed limits
+    keeps the remaining bounds active. Path and member safety checks still apply,
+    as do codec constraints such as the Zstandard window cap.
+    """
 
     max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES
     """Maximum archive input bytes accepted by `BaseSandboxSession.extract()`.
