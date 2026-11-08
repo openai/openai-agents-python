@@ -57,6 +57,8 @@ Use the same prefix for other retained public v0 submodules. Keep each workflow'
 
 Check optional integrations against the matching source before upgrading. For example, this classic tree does not include v0.24.0's `agents.extensions.sandbox.runloop` integration. Keep a workflow that requires it on v0 until you can port that integration.
 
+For a realistic staged port, follow the [invoice-support tutorial](examples/codex/migration/README.md#stage-through-classic-when-needed). It continues an actual released-v0 SQLite store in classic before starting a fresh native conversation from reviewed business facts.
+
 Run `python examples/codex/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
 
 ## Introduce native workflows separately

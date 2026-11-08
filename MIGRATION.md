@@ -26,7 +26,25 @@ There are two execution APIs in v1: native and classic. `SDKRunner` and its run 
 
 You can port and deploy workflows independently. Direct migration means each port goes from the v0 API to native v1 without first rewriting it to classic.
 
+## Check compatibility before porting
+
+Classify each required contract before editing imports. Port a whole workflow only when its replacement preserves the behavior your application needs.
+
+| Required contract | Decision before native cutover |
+| --- | --- |
+| Business functions, typed application context, structured output | **Port** declarations and validation, then test actual tool inputs, outputs, and effects. |
+| Custom Python models/clients or non-Responses endpoints | **Port** provider settings only after checking Responses compatibility. Otherwise **stay on v0 or classic** for that workflow. |
+| Handoffs, guardrails, hooks, or specialized agent settings | **Redesign and test** routing, policy timing, context transfer, and next-turn ownership. A specialist that returns a result is not a handoff. Keep the original engine until those contracts are verified. |
+| Existing sessions, serialized runs, or pending approvals | **Keep existing work on its owning engine.** Start native conversations separately from reviewed business facts; do not convert execution state. |
+| Streaming, cancellation, tracing, and effect recovery | **Port and verify** consumers and resource cleanup. A completed effect is not rolled back by a later failure or cancellation. |
+| MCP, sandbox, voice, or other useful integrations | **Retain or adapt** the existing integration where its API and resource ownership fit. Do not discard working business services just because the loop changes. |
+| Unsupported native platform or a contract with no adequate replacement | **Stay on v0**, or use classic where its package/platform requirements fit. An upgrade is optional. |
+
+For a complete, no-key application, follow the [invoice-support migration tutorial](examples/codex/migration/README.md). It executes released v0 in its own environment, tests the import-only classic step against v0 SQLite history, and ports typed tools, authorization, a separately configured specialist, and checkpoint recovery to native. It covers both direct and staged paths with the same business functions.
+
 ## Port the execution and tool declarations
+
+The v0 script below uses the released v0 SDK in its own environment. Before running the native script, [build and install this matching source](CONTRIBUTING.md#build-the-sdk-from-source); the published alpha.6 wheel does not provide the current migration APIs. The [tutorial setup](examples/codex/migration/README.md#install-the-matching-sdks) gives separate installation commands for both environments. Use the SDK and examples from the same source commit.
 
 In v0, the Python `Runner` owns the loop. This complete script shows a simple workflow:
 
