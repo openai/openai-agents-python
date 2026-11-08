@@ -695,6 +695,7 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
 
 for _declaration in (StdioMCP, HttpMCP, HostedVerificationMCP, ChatGPTAppsMCP):
     _protect_mcp_initializer(_declaration)
+    _protect_mcp_methods(_declaration, lambda owner: (owner,))
 del _declaration
 
 

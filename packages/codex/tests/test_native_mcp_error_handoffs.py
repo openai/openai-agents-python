@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import gc
 from contextlib import aclosing
 from dataclasses import replace
@@ -10,6 +11,7 @@ from dataclasses import replace
 import pytest
 from pydantic import BaseModel
 
+from _agents_codex import manual as manual_module
 from agents import (
     Agent,
     ApprovalRequest,
@@ -202,3 +204,41 @@ async def test_verification_expired_owner_still_protects_captured_registration(
         await request.decline()
     private(caught.value)
     assert registration.headers == {"X-Token": _SECRET}
+
+
+async def test_real_verification_decoder_failure_keeps_registration_private(
+    tmp_path, monkeypatch, responses: ResponsesFixture
+) -> None:
+    peer = VerificationPeer(Enrollment(tmp_path))
+    async with timeout(25), peer.serve() as url, provider(responses) as client:
+        registration = HostedVerificationMCP(
+            url=url, tools=["search"], approval_mode="preapproved", headers={"X-Token": _SECRET}
+        )
+        responses.respond(select("verification-decoder-fault"))
+        responses.respond(assistant_output("done"))
+        async with Agent(instructions="test", tools=[registration]).session(
+            provider=client
+        ) as session:
+            turn = await session.submit("Request verification")
+            async with aclosing(session.interactions()) as cursor:
+                request = await anext(cursor)
+            assert isinstance(request, VerificationRequest)
+            assert request._registration is registration
+            assert request.challenge == peer.challenge
+            failure = binascii.Error("synthetic decoder failure")
+
+            def fail_decode(value):
+                raise failure
+
+            # This is decoder fault injection on a valid, genuinely issued
+            # request; it does not claim malformed wire values reach Python.
+            with monkeypatch.context() as patch:
+                patch.setattr(manual_module.base64, "urlsafe_b64decode", fail_decode)
+                with pytest.raises(binascii.Error, match="synthetic decoder failure") as caught:
+                    _ = request.challenge
+            assert caught.value is failure
+            private(caught.value)
+            await request.decline()
+            assert (await turn.get_result()).final_output == "done"
+            assert peer.enrollment.calls == 0
+            assert registration.headers == {"X-Token": _SECRET}

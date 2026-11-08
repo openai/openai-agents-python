@@ -43,6 +43,11 @@ def _strip_mcp_frames(error: BaseException) -> None:
 def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Declarations) -> bool:
     from .mcp import _MCP
 
+    try:
+        if any(isinstance(tool, _MCP) for tool in kwargs.get("tools", ())):
+            return True
+    except TypeError:
+        pass
     owner = args[0] if args else kwargs.get("self")
     try:
         return any(isinstance(tool, _MCP) for tool in declarations(owner))
@@ -125,7 +130,31 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
 
 def _protect_mcp_methods(owner: type[Any], declarations: _Declarations) -> None:
     for name, function in tuple(vars(owner).items()):
-        if (not name.startswith("_") or name in {"__init__", "__anext__"}) and inspect.isfunction(
-            function
-        ):
+        if name.startswith("_") and name not in {
+            "__init__",
+            "__anext__",
+            "__setattr__",
+            "__delattr__",
+            "__hash__",
+            "__reduce__",
+        }:
+            continue
+        if isinstance(function, property):
+            setattr(
+                owner,
+                name,
+                property(
+                    _protect_method(function.fget, declarations)
+                    if function.fget is not None
+                    else None,
+                    _protect_method(function.fset, declarations)
+                    if function.fset is not None
+                    else None,
+                    _protect_method(function.fdel, declarations)
+                    if function.fdel is not None
+                    else None,
+                    function.__doc__,
+                ),
+            )
+        elif inspect.isfunction(function):
             setattr(owner, name, _protect_method(function, declarations))

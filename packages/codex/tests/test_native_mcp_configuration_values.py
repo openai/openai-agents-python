@@ -7,7 +7,7 @@ import copy
 import json
 import operator
 import pickle
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import FrozenInstanceError, asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -100,9 +100,15 @@ def assert_private_frames(
 
 @pytest.mark.parametrize("route", ["session", "run", "sync"])
 @pytest.mark.parametrize("preceding_http_server", [False, True])
+@pytest.mark.parametrize("tool_source", ["agent", "override"])
 async def test_opening_failure_does_not_retain_mcp_configuration(
-    preceding_http_server: bool, route: str, tmp_path: Path
+    preceding_http_server: bool,
+    route: str,
+    tool_source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "unused-provider-key")
     stdio = StdioMCP(
         name="local",
         command="unused-peer",
@@ -113,15 +119,26 @@ async def test_opening_failure_does_not_retain_mcp_configuration(
     http = HttpMCP(
         name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
     )
-    agent = Agent(instructions="test", tools=[http, stdio] if preceding_http_server else [stdio])
-    with pytest.raises(ValueError, match="requires a Session environment") as captured:
+    declarations = [http, stdio] if preceding_http_server else [stdio]
+    agent = Agent(instructions="test", tools=declarations if tool_source == "agent" else [])
+    overrides = {"tools": declarations} if tool_source == "override" else {}
+    message = (
+        "Operation tools must use captured opening bindings"
+        if tool_source == "override" and route != "session"
+        else "requires a Session environment"
+    )
+    with pytest.raises(ValueError, match=message) as captured:
         if route == "session":
-            async with agent.session():
+            async with agent.session(**overrides):
                 pytest.fail("invalid configuration opened a session")
         elif route == "run":
-            await agent.run("test")
+            await agent.run("test", **overrides)
         else:
-            await asyncio.to_thread(agent.run_sync, "test")
+
+            def run_sync() -> None:
+                agent.run_sync("test", **overrides)
+
+            await asyncio.to_thread(run_sync)
     assert_private_frames(captured.value, allow_chain=route == "sync")
     assert stdio.env == {"TOKEN": _SECRET}
     assert http.headers == {"X-Token": _SECRET}
@@ -153,6 +170,29 @@ def test_invalid_tool_selection_does_not_retain_credentials(kind: str) -> None:
     with pytest.raises(ValueError, match="not declared") as captured:
         server.tool("missing")
     assert_private_frames(captured.value)
+
+
+@pytest.mark.parametrize("kind", ["stdio", "http"])
+@pytest.mark.parametrize("operation", ["assign", "delete", "hash"])
+def test_declaration_protocol_errors_do_not_retain_credentials(kind: str, operation: str) -> None:
+    server = (
+        StdioMCP(name="local", command="peer", tools=[], env={"TOKEN": _SECRET})
+        if kind == "stdio"
+        else HttpMCP(
+            name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+        )
+    )
+    exception = TypeError if operation == "hash" else FrozenInstanceError
+    value: Any = server
+    with pytest.raises(exception) as captured:
+        if operation == "assign":
+            value.name = "replacement"
+        elif operation == "delete":
+            del value.name
+        else:
+            hash(value)
+    assert_private_frames(captured.value)
+    assert server.name == ("local" if kind == "stdio" else "remote")
 
 
 @pytest.mark.parametrize("route", ["submit", "resource", "update", "wait"])
@@ -193,6 +233,9 @@ async def test_submitted_turn_error_does_not_retain_mcp_credentials(
         server = HttpMCP(name="remote", url=url, tools=["search"], headers={"X-Token": _SECRET})
         async with Agent(instructions="test", tools=[server]).session(provider=client) as session:
             turn = await session.submit("stop before sampling", budget=RunBudget(max_requests=0))
+            with pytest.raises(TypeError, match="cannot be serialized") as serialized:
+                pickle.dumps(turn)
+            assert_private_frames(serialized.value)
             if route == "attention":
                 result = await turn.wait_for_attention()
                 assert isinstance(result, TurnNeedsAttention)
@@ -210,17 +253,24 @@ async def test_submitted_turn_error_does_not_retain_mcp_credentials(
     assert not responses.requests
 
 
+@pytest.mark.parametrize("tool_source", ["agent", "override", "cleared_override"])
 async def test_mcp_error_boundary_preserves_application_error_and_cause(
     responses: ResponsesFixture,
+    tool_source: str,
 ) -> None:
     original = RuntimeError("application failure")
     cause = ValueError("application cause")
     server = HttpMCP(
         name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
     )
+    declarations = [server]
+    agent = Agent(instructions="test", tools=declarations if tool_source == "agent" else [])
+    overrides = {} if tool_source == "agent" else {"tools": declarations}
     async with provider(responses) as client:
         with pytest.raises(RuntimeError) as captured:
-            async with Agent(instructions="test", tools=[server]).session(provider=client):
+            async with agent.session(provider=client, **overrides):
+                if tool_source == "cleared_override":
+                    declarations.clear()
                 raise original from cause
     assert captured.value is original
     assert original.__cause__ is cause
