@@ -75,7 +75,10 @@ def tool_call(
     call_id: str,
     namespace: str | None = None,
 ) -> _ScriptItem:
-    """Ask the native loop to invoke a declared tool, optionally in a namespace."""
+    """Ask the native loop to invoke a declared tool with these arguments.
+
+    namespace is separate from the short tool name. Omit it to keep the bare form.
+    """
     return _ScriptItem(
         json.dumps(
             {
