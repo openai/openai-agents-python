@@ -201,6 +201,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         return None
 
     @property
+    def _requires_live_manual_session(self) -> bool:
+        return False
+
+    @property
     def ref(self) -> ToolRef:
         """Select this function by its declared qualified identity."""
         return ToolRef(self.name, self.namespace)

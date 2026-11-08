@@ -361,6 +361,10 @@ class _CapturedFunction:
     namespace: str | None = None
 
     @property
+    def _requires_live_manual_session(self) -> bool:
+        return False
+
+    @property
     def _ref(self) -> ToolRef:
         return ToolRef(self.name, self.namespace)
 

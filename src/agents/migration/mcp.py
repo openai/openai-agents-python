@@ -75,6 +75,10 @@ class _CapturedMCPTool(_CapturedFunction):
     _namespace: str | None = field(repr=False)
 
     @property
+    def _requires_live_manual_session(self) -> bool:
+        return True
+
+    @property
     def _ref(self) -> ToolRef:
         return ToolRef(self.name, self._namespace)
 
@@ -85,6 +89,10 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
     _namespace_description: str
     _schema_json: str = field(repr=False)
     _selected_context: ContextT = field(repr=False)
+
+    @property
+    def _requires_live_manual_session(self) -> bool:
+        return True
 
     @property
     def ref(self) -> ToolRef:

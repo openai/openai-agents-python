@@ -937,7 +937,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
             from .state import SessionState
-            from .tools import _HOSTED_TOOLS, WebSearch
+            from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
@@ -1017,7 +1017,7 @@ class Agent(Generic[ContextT, OutputT]):
                     or environment is not None
                     or native_agents is not None
                     or before_step is not None
-                    or any(tool.ref.namespace is not None for tool in declared)
+                    or any(tool._requires_live_manual_session for tool in declared)
                     or (
                         mcp_tools
                         and (
@@ -1028,9 +1028,11 @@ class Agent(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionRequired(
-                    "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                    "Pausing for manual replies requires ordinary Python callbacks "
+                    "and bare manual tools, "
                     "plain output or native strict output, "
                     "no environment, children or before_step. "
+                    "Selected MCP bindings and native MCP work require live replies. "
                     "Pass on_interaction or use Agent.session() for live replies."
                 )
             # Capture before opening. An override may expose the Session and its
@@ -1094,15 +1096,21 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._native_agents is not None
                         or session._storage is not None
                         or selected_mcp
-                        or any(tool._ref.namespace is not None for tool in session._bound_tools)
+                        or any(
+                            isinstance(tool, _CapturedFunction)
+                            and tool._requires_live_manual_session
+                            for tool in session._bound_tools
+                        )
                         or any(
                             isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in opening.tools
                         )
                     ):
                         raise InteractionRequired(
-                            "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                            "Pausing for manual replies requires ordinary Python callbacks "
+                            "and bare manual tools, "
                             "plain output or native strict output, "
                             "no local storage, environment, children or before_step. "
+                            "Selected MCP bindings and native MCP work require live replies. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
                 session._fail_unhandled_questions = (

@@ -1782,3 +1782,61 @@ async def test_manual_checkpoint_rebinds_qualified_callbacks_with_equal_short_na
             ("billing", "lookup"),
             ("audit", "lookup"),
         }
+
+
+@pytest.mark.parametrize("selection", ["default", "manual-only", "idle-restore"])
+async def test_manual_one_shot_captures_ordinary_namespaced_callback_catalog(
+    responses: ResponsesFixture, selection: str
+) -> None:
+    manual = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    effects: list[str] = []
+
+    @function_tool(name="record", namespace="billing", description="Record a key")
+    async def record(key: str) -> str:
+        effects.append(key)
+        return "recorded-" + key
+
+    agent = Agent(
+        instructions="Use the requested tools.",
+        tools=[manual, record],
+        provider=provider(responses),
+    )
+    idle = None
+    async with timeout(15):
+        if selection == "idle-restore":
+            async with agent.session() as source:
+                idle = await source.save_state()
+        calls = [function_call("lookup", {"key": "A"}, "manual")]
+        if selection != "manual-only":
+            automatic = function_call("record", {"key": "B"}, "automatic")
+            automatic["item"]["namespace"] = "billing"
+            calls.append(automatic)
+        responses.respond(*calls)
+        with pytest.raises(InteractionRequired) as paused:
+            await agent.run(
+                "Read A and record B",
+                state=idle,
+                tools=[manual.ref] if selection == "manual-only" else None,
+            )
+        checkpoint = paused.value.state
+        assert checkpoint is not None
+        assert effects == ([] if selection == "manual-only" else ["B"])
+        assert len(responses.requests) == 1
+
+        async def answer(event):
+            request = manual.match(event)
+            assert request is not None and request.arguments.key == "A"
+            return request.reply("manual-answer")
+
+        responses.respond(assistant_output("continued"))
+        result = await agent.run(
+            None, state=SessionState.from_json(checkpoint.to_json()), on_interaction=answer
+        )
+        assert result.final_output == "continued"
+        assert effects == ([] if selection == "manual-only" else ["B"])
+        assert len(responses.requests) == 2
+        assert tool_output(responses.requests[1], "manual") == "manual-answer"
+        if selection != "manual-only":
+            assert tool_output(responses.requests[1], "automatic") == "recorded-B"

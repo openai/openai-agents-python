@@ -8982,6 +8982,15 @@ class Session(Generic[ContextT, OutputT]):
                 "portable restore cannot recover its callback"
             )
 
+        if any(
+            isinstance(tool, _CapturedFunction) and tool._requires_live_manual_session
+            for tool in self._catalog.tools
+        ):
+            raise CapabilityError(
+                "Cannot suspend with selected MCP tools in the current catalog; "
+                "reply in the live Session"
+            )
+
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
         self._check_open()
         if self._pending:
