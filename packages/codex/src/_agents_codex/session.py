@@ -1386,6 +1386,19 @@ def _check_buffered_native_agents(
         raise CapabilityError("Buffered Responses do not support native child agents")
 
 
+def _check_native_agents_environment(
+    native_agents: NativeAgents[Any] | None, executor: Environment[Any] | None
+) -> None:
+    if native_agents is None:
+        return
+    if executor is not None and executor.read_only:
+        raise ValueError("Read-only execution does not support NativeAgents")
+    if executor is None or not {"exec_command", "write_stdin", "apply_patch"}.issubset(
+        executor.tools
+    ):
+        raise ValueError("NativeAgents requires an Environment with all three execution tools")
+
+
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
@@ -2113,15 +2126,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )
-            if native_agents is not None and executor is not None and executor.read_only:
-                raise ValueError("Read-only execution does not support NativeAgents")
-            if native_agents is not None and (
-                executor is None
-                or not {"exec_command", "write_stdin", "apply_patch"}.issubset(executor.tools)
-            ):
-                raise ValueError(
-                    "NativeAgents requires an Environment with all three execution tools"
-                )
+            _check_native_agents_environment(native_agents, executor)
             if restored_defaults is not None:
                 # Resolve only against destination declarations, without acquiring
                 # MCP connections or replacing the active manual roster.

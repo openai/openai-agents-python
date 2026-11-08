@@ -11,12 +11,12 @@ from contextlib import asynccontextmanager
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from tests.native_executor_fixtures import ExecutorPeer
-from tests.test_native_executor_isolation import trust_certificates
 
 from agents import Agent, CapabilityError, Environment, NativeAgents, NativeProvider, NetworkPolicy
 from agents.state import SessionState
 from agents.testing import ScriptedResponse, ScriptedResponses, text, tool_call
+from tests.native_executor_fixtures import ExecutorPeer
+from tests.test_native_executor_isolation import trust_certificates
 
 SUPPORTED = sys.platform in ("linux", "darwin")
 native_sandbox = (
@@ -305,7 +305,7 @@ async def test_require_escalated_cannot_grant_writes(tmp_path):
         )
         assert result.final_output == "done" and "ORIGINAL" in output(peer.requests[1], "read")
         denied = output(peer.requests[2], "elevated").lower()
-        assert "failed" in denied or "error" in denied
+        assert "approval policy" in denied and "reject command" in denied
         assert not (root / "elevated").exists()
 
 
