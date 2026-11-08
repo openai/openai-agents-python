@@ -809,6 +809,50 @@ async def test_caller_cancellation_during_managed_entry_joins_rollback_and_propa
         await queue.close(immediate=True)
 
 
+@pytest.mark.parametrize("automatic_first", [False, True])
+async def test_manual_reply_ignores_a_qualified_same_short_name(
+    tmp_path, responses, automatic_first
+):
+    effects = []
+    manual = FunctionTool(
+        name="approve", description="Application approval", input_type=Approval, output_type=str
+    )
+
+    @function_tool(name="approve", namespace="crm")
+    async def automatic(reason: str) -> str:
+        effects.append(reason)
+        return "recorded"
+
+    tools = [automatic, manual] if automatic_first else [manual, automatic]
+    call = function_call("approve", {"reason": "record"}, "automatic")
+    call["item"]["namespace"] = "crm"
+    responses.respond(call, function_call("approve", {"reason": "approval"}, "manual"))
+    executor = make_executor(tmp_path, responses, tools)
+    first, _ = await invoke(executor, request_context())
+    assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+    assert effects == ["record"]
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    answer = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "approved",
+    }
+    with pytest.raises(InvalidParamsError):
+        await invoke(
+            executor,
+            request_context(reply={**answer, "challenge": "foreign"}, current=first.task),
+        )
+    assert len(responses.requests) == 1
+    responses.respond(assistant_output("completed"))
+    final, _ = await invoke(executor, request_context(reply=answer, current=first.task))
+    assert final.task.status.state == p.TASK_STATE_COMPLETED
+    assert final.task.artifacts[0].parts[0].text == "completed"
+    assert tool_output(responses.requests[1], "manual") == "approved"
+    assert tool_output(responses.requests[1], "automatic") == "recorded"
+    assert effects == ["record"]
+    assert len(responses.requests) == 2
+
+
 async def test_foreign_stale_and_repeated_answers_never_acquire_authority(tmp_path, responses):
     tool = FunctionTool(
         name="approve", description="Host approval", input_type=Approval, output_type=str

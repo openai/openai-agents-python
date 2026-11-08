@@ -293,9 +293,13 @@
       "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
     },
     {
-      "path": "0067-decisions.patch",
-      "sha256": "d85a11fd6ceb94d6a9bd52048f188c53661cbac0a92866a744f3aeb0cbb643ed"
+      "path": "0067-reject-ambiguous-code-mode-names.patch",
+      "sha256": "4e2bb732edab48888aa9bdca723f591caaf87465c86c0ce0a76ea5baa60c1081"
+    },
+    {
+      "path": "0068-decisions.patch",
+      "sha256": "2d646bbae8b578135764e2a6be75c4d02ca15b41346cccc474bea0d82e4880af"
     }
   ],
-  "result_tree": "ca8bc860ea55a2debd447cae2b2f90153bb2f98a"
+  "result_tree": "903b3ae9910c5e3c1751a01d30eb600703b0d711"
 }

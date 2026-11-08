@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, Union, cast, overload
 
+from ._lifecycle import _close_after_error
 from ._public import preserve_module_identity as _preserve_module_identity
 from .schema import OutputValidationError, _prepare_output, _PreparedOutput
 from .telemetry import _owned_span
@@ -277,7 +278,8 @@ async def _decide(
             response = await provider.get_decision(request)
         except DecisionError as error:
             if record is not None:
-                await record(error._response())
+                completed = error._response()
+                await _close_after_error(error, lambda: record(completed))
                 assert scope is not None
                 scope.check(scope.owner, after_await=True)
             raise

@@ -1,0 +1,358 @@
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -551,7 +551,7 @@
+         registry.mcp_namespaces(),
+     )
+     .map_err(|error| CodexErrorDetails::InvalidRequest(error.to_string()))?;
+-    let code_mode_tool_names =
++    let (code_mode_tool_names, code_mode_error) =
+         register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes);
+     for name in [
+         codex_code_mode::PUBLIC_TOOL_NAME,
+@@ -648,6 +648,7 @@
+         code_mode_tool_names,
+         tool_namespaces_info,
+         &child_management_tools,
++        code_mode_error,
+     );
+     // Internal workers can inherit MAv2 configuration without using the board.
+     if multi_agent_v2_enabled(turn_context)
+@@ -983,13 +984,14 @@
+     model_info: &ModelInfo,
+     registry: &mut ToolRegistry,
+     indirect_prefixes: &IndirectNamespacePrefixes<'_>,
+-) -> BTreeMap<String, ToolName> {
++) -> (BTreeMap<String, ToolName>, Option<String>) {
+     let tool_mode = effective_tool_mode(turn_context, model_info);
+     if !matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
+-        return BTreeMap::new();
++        return (BTreeMap::new(), None);
+     }
+ 
+     let mut code_mode_tool_names = BTreeMap::new();
++    let mut code_mode_error = None;
+     let mut code_mode_nested_tool_specs = Vec::new();
+     let mut exec_prompt_tool_specs = Vec::new();
+     let mut deferred_exec_prompt_tool_specs = Vec::new();
+@@ -1041,12 +1043,22 @@
+             Entry::Vacant(entry) => {
+                 entry.insert(tool_name);
+             }
+-            Entry::Occupied(_) => {
+-                tracing::warn!(
+-                    tool_name = %tool_name,
+-                    code_mode_name = %code_mode_name,
+-                    "skipping tool with a duplicate normalized code-mode name"
+-                );
++            Entry::Occupied(entry) => {
++                let first = entry.get();
++                let first_namespace = first
++                    .namespace
++                    .as_deref()
++                    .filter(|namespace| !namespace.is_empty())
++                    .unwrap_or(DEFAULT_FUNCTION_NAMESPACE);
++                let second_namespace = tool_name
++                    .namespace
++                    .as_deref()
++                    .filter(|namespace| !namespace.is_empty())
++                    .unwrap_or(DEFAULT_FUNCTION_NAMESPACE);
++                code_mode_error.get_or_insert_with(|| format!(
++                    "Code Mode tool names collide after normalization: tools.{} is shared by {}.{} and {}.{}; select one tool or use direct mode",
++                    entry.key(), first_namespace, first.name, second_namespace, tool_name.name,
++                ));
+                 continue;
+             }
+         }
+@@ -1106,7 +1118,7 @@
+     )));
+     registry.prepend_trusted(Arc::new(execute_handler));
+ 
+-    code_mode_tool_names
++    (code_mode_tool_names, code_mode_error)
+ }
+ 
+ #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -1936,97 +1936,77 @@
+ }
+ 
+ #[tokio::test]
+-async fn code_mode_uses_the_first_normalized_tool_identity() {
+-    for (code_mode_only, winner_exposure, shadow_is_deferred) in [
+-        (false, ToolExposure::Direct, true),
+-        (false, ToolExposure::Deferred, false),
+-        (true, ToolExposure::Direct, true),
+-        (true, ToolExposure::Deferred, false),
++async fn code_mode_rejects_ambiguous_normalized_tool_identities() {
++    for (code_mode_only, first_exposure, second_is_deferred, second_namespace) in [
++        (false, ToolExposure::Direct, true, None),
++        (
++            false,
++            ToolExposure::Deferred,
++            false,
++            Some("normalized_alias"),
++        ),
++        (true, ToolExposure::Direct, true, Some("normalized_alias")),
++        (true, ToolExposure::Deferred, false, None),
+     ] {
+-        let plan = probe_with(
+-            |turn| {
+-                update_config(turn, |config| {
+-                    config.tool_registry.turn_metadata_includes_tool_info = true;
+-                });
+-                set_feature(turn, Feature::CodeMode, /*enabled*/ true);
+-                if code_mode_only {
+-                    set_feature(turn, Feature::CodeModeOnly, /*enabled*/ true);
+-                }
+-                update_turn_settings_for_test(turn, |settings| {
+-                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+-                    Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
+-                });
+-            },
+-            ToolPlanInputs {
+-                tool_runtimes: vec![mcp_runtime(
+-                    "winner",
+-                    "normalized-alias",
+-                    "lookup",
+-                    winner_exposure,
+-                )],
+-                dynamic_tools: vec![dynamic_tool(
+-                    Some("normalized_alias"),
+-                    "lookup",
+-                    shadow_is_deferred,
+-                )],
+-                ..ToolPlanInputs::default()
+-            },
++        let (second_name, second_identity) = if second_namespace.is_some() {
++            ("lookup", "normalized_alias.lookup")
++        } else {
++            (
++                "normalized_alias__lookup",
++                "functions.normalized_alias__lookup",
++            )
++        };
++        let (_session, mut turn) = make_session_and_context().await;
++        set_feature(&mut turn, Feature::CodeMode, true);
++        set_feature(&mut turn, Feature::CodeModeOnly, code_mode_only);
++        update_turn_settings_for_test(&mut turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
++        });
++        let mcp = codex_mcp::McpBinding::empty(mcp_config_for_test(&turn.config));
++        let mut registry = build_core_tool_registry(
++            &turn,
++            turn.model_info(),
++            &turn.initial_environments,
++            &mcp,
++            None,
++            None,
++        );
++        let hosted_specs = append_source_tools(
++            &turn,
++            turn.model_info(),
++            &mut registry,
++            vec![mcp_runtime(
++                "first",
++                "normalized-alias",
++                "lookup",
++                first_exposure,
++            )],
++            Vec::new(),
++            &[dynamic_tool(
++                second_namespace,
++                second_name,
++                second_is_deferred,
++            )],
++        );
++        let preview = super::finalize_tool_router(
++            &turn,
++            turn.model_info(),
++            registry,
++            hosted_specs,
++            &Default::default(),
+         )
+-        .await;
+-
+-        let winner_name = ToolName::namespaced("normalized-alias", "lookup");
+-        let shadow_name = ToolName::namespaced("normalized_alias", "lookup");
+-        plan.assert_registered_contains(&[&winner_name.to_string(), &shadow_name.to_string()]);
+-        assert_eq!(plan.exposure(&winner_name.to_string()), winner_exposure);
+-        assert_eq!(
+-            plan.exposure(&shadow_name.to_string()),
+-            if shadow_is_deferred {
+-                ToolExposure::Deferred
+-            } else {
+-                ToolExposure::Direct
+-            },
+-        );
+-
+-        let tool_namespaces = plan
+-            .tool_namespaces_info
+-            .as_ref()
+-            .expect("opted-in Responses Lite plan should contain the supported tools");
+-        assert_eq!(
+-            plan.code_mode_tool_names.get("normalized_alias__lookup"),
+-            Some(&winner_name),
+-        );
+-        assert_eq!(
+-            tool_namespaces["normalized-alias"].functions["lookup"]
+-                .code_mode_name
+-                .as_deref(),
+-            Some("normalized_alias__lookup"),
+-        );
+-        assert!(
+-            tool_namespaces
+-                .get("normalized_alias")
+-                .and_then(|namespace| namespace.functions.get("lookup"))
+-                .and_then(|function| function.code_mode_name.as_ref())
+-                .is_none()
+-        );
+-
+-        if !code_mode_only && !shadow_is_deferred {
+-            let ToolSpec::Namespace(namespace) = plan.visible_spec("normalized_alias") else {
+-                panic!("expected the shadowed dynamic tool to remain directly visible");
+-            };
+-            let [ResponsesApiNamespaceTool::Function(shadow)] = namespace.tools.as_slice() else {
+-                panic!("expected exactly one shadowed dynamic tool");
+-            };
+-            assert_eq!(shadow.description, "lookup dynamic tool");
+-        }
+-
+-        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+-            panic!("expected code mode exec tool");
+-        };
+-        assert!(!exec.description.contains("lookup dynamic tool"));
+-        assert_eq!(
+-            exec.description.contains("lookup test tool"),
+-            code_mode_only && winner_exposure == ToolExposure::Direct,
+-        );
++        .expect("ambiguous preview construction must remain supported");
++        let error = preview
++            .validate_code_mode_names()
++            .expect_err("ambiguous Code Mode names must fail before sampling");
++        assert!(matches!(
++            error.details(),
++            CodexErrorDetails::InvalidRequest(_)
++        ));
++        let message = error.to_string();
++        assert!(message.contains("tools.normalized_alias__lookup"));
++        assert!(message.contains("normalized-alias.lookup"));
++        assert!(message.contains(second_identity));
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -16,6 +16,8 @@
+ use crate::tools::registry::ToolRegistry;
+ #[cfg(test)]
+ use crate::tools::spec_plan::finalize_tool_router;
++use codex_protocol::error::CodexErrorDetails;
++use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::models::SearchToolCallParams;
+ #[cfg(test)]
+@@ -76,6 +78,7 @@
+     model_visible_specs: Arc<[ToolSpec]>,
+     tool_mode: ToolMode,
+     code_mode_tool_names: BTreeMap<String, ToolName>,
++    code_mode_error: Option<String>,
+     tool_namespaces_info: Option<TurnToolNamespacesInfo>,
+     can_manage_children: bool,
+ }
+@@ -118,12 +121,14 @@
+         code_mode_tool_names: BTreeMap<String, ToolName>,
+         tool_namespaces_info: Option<TurnToolNamespacesInfo>,
+         child_management_tools: &[ToolName],
++        code_mode_error: Option<String>,
+     ) -> Self {
+         let mut router = Self {
+             registry,
+             model_visible_specs: model_visible_specs.into(),
+             tool_mode,
+             code_mode_tool_names,
++            code_mode_error,
+             tool_namespaces_info,
+             can_manage_children: false,
+         };
+@@ -132,6 +137,14 @@
+                 .iter()
+                 .all(|name| router.exposes_tool(name));
+         router
++    }
++
++    /// Preview plans may be ambiguous; only a sampling plan may dispatch tools.
++    pub(crate) fn validate_code_mode_names(&self) -> CodexResult<()> {
++        if let Some(error) = &self.code_mode_error {
++            return Err(CodexErrorDetails::InvalidRequest(error.clone()).into());
++        }
++        Ok(())
+     }
+ 
+     pub(crate) fn model_visible_specs(&self) -> Arc<[ToolSpec]> {
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1653,6 +1653,7 @@
+     input: Vec<ResponseItem>,
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
++    step_context.tool_router.validate_code_mode_names()?;
+     let turn_context = Arc::clone(&step_context.turn);
+     let preempt = step_context.preempt.clone().unwrap_or_default();
+     let _input_watch = if let Some(preempt) = &step_context.preempt {
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -156,6 +156,7 @@
+         Default::default(),
+         None,
+         &[],
++        None,
+     ))
+ }
+ #[test]
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -638,6 +638,7 @@
+             BTreeMap::new(),
+             /*tool_namespaces_info*/ None,
+             &[],
++            None,
+         ));
+         let step_context = step_context.with_tool_router_for_test(router);
+         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+@@ -827,6 +828,7 @@
+             BTreeMap::new(),
+             /*tool_namespaces_info*/ None,
+             &[],
++            None,
+         ));
+         let step_context = step_context.with_tool_router_for_test(router);
+         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -306,6 +306,7 @@
+                 BTreeMap::new(),
+                 /*tool_namespaces_info*/ None,
+                 &[],
++                None,
+             )),
+             loaded_agents_md: None,
+         })
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -563,6 +563,7 @@
+             BTreeMap::new(),
+             /*tool_namespaces_info*/ None,
+             &[],
++            None,
+         ));
+         let step_context = step_context.with_tool_router_for_test(router);
+         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));

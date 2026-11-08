@@ -636,3 +636,64 @@ async def test_non_finite_model_input_fails_before_provider_work():
             "Allowed?", input=[{"role": "user", "content": float("nan")}], provider=provider
         )
     assert not provider.requests
+
+
+@pytest.mark.parametrize("reason", ["refusal", "invalid_response"])
+@pytest.mark.parametrize("cleanup", ["failure", "cancel"])
+async def test_completed_provider_error_remains_primary_when_recording_fails(reason, cleanup):
+    owner = contexts()[1]
+    failure = DecisionError(reason, usage=USAGE, request_id="completed", model="custom")
+    cleanup_error = (
+        asyncio.CancelledError() if cleanup == "cancel" else RuntimeError(cleanup + " failed")
+    )
+    recorded = []
+
+    async def begin():
+        async def record(response):
+            recorded.append(response)
+            raise cleanup_error
+
+        return record
+
+    with _bind_decisions(owner, lambda: True, begin, Provider(failure)):
+        with pytest.raises(DecisionError) as caught:
+            await owner.decide("Allowed?", input="Synthetic evidence")
+    assert caught.value is failure
+    assert caught.value.__context__ is cleanup_error
+    assert recorded == [
+        DecisionResponse(value=None, usage=USAGE, request_id="completed", model="custom")
+    ]
+
+
+async def test_completed_provider_error_joins_recording_when_caller_is_cancelled():
+    owner = contexts()[1]
+    failure = DecisionError("refusal", usage=USAGE)
+    entered, release = asyncio.Event(), asyncio.Event()
+    recorded = []
+
+    async def begin():
+        async def record(response):
+            entered.set()
+            await release.wait()
+            recorded.append(response)
+
+        return record
+
+    async def invoke():
+        with _bind_decisions(owner, lambda: True, begin, Provider(failure)):
+            await owner.decide("Allowed?", input="Synthetic evidence")
+
+    task = asyncio.create_task(invoke())
+    try:
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(DecisionError) as caught:
+            await task
+        assert caught.value is failure
+        assert recorded == [DecisionResponse(value=None, usage=USAGE)]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)

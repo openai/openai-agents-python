@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 
-from agents import Agent, DecisionResponse, NativeAgents, NativeProvider
+from agents import (
+    Agent,
+    DecisionResponse,
+    NativeAgents,
+    NativeError,
+    NativeProvider,
+    RunBudget,
+    StopTurn,
+)
 from agents.usage import TokenUsage
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
+from tests.test_deferred_jobs import Journal, Provider as JobProvider, declared, done
+from tests.test_deferred_opening_outcome import pending
 from tests.test_native_child_agents import collaboration, trust
 from tests.test_native_executor_tools import declaration
+from tests.test_native_run_budget import require_follow_up
 
 
 class Provider:
@@ -110,3 +123,168 @@ async def test_native_agents_approval_decide_retains_exact_usage_and_expires(
                 await captured[0].decide("Expired?", input="Synthetic policy")
     assert len(decisions.requests) == 1
     assert len(responses.requests) == 2
+
+
+class BudgetProvider(Provider):
+    def __init__(self, missing):
+        super().__init__()
+        self.missing = missing
+
+    async def get_decision(self, request):
+        response = await super().get_decision(request)
+        return DecisionResponse(
+            value=response.value, usage=None if self.missing else response.usage
+        )
+
+
+def decision_budget(metric, limit, requests=None):
+    if metric == "cost":
+        return RunBudget(
+            max_requests=requests,
+            max_estimated_cost_micros=limit,
+            estimate_cost_micros=lambda usage: usage.total_tokens,
+        )
+    return RunBudget(max_requests=requests, max_tokens=limit)
+
+
+@pytest.mark.parametrize("metric", ["tokens", "cost", "missing"])
+async def test_before_step_decision_budget_blocks_first_model_admission(
+    responses: ResponsesFixture, metric
+):
+    decisions = BudgetProvider(metric == "missing")
+
+    async def check(turn, *, step_index):
+        assert await turn.decide("Allowed?", input="Synthetic evidence") is True
+
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        decisions=decisions,
+        provider=NativeProvider(
+            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
+        ),
+    )
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit(
+            "Answer.", budget=decision_budget(metric, 10), before_step=check
+        )
+        with pytest.raises(NativeError) as error:
+            await turn.get_result()
+        assert error.value.code == (
+            "run_budget_usage_unavailable" if metric == "missing" else "run_budget_exceeded"
+        )
+    assert len(decisions.requests) == 1
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize("metric", ["tokens", "cost", "missing"])
+@pytest.mark.parametrize("follow_up", [False, True])
+async def test_preparation_decision_allows_admitted_request_and_gates_next_admission(
+    responses: ResponsesFixture, metric, follow_up
+):
+    decisions = BudgetProvider(metric == "missing")
+
+    async def prepare(turn, request, **kwargs):
+        assert await turn.decide("Allowed?", input="Synthetic evidence") is True
+
+    if follow_up:
+        responses.before_event = require_follow_up
+    responses.respond(assistant_output("admitted model result"))
+    responses.respond(assistant_output("must not be requested"))
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        decisions=decisions,
+        provider=NativeProvider(
+            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
+        ),
+    )
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit(
+            "Answer.",
+            prepare_request=prepare,
+            budget=decision_budget(metric, 20, requests=2 if follow_up else 1),
+        )
+        if follow_up:
+            with pytest.raises(NativeError) as error:
+                await turn.get_result()
+            assert error.value.code == (
+                "run_budget_usage_unavailable" if metric == "missing" else "run_budget_exceeded"
+            )
+        else:
+            assert (await turn.get_result()).final_output == "admitted model result"
+    assert len(decisions.requests) == 1
+    assert len(responses.requests) == 1
+
+
+async def test_before_step_explicit_stop_preserves_policy_outcome_without_cost_estimate(
+    responses: ResponsesFixture,
+):
+    estimates = []
+    decisions = Provider()
+
+    def estimate(usage):
+        estimates.append(usage)
+        return usage.total_tokens
+
+    async def stop(turn, *, step_index):
+        assert await turn.decide("Stop?", input="Synthetic evidence") is True
+        return StopTurn()
+
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        decisions=decisions,
+        provider=NativeProvider(
+            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
+        ),
+    )
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit(
+            "Answer.",
+            before_step=stop,
+            budget=RunBudget(max_estimated_cost_micros=10, estimate_cost_micros=estimate),
+        )
+        with pytest.raises(NativeError, match="Turn stopped by policy"):
+            await turn.get_result()
+    assert estimates == []
+    assert len(decisions.requests) == 1
+    assert responses.requests == []
+
+
+@pytest.mark.parametrize("explicit_restore_override", [False, True])
+async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_override(
+    responses: ResponsesFixture, explicit_restore_override
+):
+    original, captured, override = Provider(), Provider(), Provider()
+    jobs, tool = declared(Journal(), JobProvider([done()]))
+
+    class RestoringAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **kwargs):
+            if kwargs.get("state") is not None and explicit_restore_override:
+                kwargs["decisions"] = override
+            async with super().session(**kwargs) as session:
+                yield session
+
+    async def complete(ctx):
+        assert await ctx.decide("Is this complete?", input=ctx.text or "") is True
+
+    agent = RestoringAgent(
+        model="gpt-5.5",
+        instructions="Render.",
+        tools=[tool],
+        decisions=original,
+        before_complete=complete,
+        provider=NativeProvider(
+            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
+        ),
+    )
+    async with timeout(20), agent.session(decisions=captured) as live:
+        request = await pending(live, tool, responses)
+        responses.respond(assistant_output("restored complete"))
+        async with jobs.start(live, request) as (_, turn):
+            assert (await turn.get_result()).final_output == "restored complete"
+    assert original.requests == []
+    assert len(captured.requests) == (0 if explicit_restore_override else 1)
+    assert len(override.requests) == (1 if explicit_restore_override else 0)

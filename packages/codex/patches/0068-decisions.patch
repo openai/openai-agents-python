@@ -1058,10 +1058,10 @@ index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..55364b892894a1dedf0a7339800a3ec9
          &self,
          turn_context: &TurnContext,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index b11cc18518eb90841b141e6d2665b99cb50a9b29..bb52135b8310b8a38e6f94080075886327c3d867 100644
+index 825d4970153f5a39f55c169bf571c989781b089f..11496de01bf87168042cf943d3de870116b2084d 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13870,3 +13870,91 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
+@@ -13871,3 +13871,91 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
      .await
      .expect("bounded real publication cancellation must settle");
  }

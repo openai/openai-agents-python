@@ -73,7 +73,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Await the call in its live callback. Saved contexts and detached tasks cannot use that callback's authority. Completed usage contributes to the owning turn; child usage stays with the child. Cancellation joins started work. The helper does not append its question or answer to the conversation.
+`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Await the call in its live callback. Saved contexts and detached tasks cannot use that callback's authority. Completed usage contributes to the owning turn; child usage stays with the child. Run budgets check limits before admitting a root model step. An admitted request may finish after reaching a limit. Decision calls do not add root request admissions. Cancellation joins started work. The helper does not append its question or answer to the conversation.
 
 Completion feedback does enter the conversation. Already streamed text remains visible and recorded. See [completion checks](../../docs/sdk/configuration.md#check-a-proposed-completion) for timing and continuation limits.
 
@@ -89,4 +89,6 @@ An explicit `decisions=` on `agent.run()` or `agent.session()` overrides the Age
 
 Free-form text and other unbounded schemas need a generative request. Configure `OpenAIDecisions(fallback_model=...)` to send the whole unsupported schema through Responses. The provider chooses the API before inference. It does not first make a Decisions request or retry a low-confidence answer. Ordinary client transport retries still follow the OpenAI client's settings.
 
-A refusal, malformed service answer, or non-JSON provider value raises `DecisionError`. Its `reason` is `refusal` or `invalid_response`; it retains trustworthy usage and request metadata without retaining the response body. Bound helpers record that completed usage before raising. Valid JSON that fails the requested output type raises the existing `OutputValidationError`, as Agent output does. Missing or invalid usage stays unknown. Transport errors keep the OpenAI client's exception types. If a schema is unsupported and no fallback is configured, the call fails before any request.
+## Handle errors and usage
+
+A refusal, malformed service answer, or non-JSON provider value raises `DecisionError`. Its `reason` is `refusal` or `invalid_response`; it retains trustworthy usage and request metadata without retaining the response body. Bound helpers record that completed usage before raising. Valid JSON that fails the requested output type raises the existing `OutputValidationError`, as Agent output does. Both failures remain available if recording a completed error also fails. Missing or invalid usage stays unknown. Transport errors keep the OpenAI client's exception types. If a schema is unsupported and no fallback is configured, the call fails before any request.
