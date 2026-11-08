@@ -48,7 +48,7 @@ flowchart TB
     Core <--> Code["Optional bundled JavaScript host process"]
 ```
 
-With direct `NativeProvider`, Codex sends Responses requests to the configured endpoint. Follow the [provider checks](providers.md) for custom endpoints; text compatibility alone does not establish tool or WebSocket support. The migration adapter's Classic Model connection uses a different path, described below.
+With `NativeProvider`, Codex sends Responses requests to the configured endpoint. Follow the [provider checks](providers.md) for custom endpoints; text compatibility alone does not establish tool or WebSocket support.
 
 Async Python callbacks run in the application event loop; synchronous callbacks run in SDK-owned worker threads. Executor permissions apply to executor operations. Your Python callbacks run with your application's permissions, and MCP servers have their own execution environments. See [tool execution](tools.md#execution-and-cancellation) and the [source ownership map](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/packages/codex/MAINTAINING.md#runtime-ownership).
 
@@ -118,13 +118,11 @@ The [stable v0.24.0 SDK](https://github.com/openai/openai-agents-python/tree/17d
 | Loop | Python `Runner` calls a Python `Model`, executes tools or handoffs, and repeats. | Embedded Codex coordinates model turns and permitted tools. |
 | Session | History-store protocol used by the runner | Live conversation and resource owner; storage is separate |
 | Run entry | `Runner.run(agent, input)` | `agent.run(input)` or Session submission and Turn completion |
-| Model integration | Python `Model` and `ModelProvider` | `NativeProvider` and the Responses protocol, or a supported migration adapter |
+| Model integration | Python `Model` and `ModelProvider` | `NativeProvider` and a compatible Responses endpoint |
 | Saved work | Session history and `RunState` | Native checkpoints or configured storage, with their own restore contracts |
 
-Choose a route per workflow:
+You can keep using v0. When upgrading, prefer a direct port to native `Agent`, `Session`, and `Turn`. The [migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) maps the APIs and provides validation steps and a coding-agent brief. Port tools, policies, events, and state handling together; an import change alone does not convert a workflow or its saved conversations.
 
-- **Classic:** Keep the Python execution contract through `agents.classic` imports. Keep related agents, tools, runners, and state together. Classic includes later fixes beyond v0.24.0; test the exact build and install its required extras. See the [Classic contract](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/CLASSIC.md).
-- **SDKRunner:** Reuse an eligible Classic Agent, explicit Model, and function tools through a private loopback connection to native execution. This experimental adapter supports a constrained subset and buffers streamed events until success. Check [migration limits](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/MIGRATION.md) for approvals, providers, guardrails, handoffs, and state.
-- **Native APIs:** Design around `Agent`, `Session`, and `Turn`, with the capabilities your application needs. An import change alone does not convert Classic conversations or checkpoints.
+Use **classic** only when a workflow needs the new package before it can complete the native port. `agents.classic` keeps the Python loop with explicit classic imports. Keep its agents, tools, runner, and state together, and start fresh native conversations as you port workflows. See the [classic contract](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md) for the compatibility baseline, required extras, and planned lifecycle.
 
-Classic and SDKRunner require a matching development build beyond the published preview. Classic extras retain native platform requirements. For a new native application, check [installation](installation.md) and follow the [quickstart](index.md).
+Classic requires a matching development build beyond the published preview. Its extras retain native platform requirements. For a new native application, check [installation](installation.md) and follow the [quickstart](index.md).

@@ -58,6 +58,7 @@ The script prints a greeting for Ada, such as `Hello, Ada!`. When the model requ
 | --- | --- |
 | Understand Agent, Session and Turn | [Core concepts](concepts.md) |
 | Compare the native runtime with v0.24.0 | [Runtime architecture and migration choices](concepts.md#compare-with-v0240) |
+| Port a v0 or classic workflow directly to native v1 | [Migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) |
 | Call Python code with application data | [Function tools](tools.md#python-functions) and [context](tools.md#application-context) |
 | Connect a tool server | [MCP servers](mcp.md) |
 | Continue a conversation or stream its answer | [Sessions](sessions.md) and [streaming](sessions.md#stream-observations) |

@@ -97,7 +97,7 @@ History and descendant iterators have no pagination arguments.
 
 ### get_cleanup
 
-Import `get_cleanup` from `agents` for native or migration failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None` finds the retained cleanup owner through the error and its exception context. It returns the existing Session or NativeProvider owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
+Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None` finds the retained cleanup owner through the error and its exception context. It returns the existing Session or NativeProvider owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
 
 Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
 
@@ -519,8 +519,8 @@ A dictionary with `type="input_text"` and `text`.
 
 A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`.
 
-## Migration run handles
+## Existing MCP clients
 
-The optional `agents.migration` adapter exposes `SDKRunner.start(...) -> SDKRunHandle` for a run that starts in the current event loop. Await `handle.get_result()` for its accepted result, or call `handle.cancel()` and then await settlement to join cleanup. `handle.replay_events()` and `result.replay_events()` yield buffered accepted semantic events after successful completion. They do not provide live model or tool progress. Classic Runner streaming APIs keep their existing behavior.
+`agents.migration.mcp` provides the independent `MCPNamespace` and `select_mcp_tools` adapter for application-owned classic MCP clients. It returns native function tools; it does not run classic Agents or Models. See [client ownership and policy limits](mcp.md#reuse-an-application-owned-mcp-client).
 
-`agents.migration.get_cleanup` re-exports the same callable as [`agents.get_cleanup`](#get_cleanup). Native callers can import it from `agents` without the optional migration adapter.
+Import native cleanup recovery as [`agents.get_cleanup`](#get_cleanup).

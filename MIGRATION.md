@@ -1,310 +1,150 @@
-# Run v0 agents with the native SDK
+# Migrate from v0 to native v1
 
-Use the experimental `agents.migration.SDKRunner` to run a supported Classic Agent through the native Codex loop. Keep its existing Model, function tools, and application context. The selected Classic Model still makes model requests; Codex decides when to request another response and execute the declared tools.
+For an existing v0 application, migrate directly to the native v1 API when you are ready to upgrade. Port each workflow's agent declarations, tools, configuration, and execution together. Use v1 classic only when you need to upgrade the package before you can complete that port.
 
-This guide applies to the source on `feat/codex-harness`. `SDKRunner` is not included in the previously published `v0.24.0-alpha.6` preview wheels or the v0 `openai-agents` package on PyPI. Follow the [contributor setup](CONTRIBUTING.md) to build this source, then install its Classic dependencies from the repository root:
+You can continue using v0. Upgrading to v1 is optional, and classic is not a required intermediate step.
 
-```sh
-python -m pip install '.[classic]'
-```
+This guide describes the v1 design on `feat/codex-harness`. It does not announce a published v1 release. The published `v0.24.0-alpha.6` preview predates classic and some native APIs shown in the current guides. Use the [contributor setup](CONTRIBUTING.md) for this source, or follow the [guides for your installed release](docs/sdk/versions.md). Keep the SDK build, documentation, and examples aligned.
 
-The same distribution contains both APIs and requires the matching native runtime. See [Classic installation](CLASSIC.md#install-from-the-matching-source) for dependency extras and platform constraints.
+## Choose your path
 
-## Allow the private loopback connection
-
-The adapter passes model responses to the native loop through a private local connection. On macOS and Windows, add `127.0.0.1` to `NO_PROXY` before starting your application, because the native transport can load system proxy settings. On other platforms, this is required when any `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` variable, including a lowercase variant, is set to a nonempty value.
-
-When a bypass is required, define `NO_PROXY`, `no_proxy`, or both. Every defined variable must contain the exact comma-separated entry `127.0.0.1`. Preserve your existing entries. The adapter requires this explicit entry; it does not interpret wildcard or subnet exclusions. Keep proxy and bypass variables unchanged during a run. An incompatible configuration fails before provider resolution or model calls. SDKRunner does not change your proxy environment.
-
-## Choose a migration step
-
-| Your goal | API | Execution |
+| Starting point and goal | Path | Execution after the change |
 | --- | --- | --- |
-| Upgrade the package while preserving existing v0 behavior | `agents.classic.Agent` and `agents.classic.Runner` | Original Python loop |
-| Move a supported v0 workflow to native execution | `agents.classic.Agent` and `agents.migration.SDKRunner` | Native loop with your Classic Model and tools |
-| Use the native API directly | `agents.Agent` and its `run` or `session` methods | Native loop with native declarations |
+| Keep a working v0 application | Keep its v0 dependency and imports. | The existing Python runner. |
+| Adopt native v1 | Upgrade the package and port the workflow to the root `agents` API. **Recommended.** | The embedded Codex runtime. |
+| Upgrade the package while a workflow still needs the v0 contract | Use `agents.classic` for that workflow, then complete the native port separately. | The retained Python runner until the port is complete. |
+| Move a v1 classic workflow to native | Follow the same native port below, starting from `agents.classic` imports. | The embedded Codex runtime. |
 
-`agents.classic` retains the v0.24.0 compatibility baseline and later fixes from its pinned main commit. Start with the [Classic import migration](CLASSIC.md#change-imports-before-changing-behavior) and test your application there. Libraries that import the old root `agents` API internally also need to select Classic.
+There are two execution APIs in v1: native and classic. `SDKRunner` and its run handles/results are removed from this development branch. It is not a migration step or an alternative runner.
 
-## Replace the runner for one supported workflow
+## Prepare the application
 
-Keep the Agent and tools together in the Classic namespace. The Python snippets below are reference fragments for an existing application: put calls containing `await` inside an async function. They assume a supported Classic `agent` with an explicit Model and an `app_context` object unless stated otherwise. For a complete runnable script, use [the scripted example](examples/codex/migration.py).
+1. Keep the current dependency lock, deployable v0 build, and a copy of persisted application data.
+2. Record the behavior each workflow must retain: model/provider configuration, tool effects, approvals and guardrails, output validation, streaming, cancellation, tracing, and conversation recovery.
+3. Run the existing application tests and evaluations to establish a baseline. Include a representative tool call and a failure or denied-action case.
+4. Install the target SDK in a separate environment using the [matching-source setup](CONTRIBUTING.md). Check its [platform requirements](docs/sdk/installation.md) before replacing a deployment.
 
-Start by changing the runner call:
+You can port and deploy workflows independently. Direct migration means each port goes from the v0 API to native v1 without first rewriting it to classic.
 
-```python
-# Before: existing v0 or Classic execution.
-from agents.classic import Runner
+## Port the execution and tool declarations
 
-result = await Runner.run(agent, "Greet Ada.", context=app_context)
-```
-
-```python
-# After: native execution of the same supported Agent.
-from agents.migration import SDKRunner
-
-result = await SDKRunner.run(agent, "Greet Ada.", context=app_context)
-print(result.final_output)
-```
-
-Do not pass a Classic Agent directly to the native `agents.Agent` API or mix native tools into the Classic Agent.
-
-Select a Model explicitly, either on `agent.model` or with the per-run `model` argument. A non-`None` run argument takes precedence over the Agent. If the selected value is a name rather than a Model object, pass its Classic ModelProvider through `model_provider=provider`. You can reuse the provider from your Classic `RunConfig`. An explicit Model object does not use a provider; omit `model_provider` in that case. For example, if `agent.model` is an explicit Responses model name, use your existing OpenAI credentials and a Classic provider:
+In v0, the Python `Runner` owns the loop. This complete script shows a simple workflow:
 
 ```python
-from agents.classic import OpenAIProvider
-from agents.migration import SDKRunner
+import asyncio
 
-provider = OpenAIProvider()
-try:
-    result = await SDKRunner.run(agent, "Greet Ada.", model_provider=provider)
-finally:
-    await provider.aclose()
+from agents import Agent, Runner, function_tool
+
+
+@function_tool
+def greet(name: str) -> str:
+    """Return a greeting for the named person."""
+    return f"Hello, {name}!"
+
+
+async def main() -> None:
+    agent = Agent(
+        name="Greeter",
+        instructions="Use greet, then return its greeting.",
+        tools=[greet],
+    )
+    result = await Runner.run(agent, "Greet Ada.")
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-Pass a `ModelSettings` object or dictionary as `model_settings` to override the Agent settings through Classic `ModelSettings.resolve`. If the Agent still uses implicit settings, defaults follow the selected model. Explicit settings and application edits are preserved before applying the run override. The adapter validates supplied settings before provider lookup and effective settings before model execution.
+For a workflow already on v1 classic, the imports in that script come from `agents.classic`. Its execution contract is still the Python runner's contract.
 
-The adapter does not choose a provider or change your model credentials. It borrows the Model and ModelProvider. Your application remains responsible for their resources, including any client you supply.
+The native version uses the native tool decorator and `Agent.run()`:
 
-Run the [complete scripted example](examples/codex/migration.py) from the matching source tree:
+```python
+import asyncio
 
-```sh
-python examples/codex/migration.py
+from agents import Agent, function_tool
+
+
+@function_tool
+def greet(name: str) -> str:
+    """Return a greeting for the named person."""
+    return f"Hello, {name}!"
+
+
+async def main() -> None:
+    agent = Agent(
+        name="Greeter",
+        instructions="Use greet, then return its greeting.",
+        tools=[greet],
+    )
+    result = await agent.run("Greet Ada.")
+    print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-It needs no model credentials and makes no external model requests. Its scripted Model requests the existing Classic `greet` tool, the native loop executes that tool with application context, and the next response supplies the final answer. The example prints `Hello, Ada!` and the native session ID. It verifies the execution path, not model quality.
+Configure your model credentials before running either script; both make live model requests. The output should greet Ada, although model wording can vary. For checks without model credentials, use the native [scripted testing guide](docs/sdk/testing.md).
 
-## Check the supported features
+The similar names do not make native and classic objects interchangeable. Reuse the business function's implementation, but declare its native tool and policies with native APIs. Keep an entire workflow's Agent, tools, execution, and state in the same API.
 
-| Feature | `SDKRunner` support |
+## Map the remaining contracts
+
+| v0 or v1 classic | Native v1 migration |
 | --- | --- |
-| One base Classic Agent | Supported; Agent subclasses are unsupported |
-| Static instructions and string input | Supported |
-| Explicit Classic Model, or model name plus explicit ModelProvider | Supported within the response limits below |
-| Eager Classic function tools with text results | Supported; the original tool validates arguments and invokes its callback |
-| Application context | Supported; pass `context=...` |
-| Text final output | Supported |
-| Model request limit | `max_turns=10` by default; a positive integer counts Model calls |
-| Ordinary model tuning | Passed to the selected Model within the supported settings contract |
-| Runner-managed retries, timeouts, or forced tool choices | Unsupported; `tool_choice` must be `None` or `"auto"` |
-| Structured final output and Agent/tool guardrails | Unsupported |
-| Dynamic instructions, prompts, lifecycle hooks, or tool enablement | Unsupported |
-| Static tool approval | Supported with `needs_approval=True` and an explicit async `on_approval` callback |
-| Dynamic approval predicates, tool timeouts, deferred loading, or namespaces | Unsupported |
-| Handoffs and agents used as tools | Unsupported |
-| Custom tool-use behavior | Unsupported; keep `tool_use_behavior="run_llm_again"` and `reset_tool_choice=True` |
-| MCP, hosted tools, sandbox tools, voice, or realtime | Unsupported |
-| Model streaming | Pass `model_invocation="stream"` to call `Model.stream_response`; the default `"response"` calls `Model.get_response` |
-| Live raw Model events | In stream mode, pass a synchronous `on_model_event` observer; these events are provisional |
-| Buffered semantic events | Use `SDKRunner.start()` inside async code; these events remain buffered in either Model invocation mode |
-| Synchronous execution to completion | Unsupported |
-| Native persistence | Idle portable state, `LocalStorage`, and root-only `CustomStorage` |
-| Classic Session stores | Pass `session` to read and append settled, uncompacted history. `OpenAIResponsesCompactionSession` works as a store. Use `agents.classic.Runner` for automatic compaction or opaque compacted history. |
-| Raw conversation history input, Classic RunState, or same-turn continuation | Unsupported |
+| `Runner.run()` / `Runner.run_sync()` | `await agent.run()` / `agent.run_sync()`. Use the synchronous form outside an existing event loop. |
+| `Runner.run_streamed()` and classic stream events | Open `agent.session()`, submit a Turn, and read `turn.events()` while awaiting its result. Update event consumers to [native observations](docs/sdk/sessions.md#stream-observations). |
+| `RunContextWrapper[T]` in a function tool | Use native `ToolContext[T]` as the first parameter and pass the application object as `context=`. See [application context](docs/sdk/tools.md#application-context). |
+| Decorator options such as `name_override` | Re-declare the tool using the native options, such as `name=`. Check [argument, result, and callback rules](docs/sdk/tools.md). |
+| `RunConfig`, `ModelSettings`, and mutable Agent fields | Set native Agent and Session options explicitly. Native Agents are immutable and native `ModelSettings` has a different contract. See [configuration](docs/sdk/configuration.md). |
+| `Model`, `ModelProvider`, custom OpenAI clients, or a Chat Completions endpoint | Configure `NativeProvider` for a compatible Responses endpoint. Python model/client objects do not plug into the native loop. Check [provider compatibility](docs/sdk/providers.md). |
+| `output_type` and result processing | Declare the native output type and validate the returned `final_output`. Check [schema limits and validation failures](docs/sdk/configuration.md#structured-output). |
+| Handoffs or agents used as tools | Port the application routing or choose [native child agents](docs/sdk/delegation.md) when their model, environment, and lifecycle requirements fit. These are not automatic handoff conversions. |
+| Guardrails, approval callbacks, and lifecycle hooks | Map each policy to application validation, [native tool policies](docs/sdk/tools.md#execution-and-cancellation), or [live interactions](docs/sdk/approvals.md). Preserve when an action is blocked; do not drop a policy to make the port run. |
+| Classic tracing and usage consumers | Configure [native telemetry](docs/sdk/observability.md) separately and update consumers to the native events and usage contract. |
+| Classic `Session` stores and `RunState` | Choose native storage separately. Keep existing work on its original engine as described below. |
 
-Unsupported Agent declarations, tool declarations, and supplied model settings fail before provider resolution or model/tool execution. Settings derived from the resolved Model are checked after provider resolution and before the Model call. Fix the reported configuration or keep that workflow on `agents.classic.Runner`. Do not remove a guardrail or approval policy merely to make a workflow eligible.
+Model defaults, request shapes, tool timing, and event ordering can change when the harness changes. Port the behavior your application needs instead of assuming a name-for-name substitution. In particular, native provider configuration does not read `OPENAI_BASE_URL`; pass a custom URL explicitly as described in [provider configuration](docs/sdk/configuration.md#provider-connection).
 
-Tool callbacks receive the application context, cumulative usage, original tool call and raw argument string, and active Agent. `ToolContext.turn_input` contains the input supplied to the selected Model invocation for the response that requested the tool. The context does not carry a Classic `RunConfig` or approval state.
+## Keep conversation state with its engine
 
-Ordinary `ModelSettings`, such as temperature, maximum output tokens, reasoning, verbosity, and provider response storage, pass to your selected Model. The adapter rejects `retry`, `timeout`, `context_management`, `extra_query`, `extra_body`, `extra_headers`, and `extra_args` when they are not `None`. These settings can require runner behavior or replace request fields that the adapter must control.
+A classic `Session` is a history-store interface. A native `Session` is a live conversation and resource owner; native [storage](docs/sdk/state.md) is a separate choice. Reusing an Agent does not preserve conversation history.
 
-The adapter validates each Model response before delivering it to native execution. A custom Model must return completed text messages, function calls, or both; reasoning records may accompany them. Unsupported output fails the run; earlier Model calls and tool effects may already have occurred.
-
-Response items with `provider_data` are unsupported. Providers can use this field for replay data, such as Gemini thought signatures or provider-native thinking blocks, that the native loop cannot preserve. The adapter rejects the whole response before any of its tools run. Keep workflows that require this metadata on `agents.classic.Runner`.
-
-Keep `OpenAIChatCompletionsModel` workflows on Classic, including plain text runs: that adapter adds `provider_data` to its responses for provider provenance. Standard Responses reasoning fields, including `encrypted_content`, remain supported.
-
-The private transport allows at most 4 MiB for each native request body and each encoded response event sequence. Stream invocation also limits the cumulative encoded Model events to 4 MiB. This is a transport limit, not a model token allowance. Keep larger workflows on Classic or port them to the native API.
-
-## Save and reopen a native conversation
-
-Without persistence options, each call starts a fresh native conversation. Use the same persistence mode when you save a conversation and when you reopen it.
-
-| Mode | Save | Reopen |
-| --- | --- | --- |
-| Portable | Pass `return_state=True` and keep `result.native_result.state` | Pass the idle `SessionState` as `state` |
-| Native local | Pass `storage=LocalStorage(path)` and keep `result.native_result.turn.session_id` | Pass the original profile as `storage` and the saved ID as `resume` |
-| Native custom | Pass `storage=CustomStorage(backend)` and keep the same Session ID | Pass storage backed by the original canonical store and the saved ID as `resume` |
-
-Save a portable checkpoint after a completed turn. In this fragment, `current_agent` is your current Classic Agent with matching instructions and tool declarations, bound to the Model and callbacks you want to use after restore.
+For new native conversations, open one Session for follow-up turns:
 
 ```python
-from agents import SessionState
-from agents.migration import SDKRunner
-
-first = await SDKRunner.run(agent, "Greet Ada.", return_state=True)
-checkpoint = first.native_result.state
-assert checkpoint is not None
-saved_json = checkpoint.to_json()
-
-second = await SDKRunner.run(
-    current_agent,
-    "Now greet Grace.",
-    state=SessionState.from_json(saved_json),
-    return_state=True,
-)
+async with agent.session() as session:
+    first = await session.submit("Remember the label atlas.")
+    await first.get_result()
+    second = await session.submit("What label did I give you?")
+    result = await second.get_result()
 ```
 
-Keep the profile and Session ID together when you use native local storage. This fragment uses the same `current_agent` convention as the portable example.
+This fragment belongs inside an async function and uses the native `agent` above. The context manager closes the Session and its owned resources.
 
-```python
-from pathlib import Path
+There is no automatic conversion from v0/classic session history or `RunState` to native checkpoints. Finish in-flight runs and pending approvals with the engine that created them. You can drain existing conversations on v0 or, after validating the namespace change, on v1 classic while routing new conversations to native.
 
-from agents import LocalStorage
-from agents.migration import SDKRunner
+If an application needs continuity in a fresh native conversation, supply a deliberately prepared summary or application data as new input. That starts a new conversation; it does not resume old tool calls, approval handles, response IDs, or execution state. Reconcile any tool effect with an unknown outcome before continuing.
 
-storage = LocalStorage(Path("native-profile"))
-first = await SDKRunner.run(agent, "Greet Ada.", storage=storage)
-second = await SDKRunner.run(
-    current_agent, "Now greet Grace.", storage=storage, resume=first.native_result.turn.session_id
-)
-```
+Keep classic data and native state separate. Native portable checkpoints have their own [compatibility rules](docs/sdk/state.md#check-checkpoint-compatibility), including an exact Codex-revision requirement. Retain the producer SDK needed to resume saved work. Switching the package back to v0 does not make native state readable by v0.
 
-A successful reopen preserves the native Session ID and recorded history. Use the current Agent and application bindings for each run, including the selected Model, context, and tool callbacks. For a named Model, pass the current provider. For portable restore, use a checkpoint created by SDKRunner with matching instructions and tool declarations. Restoring history does not restore Python callbacks, Model objects, credentials, or application context. Verify checkpoint integrity before restoring. Keep checkpoint contents and storage profiles private.
+## Use classic only when staging is necessary
 
-The native history keeps recorded item identities. The Model receives the projected native request and may see only part of that history after compaction. A Model response that reuses a recorded function call ID fails before any tool in that response runs.
+Classic is useful when a package upgrade must happen before a workflow's custom model integration, guardrail/handoff behavior, or stored conversations can move to native. Keep that workflow on `agents.classic` and verify it independently. Follow [classic setup and import mapping](CLASSIC.md); Python classic needs its dependency extra and the same native package/platform requirements still apply.
 
-Use `return_state` only without storage. Portable state must be idle and free of pending actions or recovery. `CustomStorage` supports root conversations with automatic function tools and follows the backend's durability contract.
+When the blocker is resolved, apply this guide to that classic workflow. Do not introduce a second compatibility runner or an automatic fallback between engines.
 
-SDKRunner submits only the root turn. After reopening a compatible local root, use a separate native Session to read completed child history with `Session.items(subagent_id=...)`. A reopened root that requires automatic compaction before sampling fails at the native request preparation boundary.
+Classic remains available in v1 and is not deprecated by this change. The intended lifecycle is to announce deprecation in a later v1 minor release before removal in v2. No deprecation release or removal date is set here. v0 users can keep their existing version; classic's lifecycle does not force a v0 upgrade.
 
-If local storage reports an unknown tool outcome, check your application records. Pass verified `ReconciledCall` records as `reconciled_calls` when reopening the original profile. For custom storage, follow the backend's recovery contract. Use `CustomStorage.reconcile` to record a verified result before reopening. Keep the conversation closed until you can verify what happened. See the [native storage and recovery guide](docs/sdk/state.md#recover-after-interruption).
+## Preserve useful integrations
 
-## Continue a completed Classic Session
+Native sandbox and voice integrations remain available under their existing APIs. Prefer direct native MCP declarations for a new integration. Keep an existing client adapter when its authentication, discovery, or connection ownership is useful; it does not make arbitrary classic Agent or Model objects native-compatible.
 
-Pass your existing `agents.classic.Session` to `SDKRunner.run()` or `SDKRunner.start()`. The selected Model receives the stored messages, reasoning, and complete function call pairs in order. Your new text follows that history. The native loop starts a fresh turn and executes tools for that turn only.
+### Reuse a classic MCP client with native declarations
 
-In the following fragment, `existing_session` is an application-owned Classic Session containing settled history. A declared `SessionSettings.limit` bounds the stored history that SDKRunner sends to the Model. SDKRunner checks the complete store snapshot first and reserves every stored function call ID. It then takes the latest items in order and omits any function output whose call falls outside that window. With a limit of zero or less, the Model receives only the new input. If the snapshot reaches SDKRunner's read bound, the run stops before calling the Model.
-
-```python
-from agents.migration import SDKRunner
-
-result = await SDKRunner.run(
-    agent, "Continue where we left off.", session=existing_session, context=app_context
-)
-print(result.final_output)
-```
-
-Choose one persistence route per invocation. With `session`, omit `state`, `storage`, and `resume`, leave `reconciled_calls` empty, and keep `return_state=False`.
-
-SDKRunner waits for the turn and native cleanup to succeed. It then appends the new user input, eligible Model items, and matching function results in one call. Both the result and any buffered events wait for the write to succeed. The result's `input` includes the imported history and new user input. Its `new_items` contains only the items produced in this invocation.
-
-For `OpenAIConversationsSession`, SDKRunner follows Classic Runner's rules for item metadata. On replay, it strips `id` and `provider_data` from historical assistant messages. On append, it strips top-level `id` fields from messages and function items, preserves `call_id` values, and skips reasoning items that have neither a server ID nor encrypted content.
-
-SDKRunner uses `OpenAIResponsesCompactionSession` to read and append settled, uncompacted history. `agents.classic.Runner` handles automatic Responses compaction. Opaque compaction records can hide historical function call IDs, so SDKRunner rejects them even outside the Model's retrieval window. Use `agents.classic.Runner` to continue an already compacted conversation.
-
-Reopen the same store with the same session ID after restarting your application. Use different IDs for separate conversations. Your application owns the store and closes it according to the store's lifecycle. Run one request at a time for each conversation, or coordinate concurrent requests in your application. The Classic Session protocol reads and appends in separate operations.
-
-### Finish pending Classic work before moving it
-
-SDKRunner rejects incomplete function calls, unmatched outputs, and unknown effect records before invoking the Model. Finish a pending Classic `RunState` with its original Classic Runner. If a tool may already have run, verify and reconcile its outcome before continuing. A new Model response must use fresh function call IDs. Reusing a stored ID stops the run before any tool in that response executes.
-
-If you cancel during an append, SDKRunner waits for the write to settle. It then raises cancellation. A store may commit a write before reporting an error. SDKRunner makes one append attempt. After a write error or cancellation, check the store and any tool effects before retrying.
-
-## Approve a static tool call
-
-Set `needs_approval=True` on a supported Classic function tool and pass an async `on_approval` callback. In this fragment, `agent_with_approval_tool` declares that tool and an explicit Model; `app_policy.permits` is your application's async policy check. The callback receives the Classic tool context for the exact call. That context includes the original arguments and the input supplied to the Model. Return `Allow()` to dispatch the tool or `Deny(reason)` to record a tool failure the Model can read.
-
-```python
-from agents import Allow, Deny
-from agents.migration import SDKRunner
-
-
-async def approve(call_context):
-    if await app_policy.permits(call_context):
-        return Allow()
-    return Deny("The application denied this call.")
-
-
-result = await SDKRunner.run(agent_with_approval_tool, "Greet Ada.", on_approval=approve)
-```
-
-The run waits for the callback and keeps the Model selected at the start of that invocation. Portable capture happens after the turn completes. Cancellation invalidates approval for that turn, so a late allow cannot start the tool.
-
-## Read the result and handle failures
-
-`SDKRunner.run()` returns an `SDKRunResult` after the owned native Session closes. Both `SDKRunResult` and `SDKRunHandle` are available from `agents.migration`.
-
-| Field | Value |
-| --- | --- |
-| `final_output` | Final answer as text |
-| `last_agent` | The original Classic Agent |
-| `input` | The SDK input for this invocation |
-| `context_wrapper` | The Classic `RunContextWrapper`. Its `.context` holds your typed application context or `None`. Its `.usage` holds cumulative Classic `Usage` for this run. |
-| `new_items` | Classic `RunItem` values from this invocation, in observed order |
-| `raw_responses` | Detached Classic `ModelResponse` snapshots from the selected Model |
-| `last_response_id` | The last Model response's ID, or `None` if that response has no ID |
-| `interruptions` | An empty list after a successful run, including a run that handled live approval |
-| `native_result` | The completed native result, with `turn.session_id`, `turn.turn_id`, and any requested portable `state` |
-
-`result.to_input_list()` exports a detached list of Responses input items. The list starts with this invocation's SDK input and includes its new items in order. Both `mode="preserve_all"` and `mode="normalized"` return the same items. Model items keep their original IDs when supplied. Confirmed tool outputs keep the original call ID and exact text, including empty strings.
-
-Generated native receipt IDs and history from earlier native turns stay with the native Session. Use the persistence options above to reopen that conversation. Use `agents.classic.Runner` for Classic `RunState`, cold approval, or provider continuation IDs.
-
-### Consume buffered events
-
-Call `SDKRunner.start()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval`, `session`, and the native persistence options.
-
-```python
-from agents.migration import SDKRunner
-
-stream = SDKRunner.start(agent, "Greet Ada.", context=app_context)
-async for event in stream.replay_events():
-    if event.type == "run_item_stream_event":
-        print(event.name)
-
-result = await stream.get_result()
-print(result.final_output)
-```
-
-The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `replay_events()` on a settled `SDKRunResult`. To observe live raw Model events and token deltas, use the explicit stream invocation and observer described below.
-
-The iterator yields no events while `on_approval` waits for a decision. If the Model completes the turn after a denial, the iterator includes the recorded denial as a `tool_output` event.
-
-If the run fails or is cancelled, `replay_events()` raises before yielding any events. `get_result()` also raises. Call `stream.cancel()` and await `stream.get_result()` to join cleanup. Cancelling a task waiting for either method also cancels the run and joins cleanup.
-
-### Select streaming on your Model
-
-Pass `model_invocation="stream"` to `SDKRunner.run()` or `SDKRunner.start()`. The adapter calls the selected Model's `stream_response` method. It does not switch providers or fall back to `get_response` if streaming fails. The default remains `model_invocation="response"`, including for `start()`.
-
-An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive, including failure events. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `replay_events()`.
-
-The first successful `response.completed` event ends consumption. Its response can omit `status` or set it to `completed`; explicit failure states or error details are rejected. The adapter also rejects a stream that ends without a completed response. It awaits the iterator's `aclose`, when available, before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. The adapter does not read trailing events or wait for transport EOF.
-
-Cancellation joins iterator cleanup, including response transport closure for the built-in `OpenAIResponsesModel`. A custom Model must await its cleanup before its iterator closes. Put resource cleanup in `finally` or `aclose`; ordinary code after the terminal yield may not run. A Model that suppresses cancellation or whose cleanup does not finish can delay the run's cancellation. The application still owns the Model and provider.
-
-The [application Model example](examples/codex/migration_models.py) uses a named ModelProvider, a per-run model selection, and a real native tool loop without external model requests:
-
-```sh
-python examples/codex/migration_models.py
-python examples/codex/migration_models.py --stream
-```
-
-This integration differs from `NativeProvider(base_url=...)`. A NativeProvider configures the endpoint and credentials used by the native transport. `SDKRunner` instead calls your application Model object, which owns its provider interaction. Neither route replaces native execution permissions or tool approval policies. Python SDKRunner still rejects handoffs and agents used as tools; use Classic Runner for those workflows. JavaScript SDKRunner has its own documented child and handoff subset. Each adapter retains its language's Classic precedence: Python run model/settings override the Agent, while JavaScript run model/settings supply defaults that explicit Agent values override.
-
-### Handle failures and cancellation
-
-`max_turns` limits model requests, not individual tool calls or wall-clock time. Native request and stream retries are disabled for the adapter. The selected Model's underlying client can still apply its own transport retry policy. The adapter does not add another retry loop.
-
-Classic Runner traces are not preserved. The adapter calls the selected Model with `ModelTracing.DISABLED`.
-
-To cancel, cancel the task awaiting `SDKRunner.run` and await that task's completion. The runner closes its response endpoint and native Session. During cancellation or failure, it waits for every started tool invocation to finish, including asynchronous tools. Runner cancellation does not cancel those tool invocations. A tool that never finishes can prevent cleanup from completing. A Model that suppresses cancellation can also delay cleanup.
-
-If native cleanup fails, import `get_cleanup` from `agents` and retain `cleanup = get_cleanup(error)` in your error handler. If `cleanup is not None`, await `cleanup.aclose()` and retain that owner if the retry fails. The helper finds the existing Session or NativeProvider through the error and its exception context. After admission, the Session also closes the migration-owned native provider; do not close that provider separately. The adapter still leaves your application Model and its provider open. `agents.migration.get_cleanup` re-exports the same helper.
-
-Use `get_cleanup(error)` instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
-
-Your application remains responsible for background work that its callbacks start independently. Cancellation and failure do not undo tool effects. Reconcile those effects before restarting a failed workflow.
-
-## Move a workflow fully to the native API
-
-For live native semantic events, manual tool requests, or child execution, port that workflow's declarations to `agents.Agent` and native tools. Follow the [native quickstart](docs/sdk/index.md), [tool guide](docs/sdk/tools.md), and [session guide](docs/sdk/sessions.md) from your installed SDK version.
-
-Test model inputs, tool effects, output handling, and failure behavior at each migration step. You can keep some workflows on Classic while others use `SDKRunner` or native declarations. Choose the runner explicitly for each workflow; the adapter never falls back to Classic after starting native execution.
-
-## Reuse a Classic MCP client with native declarations
-
-`agents.migration.mcp` provides a separate integration for an application-owned Classic MCP client. It does not enable MCP on SDKRunner. For native-owned connections, use the [native MCP guide](docs/sdk/mcp.md).
+`agents.migration.mcp` provides a separate integration for an application-owned Classic MCP client. For native-owned connections, use the [native MCP guide](docs/sdk/mcp.md).
 
 Create an `MCPNamespace` with a namespace name and your application-owned Classic `MCPServer`. Open the client connection before discovery, either directly or through the namespace's `authenticate` callback. Call `await select_mcp_tools(namespace, context=app_context, tool_names=["search"])` to select a tool named `search` before opening a native Session. Attach the returned tools to a native Agent, and pass the exact same `app_context` object to the Session or run. An equal but different context object is rejected. Omit `tool_names` to select all tools allowed by the client's filter; an empty list selects none. A missing or filtered-out requested name fails selection.
 
@@ -313,3 +153,28 @@ The optional namespace `authenticate` callback runs before discovery. Selection 
 Selected names use ASCII letters, digits, underscores, or hyphens. Each namespace and tool name together, including the two separator bytes, must fit within 128 bytes. Tool input schemas must describe JSON objects. The optional per-call `approval` callback receives a native `ToolContext` and returns `Allow()` or `Deny(reason)`, either directly or through an awaitable. Classic approval requirements, metadata or result hooks, custom error policies, and tool guardrails are unsupported for selected tools; keep those workflows on Classic Runner.
 
 To restore an idle native checkpoint, select tools again from the current clients with the destination application's context. Match the saved namespace, tool names, and schemas. A Session whose catalog contains selected MCP tools cannot suspend for portable manual restore; answer manual requests in the live Session. Discovery and selection do not transfer credentials or persist client connections.
+
+## Migrate with a coding agent
+
+A frontier coding agent can confidently carry out the code migration with this guide, your application source, and its tests. Give it the target SDK's matching source or documentation so it can verify APIs rather than infer replacements from v0 names. Ask it to make the direct native port and demonstrate the required behavior.
+
+Use this brief, replacing the bracketed details:
+
+```text
+Migrate [workflows] from [current SDK version] directly to the native API
+in [target SDK version or source commit]. Follow its MIGRATION.md.
+Inspect the application and establish its existing tests/evaluation baseline.
+Port declarations, function tools, application context, provider settings,
+execution, streaming, approvals/guardrails, tracing, and state ownership together.
+Preserve the required application outcomes and effect-prevention policies.
+Reuse business logic and independently useful MCP/sandbox/voice integrations.
+Do not use SDKRunner, silently switch engines, or convert old RunState/checkpoints.
+Keep existing conversations on their original engine and start new native ones.
+Use classic only for an identified blocker that makes staging necessary;
+explain that blocker and the work needed to remove it.
+Run focused tests for tool effects, output validation, denied actions, streaming,
+cancellation/cleanup, provider configuration, and conversation recovery as relevant.
+Report changes, validation results, remaining gaps, and deployment/state cutover steps.
+```
+
+Review the resulting diff and test evidence before deployment. Compare application outcomes and policy enforcement, rather than requiring identical model text or internal tool ordering. Start new native traffic only after those checks pass, and keep the prior deployment available for conversations that still need it.

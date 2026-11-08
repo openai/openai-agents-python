@@ -102,7 +102,6 @@ from ._retry_runtime import (
     should_disable_provider_managed_retries,
     should_disable_websocket_pre_event_retries,
 )
-from ._run_context import should_join_model_stream_cleanup
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 from .openai_client_utils import is_official_openai_base_url, is_official_openai_client
@@ -511,23 +510,6 @@ def _should_retry_pre_event_websocket_disconnect() -> bool:
     return not should_disable_websocket_pre_event_retries()
 
 
-def _retain_stream_cleanup_error(primary: BaseException, cleanup_error: BaseException) -> None:
-    """Attach cleanup diagnostics without a context back-edge to the primary error."""
-    if cleanup_error is primary:
-        return
-    tail = cleanup_error
-    seen = {id(primary), id(tail)}
-    while tail.__context__ is not None and id(tail.__context__) not in seen:
-        tail = tail.__context__
-        seen.add(id(tail))
-    tail.__context__ = primary.__context__
-    primary.__context__ = cleanup_error
-    if primary.__cause__ is None:
-        # Unwinding a pending read error through finally can replace implicit
-        # context. Preserve cleanup diagnostics without replacing an existing cause.
-        primary.__cause__ = cleanup_error
-
-
 class OpenAIResponsesModel(Model):
     """
     Implementation of `Model` that uses the OpenAI Responses API.
@@ -574,7 +556,7 @@ class OpenAIResponsesModel(Model):
         )
 
     async def _close_stream_allowing_background_completion(self, iterator: Any) -> None:
-        """Close the provider stream, joining an in-flight close when opted in.
+        """Close the provider stream, letting an in-flight close finish in the background.
 
         Cancellation can arrive while `aclose()` is already awaiting the provider. Shielding the
         close and detaching that exact task keeps it running instead of abandoning it half-done,
@@ -584,16 +566,8 @@ class OpenAIResponsesModel(Model):
         close_task = asyncio.ensure_future(self._maybe_aclose_async_iterator(iterator))
         try:
             await asyncio.shield(close_task)
-        except asyncio.CancelledError as error:
-            if should_join_model_stream_cleanup():
-                try:
-                    # Close has already started: join its exact task rather than
-                    # restarting it or cancelling the provider's cleanup.
-                    await asyncio.shield(close_task)
-                except BaseException as cleanup_error:
-                    _retain_stream_cleanup_error(error, cleanup_error)
-            else:
-                self._detach_stream_close(close_task)
+        except asyncio.CancelledError:
+            self._detach_stream_close(close_task)
             raise
 
     def _detach_stream_close(self, close_task: asyncio.Future[None]) -> None:
@@ -809,22 +783,16 @@ class OpenAIResponsesModel(Model):
                             # Close explicitly rather than advancing a failed stream: transport
                             # teardown during iteration must not replace the provider's error.
                             break
-                except asyncio.CancelledError as error:
+                except asyncio.CancelledError:
                     close_stream_started = True
-                    if should_join_model_stream_cleanup():
-                        try:
-                            await self._maybe_aclose_async_iterator(stream)
-                        except BaseException as cleanup_error:
-                            _retain_stream_cleanup_error(error, cleanup_error)
-                    else:
-                        self._schedule_async_iterator_close(stream)
+                    self._schedule_async_iterator_close(stream)
                     raise
                 finally:
                     if not close_stream_started:
                         try:
                             await self._close_stream_allowing_background_completion(stream)
                         except Exception as exc:
-                            if yielded_terminal_event and not should_join_model_stream_cleanup():
+                            if yielded_terminal_event:
                                 log_model_action_debug(
                                     logger,
                                     "Ignoring stream cleanup error after terminal event",

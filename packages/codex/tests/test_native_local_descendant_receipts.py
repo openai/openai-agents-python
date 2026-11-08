@@ -294,64 +294,6 @@ def canonical_completed_activity(
     ]
 
 
-async def test_sdk_runner_reopens_local_root_with_completed_child_history(tmp_path, monkeypatch):
-    from agents.classic import Agent as ClassicAgent
-    from agents.migration import SDKRunner
-    from tests.test_migration_runner import ScriptedModel, message
-
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    monkeypatch.setenv("no_proxy", "127.0.0.1")
-    peer = LocalFamilyPeer(depth=1)
-    app = web.Application()
-    app.router.add_post("/v1/responses", peer.handle)
-    app.router.add_get("/v1/responses", peer.websocket)
-    app.on_shutdown.append(peer.close_sockets)
-    async with (
-        timeout(55),
-        TestServer(app, shutdown_timeout=1) as server,
-        ExecutorPeer(tmp_path / "remote").serve() as executor,
-    ):
-        peer.url = str(server.make_url("/v1"))
-        code, rows, err = await _collect(
-            # SDKRunner resumes without an Environment; retain a legacy source policy.
-            await start(
-                peer, executor, tmp_path, "known", 1, model="gpt-5.5", write_policy="legacy"
-            )
-        )
-        assert code == 0, (rows, err)
-        session_id = rows[0]["opened"]
-        child_id = next(
-            item["subagent_id"]
-            for item in rows[1]["root_items"]
-            if item["type"] == "create_subagent_call"
-        )
-        storage = LocalStorage(tmp_path / "profile")
-        connection = peer.provider(websocket=False)
-        reader = Agent(instructions="Record a memory.", model="gpt-5.5", provider=connection)
-        async with connection:
-            async with reader.session(storage=storage, resume=session_id) as session:
-                child_before = [item async for item in session.items(subagent_id=child_id)]
-            assert any(
-                item["type"] == "function_call_output" and item["call_id"] == "source-effect"
-                for item in child_before
-            )
-            request_count = len(peer.requests)
-            model = ScriptedModel([message("root continued")])
-            result = await SDKRunner.run(
-                ClassicAgent("Current root", model=model),
-                "Continue the root.",
-                storage=storage,
-                resume=session_id,
-            )
-            assert result.final_output == "root continued"
-            assert result.native_result.turn.session_id == session_id
-            async with reader.session(storage=storage, resume=session_id) as session:
-                assert [item async for item in session.items(subagent_id=child_id)] == child_before
-            assert len(peer.requests) == request_count
-            assert len(model.requests) == 1
-            assert (tmp_path / "effects").read_text() == "source:/root/alpha\n"
-
-
 @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
 @pytest.mark.parametrize("known", [False, True], ids=["unknown", "receipted"])
 @pytest.mark.parametrize(

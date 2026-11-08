@@ -6,9 +6,9 @@ Your application runs the agent and owns its workers, storage, and credentials. 
 
 ## Existing v0 applications
 
-The source on this branch also provides `agents.classic` for existing v0 workflows. It retains the Python runner while the root `agents` API uses Codex. This addition is not included in the preview release linked below. See [classic migration](CLASSIC.md) for source installation, import changes, dependency extras, and compatibility limits.
+You can stay on v0. When you choose to upgrade, we recommend [migrating directly to native v1](MIGRATION.md), including your tools, execution, and state handling. The guide includes an API mapping, validation steps, and a brief for a frontier coding agent to carry out the port.
 
-To move a supported Classic Agent to native execution, use the experimental [SDKRunner migration adapter](MIGRATION.md). It reuses your Classic Model and function tools within an explicit, limited contract. It also requires this source; the preview release below does not contain it.
+If a workflow cannot make that move yet but needs the new package, this branch provides `agents.classic` as an optional staging path. It retains the Python runner while the root `agents` API uses Codex. Classic is not included in the preview release linked below. See [classic setup](CLASSIC.md) for imports, dependencies, and compatibility limits.
 
 ## Install
 

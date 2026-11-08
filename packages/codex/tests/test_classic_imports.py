@@ -39,16 +39,16 @@ def test_native_imports_do_not_load_migration() -> None:
     )
 
 
-def test_migration_missing_extra_has_actionable_error() -> None:
-    result = run_isolated(
-        "try:\n import agents.migration\n"
-        "except ModuleNotFoundError as exc:\n"
-        " assert \"python -m pip install '.[classic]'\" in str(exc)\n"
-        " assert 'matching source checkout' in str(exc)\n"
-        "else:\n raise AssertionError('migration imported without Classic dependencies')",
+def test_migration_namespace_is_inert_and_runner_api_is_absent() -> None:
+    run_isolated(
+        "import agents.migration, importlib.util, sys; "
+        "assert not any(x.startswith('agents.classic') for x in sys.modules); "
+        "assert importlib.util.find_spec('agents.migration.mcp') is not None; "
+        "assert not any(hasattr(agents.migration, name) "
+        "for name in ('SDKRunner', 'SDKRunResult', 'SDKRunHandle', 'get_cleanup')); "
+        "assert importlib.util.find_spec('agents.migration._runner') is None",
         no_site=True,
     )
-    assert result.returncode == 0
 
 
 def test_missing_extra_has_actionable_error() -> None:
