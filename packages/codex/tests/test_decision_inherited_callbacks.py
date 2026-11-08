@@ -14,15 +14,22 @@ from agents import (
     NativeProvider,
     RunBudget,
     StopTurn,
+    TurnStoppedError,
 )
 from agents.usage import TokenUsage
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
-from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
+from tests.native_fixtures import (
+    ResponsesFixture,
+    assistant_output,
+    function_call,
+    responses as responses,
+)
 from tests.test_deferred_jobs import Journal, Provider as JobProvider, declared, done
 from tests.test_deferred_opening_outcome import pending
 from tests.test_native_child_agents import collaboration, trust
 from tests.test_native_executor_tools import declaration
+from tests.test_native_manual_tools import next_request
 from tests.test_native_run_budget import require_follow_up
 
 
@@ -229,7 +236,7 @@ async def test_before_step_explicit_stop_preserves_policy_outcome_without_cost_e
 
     async def stop(turn, *, step_index):
         assert await turn.decide("Stop?", input="Synthetic evidence") is True
-        return StopTurn()
+        return StopTurn("The decision requires stopping.")
 
     agent = Agent(
         model="gpt-5.5",
@@ -245,7 +252,7 @@ async def test_before_step_explicit_stop_preserves_policy_outcome_without_cost_e
             before_step=stop,
             budget=RunBudget(max_estimated_cost_micros=10, estimate_cost_micros=estimate),
         )
-        with pytest.raises(NativeError, match="Turn stopped by policy"):
+        with pytest.raises(TurnStoppedError, match="^Turn stopped by policy$"):
             await turn.get_result()
     assert estimates == []
     assert len(decisions.requests) == 1
@@ -257,13 +264,17 @@ async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_o
     responses: ResponsesFixture, explicit_restore_override
 ):
     original, captured, override = Provider(), Provider(), Provider()
-    jobs, tool = declared(Journal(), JobProvider([done()]))
+    jobs, tool = declared(Journal(), JobProvider([done(), done()]))
+    restores = 0
 
     class RestoringAgent(Agent):
         @asynccontextmanager
         async def session(self, **kwargs):
-            if kwargs.get("state") is not None and explicit_restore_override:
-                kwargs["decisions"] = override
+            nonlocal restores
+            if kwargs.get("state") is not None:
+                restores += 1
+                if explicit_restore_override and restores == 1:
+                    kwargs["decisions"] = override
             async with super().session(**kwargs) as session:
                 yield session
 
@@ -283,8 +294,15 @@ async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_o
     async with timeout(20), agent.session(decisions=captured) as live:
         request = await pending(live, tool, responses)
         responses.respond(assistant_output("restored complete"))
-        async with jobs.start(live, request) as (_, turn):
+        async with jobs.start(live, request) as (restored, turn):
             assert (await turn.get_result()).final_output == "restored complete"
+            responses.respond(function_call(tool.name, {"pages": 3}, "second-job"))
+            await restored.submit("Render another report.")
+            second_request = await next_request(restored.interactions(), tool)
+            responses.respond(assistant_output("second restored complete"))
+            async with jobs.start(restored, second_request) as (_, second_turn):
+                assert (await second_turn.get_result()).final_output == "second restored complete"
+    assert restores == 2
     assert original.requests == []
-    assert len(captured.requests) == (0 if explicit_restore_override else 1)
-    assert len(override.requests) == (1 if explicit_restore_override else 0)
+    assert len(captured.requests) == (0 if explicit_restore_override else 2)
+    assert len(override.requests) == (2 if explicit_restore_override else 0)

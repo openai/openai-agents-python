@@ -697,3 +697,72 @@ async def test_completed_provider_error_joins_recording_when_caller_is_cancelled
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("envelope", [None, [], "malformed"])
+async def test_real_openai_client_rejects_nonobject_completed_envelopes(
+    compiler, fallback, envelope
+):
+    import httpx2
+    import openai
+
+    compiler["supported"] = not fallback
+    requests = []
+
+    async def respond(request):
+        requests.append(request)
+        return httpx2.Response(
+            200,
+            headers={"content-type": "application/json", "x-request-id": "req_malformed"},
+            content=json.dumps(envelope).encode(),
+        )
+
+    async with openai.AsyncOpenAI(
+        api_key="synthetic-decision-key",
+        base_url="https://example.invalid/v1",
+        max_retries=0,
+        http_client=openai.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond)),
+    ) as client:
+        async with OpenAIDecisions(
+            client=client, fallback_model="generative-fallback" if fallback else None
+        ) as provider:
+            with pytest.raises(DecisionError) as caught:
+                await provider.get_decision(
+                    DecisionRequest(
+                        question="Allowed?", input="evidence", output_schema={"type": "boolean"}
+                    )
+                )
+        assert not client.is_closed()
+    assert caught.value.reason == "invalid_response"
+    assert caught.value.usage is None and caught.value.model is None
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    assert len(requests) == 1
+    assert requests[0].url.path == ("/v1/responses" if fallback else "/v1/decisions")
+
+
+async def test_real_openai_client_preserves_normal_http_failures(compiler):
+    import httpx2
+    import openai
+
+    async def respond(request):
+        return httpx2.Response(
+            429,
+            headers={"x-request-id": "req_limited"},
+            json={"error": {"message": "Synthetic rate limit"}},
+        )
+
+    async with openai.AsyncOpenAI(
+        api_key="synthetic-decision-key",
+        base_url="https://example.invalid/v1",
+        max_retries=0,
+        http_client=openai.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond)),
+    ) as client:
+        async with OpenAIDecisions(client=client) as provider:
+            with pytest.raises(openai.RateLimitError) as caught:
+                await provider.get_decision(
+                    DecisionRequest(
+                        question="Allowed?", input="evidence", output_schema={"type": "boolean"}
+                    )
+                )
+    assert caught.value.request_id == "req_limited" and caught.value.status_code == 429

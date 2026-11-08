@@ -985,10 +985,10 @@ index 4a70340b3d252bcd2ebfcef897013e5dc62a0f45..7f6e6728dc3ee55fc96d794d90317631
  pub use codex_network_proxy::NetworkDomainPermission;
  pub use codex_network_proxy::NetworkDomainPermissionEntry;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..55364b892894a1dedf0a7339800a3ec9277349fd 100644
+index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..1c3d3fb4ef0b4c86266af1edcd130eb920d03989 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -4841,6 +4841,68 @@ impl Session {
+@@ -4841,6 +4841,70 @@ impl Session {
              .await;
      }
  
@@ -1007,14 +1007,6 @@ index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..55364b892894a1dedf0a7339800a3ec9
 +            .record_response_observation(turn_context, observation)
 +            .await;
 +        // A retention error must not discard already known completed spending.
-+        self.record_observed_response_completed(
-+            turn_context,
-+            completion_id,
-+            observation_result.as_ref().ok().cloned().flatten(),
-+            usage.as_ref(),
-+            usage_metadata.as_ref(),
-+        )
-+        .await;
 +        let mut budget_result = Ok(());
 +        if let Some(usage) = usage.as_ref() {
 +            let info = {
@@ -1050,6 +1042,16 @@ index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..55364b892894a1dedf0a7339800a3ec9
 +            }
 +        }
 +        self.send_token_count_event(turn_context).await;
++        // Publish the completion marker only after its usage snapshot. The host
++        // joins native commit and consumes this marker before releasing the callback.
++        self.record_observed_response_completed(
++            turn_context,
++            completion_id,
++            observation_result.as_ref().ok().cloned().flatten(),
++            usage.as_ref(),
++            usage_metadata.as_ref(),
++        )
++        .await;
 +        observation_result?;
 +        budget_result
 +    }
@@ -1058,10 +1060,10 @@ index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..55364b892894a1dedf0a7339800a3ec9
          &self,
          turn_context: &TurnContext,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 825d4970153f5a39f55c169bf571c989781b089f..11496de01bf87168042cf943d3de870116b2084d 100644
+index 825d4970153f5a39f55c169bf571c989781b089f..229caa87eeeb465bebf66e1cacaedb3e3fac4d9d 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13871,3 +13871,91 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
+@@ -13871,3 +13871,98 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
      .await
      .expect("bounded real publication cancellation must settle");
  }
@@ -1130,16 +1132,23 @@ index 825d4970153f5a39f55c169bf571c989781b089f..11496de01bf87168042cf943d3de8701
 +            info.total_token_usage.total_tokens,
 +            if expected_usage.is_some() { 106 } else { 99 }
 +        );
-+        let mut completions = 0;
++        let mut event_order = Vec::new();
 +        while let Ok(event) = rx.try_recv() {
 +            assert_eq!(event.id, turn.sub_id);
-+            if let EventMsg::RawResponseCompleted(event) = event.msg {
-+                completions += 1;
-+                assert_eq!(event.response_id, "local-auxiliary-completion");
-+                assert_eq!(event.token_usage, expected_usage);
++            match event.msg {
++                EventMsg::TokenCount(event) => {
++                    event_order.push("token_count");
++                    assert_eq!(event.info.as_ref(), Some(&info));
++                }
++                EventMsg::RawResponseCompleted(event) => {
++                    event_order.push("raw_response_completed");
++                    assert_eq!(event.response_id, "local-auxiliary-completion");
++                    assert_eq!(event.token_usage, expected_usage);
++                }
++                _ => {}
 +            }
 +        }
-+        assert_eq!(completions, 1);
++        assert_eq!(event_order, ["token_count", "raw_response_completed"]);
 +        let record = session.state.lock().await.latest_token_usage_record.clone();
 +        if let Some(usage) = expected_usage {
 +            let record = record.expect("completed usage receipt");

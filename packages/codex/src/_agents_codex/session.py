@@ -1879,6 +1879,7 @@ class Session(Generic[ContextT, OutputT]):
         ):
             agent = selected.declaration
             decisions_provider = _capture_decisions(agent.decisions, decisions)
+            agent = replace(agent, decisions=decisions_provider)
             if function_concurrency_omitted:
                 max_function_concurrency = selected.max_function_concurrency
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):

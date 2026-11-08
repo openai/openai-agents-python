@@ -454,9 +454,12 @@ class OpenAIDecisions:
             body = {"model": "gpt-6-luna", "input": request.input, "questions": questions}
             path = "/decisions"
         raw = await self._client.post(path, cast_to=OpenAIObject, body=body)
-        data = raw.model_dump()
-        usage = _usage(data.get("usage"))
         request_id = getattr(raw, "_request_id", None)
+        dump = getattr(raw, "model_dump", None)
+        data = dump() if callable(dump) else None
+        if not isinstance(data, dict):
+            raise DecisionError("invalid_response", request_id=request_id)
+        usage = _usage(data.get("usage"))
         reported_model = data.get("model")
         model = reported_model if isinstance(reported_model, str) else None
         failure: Literal["refusal", "invalid_response"] | None = None
