@@ -44,7 +44,7 @@ Local commands can read the workspace, any additional `writable_roots`, and the 
 
 ### Add read-only directories on Linux
 
-Development builds newer than alpha.6 support `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path, destination=path, strategy="local_bind")`. Both paths must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
+Development builds newer than alpha.6 support `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path)`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` defaults to `True`; writable mounts are unsupported. Source and destination must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
 
 Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlapping mounts, overlaps with `cwd`, write roots, or SDK storage, and files hard-linked to writable directories. Keep the mount paths stable while the Session runs. Active mounts prohibit per-turn `writable_roots` replacement, including an empty list. Restore requires the same applied executor policy, including the mounted directories. Mounts do not copy files into a checkpoint or limit the application's Python callbacks.
 
