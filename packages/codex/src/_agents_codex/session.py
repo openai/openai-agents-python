@@ -8489,11 +8489,20 @@ class Session(Generic[ContextT, OutputT]):
 
                 timer = loop.call_at(cutoff, expire_body)
 
-                async def invoke_body() -> Any:
+                value = None
+                body_error: BaseException | None = None
+
+                async def invoke_body() -> None:
+                    nonlocal value, body_error
                     try:
                         if admit_body():
-                            return await _call_callback(entry.callback, admit_body, *args, **kwargs)
-                        return None
+                            value = await _call_callback(
+                                entry.callback, admit_body, *args, **kwargs
+                            )
+                    except BaseException as error:
+                        # Transport every exit to the owner without letting
+                        # process-control exceptions escape this child task.
+                        body_error = error
                     finally:
                         timer.cancel()
                         # Settle at body exit, before unrelated ready work can
@@ -8511,16 +8520,30 @@ class Session(Generic[ContextT, OutputT]):
                         cancel_once(body)
 
                         async def join_body() -> None:
-                            await _join(body)
+                            try:
+                                await _join(body)
+                            finally:
+                                if body_error is not None and not isinstance(
+                                    body_error, asyncio.CancelledError
+                                ):
+                                    state.retain_cleanup_error(body_error)
 
                         await _close_after_error(error, join_body)
                         raise
                 finally:
                     timer.cancel()
-                body_error = None if body.cancelled() else body.exception()
                 if not self._admit_tool(state, request):
+                    if body_error is not None and not isinstance(
+                        body_error, asyncio.CancelledError
+                    ):
+                        state.retain_cleanup_error(body_error)
                     return
+                if isinstance(body_error, (SystemExit, KeyboardInterrupt)):
+                    raise body_error
                 if expired:
+                    # Discard late output before a formatter can fail. The child
+                    # task itself never owns a return value.
+                    value = None
                     if body_error is not None:
                         timeout_error.__cause__ = body_error
                     # No late value is validated or serialized. Format only
@@ -8540,8 +8563,8 @@ class Session(Generic[ContextT, OutputT]):
                     timeout_output = ToolOutput.error(text)
                     timeout_output._validate()
                     value = None
-                else:
-                    value = body.result()
+                elif body_error is not None:
+                    raise body_error
             else:
                 loop = asyncio.get_running_loop()
                 cutoff = loop.time() + duration

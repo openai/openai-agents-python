@@ -1,10 +1,15 @@
 """Timeout policies retain invocation ownership and publish only admitted results."""
 
 import asyncio
+import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, get_args
 
 import pytest
@@ -667,3 +672,60 @@ async def test_result_policy_initializes_deadline_before_eager_body(responses):
         assert tool_output(responses.requests[1], "eager-body") == "on-time"
     finally:
         loop.set_task_factory(original_factory)
+
+
+@pytest.mark.parametrize("error_name", ["SystemExit", "KeyboardInterrupt"])
+@pytest.mark.parametrize("stage", ["body", "timeout-cleanup"])
+def test_result_policy_transports_process_control_errors_to_turn(error_name, stage):
+    # Keep a regression in asyncio's process-control handling inside a subprocess.
+    script = textwrap.dedent("""        import asyncio
+        import sys
+        sys.path.insert(0, sys.argv[2])
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+        from agents import Agent, function_tool
+        from tests.native_fixtures import ResponsesFixture, function_call
+        from tests.test_native_agent import provider
+
+        async def main():
+            error_type = {"SystemExit": SystemExit, "KeyboardInterrupt": KeyboardInterrupt}
+            error = error_type[sys.argv[1]]()
+            @function_tool(callback_timeout=0.01, timeout_behavior="error_as_result")
+            async def lookup() -> str:
+                if sys.argv[3] == "timeout-cleanup":
+                    try:
+                        await asyncio.Future()
+                    finally:
+                        raise error
+                raise error
+
+            responses = ResponsesFixture()
+            responses.respond(function_call("lookup", {}, "process-control"))
+            app = web.Application()
+            app.router.add_post("/v1/responses", responses.handle)
+            async with TestServer(app) as server:
+                responses.url = str(server.make_url("/v1"))
+                survivor = asyncio.create_task(asyncio.sleep(0.05, result="alive"))
+                async with Agent(
+                    instructions="Use lookup.", tools=[lookup], provider=provider(responses)
+                ).session() as session:
+                    turn = await session.submit("read")
+                    # Observe the owning turn without the separate result-waiter
+                    # task, which has its own process-control exception boundary.
+                    await asyncio.wait((turn._completion,))
+                    assert turn._completion.exception() is error
+                assert await survivor == "alive"
+                assert len(responses.requests) == 1
+            print("parent retained process-control error")
+
+        asyncio.run(main())
+    """)
+    completed = subprocess.run(
+        [sys.executable, "-c", script, error_name, str(Path(__file__).resolve().parents[1]), stage],
+        env={key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "parent retained process-control error" in completed.stdout

@@ -1442,17 +1442,18 @@ async def test_ordinary_reused_call_id_fails_exact_handle_and_releases_turn(
         assert len(responses.requests) == 3
 
 
+@pytest.mark.parametrize("policy", ["raise_exception", "error_as_result"])
 @pytest.mark.parametrize("operation", ["cancel", "aclose", "body"])
 @pytest.mark.usefixtures("core_owner")
 async def test_callback_cleanup_errors_survive_stopping(
-    responses: ResponsesFixture, operation: str
+    responses: ResponsesFixture, operation: str, policy: str
 ) -> None:
     entered = asyncio.Event()
     cleaned = asyncio.Event()
     cleanup_error = OSError("tool cleanup failed")
     body_error = ValueError("application body failed")
 
-    @function_tool
+    @function_tool(callback_timeout=30, timeout_behavior=policy)
     async def pending() -> str:
         entered.set()
         try:
