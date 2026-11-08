@@ -36,9 +36,24 @@ API-key connections use these defaults.
 
 - `base_url=None` sends model requests to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL`. To use it, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]`.
 - An omitted key reads `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration, outside saved conversation state.
-- `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
+- `response_mode="streaming"` delivers model progress as it arrives.
+- In streaming mode, `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Buffer model responses
+
+Use `NativeProvider(response_mode="buffered")` when the endpoint supports nonstreaming Responses and your application can wait for each complete model response. The SDK requests JSON over HTTP and delivers that response's output events after reading its full body. Tool calls start after that model response completes. Tool events remain available while tools execute, and subsequent model requests follow the normal tool loop.
+
+Each buffered HTTP response body is limited to 64 MiB and one million structural characters (`{}[],:`) outside strings. Exceeding either limit fails without retry. Use streaming mode for larger responses.
+
+Set the agent's `model` explicitly to a model that uses standard Responses. The current default model uses Responses Lite and cannot use buffered mode.
+
+If the provider reports failure or an incomplete response that cannot continue, such as a token-limit error, that response's output is not delivered. An undecodable response body also yields no partial output. Any validated response metadata remains in the turn record.
+
+Buffering avoids processing individual streaming fragments. The option applies to every model request in sessions opened with that provider, including restored sessions. Saved state does not choose the mode; the current provider does. Repeat the [endpoint checks](providers.md) with `response_mode="buffered"` for the features your application uses.
+
+Buffered mode requires API-key authentication. It does not support `CodexLogin`, Responses Lite, or native child agents declared with `NativeAgents`. An explicit `supports_websockets=True` conflicts with buffered mode. Unsupported combinations fail before model dispatch; the SDK does not retry the request as a stream.
 
 ### Reuse a Codex login (experimental)
 
