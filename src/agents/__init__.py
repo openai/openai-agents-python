@@ -36,10 +36,10 @@ if TYPE_CHECKING:
         NetworkPolicy as NetworkPolicy,
     )
     from .input import (
-        ImageDetail as ImageDetail,
-        InputFile as InputFile,
         AssistantMessage as AssistantMessage,
+        ImageDetail as ImageDetail,
         InitialMessage as InitialMessage,
+        InputFile as InputFile,
         InputImage as InputImage,
         InputImageFile as InputImageFile,
         InputText as InputText,

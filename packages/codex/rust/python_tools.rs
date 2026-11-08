@@ -495,11 +495,14 @@ enum Phase {
 
 #[derive(Clone)]
 pub(crate) struct NativeMediaContext {
+    pub(crate) inline_data_url_low_detail_supported: bool,
     pub(crate) model_info: Arc<codex_protocol::openai_models::ModelInfo>,
     pub(crate) profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy,
 }
 
 struct PendingCall {
+    // Captured at enqueue; never borrow a successor turn during admission.
+    deadline: Option<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
     media: Option<NativeMediaContext>,
     _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     invocation: u64,
@@ -1813,6 +1816,7 @@ impl PythonTools {
             matches!(
                 part,
                 codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputFile { .. }
+                    | codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputImage { .. }
             )
         }) {
             return Ok(None);
@@ -1828,11 +1832,52 @@ impl PythonTools {
             Some(request) => Ok(Some(
                 request["msg"]["_sdk_model"]
                     .as_str()
-                    .context("restored file reply lacks its admitted original model")?
+                    .context("restored media reply lacks its admitted original model")?
                     .to_owned(),
             )),
             // Fresh SDK approval reentry uses the current native thread configuration.
             None => Ok(None),
+        }
+    }
+
+    // Private callback admission only. Checkpoint/mutation/manual entry checks stay strict.
+    pub(crate) fn admit_callback(
+        &self,
+        owner: &str,
+        key: &PendingKey,
+        invocation: u64,
+        entering: bool,
+    ) -> Result<bool> {
+        ensure!(
+            key.reply.thread == owner
+                && key.reply.instance == self.instance
+                && key.reply.generation == self.snapshot().id,
+            "Expired or invalid managed Python tool request"
+        );
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get_mut(key) else {
+            return Ok(false);
+        };
+        ensure!(
+            call.invocation == invocation,
+            "Invalid managed Python invocation nonce"
+        );
+        let deadline = call.deadline.clone();
+        let mut admit = || -> Result<bool> {
+            if entering {
+                ensure!(self.sdk_owned(), "effect entry requires the SDK catalog");
+                ensure!(
+                    call.phase == Phase::Admitted,
+                    "Python tool effect was entered or parked"
+                );
+                call.phase = Phase::Entered;
+            }
+            Ok(true)
+        };
+        // This synchronous gate linearizes admission with this exact turn's expiry.
+        match deadline {
+            Some(state) => state.admit(admit).unwrap_or(Ok(false)),
+            None => admit(),
         }
     }
 
@@ -1842,21 +1887,6 @@ impl PythonTools {
             .expect("Python replies poisoned")
             .get(key)
             .is_some_and(|call| call.reentry)
-    }
-
-    pub(crate) fn enter(&self, owner: &str, key: &PendingKey) -> Result<()> {
-        self.check_pending(owner, key)?;
-        ensure!(self.sdk_owned(), "effect entry requires the SDK catalog");
-        let mut pending = self.pending.lock().expect("Python replies poisoned");
-        let call = pending
-            .get_mut(key)
-            .ok_or_else(|| anyhow::anyhow!("expired Python call"))?;
-        ensure!(
-            call.phase == Phase::Admitted,
-            "Python tool effect was entered or parked"
-        );
-        call.phase = Phase::Entered;
-        Ok(())
     }
 
     pub(crate) fn park(&self, owner: &str, key: &PendingKey) -> Result<bool> {
@@ -2436,6 +2466,13 @@ impl PythonTools {
         if let Some(context) = &tracing {
             request["msg"]["tracing_context"] = json!(context.token());
         }
+        let deadline = self
+            .admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn)
+            .and_then(|receipt| receipt.sampling_stop.capture_model_deadline());
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("Python replies poisoned");
@@ -2443,6 +2480,7 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    deadline,
                     media,
                     _tracing: tracing,
                     invocation,
@@ -3659,6 +3697,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     Some(&call.model),
                     false,
                     Some(NativeMediaContext {
+                        inline_data_url_low_detail_supported: call
+                            .inline_data_url_low_detail_supported,
                         model_info: Arc::clone(&call.model_info),
                         profile: call.provider_reference_profile,
                     }),
@@ -5446,6 +5486,7 @@ pub(crate) mod managed_tests {
             "gpt-5.5",
         ));
         let context = NativeMediaContext {
+            inline_data_url_low_detail_supported: false,
             model_info: Arc::clone(&model),
             profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses,
         };
@@ -5651,6 +5692,7 @@ pub(crate) mod managed_tests {
                 tool_name: ToolName::new(None, "lookup"),
                 model: "test-model".into(),
                 model_info: Arc::new(codex_models_manager::model_info::model_info_from_slug("test-model")),
+                inline_data_url_low_detail_supported: false,
                 provider_reference_profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::PrepareInline,
                 codex_turn_metadata: None,
                 truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(1000),
@@ -5984,7 +6026,23 @@ pub(crate) mod managed_tests {
         let (key, _receiver) = tools
             .enqueue_reentry("owner", "turn", &call("one", "f", "{}"))
             .unwrap();
-        tools.enter("owner", &key).unwrap();
+        let request = tools.next_request().await;
+        let invocation = request["msg"]["_sdk_invocation"].as_u64().unwrap();
+        assert!(
+            tools
+                .admit_callback("other-owner", &key, invocation, false)
+                .is_err()
+        );
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation + 1, false)
+                .is_err()
+        );
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation, true)
+                .unwrap()
+        );
         assert!(tools.park("owner", &key).is_err());
         assert!(tools.park_continuation("owner", &key, json!(true)).is_err());
         assert!(
@@ -5992,7 +6050,11 @@ pub(crate) mod managed_tests {
                 .park_continuation("owner", &key, json!({"calls":["child1"],"receipts":[]}))
                 .unwrap()
         );
-        assert!(tools.enter("owner", &key).is_err());
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation, true)
+                .is_err()
+        );
         let keys = tools.parked("owner").unwrap();
         assert_eq!(
             tools.continuations(&keys).unwrap()["one"]["calls"],
@@ -6000,6 +6062,12 @@ pub(crate) mod managed_tests {
         );
         tools.suspend_reentry(&keys).unwrap();
         assert!(!tools.park("owner", &key).unwrap());
+        assert!(
+            !tools
+                .admit_callback("owner", &key, invocation, false)
+                .unwrap()
+        );
+        assert!(tools.check_pending("owner", &key).is_err());
     }
 
     #[tokio::test]
@@ -6011,12 +6079,21 @@ pub(crate) mod managed_tests {
         let (finished, b) = tools
             .enqueue_reentry("owner", "turn", &call("second", "g", "{}"))
             .unwrap();
+        let parked_request = tools.next_request().await;
+        let finished_request = tools.next_request().await;
+        assert_eq!(parked_request["msg"]["callId"], parked.call);
+        assert_eq!(finished_request["msg"]["callId"], finished.call);
+        let finished_invocation = finished_request["msg"]["_sdk_invocation"].as_u64().unwrap();
         tools.park("owner", &parked).unwrap();
         assert!(
             tools.parked("owner").is_err(),
             "do not seal a still admitted sibling"
         );
-        tools.enter("owner", &finished).unwrap();
+        assert!(
+            tools
+                .admit_callback("owner", &finished, finished_invocation, true)
+                .unwrap()
+        );
         assert!(
             tools.parked("owner").is_err(),
             "do not seal an entered sibling"
@@ -6056,8 +6133,18 @@ pub(crate) mod managed_tests {
         let (entered, b) = tools
             .enqueue_reentry("owner", "turn", &call("second", "g", "{}"))
             .unwrap();
+        let admitted_request = tools.next_request().await;
+        let entered_request = tools.next_request().await;
+        assert_eq!(admitted_request["msg"]["callId"], admitted.call);
+        assert_eq!(entered_request["msg"]["callId"], entered.call);
+        let admitted_invocation = admitted_request["msg"]["_sdk_invocation"].as_u64().unwrap();
+        let entered_invocation = entered_request["msg"]["_sdk_invocation"].as_u64().unwrap();
         let keys = vec![admitted.clone(), entered.clone()];
-        tools.enter("owner", &entered).unwrap();
+        assert!(
+            tools
+                .admit_callback("owner", &entered, entered_invocation, true)
+                .unwrap()
+        );
         // There is no receipt for the entered effect. Cancellation may not
         // make either that work or this whole unresolved batch resumable.
         assert!(tools.park_cancelled_reentry("owner", &keys).is_empty());
@@ -6092,7 +6179,11 @@ pub(crate) mod managed_tests {
             tools.park_cancelled_reentry("owner", &keys),
             vec![admitted.clone()]
         );
-        assert!(tools.enter("owner", &admitted).is_err());
+        assert!(
+            tools
+                .admit_callback("owner", &admitted, admitted_invocation, true)
+                .is_err()
+        );
         assert!(matches!(
             a.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)

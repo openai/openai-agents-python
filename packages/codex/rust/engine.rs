@@ -108,6 +108,41 @@ impl EngineState {
         Ok(())
     }
 
+    /// Validate the proposed captured controls before publishing accepted settings.
+    pub(crate) async fn validate_request_controls(
+        &self,
+        thread: &codex_core::CodexThread,
+        settings: &codex_protocol::protocol::ThreadSettingsOverrides,
+    ) -> anyhow::Result<()> {
+        let current = thread.thread_settings_snapshot().await;
+        let mut controls = current.request_controls;
+        if settings.tool_choice.is_some() {
+            controls.named_tool_choice = Some(None);
+        }
+        if let Some(patch) = &settings.request_controls {
+            controls.apply_patch(patch);
+        }
+        controls.validate_shape().map_err(anyhow::Error::msg)?;
+        if controls.has_wire_values() {
+            let model = settings.model.as_deref().unwrap_or(&current.model);
+            let info = self
+                .manager
+                .get_models_manager()
+                .get_model_info(model, &self.service_config.to_models_manager_config())
+                .await;
+            controls
+                .validate_profile(&info)
+                .map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                controls.store.flatten() != Some(true)
+                    || self.manager.auth_manager().auth_mode()
+                        == Some(codex_protocol::auth::AuthMode::ApiKey),
+                "store=true requires API-key Responses authentication"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn validate_hosted_search_model(&self, model: &str) -> anyhow::Result<()> {
         if self.service_config.web_search_mode.value()
             != codex_protocol::config_types::WebSearchMode::Disabled
@@ -1066,6 +1101,7 @@ impl EngineState {
                 startup.config.model_reasoning_summary = settings.reasoning_summary;
                 startup.config.service_tier = settings.service_tier.clone();
                 startup.config.sdk_tool_choice = settings.tool_choice;
+                startup.config.sdk_request_controls = settings.request_controls.clone();
                 // Session still holds its checkpoint fence and this engine's
                 // lifecycle lock. Inspect the existing source subtree before
                 // allocating a new owner, without consuming or retiring cells.
@@ -1322,7 +1358,7 @@ impl EngineState {
         }
     }
 
-    /// Validate seed file data against the resolved current startup, before seed writes.
+    /// Validate seed media data against the resolved current startup, before seed writes.
     pub(crate) async fn validate_seed_files(
         &self,
         startup: &mut StartThreadOptions,
@@ -1343,7 +1379,20 @@ impl EngineState {
                 _ => Vec::new(),
             })
             .collect();
-        if files.is_empty() {
+        let images: Vec<_> = items
+            .iter()
+            .flat_map(|item| match item {
+                ResponseItem::Message { content, .. } => content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentItem::InputImage { image, detail } => Some((image, *detail)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        if files.is_empty() && images.is_empty() {
             return Ok(());
         }
         // Match Core Session::spawn's existing selector before any seed write.
@@ -1393,6 +1442,11 @@ impl EngineState {
             file.validate_for_model(profile, &info)
                 .map_err(anyhow::Error::msg)?;
         }
+        let low_supported =
+            codex_core::inline_data_url_low_detail_supported(&startup.config, &info);
+        for (image, detail) in images {
+            validate_active_image(image, detail, profile, &info, low_supported)?;
+        }
         // Core startup receives the exact selection whose capabilities admitted the files.
         startup.config.model = Some(model);
         Ok(())
@@ -1419,7 +1473,17 @@ impl EngineState {
                 _ => None,
             })
             .collect();
-        if files.is_empty() {
+        let images: Vec<_> = response
+            .content_items
+            .iter()
+            .filter_map(|part| match part {
+                DynamicToolCallOutputContentItem::InputImage { image, detail } => {
+                    Some((image.clone().into(), *detail))
+                }
+                _ => None,
+            })
+            .collect::<Vec<(codex_protocol::models::ImageReference, _)>>();
+        if files.is_empty() && images.is_empty() {
             return Ok(());
         }
         if let Some(media) = native_media {
@@ -1428,6 +1492,15 @@ impl EngineState {
             for file in files {
                 file.validate_for_model(media.profile, &media.model_info)
                     .map_err(anyhow::Error::msg)?;
+            }
+            for (image, detail) in images {
+                validate_active_image(
+                    &image,
+                    detail,
+                    media.profile,
+                    &media.model_info,
+                    media.inline_data_url_low_detail_supported,
+                )?;
             }
             return Ok(());
         }
@@ -1477,6 +1550,10 @@ impl EngineState {
         for file in files {
             file.validate_for_model(profile, &info)
                 .map_err(anyhow::Error::msg)?;
+        }
+        let low_supported = codex_core::inline_data_url_low_detail_supported(&config, &info);
+        for (image, detail) in images {
+            validate_active_image(&image, detail, profile, &info, low_supported)?;
         }
         Ok(())
     }
@@ -2889,4 +2966,22 @@ mod rebuild_consumer_tests {
         }
         cleanup.expect("all native threads and state DB shut down");
     }
+}
+
+/// Validate representation with the native issuing metadata; publication owns its own grant.
+fn validate_active_image(
+    image: &codex_protocol::models::ImageReference,
+    detail: Option<codex_protocol::models::ImageDetail>,
+    profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy,
+    model: &codex_protocol::openai_models::ModelInfo,
+    inline_data_url_low_detail_supported: bool,
+) -> anyhow::Result<()> {
+    codex_core::validate_inline_image_detail(image, detail, inline_data_url_low_detail_supported)
+        .map_err(anyhow::Error::msg)?;
+    let inline = matches!(image, codex_protocol::models::ImageReference::Inline { image_url }
+        if image_url.starts_with("data:"));
+    ensure!(inline || (profile == codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses
+        && !model.use_responses_lite && !inline_data_url_low_detail_supported),
+        "image references require the current qualified standard Responses route");
+    Ok(())
 }

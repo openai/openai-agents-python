@@ -18,7 +18,7 @@ from pydantic import (
 from typing_extensions import NotRequired, Required, TypedDict
 
 from ._events import FunctionCallResponse as FunctionCallResponse
-from ._media import ImageDetail, _capture_file, _capture_image, _capture_tool_part
+from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
 from .manual import _CapturedManual as _CapturedManual
 

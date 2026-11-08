@@ -75,6 +75,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._mcp_errors import _protect_mcp_methods
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._projection import (
     _error_code as _error_code,
@@ -109,8 +110,7 @@ from .executor import (
     _writable_roots as _writable_roots,
 )
 from .history import RecordedTurn as RecordedTurn
-from .initial_messages import _capture_initial_messages
-from .input import InitialMessage, UserInput as UserInput, _native_input as _native_input
+from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
     _FORM_MODES as _FORM_MODES,
     _URL_ACCEPT as _URL_ACCEPT,
@@ -166,6 +166,7 @@ from .observation import (
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
+    ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
     ToolStarted as ToolStarted,
@@ -189,6 +190,7 @@ from .recovery import (
     ReconciledCall as ReconciledCall,
     UncertainCall as UncertainCall,
 )
+from .response_facts import _response_fact_record
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -259,10 +261,39 @@ _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST = hashlib.sha256(b"implicit-remote-works
 def _native_model_settings(model: str | None, settings: ModelSettings | None) -> dict[str, Any]:
     if model is not None and not isinstance(model, str):
         raise TypeError("model must be a string or None")
-    result = {
-        {"reasoning_effort": "effort", "reasoning_summary": "summary"}.get(key, key): value
-        for key, value in _copy_model_settings(settings).items()
+    copied = _copy_model_settings(settings)
+    result: dict[str, Any] = {}
+    controls: dict[str, Any] = {}
+    control_fields = {
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "top_logprobs",
+        "parallel_tool_calls",
+        "verbosity",
+        "metadata",
+        "store",
+        "prompt_cache_retention",
+        "prompt_cache_ttl",
     }
+    for key, value in copied.items():
+        if key == "tool_choice":
+            if isinstance(value, ToolRef):
+                result["tool_choice"] = "required"
+                controls["named_tool_choice"] = {"name": value.name, "namespace": value.namespace}
+            else:
+                result["tool_choice"] = value or "auto"
+                controls["named_tool_choice"] = None
+        elif key in control_fields:
+            controls[key] = (
+                dict(value) if key == "metadata" and isinstance(value, Mapping) else value
+            )
+        else:
+            result[{"reasoning_effort": "effort", "reasoning_summary": "summary"}.get(key, key)] = (
+                value
+            )
+    if controls:
+        result["request_controls"] = controls
     if model is not None:
         result["model"] = model
     return result
@@ -304,6 +335,47 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         # The existing settings operation accepts an explicit null service tier.
         if value is not None or target == "service_tier":
             settings[target] = value
+    timeout_ms = captured.get("invocation_timeout_ms")
+    if timeout_ms is not None and (
+        type(timeout_ms) is not int or not 1 <= timeout_ms <= 4_294_967_295
+    ):
+        raise ValueError("Manual checkpoint has invalid invocation_timeout_ms")
+    settings["invocation_timeout_ms"] = timeout_ms
+    if "request_controls" in captured:
+        controls = captured["request_controls"]
+        ordinary = {
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "top_logprobs",
+            "parallel_tool_calls",
+            "verbosity",
+            "metadata",
+            "store",
+            "prompt_cache_retention",
+            "prompt_cache_ttl",
+        }
+        if not isinstance(controls, dict) or controls.keys() - (ordinary | {"named_tool_choice"}):
+            raise ValueError("Manual checkpoint has invalid accepted request controls")
+        normalized = _native_model_settings(
+            None,
+            cast(ModelSettings, {key: value for key, value in controls.items() if key in ordinary}),
+        ).get("request_controls", {})
+        if "named_tool_choice" in controls:
+            target = controls["named_tool_choice"]
+            if target is not None:
+                if (
+                    not isinstance(target, dict)
+                    or target.keys() - {"name", "namespace"}
+                    or "name" not in target
+                ):
+                    raise ValueError("Manual checkpoint has invalid named tool choice")
+                ref = ToolRef(target["name"], target.get("namespace"))
+                _copy_model_settings({"tool_choice": ref})
+                normalized["named_tool_choice"] = {"name": ref.name, "namespace": ref.namespace}
+            else:
+                normalized["named_tool_choice"] = None
+        settings["request_controls"] = normalized
     return model, settings
 
 
@@ -541,6 +613,8 @@ ResponseIntegrityReason: TypeAlias = Literal[
     "provider_owned_tool_receipt",
     "unfinished_assistant_item",
     "missing_supported_terminal_output",
+    "provider_refusal",
+    "malformed_probability_facts",
 ]
 
 
@@ -687,7 +761,11 @@ def _native_error(error: dict[str, Any], message: str | None = None) -> NativeEr
     result = NativeError(
         error["message"] if message is None else message,
         status_code=metadata.get("status_code"),
-        code=metadata.get("code"),
+        code=(
+            "model_invocation_deadline_exceeded"
+            if _error_code(error) == "model_invocation_deadline_exceeded"
+            else metadata.get("code")
+        ),
         request_id=metadata.get("request_id"),
         category=_error_code(error),
     )
@@ -747,6 +825,11 @@ def _future() -> asyncio.Future[Any]:
     future = asyncio.get_running_loop().create_future()
     future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
     return future
+
+
+def _validate_function_concurrency(value: int | None) -> None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+        raise ValueError("max_function_concurrency must be a positive integer or None")
 
 
 @dataclass(frozen=True)
@@ -1844,7 +1927,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | None = None,
-        initial_messages: Sequence[InitialMessage] | None = None,
+        initial_messages_json: str | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
@@ -1860,13 +1943,7 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
-        initial_messages = _capture_initial_messages(initial_messages, state=state, resume=resume)
-        if max_function_concurrency is not None and (
-            isinstance(max_function_concurrency, bool)
-            or not isinstance(max_function_concurrency, int)
-            or max_function_concurrency <= 0
-        ):
-            raise ValueError("max_function_concurrency must be a positive integer or None")
+        _validate_function_concurrency(max_function_concurrency)
         parent_trace = _trace_context(parent_trace)
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
@@ -2045,6 +2122,8 @@ class Session(Generic[ContextT, OutputT]):
         # The opening default still applies to the next explicit request.
         restored_output = selected.output if selected is not None and manual_restore else output
         settings = _native_model_settings(model, agent.model_settings)
+        if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
+            raise ValueError("store=True requires API-key Responses authentication")
         if restored_model_settings is not None:
             model, settings = restored_model_settings
         native_specs = catalog.native_specs()
@@ -2276,6 +2355,7 @@ class Session(Generic[ContextT, OutputT]):
                         "wire_api": "responses",
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
+                        **provider._routing_config(),
                         # Both native web protocols require a compatible Responses
                         # provider. The declaration admits that provider capability.
                         "supports_standalone_web_search": (
@@ -2573,11 +2653,7 @@ class Session(Generic[ContextT, OutputT]):
                     engine._start_initial_replaceable_thread(
                         json.dumps(options),
                         native_specs,
-                        **(
-                            {"initial_messages_json": json.dumps(initial_messages)}
-                            if initial_messages is not None
-                            else {}
-                        ),
+                        initial_messages_json=initial_messages_json,
                     )
                     if checkpoint is None
                     else engine.restore_checkpoint(checkpoint, json.dumps(options), native_specs)
@@ -6783,6 +6859,17 @@ class Session(Generic[ContextT, OutputT]):
                 submission_id=handle.submission_id,
             ):
                 return
+            elif kind == "response_fact":
+                record = _response_fact_record(message)
+                if record is not None:
+                    self._observations.append(
+                        ResponseFactReceived(
+                            session_id=self.id,
+                            turn_id=handle.turn_id,
+                            submission_id=handle.submission_id,
+                            record=record,
+                        )
+                    )
             elif kind == "agent_message_content_delta":
                 self._observations.append(
                     OutputTextDelta(
@@ -7904,7 +7991,8 @@ class Session(Generic[ContextT, OutputT]):
                         continue
                     request = json.dumps(message)
                     try:
-                        self._native._check_python_tool(request)
+                        if not self._native._check_python_tool(request):
+                            continue
                     except RuntimeError:
                         continue  # A cancelled or retired invocation grants no callback authority.
                     child = self._child_callback_state(
@@ -8126,7 +8214,7 @@ class Session(Generic[ContextT, OutputT]):
                         # Unknown-phase blank tails keep the previous final answer.
                         if not blank or item.get("phase") == "final_answer":
                             state.last_assistant_had_blank_final = blank
-                elif kind in {"agent_message_content_delta", "item_completed"}:
+                elif kind in {"agent_message_content_delta", "item_completed", "response_fact"}:
                     self._observe_progress(event, handle, self.id)
                 elif kind == "dynamic_tool_call_request" and not state.stopping:
                     if message.get("_sdk_manual") is True:
@@ -8655,8 +8743,7 @@ class Session(Generic[ContextT, OutputT]):
         """Recheck authority before the invocation starts another Python step."""
         if state.stopping or state.failure.done() or self._closing:
             return False
-        self._native._check_python_tool(request)
-        return True
+        return self._native._check_python_tool(request) is True
 
     async def _invoke_tool(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("tool callback", "callback", message.get("tracing_context")) as tracing:
@@ -8763,8 +8850,7 @@ class Session(Generic[ContextT, OutputT]):
                     reply = json.dumps({"request": message, "response": denial.to_native()})
                     if self._admit_tool(state, request):
                         accepted = await self._native._respond_python_tool(reply)
-                        if not accepted and not state.stopping:
-                            raise NativeError("Native tool denial was not accepted")
+                        # A late send does not undo an already committed receipt.
                         if accepted:
                             status = "failed"
                     return
@@ -8963,8 +9049,8 @@ class Session(Generic[ContextT, OutputT]):
             if not self._admit_tool(state, request):
                 return
             accepted = await self._native._respond_python_tool(reply)
-            if not accepted and not state.stopping:
-                raise NativeError("Native tool result was not accepted")
+            # A retired receiver grants no delivery authority; the native owner
+            # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:
                 status = "completed" if output.success else "failed"
         except BaseException as error:  # report every callback exit to its owner
@@ -9885,4 +9971,5 @@ def get_cleanup(
     return None
 
 
+_protect_mcp_methods(Session, lambda owner: owner._opening_agent.tools)
 _preserve_module_identity(globals(), "agents.session")

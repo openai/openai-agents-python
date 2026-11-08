@@ -988,37 +988,22 @@ impl NativeThread {
     // Recheck after caller-owned checkpoint storage has settled, immediately
     // before invoking the Python effect. A raw native interrupt may have raced it.
     #[pyo3(signature = (request_json, *, entering=false))]
-    fn _check_python_tool(&self, request_json: &str, entering: bool) -> PyResult<()> {
+    fn _check_python_tool(&self, request_json: &str, entering: bool) -> PyResult<bool> {
         let request: serde_json::Value = serde_json::from_str(request_json).map_err(py_error)?;
         let inner = self.current()?;
-        let key: python_tools::PendingKey =
-            serde_json::from_value(request.clone()).map_err(py_error)?;
-        if key.reply.thread != inner.id.to_string() {
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .and_then(|tools| tools.owner(&inner.id.to_string(), &key))
-                .ok_or_else(|| py_error("Expired or invalid managed Python tool request"))?;
-            if entering {
-                return Err(py_error(
-                    "Native children cannot park or enter SDK manual approvals",
-                ));
-            }
-            return tools
-                .check_pending(&key.reply.thread, &key)
-                .map_err(py_error);
+        let key: python_tools::PendingKey = serde_json::from_value(request.clone()).map_err(py_error)?;
+        let invocation = request.get("_sdk_invocation").and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| py_error("Invalid managed Python invocation nonce"))?;
+        let root = inner.thread.thread_extension_data().get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("managed tool owner is unavailable"))?;
+        let tools = root.owner(&inner.id.to_string(), &key)
+            .ok_or_else(|| py_error("Expired or invalid managed Python tool request"))?;
+        if entering && key.reply.thread != inner.id.to_string() {
+            return Err(py_error("Native children cannot park or enter SDK manual approvals"));
         }
-        checkpoint::check_capture(&inner, &request).map_err(py_error)?;
-        if entering {
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .ok_or_else(|| py_error("effect entry requires managed tools"))?;
-            tools.enter(&inner.id.to_string(), &key).map_err(py_error)?;
-        }
-        Ok(())
+        let admitted = tools.admit_callback(&key.reply.thread, &key, invocation, entering).map_err(py_error)?;
+        if entering && !admitted { return Err(py_error("Expired managed Python effect entry")); }
+        Ok(admitted)
     }
 
     // Cancellation from a child callback must target its still-live issuer,
@@ -1615,6 +1600,11 @@ impl NativeThread {
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
+            inner
+                .engine
+                .validate_request_controls(&inner.thread, &settings)
+                .await
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
             inner
                 .thread
                 .update_thread_settings(settings)

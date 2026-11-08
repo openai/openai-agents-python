@@ -570,11 +570,14 @@ async def test_waiter_rechecks_exact_native_receipt_before_validation(responses,
                 return getattr(native, name)
 
             def _check_python_tool(self, raw):
-                native._check_python_tool(raw)
+                accepted = native._check_python_tool(raw)
+                if not accepted:
+                    return False
                 if expire_waiters and json.loads(raw)["callId"] != first_call:
                     # Exercise the real binding's foreign-owner rejection after
                     # the task has queued, rather than inventing a host error.
                     other._native._check_python_tool(raw)
+                return accepted
 
         monkeypatch.setattr(session, "_native", NativeReceipt())
         turn = await session.submit("wait for a permit")

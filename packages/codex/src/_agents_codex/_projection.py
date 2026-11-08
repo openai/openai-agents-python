@@ -95,6 +95,7 @@ def _error_code(error: dict[str, Any]) -> str | None:
         if code
         in {
             "session_budget_exceeded",
+            "model_invocation_deadline_exceeded",
             "usage_limit_exceeded",
             "project_spend_limit_exceeded",
             "organization_spend_limit_exceeded",

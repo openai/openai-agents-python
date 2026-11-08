@@ -1,0 +1,535 @@
+--- a/codex-rs/exec-server/src/local_process.rs
++++ b/codex-rs/exec-server/src/local_process.rs
+@@ -363,7 +363,7 @@
+         }
+         let prepared = prepare_exec_request_with_telemetry(
+             &params,
+-            child_env(&params),
++            child_env(&params)?,
+             self.runtime_paths.as_ref(),
+             network_policy_decider,
+             network_policy_audit_observer,
+@@ -739,19 +739,54 @@
+     }
+ }
+ 
+-fn child_env(params: &ExecParams) -> HashMap<String, String> {
+-    let mut env = match &params.env_policy {
++fn child_env(params: &ExecParams) -> Result<HashMap<String, String>, JSONRPCErrorError> {
++    let overrides = params
++        .env
++        .iter()
++        .map(|(key, value)| (key.into(), value.into()))
++        .collect();
++    if !shell_environment::env_override_names_are_distinct(&overrides) {
++        return Err(invalid_params(
++            "duplicate explicit environment names are not allowed on this platform".to_string(),
++        ));
++    }
++    let base = match &params.env_policy {
+         Some(env_policy) => {
+-            let policy = shell_environment_policy(env_policy);
+-            let mut env = shell_environment::create_env(&policy, /*thread_id*/ None);
+-            env.extend(params.env.clone());
+-            env
+-        }
+-        None => params.env.clone(),
++            let inherited = env_policy
++                .r#set
++                .iter()
++                .map(|(key, value)| (key.into(), value.into()))
++                .collect();
++            if !shell_environment::env_override_names_are_distinct(&inherited) {
++                return Err(invalid_params(
++                    "duplicate forwarded environment names are not allowed on this platform"
++                        .to_string(),
++                ));
++            }
++            shell_environment::create_env(&shell_environment_policy(env_policy), None)
++        }
++        None => HashMap::new(),
+     };
++    let mut env: HashMap<String, String> = shell_environment::merge_env_overrides(
++        base.into_iter()
++            .map(|(key, value)| (key.into(), value.into()))
++            .collect(),
++        overrides,
++    )
++    .into_iter()
++    .map(|(key, value)| {
++        (
++            key.into_string()
++                .expect("environment names originated as Unicode"),
++            value
++                .into_string()
++                .expect("environment values originated as Unicode"),
++        )
++    })
++    .collect();
+     env.remove(crate::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR);
+     env.retain(|name, _| !shell_environment::is_non_inheritable_env_var(name));
+-    env
++    Ok(env)
+ }
+ 
+ pub(crate) fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvironmentPolicy {
+@@ -810,7 +845,7 @@
+             }
+             let mut prepared = prepare_exec_request_with_telemetry(
+                 &params,
+-                child_env(&params),
++                child_env(&params).map_err(map_handler_error)?,
+                 self.runtime_paths.as_ref(),
+                 /*network_policy_decider*/ None,
+                 /*network_policy_audit_observer*/ None,
+@@ -1260,7 +1295,7 @@
+         );
+     }
+ 
+-    fn test_exec_params(env: HashMap<String, String>) -> ExecParams {
++    pub(super) fn test_exec_params(env: HashMap<String, String>) -> ExecParams {
+         ExecParams {
+             metadata: None,
+             process_id: ProcessId::from("env-test"),
+@@ -1525,7 +1560,7 @@
+         let params = test_exec_params(HashMap::from([("ONLY_THIS".to_string(), "1".to_string())]));
+ 
+         assert_eq!(
+-            child_env(&params),
++            child_env(&params).unwrap(),
+             HashMap::from([("ONLY_THIS".to_string(), "1".to_string())])
+         );
+     }
+@@ -1559,7 +1594,7 @@
+             expected.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+         }
+ 
+-        assert_eq!(child_env(&params), expected);
++        assert_eq!(child_env(&params).unwrap(), expected);
+     }
+ 
+     #[tokio::test]
+@@ -2104,3 +2139,64 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod environment_layer_tests {
++    use super::*;
++
++    fn params(env: HashMap<String, String>, forwarded: HashMap<String, String>) -> ExecParams {
++        let mut params = super::tests::test_exec_params(env);
++        params.env_policy = Some(ExecEnvPolicy {
++            inherit: codex_protocol::config_types::ShellEnvironmentPolicyInherit::None,
++            ignore_default_excludes: true,
++            exclude: Vec::new(),
++            r#set: forwarded,
++            include_only: Vec::new(),
++        });
++        params
++    }
++
++    #[test]
++    fn mcp_remote_unknown_platform_preserves_layers_until_target() {
++        let env = child_env(&params(
++            HashMap::from([
++                ("PATH".into(), "explicit".into()),
++                ("OpenAI_Identity_Token_File".into(), "reserved".into()),
++            ]),
++            HashMap::from([
++                ("Path".into(), "forwarded".into()),
++                ("OPENAI_FEDERATION_RULE_ID".into(), "reserved".into()),
++            ]),
++        ))
++        .unwrap();
++        assert_eq!(env.get("PATH"), Some(&"explicit".to_string()));
++        assert_eq!(
++            env.get("Path").map(String::as_str),
++            if cfg!(windows) {
++                None
++            } else {
++                Some("forwarded")
++            }
++        );
++        assert!(
++            !env.keys()
++                .any(|key| shell_environment::is_non_inheritable_env_var(key))
++        );
++    }
++
++    #[test]
++    fn mcp_remote_explicit_and_forwarded_duplicates_reject_only_on_windows() {
++        let duplicate = HashMap::from([
++            ("Foo".into(), "first".into()),
++            ("FOO".into(), "second".into()),
++        ]);
++        assert_eq!(
++            child_env(&params(duplicate.clone(), HashMap::new())).is_err(),
++            cfg!(windows)
++        );
++        assert_eq!(
++            child_env(&params(HashMap::new(), duplicate)).is_err(),
++            cfg!(windows)
++        );
++    }
++}
+--- a/codex-rs/protocol/src/shell_environment.rs
++++ b/codex-rs/protocol/src/shell_environment.rs
+@@ -48,6 +48,38 @@
+             command.env_remove(name);
+         }
+     }
++}
++
++/// Checks override names using the target's native environment-key identity.
++/// No process is started. POSIX names remain case-sensitive.
++#[doc(hidden)]
++pub fn env_override_names_are_distinct(
++    overrides: &HashMap<std::ffi::OsString, std::ffi::OsString>,
++) -> bool {
++    let mut names = std::process::Command::new("");
++    names.env_clear();
++    for name in overrides.keys() {
++        names.env(name, "");
++    }
++    names.get_envs().count() == overrides.len()
++}
++
++/// Applies one ordered layer using the target's native environment-key identity.
++/// Duplicate validation is separate; shell policies may also merge unchecked layers.
++#[doc(hidden)]
++pub fn merge_env_overrides(
++    base: HashMap<std::ffi::OsString, std::ffi::OsString>,
++    overrides: HashMap<std::ffi::OsString, std::ffi::OsString>,
++) -> HashMap<std::ffi::OsString, std::ffi::OsString> {
++    let mut command = std::process::Command::new("");
++    command.env_clear().envs(base);
++    for (name, value) in overrides {
++        command.env_remove(&name).env(name, value);
++    }
++    command
++        .get_envs()
++        .filter_map(|(name, value)| value.map(|value| (name.to_os_string(), value.to_os_string())))
++        .collect()
+ }
+ 
+ /// Construct a shell environment from the supplied process environment and
+@@ -137,11 +169,28 @@
+     }
+ 
+     // Step 4 - Apply user-provided overrides.
+-    for (key, val) in &policy.r#set {
+-        #[cfg(windows)]
+-        env_map.retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+-        env_map.insert(key.clone(), val.clone());
+-    }
++    env_map = merge_env_overrides(
++        env_map
++            .into_iter()
++            .map(|(key, value)| (key.into(), value.into()))
++            .collect(),
++        policy
++            .r#set
++            .iter()
++            .map(|(key, value)| (key.into(), value.into()))
++            .collect(),
++    )
++    .into_iter()
++    .map(|(key, value)| {
++        (
++            key.into_string()
++                .expect("environment names originated as Unicode"),
++            value
++                .into_string()
++                .expect("environment values originated as Unicode"),
++        )
++    })
++    .collect();
+ 
+     // Step 5 - If include_only is non-empty, keep only the matching vars.
+     if !policy.include_only.is_empty() {
+@@ -321,3 +370,39 @@
+         assert_eq!(result, expected);
+     }
+ }
++
++#[cfg(test)]
++mod native_env_layer_tests {
++    use super::*;
++    use std::ffi::OsString;
++
++    #[test]
++    fn mcp_environment_layer_uses_target_identity_and_explicit_value() {
++        let env = merge_env_overrides(
++            HashMap::from([(OsString::from("Path"), OsString::from("inherited"))]),
++            HashMap::from([(OsString::from("PATH"), OsString::from("explicit"))]),
++        );
++        assert_eq!(
++            env.get(&OsString::from("PATH")),
++            Some(&OsString::from("explicit"))
++        );
++        assert_eq!(env.len(), if cfg!(windows) { 1 } else { 2 });
++        if !cfg!(windows) {
++            assert_eq!(
++                env.get(&OsString::from("Path")),
++                Some(&OsString::from("inherited"))
++            );
++        }
++    }
++
++    #[test]
++    fn mcp_environment_duplicate_detection_uses_native_unicode_identity() {
++        for (left, right) in [("PATH", "Path"), ("É", "é")] {
++            let values = HashMap::from([
++                (OsString::from(left), OsString::from("first")),
++                (OsString::from(right), OsString::from("second")),
++            ]);
++            assert_eq!(env_override_names_are_distinct(&values), !cfg!(windows));
++        }
++    }
++}
+--- a/codex-rs/rmcp-client/src/stdio_server_launcher.rs
++++ b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+@@ -686,7 +686,7 @@
+             .try_into()
+             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+         let program_name = program.to_string_lossy().into_owned();
+-        let envs = create_env_overlay_for_remote_mcp_server(env, &env_vars);
++        let (inherited_envs, envs) = create_env_overlay_for_remote_mcp_server(env, &env_vars);
+         let remote_env_vars = remote_mcp_env_var_names(&env_vars);
+         // The executor protocol carries argv/env as UTF-8 strings. Local stdio can
+         // accept arbitrary OsString values because it calls the OS directly; remote
+@@ -694,6 +694,7 @@
+         // before sending an executor request.
+         let argv = Self::process_api_argv(&program, &args).map_err(io::Error::other)?;
+         let env = Self::process_api_env(envs).map_err(io::Error::other)?;
++        let inherited_env = Self::process_api_env(inherited_envs).map_err(io::Error::other)?;
+         let process_id = ExecutorProcessTransport::next_process_id();
+         // Start the MCP server process on the executor with raw pipes. `tty=false`
+         // keeps stdout as a clean protocol stream, while `pipe_stdin=true` lets
+@@ -705,7 +706,7 @@
+                 argv,
+                 cwd,
+                 shell_snapshot: None,
+-                env_policy: Some(Self::remote_env_policy(&remote_env_vars)),
++                env_policy: Some(Self::remote_env_policy(&remote_env_vars, inherited_env)),
+                 env,
+                 tty: false,
+                 pipe_stdin: true,
+@@ -761,7 +762,10 @@
+             .map_err(|_| anyhow!("{label} must be valid Unicode for remote MCP stdio"))
+     }
+ 
+-    fn remote_env_policy(remote_env_vars: &[String]) -> ExecEnvPolicy {
++    fn remote_env_policy(
++        remote_env_vars: &[String],
++        inherited_env: HashMap<String, String>,
++    ) -> ExecEnvPolicy {
+         let include_only = if remote_env_vars.is_empty() {
+             Vec::new()
+         } else {
+@@ -777,6 +781,7 @@
+                 .chain(["SYSTEMROOT", "TEMP", "TMP"].iter())
+                 .map(|name| (*name).to_string())
+                 .chain(remote_env_vars.iter().cloned())
++                .chain(inherited_env.keys().cloned())
+                 .collect()
+         };
+         ExecEnvPolicy {
+@@ -787,7 +792,7 @@
+             },
+             ignore_default_excludes: true,
+             exclude: Vec::new(),
+-            r#set: HashMap::new(),
++            r#set: inherited_env,
+             include_only,
+         }
+     }
+@@ -802,7 +807,7 @@
+ 
+     #[test]
+     fn remote_env_policy_uses_core_env_without_remote_source_vars() {
+-        let policy = ExecutorStdioServerLauncher::remote_env_policy(&[]);
++        let policy = ExecutorStdioServerLauncher::remote_env_policy(&[], HashMap::new());
+ 
+         assert_eq!(policy.inherit, ShellEnvironmentPolicyInherit::Core);
+         assert!(policy.include_only.is_empty());
+@@ -810,7 +815,10 @@
+ 
+     #[test]
+     fn remote_env_policy_includes_remote_source_vars_without_full_env() {
+-        let policy = ExecutorStdioServerLauncher::remote_env_policy(&["REMOTE_TOKEN".to_string()]);
++        let policy = ExecutorStdioServerLauncher::remote_env_policy(
++            &["REMOTE_TOKEN".to_string()],
++            HashMap::new(),
++        );
+ 
+         assert_eq!(policy.inherit, ShellEnvironmentPolicyInherit::All);
+         assert!(
+@@ -827,8 +835,10 @@
+ 
+     #[test]
+     fn remote_env_policy_effectively_filters_unrequested_vars() {
+-        let exec_policy =
+-            ExecutorStdioServerLauncher::remote_env_policy(&["REMOTE_TOKEN".to_string()]);
++        let exec_policy = ExecutorStdioServerLauncher::remote_env_policy(
++            &["REMOTE_TOKEN".to_string()],
++            HashMap::new(),
++        );
+         let policy = ShellEnvironmentPolicy {
+             inherit: exec_policy.inherit,
+             ignore_default_excludes: exec_policy.ignore_default_excludes,
+@@ -886,3 +896,19 @@
+         assert!(!env.contains_key("UNREQUESTED_SECRET"));
+     }
+ }
++
++#[cfg(test)]
++mod inherited_environment_tests {
++    use super::*;
++    #[test]
++    fn mcp_forwarded_inheritance_survives_remote_allowlist() {
++        let forwarded = HashMap::from([("LOCAL_FORWARDED".to_string(), "value".to_string())]);
++        let policy = ExecutorStdioServerLauncher::remote_env_policy(
++            &["REMOTE_VAR".to_string()],
++            forwarded.clone(),
++        );
++        assert_eq!(policy.r#set, forwarded);
++        assert!(policy.include_only.contains(&"LOCAL_FORWARDED".to_string()));
++        assert!(policy.include_only.contains(&"REMOTE_VAR".to_string()));
++    }
++}
+--- a/codex-rs/rmcp-client/src/utils.rs
++++ b/codex-rs/rmcp-client/src/utils.rs
+@@ -36,21 +36,26 @@
+         env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
+         env.insert(OsString::from(name), value);
+     }
+-    for (name, value) in extra_env.unwrap_or_default() {
+-        if cfg!(windows)
+-            || name.to_str().is_some_and(|name| {
+-                CUSTOM_CA_ENV_KEYS
+-                    .iter()
+-                    .any(|ca_name| ca_name.eq_ignore_ascii_case(name))
+-            })
+-        {
++    let extra_env = extra_env.unwrap_or_default();
++    if !codex_protocol::shell_environment::env_override_names_are_distinct(&extra_env) {
++        return Err(anyhow!(
++            "duplicate explicit environment names are not allowed on this platform"
++        ));
++    }
++    // Preserve removal of inherited custom-CA aliases on POSIX as well.
++    for name in extra_env.keys() {
++        if name.to_str().is_some_and(|name| {
++            CUSTOM_CA_ENV_KEYS
++                .iter()
++                .any(|ca| ca.eq_ignore_ascii_case(name))
++        }) {
+             env.retain(|key, _| {
+                 !key.to_string_lossy()
+                     .eq_ignore_ascii_case(&name.to_string_lossy())
+             });
+         }
+-        env.insert(name, value);
+-    }
++    }
++    env = codex_protocol::shell_environment::merge_env_overrides(env, extra_env);
+     env.retain(|name, _| {
+         name.to_str()
+             .is_none_or(|name| !is_non_inheritable_env_var(name))
+@@ -61,21 +66,22 @@
+ pub(crate) fn create_env_overlay_for_remote_mcp_server(
+     extra_env: Option<HashMap<OsString, OsString>>,
+     env_vars: &[McpServerEnvVar],
+-) -> HashMap<OsString, OsString> {
+-    // Remote stdio should inherit PATH/HOME/etc. from the executor side, not
+-    // from the orchestrator process. Only forward variables explicitly named
+-    // by the MCP config plus literal env overrides from that config.
+-    let mut env: HashMap<OsString, OsString> = env_vars
++) -> (HashMap<OsString, OsString>, HashMap<OsString, OsString>) {
++    // Keep named inherited values separate from literals until the executor
++    // applies its own platform's identity and precedence rules.
++    let mut inherited: HashMap<OsString, OsString> = env_vars
+         .iter()
+         .filter(|var| !var.is_remote_source())
+         .filter_map(|var| env::var_os(var.name()).map(|value| (OsString::from(var.name()), value)))
+-        .chain(extra_env.unwrap_or_default())
+         .collect();
+-    env.retain(|name, _| {
+-        name.to_str()
+-            .is_none_or(|name| !is_non_inheritable_env_var(name))
+-    });
+-    env
++    let mut explicit = extra_env.unwrap_or_default();
++    for layer in [&mut inherited, &mut explicit] {
++        layer.retain(|name, _| {
++            name.to_str()
++                .is_none_or(|name| !is_non_inheritable_env_var(name))
++        });
++    }
++    (inherited, explicit)
+ }
+ 
+ pub(crate) fn remote_mcp_env_var_names(env_vars: &[McpServerEnvVar]) -> Vec<String> {
+@@ -258,7 +264,7 @@
+         let _default_guard = EnvVarGuard::set(default_var, "from-default");
+         let _custom_guard = EnvVarGuard::set(custom_var, &custom_value);
+ 
+-        let env = create_env_overlay_for_remote_mcp_server(
++        let (env, explicit) = create_env_overlay_for_remote_mcp_server(
+             Some(HashMap::from([(
+                 OsString::from("OpenAI_Federation_Rule_Id"),
+                 OsString::from("rule"),
+@@ -270,6 +276,7 @@
+             env,
+             HashMap::from([(OsString::from(custom_var), custom_value)])
+         );
++        assert!(explicit.is_empty(), "reserved literal must be scrubbed");
+     }
+ 
+     #[test]
+@@ -281,7 +288,7 @@
+         let _remote_guard = EnvVarGuard::set(remote_var, "should-not-be-copied");
+         let _local_guard = EnvVarGuard::set(local_var, &local_value);
+ 
+-        let env = create_env_overlay_for_remote_mcp_server(
++        let (env, explicit) = create_env_overlay_for_remote_mcp_server(
+             /*extra_env*/ None,
+             &[
+                 McpServerEnvVar::Config {
+@@ -299,6 +306,7 @@
+             env,
+             HashMap::from([(OsString::from(local_var), local_value)])
+         );
++        assert!(explicit.is_empty());
+     }
+ 
+     #[test]
+@@ -355,3 +363,25 @@
+         assert_eq!(env.get(OsStr::new("PATH")), Some(&expected));
+     }
+ }
++
++#[cfg(test)]
++mod environment_override_tests {
++    use super::*;
++    #[test]
++    fn mcp_explicit_environment_duplicates_follow_target_identity() {
++        let env = create_env_for_mcp_server(
++            Some(HashMap::from([
++                (OsString::from("MCP_CASE"), OsString::from("first")),
++                (OsString::from("mcp_case"), OsString::from("second")),
++            ])),
++            &[],
++        );
++        assert_eq!(env.is_err(), cfg!(windows));
++        if !cfg!(windows) {
++            assert_eq!(
++                env.unwrap().get(&OsString::from("mcp_case")),
++                Some(&OsString::from("second"))
++            );
++        }
++    }
++}

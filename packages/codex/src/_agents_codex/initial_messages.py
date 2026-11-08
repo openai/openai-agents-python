@@ -1,10 +1,15 @@
 """Capture settled messages before opening a fresh native conversation."""
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .input import AssistantMessage, InitialMessage, UserMessage, _native_input, _response_content
+
+
+def _initial_messages_json(messages: Sequence[InitialMessage] | None) -> str | None:
+    return None if messages is None else json.dumps(messages)
 
 
 def _capture_initial_messages(

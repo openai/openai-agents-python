@@ -28,6 +28,7 @@ from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
 
@@ -81,8 +82,8 @@ def _protect_mcp_initializer(declaration: type[Any]) -> None:
             initialize(self, *args, **kwargs)
         except BaseException as error:
             _clear_frames(error.__traceback__)
-            error.__context__ = None
-            error.__cause__ = None
+            object.__setattr__(error, "__context__", None)
+            object.__setattr__(error, "__cause__", None)
             for name in ("env", "headers", "bearer_token", "access_token"):
                 if name in self.__dict__:
                     object.__setattr__(self, name, None)
@@ -694,6 +695,7 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
 
 for _declaration in (StdioMCP, HttpMCP, HostedVerificationMCP, ChatGPTAppsMCP):
     _protect_mcp_initializer(_declaration)
+    _protect_mcp_methods(_declaration, lambda owner: (owner,))
 del _declaration
 
 
@@ -799,4 +801,5 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
     )
 
 
+_protect_mcp_methods(_MCP, lambda owner: (owner,))
 _preserve_module_identity(globals(), "agents.mcp")

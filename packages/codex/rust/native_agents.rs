@@ -1445,6 +1445,62 @@ mod steering_capture_tests {
     }
 
     #[tokio::test]
+    async fn terminal_persistence_failure_settles_only_the_exact_child_waiter() {
+        let provider = crate::engine::settlement_tests::Provider::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine = real_engine(&directory, &provider.url).await;
+        let native = engine
+            .start_with_tools(Default::default(), None, Some(vec![]), false)
+            .await
+            .unwrap();
+        let state = Arc::clone(&native.current().unwrap());
+        let child_id = ThreadId::new();
+        install_instance(&state, child_id);
+        let _store = sdk_turn(&state, "failed-terminal-child").await;
+        let original = {
+            let mut rows = state.child_instances.write().unwrap();
+            let row = rows.get_mut(&child_id).unwrap();
+            row.observe(&state, child_id, &started("failed-terminal-child"));
+            row.turn.clone().unwrap()
+        };
+        let mut waiting = Box::pin(original.wait());
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        {
+            let rows = state.child_instances.read().unwrap();
+            let row = rows.get(&child_id).unwrap();
+            row.fail_tool_completion("failed-terminal-child", "stale-incarnation");
+            row.fail_tool_completion("other-turn", "test-child");
+        }
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        state
+            .child_instances
+            .read()
+            .unwrap()
+            .get(&child_id)
+            .unwrap()
+            .fail_tool_completion("failed-terminal-child", "test-child");
+        let std::task::Poll::Ready(result) = futures_util::poll!(&mut waiting) else {
+            panic!("owned persistence failure must retire the child waiter without TurnComplete");
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Terminal tool persistence failed")
+        );
+        state.close().await.unwrap();
+        assert!(
+            original
+                .wait()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("persistence failed")
+        );
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn ordinary_child_wait_is_passive_and_preserves_old_outcome() {
         let provider = crate::engine::settlement_tests::Provider::start().await;
         let directory = tempfile::tempdir().unwrap();

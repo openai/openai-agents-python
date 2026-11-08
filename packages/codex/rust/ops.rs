@@ -333,6 +333,9 @@ pub struct ThreadSettings {
     #[serde(deserialize_with = "optional")]
     service_tier: Option<Option<String>>,
     tool_choice: Option<ToolChoice>,
+    #[serde(deserialize_with = "optional")]
+    invocation_timeout_ms: Option<Option<u32>>,
+    request_controls: Option<codex_protocol::model_request_controls::ModelRequestControls>,
     collaboration_mode: Option<CollaborationMode>,
     personality: Option<Personality>,
     disabled_plugin_ids: Option<Vec<String>>,
@@ -345,6 +348,34 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
         .context("model settings must be an object")?;
     for (key, value) in fields {
         match key.as_str() {
+            "invocation_timeout_ms" => {
+                if !value.is_null() {
+                    let ms = value
+                        .as_u64()
+                        .context("invocation_timeout_ms must be an integer or null")?;
+                    anyhow::ensure!(
+                        (1..=u32::MAX as u64).contains(&ms),
+                        "invocation_timeout_ms must be in the range 1..=4294967295"
+                    );
+                }
+            }
+            "request_controls" => {
+                anyhow::ensure!(value.is_object(), "request_controls must be an object");
+                if let Some(target) = value
+                    .get("named_tool_choice")
+                    .filter(|value| !value.is_null())
+                {
+                    let fields = target
+                        .as_object()
+                        .context("named tool choice must be an object")?;
+                    anyhow::ensure!(
+                        fields
+                            .keys()
+                            .all(|key| matches!(key.as_str(), "name" | "namespace")),
+                        "unknown named tool choice member"
+                    );
+                }
+            }
             "model" | "effort" | "summary" | "service_tier" | "tool_choice" => {
                 if key == "service_tier" && value.is_null() {
                     continue;
@@ -356,6 +387,9 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
         }
     }
     let settings = ThreadSettings::deserialize(params)?;
+    if let Some(controls) = &settings.request_controls {
+        controls.validate_shape().map_err(anyhow::Error::msg)?;
+    }
     anyhow::ensure!(
         settings.effort != Some(Some(ReasoningEffort::Persistent)),
         "persistent reasoning is unsupported for replaceable sessions"

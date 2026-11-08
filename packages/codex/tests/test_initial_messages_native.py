@@ -19,8 +19,7 @@ def messages(snapshot):
     return [
         item
         for item in snapshot.items
-        if item.get("type") == "message"
-        and item.get("role") in {"user", "assistant"}
+        if item.get("type") == "message" and item.get("role") in {"user", "assistant"}
     ]
 
 
@@ -163,9 +162,9 @@ async def test_initial_messages_inline_image_uses_canonical_preparation(response
             assert seed["content"][0] == {"type": "input_text", "text": "before-image"}
             assert seed["content"][2] == {"type": "input_text", "text": "after-image"}
             assert seed["content"][1]["type"] == "input_image"
-            # Existing Core normalization retains high detail in canonical history.
-            # The caller omitted detail, so comparing raw and accepted content fails.
-            assert seed["content"][1]["detail"] == "high"
+            # Detail-based preparation uses high processing quality internally,
+            # while retaining the caller's omitted detail in canonical content.
+            assert "detail" not in seed["content"][1]
             assert [turn async for turn in session.turns()] == []
             state = await session.save_state()
         async with agent.session(state=state) as restored:
@@ -246,4 +245,16 @@ async def test_initial_messages_empty_fresh_batch_creates_no_turn(responses):
         ) as session:
             assert messages(await session.model_context()) == []
             assert [turn async for turn in session.turns()] == []
+        assert responses.requests == []
+
+
+async def test_initial_file_retains_an_explicit_empty_filename(responses):
+    content = {"type": "input_file", "file_id": "opaque-seed-file", "filename": ""}
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-seeds") as provider:
+        agent = Agent(instructions="Keep the file.", model="gpt-5.5", provider=provider)
+        async with agent.session(
+            initial_messages=[{"role": "user", "content": [content]}]
+        ) as session:
+            [seed] = messages(await session.model_context())
+            assert seed["content"] == [content]
         assert responses.requests == []

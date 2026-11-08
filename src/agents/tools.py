@@ -22,6 +22,7 @@ from _agents_codex.tools import (
     FileSearchHybridRanking as FileSearchHybridRanking,
     FileSearchRanking as FileSearchRanking,
     FunctionCallResponse as FunctionCallResponse,
+    ImageDetail as ImageDetail,
     ImageGeneration as ImageGeneration,
     ImageGenerationMask as ImageGenerationMask,
     ImageGenerationSvg as ImageGenerationSvg,

@@ -100,10 +100,7 @@ impl Batch {
                                     "initial media requires a nonempty source"
                                 );
                                 if let Some(name) = object.get("filename") {
-                                    ensure!(
-                                        name.as_str().is_some_and(|text| !text.is_empty()),
-                                        "initial filename must be nonempty text"
-                                    );
+                                    ensure!(name.is_string(), "initial filename must be text");
                                 }
                                 if let Some(detail) = object.get("detail") {
                                     ensure!(
