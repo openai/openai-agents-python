@@ -34,7 +34,11 @@ from tests.test_native_agent import provider
 from tests.test_native_child_agents import agent_for, child_peer, handles, trust
 from tests.test_native_executor_tools import declaration
 from tests.test_native_manual_tools import LookupArgs, next_request
-from tests.test_native_mcp_configuration_values import _SECRET, assert_private_frames
+from tests.test_native_mcp_configuration_values import (
+    _SECRET,
+    FrozenApplicationError,
+    assert_private_frames,
+)
 from tests.test_native_mcp_tools import Peer, mcp_call
 from tests.test_native_scoped_policies import AskingPeer, selected
 from tests.test_native_user_verification import Enrollment, VerificationPeer, select
@@ -206,8 +210,9 @@ async def test_verification_expired_owner_still_protects_captured_registration(
     assert registration.headers == {"X-Token": _SECRET}
 
 
+@pytest.mark.parametrize("error_type", [binascii.Error, FrozenApplicationError])
 async def test_real_verification_decoder_failure_keeps_registration_private(
-    tmp_path, monkeypatch, responses: ResponsesFixture
+    tmp_path, monkeypatch, responses: ResponsesFixture, error_type: type[Exception]
 ) -> None:
     peer = VerificationPeer(Enrollment(tmp_path))
     async with timeout(25), peer.serve() as url, provider(responses) as client:
@@ -225,18 +230,20 @@ async def test_real_verification_decoder_failure_keeps_registration_private(
             assert isinstance(request, VerificationRequest)
             assert request._registration is registration
             assert request.challenge == peer.challenge
-            failure = binascii.Error("synthetic decoder failure")
+            failure = error_type("synthetic decoder failure")
+            cause = ValueError("synthetic decoder cause")
 
             def fail_decode(value):
-                raise failure
+                raise failure from cause
 
             # This is decoder fault injection on a valid, genuinely issued
             # request; it does not claim malformed wire values reach Python.
             with monkeypatch.context() as patch:
                 patch.setattr(manual_module.base64, "urlsafe_b64decode", fail_decode)
-                with pytest.raises(binascii.Error, match="synthetic decoder failure") as caught:
+                with pytest.raises(error_type, match="synthetic decoder failure") as caught:
                     _ = request.challenge
             assert caught.value is failure
+            assert failure.__cause__ is cause
             private(caught.value)
             await request.decline()
             assert (await turn.get_result()).final_output == "done"

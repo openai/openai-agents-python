@@ -7,7 +7,8 @@ import copy
 import json
 import operator
 import pickle
-from dataclasses import FrozenInstanceError, asdict, fields, is_dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import FrozenInstanceError, asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,31 @@ from tests.test_native_agent import provider
 from tests.test_native_mcp_tools import Peer, mcp_call
 
 _SECRET = "synthetic-mcp-credential-for-traceback-tests"
+
+
+@dataclass(frozen=True)
+class FrozenApplicationError(RuntimeError):
+    message: str
+
+
+def test_configuration_preserves_a_frozen_application_exception() -> None:
+    failure = FrozenApplicationError("application mapping failed")
+
+    class FailingHeaders(Mapping[str, str]):
+        def __getitem__(self, key: str) -> str:
+            return _SECRET
+
+        def __iter__(self) -> Iterator[str]:
+            raise failure
+
+        def __len__(self) -> int:
+            return 1
+
+    with pytest.raises(FrozenApplicationError) as captured:
+        HttpMCP(name="remote", url="https://example.invalid", tools=[], headers=FailingHeaders())
+    assert captured.value is failure
+    assert failure.message == "application mapping failed"
+    assert_private_frames(failure)
 
 
 def assert_private_frames(
