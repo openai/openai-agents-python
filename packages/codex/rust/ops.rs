@@ -15,7 +15,7 @@ use codex_protocol::mcp::RequestId;
 use codex_protocol::mcp_approval_meta::{PERSIST_ALWAYS, PERSIST_KEY, PERSIST_SESSION};
 use codex_protocol::models::{
     ActivePermissionProfile, PermissionProfile, PermissionProfileSnapshot, ProfileWorkspaceRoot,
-    ResponseItem,
+    ContentItem, ResponseItem,
 };
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::*;
@@ -70,6 +70,22 @@ pub const OPERATIONS: &[&str] = &[
     "realtime_conversation_speech",
     "realtime_conversation_close",
     "realtime_conversation_list_voices",
+    "realtime_tool_selection_sdk",
+    "realtime_conversation_start_sdk",
+    "realtime_conversation_prepare_sdk",
+    "realtime_conversation_activate_sdk",
+    "realtime_conversation_update_sdk",
+    "realtime_conversation_audio_sdk",
+    "realtime_conversation_audio_commit_sdk",
+    "realtime_conversation_input_sdk",
+    "realtime_conversation_response_sdk",
+    "realtime_conversation_delete_item_sdk",
+    "realtime_conversation_text_sdk",
+    "realtime_conversation_complete_sdk",
+    "realtime_conversation_fail_sdk",
+    "realtime_conversation_interrupt_sdk",
+    "realtime_conversation_close_sdk",
+    "realtime_conversation_hosted_mcp_approval_sdk",
     "turn_input",
     "recover_turn",
     "suspend_turn_and_shutdown",
@@ -416,6 +432,7 @@ impl Default for Mode {
 
 params!(TurnParams {
     input: Value,
+    operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     observation_submission_id: Option<String>,
     client_id: Option<String>,
     #[serde(default, alias = "settings", with = "ThreadSettings")]
@@ -531,6 +548,92 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
     Ok(result)
 }
 
+params!(RealtimeToolSubmission {
+    generation: String,
+    response_id: String,
+    #[serde(default)]
+    expected_root_turn_id: Option<String>,
+    call_ids: Vec<String>,
+    observation_submission_id: Option<String>,
+    #[serde(default, with = "ThreadSettings")]
+    thread_settings: ThreadSettingsOverrides,
+    trace: Option<W3cTraceContext>
+});
+
+pub(crate) async fn submit_realtime_tools(
+    state: &crate::engine::ThreadState,
+    mut value: Value,
+) -> Result<Value> {
+    codex_otel::sdk_trace::prepare_submission(&mut value).map_err(anyhow::Error::msg)?;
+    let p: RealtimeToolSubmission = decode(value)?;
+    ensure!(
+        p.thread_settings.effort != Some(Some(ReasoningEffort::Persistent))
+            && !p
+                .thread_settings
+                .collaboration_mode
+                .as_ref()
+                .is_some_and(|mode| mode.reasoning_effort() == Some(ReasoningEffort::Persistent)),
+        "Realtime tool calls do not support persistent execution"
+    );
+    let mut mutation = Some(state.mutations.lock().await);
+    let tools = state
+        .thread
+        .thread_extension_data()
+        .get::<crate::python_tools::PythonTools>()
+        .context("Realtime tool submission requires a managed tool session")?;
+    if let Some(expected_root_turn_id) = p.expected_root_turn_id {
+        // Attachment owns work on the existing root. It must not reopen the
+        // graph or seed a replacement turn/admission receipt.
+        let result = state
+            .thread
+            .attach_realtime_tools_if_owned(
+                p.generation,
+                p.response_id,
+                p.call_ids,
+                expected_root_turn_id.clone(),
+                p.trace,
+            )
+            .await?;
+        return realtime_attachment(result, &expected_root_turn_id);
+    }
+    tools.resume_graph(&state.engine.manager).await?;
+    let mut init = state.thread.config_snapshot().await.turn_extension_init;
+    if let Some(submission) = p.observation_submission_id {
+        state
+            .request_metadata
+            .seed(&mut init, submission, state.id.to_string());
+    }
+    Ok(idle_submission(
+        crate::turn_settlement::start_realtime(
+            state,
+            &mut mutation,
+            p.generation,
+            p.response_id,
+            p.call_ids,
+            p.thread_settings,
+            p.trace,
+            init,
+        )
+        .await?,
+    ))
+}
+
+fn realtime_attachment(result: TurnInputSubmission, expected_root_turn_id: &str) -> Result<Value> {
+    match result {
+        TurnInputSubmission::Steered { turn_id } => {
+            anyhow::ensure!(
+                turn_id == expected_root_turn_id,
+                "Realtime attachment root changed"
+            );
+            Ok(json!({"status":"attached","root_turn_id":turn_id}))
+        }
+        TurnInputSubmission::NotSubmitted { reason } => Ok(rejection(reason)),
+        TurnInputSubmission::Started { .. } => {
+            bail!("Realtime attachment created an unexpected root")
+        }
+    }
+}
+
 async fn prepare_write_selection(
     state: &crate::engine::ThreadState,
     roots: Vec<PathUri>,
@@ -609,6 +712,7 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
     trace: Option<W3cTraceContext>,
     observation_submission_id: Option<String>,
     #[serde(default)]
@@ -629,6 +733,9 @@ pub async fn recover_prepared(
             .request_metadata
             .seed(&mut init, submission, state.id.to_string());
     }
+    init.insert(crate::agent_profiles::OperationDeclarationSource(
+        p.operation_declaration_source,
+    ));
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
     let seed = crate::turn_settlement::Seed::attach(&mut init);
     let submission = thread
@@ -676,6 +783,22 @@ async fn start_with_params<'a>(
             .seed(&mut init, submission, state.id.to_string());
         Some(init)
     } else {
+        turn_init
+    };
+    let turn_init = if managed.is_some() {
+        let mut init = match turn_init {
+            Some(init) => init,
+            None => thread.config_snapshot().await.turn_extension_init,
+        };
+        init.insert(crate::agent_profiles::OperationDeclarationSource(
+            p.operation_declaration_source,
+        ));
+        Some(init)
+    } else {
+        ensure!(
+            p.operation_declaration_source.is_none(),
+            "Operation declaration provenance requires a managed Session"
+        );
         turn_init
     };
     let input = if p.input.is_array() {
@@ -1293,6 +1416,186 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .await?;
             return Ok(Value::Null);
         }
+        "realtime_tool_selection_sdk" => {
+            let tools = thread
+                .thread_extension_data()
+                .get::<crate::python_tools::PythonTools>()
+                .context("Realtime tool selection requires a managed Session")?;
+            return tools.realtime_selection_snapshot(thread).await;
+        }
+        "realtime_conversation_start_sdk" => {
+            let p: RealtimeSdkStart = decode(params)?;
+            let function_tools = realtime_function_tools(p.function_tools);
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationStartSdk {
+                    generation: p.generation,
+                    params: p.params.into(),
+                    settings: p.settings,
+                    function_tools,
+                    expected_selection_id: p.expected_selection_id,
+                    hosted_mcp_auto_response: p.hosted_mcp_auto_response,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_prepare_sdk" => {
+            let p: RealtimeSdkStart = decode(params)?;
+            let function_tools = realtime_function_tools(p.function_tools);
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationPrepareSdk {
+                    generation: p.generation,
+                    params: p.params.into(),
+                    settings: p.settings,
+                    function_tools,
+                    expected_selection_id: p.expected_selection_id,
+                    hosted_mcp_auto_response: p.hosted_mcp_auto_response,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_activate_sdk" => {
+            let p: RealtimeSdkActivate = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationActivateSdk {
+                    generation: p.generation,
+                    api_key: p.api_key.map(RealtimeConversationApiKey::new),
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_interrupt_sdk" => {
+            let p: RealtimeSdkInterrupt = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationInterruptSdk {
+                    generation: p.generation,
+                    response_id: p.response_id,
+                    playback: p.playback,
+                    feedback: p.feedback,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_update_sdk"
+        | "realtime_conversation_audio_sdk"
+        | "realtime_conversation_audio_commit_sdk"
+        | "realtime_conversation_input_sdk"
+        | "realtime_conversation_response_sdk"
+        | "realtime_conversation_delete_item_sdk"
+        | "realtime_conversation_text_sdk"
+        | "realtime_conversation_complete_sdk"
+        | "realtime_conversation_fail_sdk"
+        | "realtime_conversation_hosted_mcp_approval_sdk"
+        | "realtime_conversation_close_sdk" => {
+            let (reply, result) = oneshot::channel();
+            let operation = match operation {
+                "realtime_conversation_hosted_mcp_approval_sdk" => {
+                    let p: RealtimeSdkHostedMcpApproval = decode(params)?;
+                    Op::RealtimeConversationHostedMcpApprovalSdk {
+                        generation: p.generation,
+                        approval_id: p.approval_id,
+                        approve: p.approve,
+                        reason: p.reason,
+                        reply,
+                    }
+                }
+                "realtime_conversation_update_sdk" => {
+                    let p: RealtimeSdkUpdate = decode(params)?;
+                    Op::RealtimeConversationUpdateSdk {
+                        generation: p.generation,
+                        update: p.update,
+                        profile: p.profile.map(Into::into),
+                        reply,
+                    }
+                }
+                "realtime_conversation_delete_item_sdk" => {
+                    let p: RealtimeSdkDeleteItem = decode(params)?;
+                    Op::RealtimeConversationDeleteItemSdk {
+                        generation: p.generation,
+                        item_id: p.item_id,
+                        reply,
+                    }
+                }
+                "realtime_conversation_response_sdk" => {
+                    let p: RealtimeSdkGeneration = decode(params)?;
+                    Op::RealtimeConversationResponseSdk {
+                        generation: p.generation,
+                        reply,
+                    }
+                }
+                "realtime_conversation_input_sdk" => {
+                    let p: RealtimeSdkInput = decode(params)?;
+                    Op::RealtimeConversationInputSdk {
+                        generation: p.generation,
+                        params: ConversationInputParams {
+                            content: p.content,
+                            trigger_response: p.trigger_response,
+                        },
+                        reply,
+                    }
+                }
+                "realtime_conversation_audio_commit_sdk" => {
+                    let p: RealtimeSdkGeneration = decode(params)?;
+                    Op::RealtimeConversationAudioCommitSdk {
+                        generation: p.generation,
+                        reply,
+                    }
+                }
+                "realtime_conversation_audio_sdk" => {
+                    let p: RealtimeSdkAudio = decode(params)?;
+                    Op::RealtimeConversationAudioSdk {
+                        generation: p.generation,
+                        params: ConversationAudioParams { frame: p.frame },
+                        reply,
+                    }
+                }
+                "realtime_conversation_text_sdk" => {
+                    let p: RealtimeSdkText = decode(params)?;
+                    Op::RealtimeConversationTextSdk {
+                        generation: p.generation,
+                        params: ConversationTextParams {
+                            text: p.text,
+                            role: p.role,
+                        },
+                        reply,
+                    }
+                }
+                "realtime_conversation_complete_sdk" => {
+                    let p: RealtimeSdkComplete = decode(params)?;
+                    Op::RealtimeConversationCompleteSdk {
+                        generation: p.generation,
+                        handoff_id: p.handoff_id,
+                        text: p.text,
+                        reply,
+                    }
+                }
+                "realtime_conversation_fail_sdk" => {
+                    let p: RealtimeSdkHandoff = decode(params)?;
+                    Op::RealtimeConversationFailSdk {
+                        generation: p.generation,
+                        handoff_id: p.handoff_id,
+                        reply,
+                    }
+                }
+                _ => {
+                    let p: RealtimeSdkGeneration = decode(params)?;
+                    Op::RealtimeConversationCloseSdk {
+                        generation: p.generation,
+                        reply,
+                    }
+                }
+            };
+            thread.submit(operation).await?;
+            result.await??;
+            return Ok(Value::Null);
+        }
         "realtime_conversation_start" => {
             Op::RealtimeConversationStart(decode::<RealtimeStart>(params)?.into())
         }
@@ -1348,6 +1651,145 @@ async fn submit(thread: &CodexThread, op: Op) -> Result<Value> {
 
 params!(RealtimeAudio {
     frame: RealtimeAudioFrame
+});
+params!(RealtimeSdkGeneration { generation: String });
+fn realtime_auto_response_default() -> bool {
+    true
+}
+params!(RealtimeSdkHostedMcpApproval {
+    generation: String,
+    approval_id: String,
+    approve: bool,
+    #[serde(default)]
+    reason: Option<String>
+});
+params!(RealtimeSdkStart {
+    generation: String,
+    params: RealtimeStart,
+    #[serde(default)]
+    settings: Option<codex_protocol::realtime_settings::RealtimeV2SessionSettings>,
+    #[serde(default)]
+    function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
+    #[serde(default)]
+    expected_selection_id: Option<String>,
+    #[serde(default = "realtime_auto_response_default")]
+    hosted_mcp_auto_response: bool
+});
+pub(crate) async fn prepare_realtime(
+    thread: &CodexThread,
+    params: Value,
+    adapter: Option<std::sync::Arc<dyn codex_api::RealtimeAdapter>>,
+) -> Result<Value> {
+    let p: RealtimeSdkStart = decode(params)?;
+    let mut init = ExtensionDataInit::new();
+    if let Some(adapter) = adapter {
+        init.insert(adapter);
+    }
+    let (reply, result) = oneshot::channel();
+    thread
+        .submit(WithTurnExtensionData::new(
+            Op::RealtimeConversationPrepareSdk {
+                generation: p.generation,
+                params: p.params.into(),
+                settings: p.settings,
+                function_tools: realtime_function_tools(p.function_tools),
+                expected_selection_id: p.expected_selection_id,
+                hosted_mcp_auto_response: p.hosted_mcp_auto_response,
+                reply,
+            },
+            init,
+        ))
+        .await?;
+    Ok(serde_json::to_value(result.await??)?)
+}
+params!(RealtimeSdkActivate {
+    generation: String,
+    api_key: Option<String>
+});
+params!(RealtimeSdkUpdate {
+    generation: String,
+    update: codex_protocol::realtime_settings::RealtimeSessionUpdate,
+    #[serde(default)]
+    profile: Option<RealtimeSdkProfileUpdate>
+});
+params!(RealtimeSdkProfileUpdate {
+    #[serde(default)]
+    response_id: Option<String>,
+    #[serde(default)]
+    delegation_id: Option<String>,
+    #[serde(default)]
+    target: Option<codex_protocol::agent_profile::AgentProfileReceipt>,
+    #[serde(default)]
+    function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
+    #[serde(default)]
+    expected_selection_id: Option<String>
+});
+impl From<RealtimeSdkProfileUpdate>
+    for codex_protocol::realtime_settings::RealtimeToolProfileUpdate
+{
+    fn from(value: RealtimeSdkProfileUpdate) -> Self {
+        Self {
+            response_id: value.response_id,
+            delegation_id: value.delegation_id,
+            target: value.target,
+            function_tools: realtime_function_tools(value.function_tools),
+            expected_selection_id: value.expected_selection_id,
+        }
+    }
+}
+
+fn realtime_function_tools(
+    definitions: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
+) -> Option<Vec<codex_protocol::realtime_settings::RealtimeFunctionTool>> {
+    definitions.map(|definitions| {
+        definitions
+            .into_iter()
+            .map(|definition| {
+                codex_protocol::realtime_settings::RealtimeFunctionTool {
+                    name: definition.name,
+                    description: Some(definition.description),
+                    parameters: definition.input_schema,
+                    // The captured source owns the actual provider strictness.
+                    strict: None,
+                }
+            })
+            .collect()
+    })
+}
+params!(RealtimeSdkAudio {
+    generation: String,
+    frame: RealtimeAudioFrame
+});
+params!(RealtimeSdkDeleteItem {
+    generation: String,
+    item_id: String
+});
+params!(RealtimeSdkInput {
+    generation: String,
+    content: Vec<ContentItem>,
+    #[serde(default = "realtime_auto_response_default")]
+    trigger_response: bool
+});
+params!(RealtimeSdkText {
+    generation: String,
+    text: String,
+    #[serde(default)]
+    role: ConversationTextRole
+});
+params!(RealtimeSdkComplete {
+    generation: String,
+    handoff_id: String,
+    text: String
+});
+params!(RealtimeSdkHandoff {
+    generation: String,
+    handoff_id: String
+});
+params!(RealtimeSdkInterrupt {
+    generation: String,
+    response_id: Option<String>,
+    playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+    feedback: Option<String>
 });
 params!(RealtimeSpeech { text: String });
 params!(RealtimeText {

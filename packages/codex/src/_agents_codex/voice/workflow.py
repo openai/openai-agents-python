@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .._function_tools import Tool
 from .._public import preserve_module_identity as _preserve_module_identity
 from ..session import Session
+from ..tools import ToolRef
 from ..turn import Turn
 
 
@@ -41,10 +43,19 @@ class NativeSessionVoiceWorkflow:
     an already busy Session follows its normal rejection policy. Close a run
     iterator explicitly when stopping early, for example with contextlib.aclosing.
     Closing or cancelling a run stops and joins only its own native turn.
+
+    Omit tools to use the Session's current defaults for each run. An explicit
+    sequence is captured at construction and limits each submitted turn; an
+    empty sequence excludes all tools. Runs use the current acknowledged
+    replacements for selected opening tools. An active profile that does not
+    admit the selection causes submission to fail.
     """
 
-    def __init__(self, session: Session[Any, Any]) -> None:
+    def __init__(
+        self, session: Session[Any, Any], *, tools: Sequence[Tool[Any] | ToolRef] | None = None
+    ) -> None:
         self._session = session
+        self._tools = tuple(tools) if tools is not None else None
         self._invocation: _Invocation | None = None
 
     async def on_start(self) -> AsyncGenerator[str, None]:
@@ -61,7 +72,13 @@ class NativeSessionVoiceWorkflow:
 
         # Reserve before awaiting admission. A passive wait retains the exact Turn if
         # cancellation races with submit returning its locally issued handle.
-        invocation = _Invocation(asyncio.create_task(self._session.submit(transcription)))
+        invocation = _Invocation(
+            asyncio.create_task(
+                self._session.submit(transcription)
+                if self._tools is None
+                else self._session.submit(transcription, tools=self._tools)
+            )
+        )
         self._invocation = invocation
         completed = False
         primary_error: BaseException | None = None

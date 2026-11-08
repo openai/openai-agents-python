@@ -27,7 +27,8 @@ struct Ticket {
     receipt: Arc<TurnAdmission>,
     original: Arc<dyn ModelToolAdmission>,
     operation: u64,
-    generation: u64,
+    generation: Arc<Generation>,
+    profile: Option<codex_extension_api::AgentProfileReceipt>,
 }
 
 impl std::fmt::Debug for Ticket {
@@ -43,7 +44,7 @@ impl Ticket {
             && !state.retired
             && state.operation == self.operation
             && self.tools.instance.is_none()
-            && self.tools.snapshot().id == self.generation
+            && self.tools.admits_generation(&self.generation)
             && self.receipt.prepared_operation == Some(self.operation)
             && self.receipt.is_current()
             && self
@@ -189,7 +190,12 @@ impl ModelRequestContributor for Contributor {
             let thread = input.admission.thread_id().to_owned();
             // Receipt identity comes from Core's retained store, never Python IDs.
             let ticket = Arc::new(Ticket {
-                generation: tools.snapshot().id,
+                generation: tools
+                    .generation_for_step(input.admission.step_store())
+                    .map_err(|_| FAILURE)?,
+                profile: tools
+                    .source_profile(input.admission.step_store())
+                    .map_err(|_| FAILURE)?,
                 tools: tools.clone(),
                 receipt: receipt.clone(),
                 original: input.admission,
@@ -231,16 +237,21 @@ impl ModelRequestContributor for Contributor {
                 tools: tools.clone(),
                 id,
             };
+            let mut request = json!({
+                "id": receipt.turn_id,
+                "msg": {"type":"_sdk_prepare_request", "turn_id":receipt.turn_id,
+                    "thread":thread, "instance":tools.instance, "request_id":id,
+                    "generation":ticket.generation.id, "recovery_attempt":input.recovery_attempt,
+                    "data":input.data}
+            });
+            if let Some(profile) = &ticket.profile {
+                request["msg"]["profile_id"] = json!(profile.profile_id);
+                request["msg"]["profile_epoch"] = json!(profile.epoch);
+            }
             tools
                 .family
                 .requests
-                .send(QueuedRequest::Prepared(json!({
-                    "id": receipt.turn_id,
-                    "msg": {"type":"_sdk_prepare_request", "turn_id":receipt.turn_id,
-                        "thread":thread, "instance":tools.instance, "request_id":id,
-                        "generation":ticket.generation, "recovery_attempt":input.recovery_attempt,
-                        "data":input.data}
-                })))
+                .send(QueuedRequest::Prepared(request))
                 .map_err(|_| FAILURE)?;
             let mut status = receipt.state.subscribe();
             let data = tokio::select! {

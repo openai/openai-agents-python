@@ -557,6 +557,12 @@ impl EngineState {
             && options.permits_initial_config())
         .then_some(&self.service_config);
         let manual_slots = std::mem::take(&mut options.manual_tool_slots);
+        let agent_profiles = options.agent_profiles.take();
+        let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
+        ensure!(
+            agent_profiles.is_none() || python_specs.is_some(),
+            "Agent profiles require managed tools"
+        );
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
@@ -598,6 +604,9 @@ impl EngineState {
         }
         if let Some(history) = history {
             startup.initial_history = history;
+        }
+        if let Some(profiles) = agent_profiles {
+            crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
         }
         if let Some(specs) = python_specs {
             ensure!(
@@ -794,7 +803,7 @@ impl EngineState {
     pub(crate) async fn rebuild_local(
         self: &Arc<Self>,
         state: &Arc<ThreadState>,
-        options: options::ThreadOptions,
+        mut options: options::ThreadOptions,
         specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         expected: Vec<codex_history::RolloutItem>,
         prepared: Vec<codex_history::RolloutItem>,
@@ -808,6 +817,8 @@ impl EngineState {
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
+        let agent_profiles = options.agent_profiles.take();
+        let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let receipt = receipt.into();
         // Compaction holds the source context lease through this handoff.
@@ -828,6 +839,9 @@ impl EngineState {
             None
         };
         startup.initial_history = self.history(&state.id.to_string()).await?;
+        if let Some(profiles) = agent_profiles {
+            crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
+        }
         crate::python_tools::PythonTools::install(
             &mut startup,
             specs,
@@ -988,13 +1002,19 @@ impl EngineState {
         id_or_path: &str,
         nth_user_message: Option<usize>,
         boundary: ForkSelection,
-        options: options::ThreadOptions,
+        mut options: options::ThreadOptions,
         python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let transform_context = options.transform_context;
         let before_compact = options.before_compact;
         let before_complete = options.before_complete;
+        let agent_profiles = options.agent_profiles.take();
+        let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
+        ensure!(
+            agent_profiles.is_none() || python_specs.is_some(),
+            "Agent profiles require managed tools"
+        );
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
@@ -1107,6 +1127,9 @@ impl EngineState {
             // The native fork will select its own boundary. Install against
             // that source's fixed header, not a fresh startup's empty history.
             startup.initial_history = history.clone();
+            if let Some(profiles) = agent_profiles {
+                crate::agent_profiles::install_opening(&mut startup, profiles, profile_files)?;
+            }
             crate::python_tools::PythonTools::install(
                 &mut startup,
                 specs,
@@ -1608,6 +1631,11 @@ async fn read_child(children: &mut VecDeque<(ThreadId, ChildReader)>) -> (ChildE
     ((id, reader.instance, reader.incarnation.clone()), event)
 }
 
+fn retired_realtime_output(event: &Event) -> bool {
+    matches!(&event.msg, EventMsg::RealtimeConversationRealtime(realtime)
+        if realtime.payload.is_output_retired())
+}
+
 fn native_event(
     source: Option<(ThreadId, u64)>,
     mut event: Event,
@@ -1624,6 +1652,16 @@ fn native_event(
         event.msg = retained;
     }
     let mut value = serde_json::to_value(&event)?;
+    if session_reader
+        && let EventMsg::RealtimeConversationRealtime(realtime) = &event.msg
+        && let codex_protocol::protocol::RealtimeEvent::HandoffRequested(handoff) =
+            &realtime.payload
+    {
+        // Use Core's own task and transcript rendering for SDK-owned admission.
+        // Keep the provider event intact for ordinary observations.
+        value["msg"]["_sdk_native_input"] =
+            serde_json::json!(codex_core::prepare_realtime_delegation_input(handoff));
+    }
     if project_integrity_reason {
         match &event.msg {
             EventMsg::Error(error) => {
@@ -1899,6 +1937,9 @@ impl ThreadState {
                 return graph_event(event);
             }
             if let Some((source, event)) = events.pending.pop_front() {
+                if retired_realtime_output(&event) {
+                    continue;
+                }
                 return self.child_event(source, event, admission_ready).await;
             }
             let event = if let Some((_, remaining)) = &mut events.root_step_prefix {
@@ -1943,7 +1984,10 @@ impl ThreadState {
                         return Ok(request);
                     },
                     event = async { native.as_mut().expect("guarded native reader").await }, if native.is_some() => event,
-                    (source, event) = read_child(children) => return self.child_event(source, event, admission_ready).await,
+                    (source, event) = read_child(children) => {
+                        if retired_realtime_output(&event) { continue; }
+                        return self.child_event(source, event, admission_ready).await;
+                    },
                     Some(event) = graph.recv() => {
                         self.discover_children(&mut events).await?;
                         return graph_event(event);
@@ -1959,6 +2003,7 @@ impl ThreadState {
                     }
                     event = extensions.recv() => {
                         let (target, event) = event?;
+                    if retired_realtime_output(&event) { continue; }
                         if target.is_empty() || target == self.id.to_string() {
                             return native_event(None, event, admission_ready, false);
                         }
@@ -1977,6 +2022,9 @@ impl ThreadState {
             };
             events.native = Some(next_native_event(self.thread.clone()));
             let event = event?;
+            if retired_realtime_output(&event) {
+                continue;
+            }
             if admission_ready && let EventMsg::TurnComplete(done) = &event.msg {
                 ensure!(
                     done.turn_id == event.id,

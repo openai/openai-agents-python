@@ -59,6 +59,8 @@ pub struct ThreadOptions {
     sdk_history: Option<Vec<ResponseItem>>,
     #[serde(rename = "_application_instructions")]
     pub(crate) application_instructions: Option<String>,
+    #[serde(rename = "_agent_profiles")]
+    pub(crate) agent_profiles: Option<crate::agent_profiles::OpeningProfiles>,
     #[serde(rename = "_sdk_instruction_files")]
     pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]

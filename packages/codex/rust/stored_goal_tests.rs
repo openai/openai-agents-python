@@ -12,6 +12,7 @@ use std::time::Duration;
 
 fn thread_params(id: ThreadId) -> CreateThreadParams {
     CreateThreadParams {
+        sdk_mcp_source_required: false,
         creator_user_id: None,
         creator_account_id: None,
         session_id: id.into(),

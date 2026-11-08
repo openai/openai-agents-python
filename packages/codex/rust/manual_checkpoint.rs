@@ -1,7 +1,7 @@
 //! Portable manual boundaries. Core remains the only model and history owner.
 
 use anyhow::{Context, Result, ensure};
-use codex_history::RolloutItem;
+use codex_history::{ResponseItemEnvelope, RolloutItem};
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::{
     ThreadId,
@@ -43,14 +43,230 @@ pub(crate) struct Frame {
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
-    pub accepted: HashMap<String, ResponseItem>,
+    pub accepted: HashMap<String, ResponseItemEnvelope>,
     pub seen: HashSet<String>,
     pub state: Value,
-    pub receivers: Vec<oneshot::Receiver<DynamicToolResponse>>,
+    pub receivers: Vec<oneshot::Receiver<crate::python_tools::ToolReply>>,
     pub sealed: bool,
+    pub profile_source: Option<codex_extension_api::AgentProfileReceipt>,
+    handoffs: Vec<(
+        codex_tools::ToolName,
+        codex_protocol::agent_profile::AgentProfileHandoff,
+    )>,
+}
+
+/// Recover source identity from accepted history, never a runtime allocation ID.
+pub(crate) fn validate_for_opening(
+    state: &Value,
+    instructions: &str,
+    specs: &[DynamicToolSpec],
+    manual_slots: &[usize],
+    opening: Option<&crate::agent_profiles::OpeningProfiles>,
+) -> Result<Frame> {
+    let Some(opening) = opening else {
+        let frame = validate(state, instructions, specs, manual_slots)?;
+        ensure!(
+            frame.handoffs.is_empty(),
+            "Restored handoff requires declared Agent graph"
+        );
+        return Ok(frame);
+    };
+    let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
+    let pending = state["native_continuation"]["pending_manual"]
+        .as_array()
+        .context("Missing pending manual calls")?;
+    let ids = pending
+        .iter()
+        .map(|item| {
+            item["call_id"]
+                .as_str()
+                .context("Missing pending call identity")
+        })
+        .collect::<Result<HashSet<_>>>()?;
+    ensure!(
+        !ids.is_empty() && ids.len() == pending.len(),
+        "Invalid pending call identities"
+    );
+    let mut current = None;
+    let mut source = None;
+    let mut found = HashSet::new();
+    let turn = state["native_continuation"]["turn_id"]
+        .as_str()
+        .context("Missing manual turn")?;
+    let mut in_turn = false;
+    let mut call_sources = HashMap::new();
+    let mut result_indices = HashMap::new();
+    let mut transitions = Vec::new();
+    for (index, item) in history.iter().enumerate() {
+        if let RolloutItem::EventMsg(EventMsg::TurnStarted(start)) = item {
+            in_turn = start.turn_id == turn;
+        }
+        let RolloutItem::ResponseItem(envelope) = item else {
+            continue;
+        };
+        if let Some(metadata) = &envelope.metadata
+            && let Some(profile) = &metadata.sdk_agent_profile
+        {
+            let receipt = crate::agent_profiles::profile_receipt(profile)?;
+            let graph = metadata
+                .sdk_agent_graph
+                .as_deref()
+                .context("Captured Agent history has no declaration graph")?;
+            transitions.push((index, receipt.clone(), graph));
+            current = Some((receipt, graph));
+        }
+        if !in_turn {
+            continue;
+        }
+        if let Some(handoff) = envelope
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.sdk_agent_handoff.as_ref())
+        {
+            ensure!(
+                result_indices
+                    .insert(handoff.call_id.clone(), index)
+                    .is_none(),
+                "Repeated canonical handoff result"
+            );
+        }
+        if let ResponseItem::FunctionCall { call_id, .. } = &envelope.item {
+            if let Some((receipt, graph)) = &current {
+                ensure!(
+                    call_sources
+                        .insert(call_id.clone(), (receipt.clone(), (*graph).to_owned()))
+                        .is_none(),
+                    "Repeated call source in manual history"
+                );
+            }
+        }
+        if let ResponseItem::FunctionCall { call_id, .. } = &envelope.item
+            && ids.contains(call_id.as_str())
+        {
+            ensure!(
+                found.insert(call_id.as_str()),
+                "Repeated pending call in history"
+            );
+            let (receipt, graph) = current
+                .as_ref()
+                .context("Pending call has no captured Agent source")?;
+            ensure!(
+                *graph == opening.fingerprint,
+                "Pending call belongs to a different Agent graph"
+            );
+            if let Some(previous) = &source {
+                ensure!(
+                    previous == receipt,
+                    "Pending calls have different Agent sources"
+                );
+            } else {
+                source = Some(receipt.clone());
+            }
+        }
+    }
+    ensure!(
+        found.len() == ids.len(),
+        "Pending source does not cover every call"
+    );
+    let source = source.context("Missing pending Agent source")?;
+    ensure!(
+        current
+            .as_ref()
+            .is_some_and(|(receipt, _)| receipt == &source),
+        "Pending calls differ from the active Agent source"
+    );
+    let accepted = crate::agent_profiles::validate_restored(opening, &history)?;
+    let (specs, manual_slots) = opening.restore_catalog(&history, &state["managed_tool_specs"])?;
+    let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots)?;
+    let mut target = None;
+    let mut pending_handoffs = Vec::new();
+    for (name, handoff) in frame.handoffs.drain(..) {
+        let (original, graph) = call_sources
+            .get(&handoff.call_id)
+            .context("Handoff has no original call source")?;
+        ensure!(
+            original == &handoff.source && graph == &opening.fingerprint,
+            "Handoff differs from its original call source or admitted graph"
+        );
+        opening.validate_restored_handoff(&name, &handoff)?;
+        // A canonical target receipt proves that this handoff already applied.
+        // Buffered sibling results have no later transition and stay pending.
+        if let Some(index) = result_indices.get(&handoff.call_id) {
+            if let Some((_, next, next_graph)) = transitions
+                .iter()
+                .find(|(next_index, _, _)| next_index > index)
+            {
+                ensure!(
+                    next.profile_id == handoff.target_profile_id
+                        && handoff.source.epoch.checked_add(1) == Some(next.epoch)
+                        && *next_graph == opening.fingerprint,
+                    "Handoff does not match its next accepted Agent transition"
+                );
+                continue;
+            }
+        }
+        ensure!(
+            handoff.source == source,
+            "Deferred handoff differs from pending source"
+        );
+        ensure!(
+            target
+                .as_ref()
+                .is_none_or(|previous| previous == &handoff.target_profile_id),
+            "Conflicting deferred Agent handoffs"
+        );
+        target = Some(handoff.target_profile_id.clone());
+        pending_handoffs.push((name, handoff));
+    }
+    frame.handoffs = pending_handoffs;
+    frame.profile_source = Some(source);
+    Ok(frame)
 }
 
 pub(crate) fn validate(
+    state: &Value,
+    instructions: &str,
+    specs: &[DynamicToolSpec],
+    manual_slots: &[usize],
+) -> Result<Frame> {
+    let history: Vec<RolloutItem> = serde_json::from_value(state["history"].clone())?;
+    crate::application_instructions::validate(&history, instructions)?;
+    validate_frame(state, instructions, specs, manual_slots)
+}
+
+// A canonical wrapper preserves accepted handoff metadata. Older snapshots stored
+// bare model items and remain readable without manufacturing that provenance.
+fn decode_accepted_replies(value: &Value) -> Result<HashMap<String, ResponseItemEnvelope>> {
+    value
+        .as_object()
+        .context("Invalid accepted continuation replies")?
+        .iter()
+        .map(|(call, value)| {
+            let envelope = if value["type"] == "response_item" {
+                let RolloutItem::ResponseItem(envelope) = serde_json::from_value(value.clone())?
+                else {
+                    anyhow::bail!("Accepted continuation reply is not a response item")
+                };
+                envelope
+            } else {
+                let item: ResponseItem = serde_json::from_value(value.clone())?;
+                item.into()
+            };
+            Ok((call.clone(), envelope))
+        })
+        .collect()
+}
+
+fn encode_accepted_replies(replies: &HashMap<String, ResponseItemEnvelope>) -> Result<Value> {
+    Ok(serde_json::to_value(
+        replies
+            .iter()
+            .map(|(call, envelope)| (call, RolloutItem::ResponseItem(envelope.clone())))
+            .collect::<HashMap<_, _>>(),
+    )?)
+}
+
+fn validate_frame(
     state: &Value,
     instructions: &str,
     specs: &[DynamicToolSpec],
@@ -103,8 +319,7 @@ pub(crate) fn validate(
         ordered.len() == order.len() && ordered.is_subset(&seen_calls),
         "Continuation receipt order does not match admitted calls"
     );
-    let accepted: HashMap<String, ResponseItem> =
-        serde_json::from_value(frame["accepted_replies"].clone())?;
+    let accepted = decode_accepted_replies(&frame["accepted_replies"])?;
     let pending = frame["pending_manual"]
         .as_array()
         .context("Invalid pending manual list")?;
@@ -117,7 +332,10 @@ pub(crate) fn validate(
         portable_manual_actions(&history),
         "Manual continuation contains nonportable native work"
     );
-    crate::application_instructions::validate(&history, instructions)?;
+    ensure!(
+        crate::application_instructions::latest(&history)?.text == instructions,
+        "Manual restore requires matching accepted instructions"
+    );
     let root: StoredThread = serde_json::from_value(state["root_metadata"].clone())?;
     let source_id: ThreadId = serde_json::from_value(state["source_session_id"].clone())?;
     let header = crate::checkpoint::validate_history(source_id, &history)?;
@@ -137,6 +355,7 @@ pub(crate) fn validate(
     let mut admitted_order = Vec::new();
     let mut results = HashSet::new();
     let mut last_started = None;
+    let mut handoffs = Vec::new();
     for line in &history {
         let raw = serde_json::to_value(line)?;
         if raw["type"] == "event_msg" && raw["payload"]["type"] == "task_started" {
@@ -144,6 +363,7 @@ pub(crate) fn validate(
             calls.clear();
             admitted_order.clear();
             results.clear();
+            handoffs.clear();
         }
         if raw["type"] == "event_msg"
             && matches!(
@@ -153,10 +373,32 @@ pub(crate) fn validate(
         {
             last_started = None;
         }
-        if let RolloutItem::ResponseItem(value) = line {
-            let value = value.item.clone();
+        if let RolloutItem::ResponseItem(envelope) = line {
+            let value = envelope.item.clone();
             let raw = serde_json::to_value(&value)?;
             if last_started.as_deref() == Some(&turn) {
+                if let Some(handoff) = envelope
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.sdk_agent_handoff.as_ref())
+                {
+                    ensure!(
+                        raw["type"] == "function_call_output" && raw["call_id"] == handoff.call_id,
+                        "Restored handoff is not attached to its canonical result"
+                    );
+                    let call = calls
+                        .get(&handoff.call_id)
+                        .context("Restored handoff has no original call")?;
+                    ensure!(
+                        call["type"] == "function_call",
+                        "Restored handoff requires a function call"
+                    );
+                    let name = call["name"]
+                        .as_str()
+                        .context("Restored handoff has no tool name")?;
+                    let namespace = call["namespace"].as_str().map(str::to_owned);
+                    handoffs.push((codex_tools::ToolName::new(namespace, name), handoff.clone()));
+                }
                 if matches!(
                     raw["type"].as_str(),
                     Some("function_call" | "custom_tool_call")
@@ -295,7 +537,7 @@ pub(crate) fn validate(
         "Pending manual requests differ from canonical receipt order"
     );
     for (call, receipt) in &accepted {
-        let raw = serde_json::to_value(receipt)?;
+        let raw = serde_json::to_value(&receipt.item)?;
         ensure!(
             ordered.contains(call)
                 && !pending_ids.contains(call)
@@ -304,8 +546,32 @@ pub(crate) fn validate(
                     .is_some_and(|original| receipt_matches(original, &raw)),
             "Accepted continuation result has wrong call identity or kind"
         );
+        if let Some(handoff) = receipt
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.sdk_agent_handoff.as_ref())
+        {
+            ensure!(
+                raw["type"] == "function_call_output" && raw["call_id"] == handoff.call_id,
+                "Restored handoff is not attached to its canonical result"
+            );
+            let original = calls
+                .get(call)
+                .context("Restored handoff has no original call")?;
+            ensure!(
+                original["type"] == "function_call",
+                "Restored handoff requires a function call"
+            );
+            let name = original["name"]
+                .as_str()
+                .context("Restored handoff has no tool name")?;
+            let namespace = original["namespace"].as_str().map(str::to_owned);
+            handoffs.push((codex_tools::ToolName::new(namespace, name), handoff.clone()));
+        }
     }
     Ok(Frame {
+        profile_source: None,
+        handoffs,
         turn,
         pending: admitted,
         order,
@@ -465,14 +731,16 @@ impl Frame {
         if !self.sealed && key.turn == self.turn && self.order.contains(&key.call) {
             self.accepted.insert(
                 key.call.clone(),
-                crate::python_tools::PythonOutput(value.clone()).receipt(key),
+                crate::python_tools::PythonOutput(value.clone())
+                    .receipt(key)
+                    .into(),
             );
         }
     }
 
     pub(crate) fn snapshot(&self) -> Result<Value> {
         let mut value = self.state.clone();
-        value["native_continuation"]["accepted_replies"] = serde_json::to_value(&self.accepted)?;
+        value["native_continuation"]["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
         value["native_continuation"]["pending_manual"]
             .as_array_mut()
             .context("Missing pending manual calls")?
@@ -491,11 +759,33 @@ impl Frame {
     }
 }
 
-pub(crate) fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
+pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Result<()> {
+    let expected_source = owner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?
+        .as_ref()
+        .context("No manual continuation")?
+        .profile_source
+        .clone();
+    let captured = if expected_source.is_some() {
+        Some(
+            thread
+                .thread
+                .captured_agent_profile()
+                .await?
+                .context("Manual continuation has no committed Agent source")?,
+        )
+    } else {
+        None
+    };
     let mut current = owner
         .lock()
         .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
     let frame = current.as_mut().context("No manual continuation")?;
+    ensure!(
+        frame.profile_source == expected_source,
+        "Manual continuation source changed"
+    );
     let history: Vec<RolloutItem> = serde_json::from_value(frame.state["history"].clone())?;
     // Validate before granting any restored request or binding its sender.
     if frame.state["root_code_mode"].is_null() {
@@ -531,13 +821,34 @@ pub(crate) fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Res
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let model = crate::checkpoint::managed_settings(&history, source_id)
         .map(|settings| settings.model.as_str());
-    for item in &frame.pending {
-        frame.receivers.push(tools.enqueue_manual_reentry(
-            &thread.id.to_string(),
+    for (name, handoff) in &frame.handoffs {
+        crate::agent_profiles::restore_handoff(
+            thread,
+            captured
+                .as_deref()
+                .context("Restored handoff has no captured Agent source")?,
             &frame.turn,
-            item,
-            model,
-        )?);
+            name,
+            handoff,
+        )?;
+    }
+    for item in &frame.pending {
+        frame
+            .receivers
+            .push(if let Some(source) = &frame.profile_source {
+                crate::agent_profiles::enqueue_manual_reentry(
+                    thread,
+                    source,
+                    captured
+                        .as_deref()
+                        .context("Missing captured manual source")?,
+                    &frame.turn,
+                    item,
+                    model,
+                )?
+            } else {
+                tools.enqueue_manual_reentry(&thread.id.to_string(), &frame.turn, item, model)?
+            });
     }
     tools.bind_manual_restore(Arc::downgrade(owner));
     Ok(())
@@ -548,6 +859,7 @@ pub(crate) async fn continue_if_ready(
     owner: &Owner,
     trace: Option<codex_protocol::protocol::W3cTraceContext>,
     observation_submission_id: Option<String>,
+    operation_declaration_source: Option<codex_extension_api::AgentProfileReceipt>,
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
@@ -573,13 +885,19 @@ pub(crate) async fn continue_if_ready(
         .iter()
         .map(|call| frame.accepted[call].clone())
         .collect();
-    thread.thread.inject_response_items(outputs).await?;
+    thread
+        .thread
+        .inject_response_item_envelopes(outputs)
+        .await?;
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
     };
     recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
+    if let Some(source) = operation_declaration_source {
+        recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
+    }
     let result = crate::ops::recover_prepared(
         thread,
         frame.turn,
@@ -766,6 +1084,11 @@ pub(crate) async fn capture(
         .as_any()
         .downcast_ref::<crate::storage::MemoryThreadStore>()
         .context("Manual continuation requires the in-memory store")?;
+    // Capture the accepted catalog before suspension revokes all live getters.
+    let managed_specs = match crate::agent_profiles::active_specs(&thread.thread).await? {
+        Some(specs) => specs,
+        None => tools.current_specs()?,
+    };
     let code_states = match crate::checkpoint::capture_code_states(thread).await {
         Ok(states) => states,
         Err(error) if error.is::<UnsupportedManualState>() => return Ok(None),
@@ -800,7 +1123,7 @@ pub(crate) async fn capture(
     let suspended = suspended_turn.is_some();
     let snapshot = match preserved {
         Ok(true) if suspended_turn == Some(turn.as_str()) => {
-            crate::checkpoint::export_suspended(thread, &code_states).await
+            crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
         }
         Ok(_) => Err(anyhow::anyhow!(
             "Core did not preserve the pending manual turn"
@@ -851,9 +1174,7 @@ pub(crate) async fn capture(
                         .as_str()
                         .context("Tool output lacks call identity")?;
                     ensure!(
-                        outputs
-                            .insert(call_id.to_owned(), item.item.clone())
-                            .is_none(),
+                        outputs.insert(call_id.to_owned(), item.clone()).is_none(),
                         "Repeated tool result"
                     );
                 }
@@ -920,7 +1241,7 @@ pub(crate) async fn capture(
     snapshot["history"] = serde_json::to_value(history)?;
     snapshot["native_continuation"] = serde_json::json!({
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
-        "turn_usage":usage,"reply_order":order,"accepted_replies":accepted,"pending_manual":pending_manual
+        "turn_usage":usage,"reply_order":order,"accepted_replies":encode_accepted_replies(&accepted)?,"pending_manual":pending_manual
     });
     if let Some(schema) = output_schema {
         snapshot["native_continuation"]["output_schema"] = schema;

@@ -72,6 +72,8 @@ pub(crate) fn _connect_live<'py>(
         session_mode: RealtimeSessionMode::Conversational,
         output_modality: RealtimeOutputModality::Audio,
         voice,
+        v2: None,
+        function_tools: Vec::new(),
     };
     async_bridge::future_into_py(py, async move {
         let client = RealtimeWebsocketClient::new(
@@ -113,6 +115,12 @@ impl NativeLiveSession {
                     num_channels: 1,
                     samples_per_channel: None,
                     item_id: None,
+                    format: None,
+                    response_id: None,
+                    content_index: None,
+                    output_index: None,
+                    profile_receipt: None,
+                    output_guard: Default::default(),
                 })
                 .await
                 .map_err(|_| py_error("Live audio send failed"))
