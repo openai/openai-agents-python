@@ -3386,7 +3386,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.24.0a6"
+version = "0.24.0a7"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

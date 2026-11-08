@@ -8,7 +8,7 @@ Run the commands below from the repository root with Git, Python, and an authent
 
 ## Prepare the candidate
 
-1. Start from the current `feat/codex-harness` head. Confirm the proposed tag and GitHub release do not already exist. Review the changes since the previous preview, including the release notes in `CHANGELOG-alpha.md`.
+1. Start from the current `feat/codex-harness` head. Confirm the proposed tag and GitHub release do not already exist. Use the [release-notes skill](../.agents/skills/release-notes/SKILL.md) to audit changes since the previous published preview and draft highlights first. Include `CHANGELOG-alpha.md` in the audit and retain the draft outside the source tree for review.
 2. Run `make check-released-api-contract VERSION=<current-source-version>` before changing release metadata. Investigate any API mismatch. Do not regenerate the snapshot to hide one.
 3. Update the version in `pyproject.toml`, the editable project entry in `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `docs/sdk/topics.json`. Keep the topic index marked `unreleased` until publication is verified.
 4. Run `make update-released-api-contract VERSION=<new-source-version>`, then the matching check command. A version-only update changes only `baseline` and `baseline_commit` in the API snapshot. Keep its public API and native revision unchanged. The source commit identifies the candidate's parent.
@@ -67,7 +67,22 @@ PY
 
 ### Prepare release notes
 
-Prepare `$RELEASE_STAGE/notes.md` from the reviewed changelog. Include the exact version, source commit, qualifying Tests run, supported platforms, wheel filenames, and installation commands. Use versioned links so the release remains usable after the README advances.
+Save the customer-facing copy as `$RELEASE_STAGE/authored-notes.md`, following the [release-notes skill](../.agents/skills/release-notes/SKILL.md). Audit any changes between the draft's target and the qualified candidate. Include the exact version, highlights, required upgrade actions, and customer-visible changes, with bullets ordered by impact. Keep routine installation commands, platform tables, wheel filenames, and checksum instructions in the installation guide. Add installation details to the notes only when explicitly requested or when this release changes the installation process. Use versioned links for any installation guidance included. Leave the `Release verification` section to the helper below.
+
+Assemble the final file for review using the qualification record from the earlier step:
+
+```sh
+python .agents/skills/release-notes/scripts/prepare_notes.py \
+  --notes "$RELEASE_STAGE/authored-notes.md" \
+  --qualification "$RELEASE_STAGE/qualification.json" \
+  --version "${RELEASE_TAG#v}" \
+  --source-sha "$RELEASE_SHA" \
+  --output "$RELEASE_STAGE/notes.md"
+```
+
+The helper checks the local record's version and source against the requested release, requires Highlights first, and adds source and qualifying Tests links. It creates a new output file; use a new filename for a revised draft. It does not requalify artifacts or approve publication.
+
+Show the complete assembled notes to the release owner and obtain review before publishing. If the release range or substantive copy changes, review the updated file. Pass the same reviewed file to `gh release create --notes-file` below, and retain its version and source identity with the release evidence.
 
 ### Publish the reviewed tag and assets
 

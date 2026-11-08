@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents"
-version = "0.24.0-alpha.6"  # x-release-please-version
+version = "0.24.0-alpha.7"  # x-release-please-version
 description = "OpenAI Agents SDK"
 readme = "packages/codex/README.md"
 requires-python = ">=3.10"
