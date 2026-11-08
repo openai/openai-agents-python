@@ -21,7 +21,7 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 The storage choices have these limits:
 
 - Portable checkpoints can retain settled native stored values and terminal code-cell observations. They do not copy workspace files, live processes, or arbitrary JavaScript heap state.
-- Persistent storage (`LocalStorage` or `CustomStorage`) has one writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Retain `session.id` and reopen with the same storage backend.
+- A Session using persistent storage (`LocalStorage` or `CustomStorage`) has one writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Retain `session.id` and reopen with the same storage backend.
 - Do not combine `storage` or `resume` with portable `state`.
 - Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
