@@ -922,8 +922,10 @@ async def test_manual_cursor_can_seal_before_reader_delivers_native_notice(
         )
 
 
+@pytest.mark.parametrize("namespace", [None, "billing"])
 async def test_settled_manual_state_preserves_blocked_accepted_receipt(
     responses: ResponsesFixture,
+    namespace: str | None,
 ) -> None:
     effects: list[str] = []
     replayed: list[str] = []
@@ -941,12 +943,12 @@ async def test_settled_manual_state_preserves_blocked_accepted_receipt(
         name="lookup", description="Look up a key", input_type=LookupArgs, output_type=Answer
     )
 
-    @function_tool(name="record", description="Record a key")
+    @function_tool(name="record", namespace=namespace, description="Record a key")
     async def original(key: str) -> str:
         effects.append(key)
         return "known-B"
 
-    @function_tool(name="record", description="Record a key")
+    @function_tool(name="record", namespace=namespace, description="Record a key")
     async def current(key: str) -> str:
         replayed.append(key)
         return "new-B"
@@ -954,7 +956,10 @@ async def test_settled_manual_state_preserves_blocked_accepted_receipt(
     original_arguments = ' { "key" : "A" } '
     manual_call = function_call("lookup", {"key": "A"}, "call-A")
     manual_call["item"]["arguments"] = original_arguments
-    responses.respond(manual_call, function_call("record", {"key": "B"}, "call-B"))
+    automatic_call = function_call("record", {"key": "B"}, "call-B")
+    if namespace is not None:
+        automatic_call["item"]["namespace"] = namespace
+    responses.respond(manual_call, automatic_call)
     agent = Agent(
         instructions="Use both tools.", tools=[lookup, original], provider=provider(responses)
     )
@@ -1041,24 +1046,27 @@ async def test_settled_manual_state_preserves_blocked_accepted_receipt(
         )
 
 
-async def test_save_state_refuses_a_running_automatic_effect(responses: ResponsesFixture) -> None:
+@pytest.mark.parametrize("namespace", [None, "billing"])
+async def test_save_state_refuses_a_running_automatic_effect(
+    responses: ResponsesFixture, namespace: str | None
+) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     effects: list[str] = []
     lookup = FunctionTool(
         name="lookup", description="Look up a key", input_type=LookupArgs, output_type=str
     )
 
-    @function_tool
+    @function_tool(namespace=namespace)
     async def record(key: str) -> str:
         entered.set()
         await release.wait()
         effects.append(key)
         return "done"
 
-    responses.respond(
-        function_call("lookup", {"key": "A"}, "call-A"),
-        function_call("record", {"key": "B"}, "call-B"),
-    )
+    automatic_call = function_call("record", {"key": "B"}, "call-B")
+    if namespace is not None:
+        automatic_call["item"]["namespace"] = namespace
+    responses.respond(function_call("lookup", {"key": "A"}, "call-A"), automatic_call)
     agent = Agent(
         instructions="Use both tools.", tools=[lookup, record], provider=provider(responses)
     )
@@ -1705,3 +1713,72 @@ async def test_manual_restore_keeps_saved_model_settings_and_uses_current_creden
         assert responses.request_headers[0]["authorization"] == "Bearer synthetic-manual-test"
         assert responses.request_headers[1]["authorization"] == "Bearer synthetic-current-restore"
         assert current.model == "gpt-5.2"
+
+
+async def test_manual_checkpoint_rebinds_qualified_callbacks_with_equal_short_names(
+    responses: ResponsesFixture,
+) -> None:
+    from tests.test_native_function_namespaces import lookup_for, namespaced_call
+    from tests.test_native_mcp_tools import declarations
+
+    manual = FunctionTool(
+        name="lookup",
+        description="Read a record",
+        input_type=LookupArgs,
+        output_type=str,
+    )
+    effects: list[str] = []
+    current_effects: list[str] = []
+    billing, audit = (lookup_for(name, effects) for name in ("billing", "audit"))
+    agent = Agent(
+        instructions="Use the requested lookup.",
+        tools=[manual, billing, audit],
+        provider=provider(responses),
+    )
+    responses.respond(
+        function_call("lookup", {"key": "manual"}, "manual"),
+        namespaced_call("billing", "lookup", {"key": "saved"}, "saved-billing"),
+    )
+    async with timeout(15):
+        async with agent.session(context=effects) as source:
+            await source.submit("Read both")
+            original = await next_request(source.interactions(), manual)
+            async for event in source.events():
+                if isinstance(event, ToolFinished) and event.call_id == "saved-billing":
+                    break
+            saved = await source.suspend()
+        assert effects == ["billing:saved"]
+        assert len(responses.requests) == 1
+        billing, audit = (lookup_for(name, current_effects) for name in ("billing", "audit"))
+        # Ordinary manual restore preserves declaration order and rebinds current callbacks.
+        current = replace(agent, tools=[manual, billing, audit])
+        responses.respond(
+            namespaced_call("billing", "lookup", {"key": "new-billing"}, "new-billing"),
+            namespaced_call("audit", "lookup", {"key": "new-audit"}, "new-audit"),
+        )
+        responses.respond(assistant_output("continued"))
+        async with current.session(
+            context=current_effects, state=SessionState.from_json(saved.to_json())
+        ) as restored:
+            request = await next_request(restored.interactions(), manual)
+            assert (request.call_id, request.turn_id) == (
+                original.call_id,
+                original.turn_id,
+            )
+            assert len(responses.requests) == 1
+            with pytest.raises((RuntimeError, ValueError), match="foreign|expired|closed|sealed"):
+                await original.respond("stale")
+            await request.respond("manual-answer")
+            assert (await restored.restored_turn.get_result()).final_output == "continued"
+        assert effects == ["billing:saved"]
+        assert sorted(current_effects) == ["audit:new-audit", "billing:new-billing"]
+        assert len(responses.requests) == 3
+        assert tool_output(responses.requests[1], "manual") == "manual-answer"
+        assert tool_output(responses.requests[1], "saved-billing") == "billing:saved"
+        assert tool_output(responses.requests[2], "new-billing") == "billing:new-billing"
+        assert tool_output(responses.requests[2], "new-audit") == "audit:new-audit"
+        assert set(declarations(responses.requests[1])) == {
+            ("functions", "lookup"),
+            ("billing", "lookup"),
+            ("audit", "lookup"),
+        }

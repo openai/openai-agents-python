@@ -216,6 +216,7 @@ pub(crate) fn validate(
     );
     let saved_specs: Vec<DynamicToolSpec> =
         serde_json::from_value(state["managed_tool_specs"].clone())?;
+    crate::python_tools::validate_declarations(&saved_specs)?;
     let saved_names: HashSet<_> = saved_specs
         .iter()
         .filter_map(|spec| {
@@ -226,10 +227,6 @@ pub(crate) fn validate(
             }
         })
         .collect();
-    ensure!(
-        saved_names.len() == saved_specs.len(),
-        "Unsupported saved tool declarations"
-    );
     let mut admitted = Vec::new();
     let mut pending_ids = HashSet::new();
     for value in pending {

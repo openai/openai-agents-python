@@ -8981,11 +8981,6 @@ class Session(Generic[ContextT, OutputT]):
                 "Cannot suspend an operation with before_step: "
                 "portable restore cannot recover its callback"
             )
-        if any(tool._ref.namespace is not None for tool in self._catalog.tools):
-            raise CapabilityError(
-                "Cannot suspend with selected MCP tools in the current catalog; "
-                "reply in the live Session"
-            )
 
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
         self._check_open()
