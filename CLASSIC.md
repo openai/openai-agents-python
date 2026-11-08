@@ -2,34 +2,34 @@
 
 Prefer [migrating directly from v0 to native v1](MIGRATION.md). Use classic only when you need to upgrade the package before a workflow can adopt native execution. You can also keep that workflow on v0; upgrading is optional.
 
-The source on this branch includes `agents.classic`. It retains the v0 Python runner and its integrations. The root `agents` API uses native Codex. Classic is not available in the previously published preview wheels.
+Starting with alpha.7, preview wheels include `agents.classic`. It retains the v0 Python runner and its integrations. The root `agents` API uses native Codex.
 
 The classic source comes from v0 `main` commit `814de8b1cfdaf6c70212dca9ca23563dd0b789ac`, with v0.24.0 as the released compatibility baseline. It includes later fixes from that pinned commit. Its namespace changes do not move execution onto Codex.
 
-## Install from the matching source
+## Install the classic extra
 
-Follow [the contributor setup](CONTRIBUTING.md) for the native build prerequisites, then install this source with the classic extra from the repository root:
+Download the wheel for your platform from the [alpha.7 release](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7). Follow the [installation guide](docs/sdk/installation.md) to create and activate a Python environment. From the directory containing the downloaded wheel, replace `WHEEL.whl` below with its full filename:
 
 ```sh
-python -m pip install '.[classic]'
+python -m pip install './WHEEL.whl[classic]'
 ```
 
-Classic is part of the same `openai-agents` distribution. The extra installs the dependencies needed by the old Python runner. It does not remove the native wheel's platform requirements or source-build prerequisites. Keep using the existing v0 release in its own environment if your platform cannot install the new SDK.
+Classic is part of the same `openai-agents` distribution. The extra installs the dependencies needed by the old Python runner. The native wheel's platform requirements still apply. Keep using the existing v0 release in its own environment if your platform cannot install the new SDK.
 
-Optional v0 integrations use `classic-` prefixed extras, for example `.[classic,classic-voice]`, `.[classic,classic-litellm]`, or `.[classic,classic-sqlalchemy]`. Install only the integrations your application uses. The base classic extra does not install every optional service client.
+Optional v0 integrations use `classic-` prefixed extras, such as `classic-voice`, `classic-litellm`, or `classic-sqlalchemy`. Append the extras you need to the wheel filename, for example `'./WHEEL.whl[classic,classic-voice]'`. The base classic extra does not install every optional service client.
 
 ### SQLite session drivers
 
 `AsyncSQLiteSession` requires `aiosqlite` in addition to the classic extra:
 
 ```sh
-python -m pip install '.[classic]' aiosqlite
+python -m pip install './WHEEL.whl[classic]' aiosqlite
 ```
 
 `SQLAlchemySession` requires an async driver that matches your database URL. For SQLite URLs that start with `sqlite+aiosqlite://`, install:
 
 ```sh
-python -m pip install '.[classic-sqlalchemy]' aiosqlite
+python -m pip install './WHEEL.whl[classic-sqlalchemy]' aiosqlite
 ```
 
 The `classic-sqlalchemy` extra includes the classic runtime and `asyncpg` for PostgreSQL URLs that start with `postgresql+asyncpg://`. Install drivers for other databases separately, as in v0.
@@ -37,6 +37,14 @@ The `classic-sqlalchemy` extra includes the classic runtime and `asyncpg` for Po
 ### Experimental Codex integration
 
 `agents.classic.extensions.experimental.codex` runs the Codex CLI as a separate process. Install the CLI separately and make `codex` available on `PATH`, or select its executable with `CODEX_PATH` or `Codex(codex_path_override="/absolute/path/to/codex")`. This distribution does not bundle that CLI. The native SDK helper executables serve the root `agents` API and are not replacements for the CLI used by this integration.
+
+### Install from the matching source
+
+To develop the SDK or run an example that needs a source installation, follow [the contributor setup](CONTRIBUTING.md), then install from the repository root:
+
+```sh
+python -m pip install '.[classic]'
+```
 
 ## Stage the package and import change
 

@@ -4,7 +4,7 @@ Install the [SDK preview wheel](installation.md) and use examples from the match
 
 ## Runnable task examples
 
-Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. From the development checkout's repository root, run a module with `PYTHONPATH=. python -m examples.codex.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
+Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. From the matching source archive's root, run a module with `PYTHONPATH=. python -m examples.codex.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
 
 ### Test application logic without a model
 
@@ -14,7 +14,7 @@ These examples use scripted responses and need no API key. Tools still execute, 
 | --- | --- |
 | [`typed_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/typed_tools.py) | Validates nested Python input and returns typed results as JSON. Python enforces bounds the native schema can omit. Invalid input prevents a write; invalid output cannot undo one. |
 | [`inspect_requests`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/inspect_requests.py) | Prints native declarations, original arguments, arguments after preparation, and the model-visible result. Scripted selection does not measure prompt quality. |
-| [`prepared_request`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/prepared_request.py) | Edits the next sampling request after a tool result while retaining execution policies. Uses APIs added after alpha.6; follow the [matching-source setup](installation.md#examples-and-upgrades) and [request-editing limits](configuration.md#edit-the-next-sampling-request). |
+| [`prepared_request`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/prepared_request.py) | Edits the next sampling request after a tool result while retaining execution policies. Requires `0.24.0-alpha.7` or later; install a [matching preview wheel](installation.md) and follow the [request-editing limits](configuration.md#edit-the-next-sampling-request). |
 | [`concurrent_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/concurrent_tools.py) | Two Sessions share one quota unit through an event-loop lock. The quota does not work across threads or processes. |
 | [`safe_effects`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/safe_effects.py) | A fake writer records one write for duplicate calls. Deduplication lasts only in memory. |
 | [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
@@ -35,7 +35,7 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 
 ## Run supervised workers
 
-This example uses APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](installation.md#examples-and-upgrades) before running it.
+This example requires `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md) before running it.
 
 The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
 
@@ -85,7 +85,7 @@ Use these guides for the rules behind each recipe:
 | Save or resume a conversation | [Storage choices](state.md#choose-how-to-store-a-conversation) and [capture readiness](state.md#check-support-and-capture-readiness) |
 | Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
 | Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
-| Edit the next model request | [Prepared sampling requests](configuration.md#edit-the-next-sampling-request), available in a matching development build |
+| Edit the next model request | [Prepared sampling requests](configuration.md#edit-the-next-sampling-request), available in `0.24.0-alpha.7` or later |
 | Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
 | Run an MCP server locally | [Start a stdio server](mcp.md#start-a-stdio-server) |
 | Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |

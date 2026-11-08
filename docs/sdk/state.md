@@ -25,13 +25,13 @@ The storage choices have these limits:
 - Do not combine `storage` or `resume` with portable `state`.
 - Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
-In development builds after `0.24.0-alpha.6`, `LocalStorage` rejects `programmatic_tool_calling=True` before opening work. Nested code-mode tool calls do not yet have the durable intent and result receipts needed for safe local recovery. Use a nonpersistent Session for code mode, or check the limits for [eligible settled portable checkpoints](#check-manual-checkpoint-support).
+In `0.24.0-alpha.7` or later, `LocalStorage` rejects `programmatic_tool_calling=True` before opening work. Nested code-mode tool calls do not yet have the durable intent and result receipts needed for safe local recovery. Use a nonpersistent Session for code mode, or check the limits for [eligible settled portable checkpoints](#check-manual-checkpoint-support).
 
-`CustomStorage`, also added after alpha.6, supports root Sessions with automatic Python tools. Use a [matching development build](installation.md#examples-and-upgrades). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
+`CustomStorage` supports root Sessions with automatic Python tools in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
 
 A custom-store reopen with unresolved root calls raises `LocalRecoveryRequired` before Core starts. Inspect `error.calls`, `error.turns`, and `error.items`; the SDK reads this metadata under the canonical writer lease. This works even when the process stopped before application code recorded the native call IDs. Verify the external outcome, then use `CustomStorage.reconcile()` with those IDs and a truthful result. Keep local-profile `reconciled_calls` separate from custom-store reconciliation.
 
-In development builds after `0.24.0-alpha.6`, if reconciliation fails or is cancelled, use `get_cleanup(error)` to retain any remaining storage cleanup owner. Check for `None` before calling `await cleanup.aclose()`. Retry cleanup through this owner if release fails again. Cleanup releases the original lease without repeating reconciliation or running the tool. A release failure can follow a recorded result; do not repeat reconciliation to retry release. See [retry incomplete cleanup](sessions.md#retry-incomplete-cleanup).
+In `0.24.0-alpha.7` or later, if reconciliation fails or is cancelled, use `get_cleanup(error)` to retain any remaining storage cleanup owner. Check for `None` before calling `await cleanup.aclose()`. Retry cleanup through this owner if release fails again. Cleanup releases the original lease without repeating reconciliation or running the tool. A release failure can follow a recorded result; do not repeat reconciliation to retry release. See [retry incomplete cleanup](sessions.md#retry-incomplete-cleanup).
 
 For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/canonical_storage). Storage does not guarantee exactly-once external actions.
 
@@ -305,13 +305,13 @@ Cancelling the call waits for the summary update to finish. An accepted summary 
 
 ### Retain selected context items
 
-Development builds newer than alpha.6 can keep selected original items beside a supplied summary. Capture `snapshot = await session.model_context()` while idle, choose zero-based indices from `snapshot.items`, and pass `summary=...`, `snapshot=snapshot`, and `retain=indices` together to `session.compact()`.
+In `0.24.0-alpha.7` or later, you can keep selected original items beside a supplied summary. Capture `snapshot = await session.model_context()` while idle, choose zero-based indices from `snapshot.items`, and pass `summary=...`, `snapshot=snapshot`, and `retain=indices` together to `session.compact()`.
 
 Pass the exact snapshot issued by the same live Session while its context is unchanged. Editing `snapshot.items` does not edit the retained originals. Duplicate indices count once, and selected items keep native order. System and developer items are always retained. Keep both a tool call and its result, or omit both. An empty selection retains no additional items. Capture a new snapshot after context changes or restore. The [supplied-summary limits](#supply-a-trusted-summary) still apply.
 
 ### Supply summaries through a callback
 
-`Agent(before_compact=callback)` also requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). The callback runs before automatic or explicit model-based compaction for roots and children. It receives `CompactionContext` from `agents`, with detached active `items`, application `context`, native identity, and `trigger="auto"` or `"manual"`.
+`Agent(before_compact=callback)` also requires [`0.24.0-alpha.7` or later](installation.md). The callback runs before automatic or explicit model-based compaction for roots and children. It receives `CompactionContext` from `agents`, with detached active `items`, application `context`, native identity, and `trigger="auto"` or `"manual"`.
 
 Return a nonempty summary string to skip model summarization, or `None` to let Codex generate the summary. Include details your application still needs from discarded assistant and tool messages. Codex retains ownership of compaction and records the summary in history; the summary does not replace application instructions. A supplied `session.compact(summary=...)` bypasses this callback. Returning `None` lets `transform_context` run on the model summarization request.
 
@@ -334,7 +334,7 @@ async for recorded_turn in session.turns():
 
 Pass `subagent_id=child_id` to read a descendant's recorded items or turns, including restored outcomes. These reads do not start native work or create live `Turn` objects.
 
-For post-alpha.6 builds, [inspect response attempts](sessions.md#inspect-response-attempts) to interpret retained provider status and counters, and correlate them with live request observations. Provider completion and SDK acceptance are separate outcomes.
+In `0.24.0-alpha.7` or later, [inspect response attempts](sessions.md#inspect-response-attempts) to interpret retained provider status and counters, and correlate them with live request observations. Provider completion and SDK acceptance are separate outcomes.
 
 ## Fork a conversation
 

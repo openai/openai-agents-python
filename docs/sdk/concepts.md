@@ -4,7 +4,7 @@ The Agents SDK lets you build applications that use a model to reason and tools 
 
 The **Codex harness** is the runtime around the model. The model chooses what to do next; the harness carries out those choices through the capabilities you allow. You get Codex's execution model through a library that runs in a process you control.
 
-The native v1 API is under development. These guides describe the development branch, including APIs added after the downloadable preview. Use the [guides for your installed build](versions.md). The [v0 comparison](#compare-with-v0240) below uses stable v0.24.0.
+The native v1 API is under development. These guides describe `0.24.0-alpha.7` or later. Use the [guides for your installed build](versions.md). The [v0 comparison](#compare-with-v0240) below uses stable v0.24.0.
 
 ## What you can build
 
@@ -125,4 +125,4 @@ You can keep using v0. When upgrading, prefer a direct port to native `Agent`, `
 
 Use **classic** only when a workflow needs the new package before it can complete the native port. `agents.classic` keeps the Python loop with explicit classic imports. Keep its agents, tools, runner, and state together, and start fresh native conversations as you port workflows. See the [classic contract](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md) for the compatibility baseline, required extras, and planned lifecycle.
 
-Classic requires a matching development build beyond the published preview. Its extras retain native platform requirements. For a new native application, check [installation](installation.md) and follow the [quickstart](index.md).
+Classic requires `0.24.0-alpha.7` or later. Its extras retain native platform requirements. For a new native application, check [installation](installation.md) and follow the [quickstart](index.md).

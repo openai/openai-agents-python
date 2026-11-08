@@ -207,7 +207,7 @@ async def read_one(session: Session, last_seen: int = 0) -> int:
 
 Use the recovered history to refresh your application's view after a gap; the missing observations cannot be replayed. Choose what history your application may display or log.
 
-An existing `turn.events()` iterator ends when its owned steps settle. Keep reading `session.events()` to observe later background completions. To replay a late completion still in the buffer, open a fresh Turn cursor with `turn.events(after=last_seen)`. The detailed execution-completion observations require a matching development build added after alpha.6; see [completed execution](#inspect-completed-execution).
+An existing `turn.events()` iterator ends when its owned steps settle. Keep reading `session.events()` to observe later background completions. To replay a late completion still in the buffer, open a fresh Turn cursor with `turn.events(after=last_seen)`. The detailed execution-completion observations require `0.24.0-alpha.7` or later; see [completed execution](#inspect-completed-execution).
 
 ## Interrupt work
 
@@ -274,7 +274,7 @@ Execution items carry a call ID and a status when the runtime records them. Comm
 
 ### Inspect response attempts
 
-Retained response facts and the `ModelRequestDispatching` and `ModelResponseLinked` observations were added after `0.24.0-alpha.6`. Use a [matching development build](installation.md#examples-and-upgrades) for this recipe.
+Retained response facts and the `ModelRequestDispatching` and `ModelResponseLinked` observations require `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md) for this recipe.
 
 `session.turns()` can include `RecordedTurn.responses`, a list of retained `RecordedResponse` occurrences. A provider can report `status="completed"` while `get_result()` fails because the SDK rejects its output. Inspect both outcomes. Save the following complete script as `response_diagnostics.py` and run it with the interpreter and credentials from [SDK setup](index.md#before-you-begin):
 
@@ -351,7 +351,7 @@ Events are bounded and best effort. Cancellation or retirement can suppress a li
 
 ### Diagnose response integrity failures
 
-The read-only `NativeError.response_integrity_reason` and its public `ResponseIntegrityReason` type were added after `0.24.0-alpha.6`. Use a [matching development build](installation.md#examples-and-upgrades) to inspect this field. It identifies the captured cause of a supported-output failure, even when several failures share the same generic error message or category:
+The read-only `NativeError.response_integrity_reason` and its public `ResponseIntegrityReason` type are available in `0.24.0-alpha.7` or later. Use a [matching preview wheel](installation.md) to inspect this field. It identifies the captured cause of a supported-output failure, even when several failures share the same generic error message or category:
 
 | Reason | Meaning |
 | --- | --- |
@@ -402,7 +402,7 @@ result = await second.get_result()
 
 Updates cannot add new names or MCP pairs. Open a new Session for those. Temporary turn selections cannot install bindings. Selecting an original descriptor uses its last accepted replacement. See [idle replacement](tools.md#replace-tools-between-turns).
 
-In development builds newer than alpha.6, explicit selections can omit native capabilities admitted at opening. `tools=[]` disables all model tools for that operation. Select the captured Environment or `NativeAgents` declaration, or admitted `ToolRef` values, to include executor or collaboration tools. Changing the selection does not close resources or stop already running children or processes. [Per-step selection](#select-tools-before-each-model-step) can narrow the operation's selection further.
+In `0.24.0-alpha.7` or later, explicit selections can omit native capabilities admitted at opening. `tools=[]` disables all model tools for that operation. Select the captured Environment or `NativeAgents` declaration, or admitted `ToolRef` values, to include executor or collaboration tools. Changing the selection does not close resources or stop already running children or processes. [Per-step selection](#select-tools-before-each-model-step) can narrow the operation's selection further.
 
 ### Update instructions or model settings
 
@@ -471,7 +471,7 @@ async with agent.session() as session:
 A selector has these limits:
 
 - It cannot add tools excluded by the operation, including MCP tools, or install or replace bindings.
-- In development builds newer than alpha.6, it can omit admitted native capabilities for that preparation, including executor, collaboration, search, and planning tools.
+- In `0.24.0-alpha.7` or later, it can omit admitted native capabilities for that preparation, including executor, collaboration, search, and planning tools.
 - With programmatic tool calling, the SDK includes the `exec` and `wait` helpers for a nonempty selection. An empty selection disables the helpers and all tool calls for that preparation.
 
 An operation with `before_step` cannot be suspended because portable state does not retain its callback.
@@ -506,7 +506,7 @@ async with agent.session(storage=profile) as session:
     goal = await session.goal()
 ```
 
-After closing the Session, [reopen the local conversation](state.md#reopen-a-conversation-from-local-storage) with `agent.session(storage=profile, resume=saved_id)` and declare `NativeGoals()` again. Reopening the Session and reading the goal do not start a turn or resume goal work automatically. `NativeGoals` does not enable a checklist. In development builds newer than alpha.6, explicit operation and step selections can omit a planning declaration to disable its tools for that operation or preparation. Saved planning data alone grants neither tool.
+After closing the Session, [reopen the local conversation](state.md#reopen-a-conversation-from-local-storage) with `agent.session(storage=profile, resume=saved_id)` and declare `NativeGoals()` again. Reopening the Session and reading the goal do not start a turn or resume goal work automatically. `NativeGoals` does not enable a checklist. In `0.24.0-alpha.7` or later, explicit operation and step selections can omit a planning declaration to disable its tools for that operation or preparation. Saved planning data alone grants neither tool.
 
 ## Save, restore, or compact a conversation
 
@@ -560,7 +560,7 @@ if cleanup is not None:
 
 Retain that owner until cleanup succeeds. If another attempt fails, retain both the primary error and the owner for a later retry. The public `aclose()` method retries complete cleanup. For an admitted Session, `aclose()` retries native retirement. It then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. Cleanup preserves the primary failure; linked cleanup errors remain available through its exception context.
 
-In development builds after `0.24.0-alpha.6`, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner. Its `aclose()` retries only release of the original storage lease. It never records another result or runs the tool. Concurrent cleanup calls join the same release attempt; calls after successful release do nothing. The reconciliation result may already be recorded when release fails, so retry cleanup through this owner before reopening the Session.
+In `0.24.0-alpha.7` or later, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner. Its `aclose()` retries only release of the original storage lease. It never records another result or runs the tool. Concurrent cleanup calls join the same release attempt; calls after successful release do nothing. The reconciliation result may already be recorded when release fails, so retry cleanup through this owner before reopening the Session.
 
 [`get_cleanup(error)`](reference.md#get_cleanup) also follows exception contexts. On Python 3.10, a Task boundary can replace a `CancelledError` while retaining the original error in its context. The helper returns the existing owner and does not wrap or replace the cancellation error.
 

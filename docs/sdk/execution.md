@@ -10,11 +10,11 @@ Pass an `Environment` to a Session to give the model selected process and file t
 | With explicit network or local-socket access | [Network policy](#network-and-local-socket-access) |
 | After an application decision | [Executor policies](#executor-policies) |
 
-Use an SDK wheel and native helpers that match the documented API, then [configure the model provider](configuration.md#provider-connection). The [installation guide](installation.md) distinguishes published preview wheels from development APIs. Examples with `await` or `async with` belong inside an async application. The remote examples also require an already deployed compatible exec-server and current credentials.
+Use an SDK wheel and native helpers that match the documented API, then [configure the model provider](configuration.md#provider-connection). Use a [preview wheel](installation.md) for `0.24.0-alpha.7` or later. Examples with `await` or `async with` belong inside an async application. The remote examples also require an already deployed compatible exec-server and current credentials.
 
 ## Local execution
 
-`Environment.local()` requires a wheel and native helpers built from this revision, or a later published release that explicitly includes local execution. The published `0.24.0-alpha.6` wheel does not provide this API. Follow the [source build guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) to try the development API.
+`Environment.local()` requires `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md).
 
 Use `Environment.local()` to run selected tools with the SDK's native sandbox on a supported Linux or macOS host. The matching wheel supplies the local executor helper. Give the executor an existing absolute working directory and select the tools the model may call. Use a workspace your application owns.
 
@@ -44,7 +44,7 @@ Local commands can read the workspace, any additional `writable_roots`, and the 
 
 ### Add read-only directories on Linux
 
-Development builds newer than alpha.6 support `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path)`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` defaults to `True`; writable mounts are unsupported. Source and destination must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
+SDK version `0.24.0-alpha.7` or later supports `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path)`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` defaults to `True`; writable mounts are unsupported. Source and destination must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
 
 Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlapping mounts, overlaps with `cwd`, write roots, or SDK storage, and files hard-linked to writable directories. Keep the mount paths stable while the Session runs. Active mounts prohibit per-turn `writable_roots` replacement, including an empty list. Restore requires the same applied executor policy, including the mounted directories. Mounts do not copy files into a checkpoint or limit the application's Python callbacks.
 
@@ -52,7 +52,7 @@ Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlappin
 
 The executor limits writes to `cwd` and any additional `writable_roots`, while preserving native metadata protections. Linux commands can also write to a private temporary filesystem whose contents disappear when the sandbox exits. Paths resolve on the executor. If a linked Git worktree must update Git state, explicitly grant its required Git directories after checking which paths those grants expose.
 
-In the current development API, new local and remote Environments default to `write_policy="strict"`. Set the initial `writable_roots` to opt into extra directories:
+In `0.24.0-alpha.7` or later, new local and remote Environments default to `write_policy="strict"`. Set the initial `writable_roots` to opt into extra directories:
 
 | `writable_roots` value | Strict write policy |
 | --- | --- |

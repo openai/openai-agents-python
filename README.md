@@ -8,30 +8,30 @@ Your application runs the agent and owns its workers, storage, and credentials. 
 
 You can stay on v0. When you choose to upgrade, we recommend [migrating directly to native v1](MIGRATION.md), including your tools, execution, and state handling. The guide includes an API mapping, validation steps, and a brief for a frontier coding agent to carry out the port.
 
-If a workflow cannot make that move yet but needs the new package, this branch provides `agents.classic` as an optional staging path. It retains the Python runner while the root `agents` API uses Codex. Classic is not included in the preview release linked below. See [classic setup](CLASSIC.md) for imports, dependencies, and compatibility limits.
+If a workflow cannot make that move yet but needs the new package, this branch provides `agents.classic` as an optional staging path. It retains the Python runner while the root `agents` API uses Codex. See [classic setup](CLASSIC.md) for imports, dependencies, and compatibility limits.
 
 ## Install
 
-The commands below install the published preview. Use [documentation and example files from that release](docs/sdk/versions.md); these branch guides also describe APIs added after the release.
+The commands below install the published preview. Use [documentation and example files from that release](docs/sdk/versions.md); branch guides can change between releases.
 
-Install [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) from a prebuilt Python wheel. Use standard CPython 3.10–3.14 and [create a virtual environment](docs/sdk/installation.md#create-a-python-environment), then run the command for your platform. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain.
+Install [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) from a prebuilt Python wheel. Use standard CPython 3.10–3.14 and [create a virtual environment](docs/sdk/installation.md#create-a-python-environment), then run the command for your platform. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain.
 
 **Linux x86_64 (glibc 2.39 or newer)**
 
 ```sh
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-manylinux_2_39_x86_64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-manylinux_2_39_x86_64.whl"
 ```
 
 **macOS 11 or newer on Apple Silicon**
 
 ```sh
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
 ```
 
 **Windows x64**
 
 ```powershell
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-win_amd64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-win_amd64.whl"
 ```
 
 This preview is distributed through GitHub Releases. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here. See the [installation guide](docs/sdk/installation.md) for setup, supported platforms, and troubleshooting.

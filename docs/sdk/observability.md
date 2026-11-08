@@ -30,7 +30,7 @@ For a live display, replace the snapshot with `UsageUpdated.usage` from `agents.
 
 ## Limit a run's model requests and usage
 
-`RunBudget` requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). Pass `budget=RunBudget(...)` to `agent.run()`, `agent.run_sync()`, or `session.submit()`. This async fragment assumes a configured `agent`:
+`RunBudget` requires [`0.24.0-alpha.7` or later](installation.md). Pass `budget=RunBudget(...)` to `agent.run()`, `agent.run_sync()`, or `session.submit()`. This async fragment assumes a configured `agent`:
 
 ```python
 from agents import RunBudget
@@ -80,7 +80,7 @@ Content defaults are `log_user_prompt=False`, `log_agent_responses=False` and `t
 
 ## Group work in a local trace
 
-Local workflow scopes, `TraceOptions`, and custom processors require a development build newer than `0.24.0-alpha.6`. Follow the [matching-source setup](installation.md#examples-and-upgrades). Run each complete telemetry example below in a fresh Python process because telemetry configuration and shutdown apply to the process.
+Local workflow scopes, `TraceOptions`, and custom processors require `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md). Run each complete telemetry example below in a fresh Python process because telemetry configuration and shutdown apply to the process.
 
 Use `telemetry.trace()` for a workflow and `telemetry.span()` for application work inside it. These are synchronous context managers used inside either synchronous or asynchronous application code. This complete script groups two synthetic Agent runs and an application span. It checks local context without configuring an exporter. To send the spans to a collector, add the exporter from [telemetry configuration](#configure-telemetry).
 
@@ -122,7 +122,7 @@ For `agent.session(trace_options=...)`, `agent.run(trace_options=...)`, or `sess
 
 ## Send native traces to an application sink
 
-This section uses the same [development-build setup](installation.md#examples-and-upgrades) as local trace scopes. Supply an object with `on_trace_event(event)` through `telemetry.configure(processors=[...])` before opening Sessions. A processor can receive native trace records without an OTLP collector. The interface is separate from classic SDK trace processors.
+This section uses the same [matching preview wheel](installation.md) as local trace scopes. Supply an object with `on_trace_event(event)` through `telemetry.configure(processors=[...])` before opening Sessions. A processor can receive native trace records without an OTLP collector. The interface is separate from classic SDK trace processors.
 
 This complete script prints synthetic lifecycle records and a bounded delivery result:
 
@@ -165,7 +165,7 @@ Both `force_flush` and an explicit shutdown budget accept integer milliseconds f
 
 ## Continue a trace across workers
 
-`TraceContext` and `parent_trace` were added after `0.24.0-alpha.6`. Follow the [development-branch setup](installation.md#examples-and-upgrades) to use these APIs and the example below.
+`TraceContext` and `parent_trace` require `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md) to use these APIs and the example below.
 
 Pass `parent_trace=TraceContext(traceparent=...)` or a W3C header mapping to `agent.run()`, `agent.run_sync()`, or `agent.session()`. Import `TraceContext` from `agents`. A Session uses this parent for startup and as the default for new root Turns and restored manual continuations. Pass a fresh parent when restoring state; saved conversation state does not retain an active trace context.
 

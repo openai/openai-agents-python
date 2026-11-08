@@ -4,9 +4,9 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 ## Preview availability
 
-[0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
+[0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
 
-The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides. Use [the guides for your installed release](versions.md): these development-branch guides include APIs added after alpha.6.
+The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides. Use [the guides for your installed release](versions.md): development-branch guides can change between releases.
 
 ## Requirements
 
@@ -51,19 +51,19 @@ Run the command for your platform. pip downloads the wheel and installs the SDK 
 **Linux x86_64 (glibc 2.39 or newer)**
 
 ```sh
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-manylinux_2_39_x86_64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-manylinux_2_39_x86_64.whl"
 ```
 
 **macOS 11 or newer on Apple Silicon**
 
 ```sh
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
 ```
 
 **Windows x64**
 
 ```powershell
-python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-win_amd64.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.7/openai_agents-0.24.0a7-cp310-abi3-win_amd64.whl"
 ```
 
 Check the installed version and native module:
@@ -72,23 +72,23 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`. Continue with [the quickstart for that release](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.6/docs/sdk/index.md) to set your API key and run your first agent.
+Expect `0.24.0-alpha.7` or its equivalent Python packaging spelling, `0.24.0a7`. Continue with [the quickstart for that release](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/docs/sdk/index.md) to set your API key and run your first agent.
 
 ## Examples and upgrades
 
 Use documentation and example files from the same release as the installed wheel. You can copy a self-contained example into your application.
 
-The wheel does not include example files. To run an example included in `0.24.0-alpha.6`:
+The wheel does not include example files. To run an example included in `0.24.0-alpha.7`:
 
-1. Download and extract the [0.24.0-alpha.6 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v0.24.0-alpha.6.zip).
+1. Download and extract the [0.24.0-alpha.7 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v0.24.0-alpha.7.zip).
 2. Keep your wheel's Python environment activated. In your shell, change to the extracted directory that contains `examples/`.
 3. Follow the example's setup notes and run its command from that directory.
 
 You do not need to build the SDK to run examples from that release.
 
-In a development-branch source checkout, examples live under `examples/codex/`. Run their module commands from the repository root, which contains the `examples` package. The alpha.6 archive keeps its original root `examples/` directory.
+In the alpha.7 source archive, native examples live under `examples/codex/`. Run their module commands from the repository root, which contains the `examples` package.
 
-Development-branch examples can require APIs absent from alpha.6, including `Environment.local()` for local execution and `Turn.wait_for_attention()` for supervised workers. To run those examples, use a newer release whose notes include the APIs, or follow the [contributor setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) to build this branch. Keep the example files and installed build on the same version.
+Development-branch examples can require APIs added after a release. Keep the example files and installed build on the same version. To run unreleased examples, follow the [contributor setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) to build the matching source.
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.
 

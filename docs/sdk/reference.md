@@ -99,19 +99,19 @@ History and descendant iterators have no pagination arguments.
 
 Import `get_cleanup` from `agents` for native failures and cancellation. `get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None` finds the retained cleanup owner through the error and its exception context. It returns the existing owner, or `None` when it finds no owner. Retain a returned owner until `await cleanup.aclose()` succeeds. Do not close the provider separately while a Session owns cleanup.
 
-In development builds after `0.24.0-alpha.6`, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner, also exported from `agents`. Its `aclose()` retries release of the original storage lease without repeating reconciliation.
+In `0.24.0-alpha.7` or later, a failed or cancelled `CustomStorage.reconcile()` can retain a `SessionStoreCleanup` owner, also exported from `agents`. Its `aclose()` retries release of the original storage lease without repeating reconciliation.
 
 Use this helper instead of reading `error.cleanup` directly. On Python 3.10, a Task boundary can replace a `CancelledError` and leave the owner on an error in its context. Cancellation still propagates; the helper does not wrap or replace the error.
 
 ### PreparedRequest and prepare_request
 
-Request editing requires a development build newer than alpha.6; use the [matching-source setup](installation.md#examples-and-upgrades). Import `PreparedRequest` and `PreparedToolPresentation` from `agents`.
+Request editing requires `0.24.0-alpha.7` or later; use the [matching preview wheel](installation.md). Import `PreparedRequest` and `PreparedToolPresentation` from `agents`.
 
 `prepare_request(turn, request, *, preparation_index, recovery_attempt)` may return a complete `PreparedRequest`, `None`, or an awaitable of either. The value contains `instructions: str`, `input: list[dict]`, and `tools: list[PreparedToolPresentation]`. Input uses native ResponseItem JSON. A tool presentation contains `namespace`, `name`, `kind`, `strict`, `defer_loading`, `description`, and `parameters`; only the last two can change. Edits affect sampling, leaving canonical history and execution authority unchanged. See [request-editing profiles and lifecycle limits](configuration.md#edit-the-next-sampling-request).
 
 ### CompletionContext, ContinueTurn, and CompactionContext
 
-These types require a development build newer than alpha.6. `Agent.before_complete` receives `CompletionContext` and returns `None`, `ContinueTurn(instructions)`, or `StopTurn(...)`. See [proposed completion checks](configuration.md#check-a-proposed-completion) for callback timing and limits.
+These types require `0.24.0-alpha.7` or later. `Agent.before_complete` receives `CompletionContext` and returns `None`, `ContinueTurn(instructions)`, or `StopTurn(...)`. See [proposed completion checks](configuration.md#check-a-proposed-completion) for callback timing and limits.
 
 `Agent.before_compact` receives `CompactionContext` and returns a nonempty summary string or `None`. See [compaction callbacks](state.md#supply-summaries-through-a-callback) for retained history, fallback, and callback ownership.
 
@@ -161,7 +161,7 @@ Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage
 
 ### RecordedTurn and RecordedResponse
 
-Import these history value types from `agents.history`. In a development build newer than alpha.6, a `RecordedTurn` can include `responses`, a list of retained `RecordedResponse` occurrences. Each occurrence has origin `thread_id`/`turn_id`, optional observation `id` and provider `response_id`, `usage_source`, and available usage or terminal facts. `usage_source` is `"received"` or `"native_normalized"`; missing counters are unknown and differ from zero. Optional `status` and `incomplete_reason` retain reported terminal facts. Occurrence `id` differs from a provider `response_id`, which can repeat. Missing response coverage is unknown, and retained responses do not prove SDK acceptance or billing. See [response-attempt inspection](sessions.md#inspect-response-attempts) and the [matching-source setup](installation.md#examples-and-upgrades).
+Import these history value types from `agents.history`. In `0.24.0-alpha.7` or later, a `RecordedTurn` can include `responses`, a list of retained `RecordedResponse` occurrences. Each occurrence has origin `thread_id`/`turn_id`, optional observation `id` and provider `response_id`, `usage_source`, and available usage or terminal facts. `usage_source` is `"received"` or `"native_normalized"`; missing counters are unknown and differ from zero. Optional `status` and `incomplete_reason` retain reported terminal facts. Occurrence `id` differs from a provider `response_id`, which can repeat. Missing response coverage is unknown, and retained responses do not prove SDK acceptance or billing. See [response-attempt inspection](sessions.md#inspect-response-attempts) and the [matching preview wheel](installation.md).
 
 Live `ModelRequestDispatching` and `ModelResponseLinked` observations come from `agents.observation`. They describe resolved sampling fields and best-effort links to retained occurrences. Dispatch can precede encoding failure or zero socket writes; links can be lost. Neither event proves provider receipt or success. Follow the same response-attempt guide for correlation and coverage limits.
 
@@ -175,7 +175,7 @@ These values describe native thread snapshots. They do not report per-submission
 
 ### RunBudget
 
-Import `RunBudget` from `agents` or `agents.usage` in a development build newer than alpha.6:
+Import `RunBudget` from `agents` or `agents.usage` in `0.24.0-alpha.7` or later:
 
 ```text
 RunBudget(max_requests=None, max_tokens=None, max_estimated_cost_micros=None,
@@ -200,7 +200,7 @@ The run needs an application decision. A supported one-shot run using Python or 
 | `code` | Available upstream provider error code, or `None`. |
 | `request_id` | Available provider request ID, or `None`. |
 | `category` | Normalized native failure category, or `None`. |
-| `response_integrity_reason` | Read-only `ResponseIntegrityReason` or `None` for the captured originating model-output integrity failure. Added after alpha.6; see [integrity diagnostics](sessions.md#diagnose-response-integrity-failures) and use the [matching development build](installation.md#examples-and-upgrades). |
+| `response_integrity_reason` | Read-only `ResponseIntegrityReason` or `None` for the captured originating model-output integrity failure. Available in `0.24.0-alpha.7` or later; see [integrity diagnostics](sessions.md#diagnose-response-integrity-failures) and use the [matching preview wheel](installation.md). |
 | `effects` | `"not_started"`, `"unknown"`, or `"recorded"` for the exact failed operation. The default is `"unknown"`. |
 
 Missing or discarded metadata is `None`. Messages and metadata may contain provider-supplied information. `effects="unknown"` does not establish that replay is safe. Even `"not_started"` describes only this failed operation, not earlier actions.
@@ -229,7 +229,7 @@ After closing the Session, reopen the conversation with `agent.session(storage=p
 
 `resume` requires `storage`. Neither option can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`.
 
-In builds newer than alpha.6, `LocalStorage` rejects `Agent(programmatic_tool_calling=True)` before opening because nested tool calls lack durable intent/result receipts. Use the [matching development build](installation.md#examples-and-upgrades) and [storage support limits](state.md#choose-how-to-store-a-conversation).
+In `0.24.0-alpha.7` or later, `LocalStorage` rejects `Agent(programmatic_tool_calling=True)` before opening because nested tool calls lack durable intent/result receipts. Use the [matching preview wheel](installation.md) and [storage support limits](state.md#choose-how-to-store-a-conversation).
 
 An unknown call outcome raises `LocalRecoveryRequired`. Verify the effects of unresolved root calls, then supply `reconciled_calls` to reopen the original conversation. An active child whose runtime cannot be restored still blocks reopening. See [local recovery](state.md#recover-after-interruption).
 
@@ -385,7 +385,7 @@ For a Windows x64 job-local named pipe, explicitly select `write_policy="legacy"
 
 ### LocalStorageMount
 
-In development builds newer than alpha.6, `LocalStorageMount(source, destination=None, strategy="local_bind", read_only=True)` adds an existing same-path directory to a Linux local executor's read-only mounts. Pass `LocalStorageMount(source=path)` in `Environment.local(mounts=[...])`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` must remain `True`. Existing explicit calls remain valid; `read_only=False` is unsupported. See [read-only directory requirements and restore limits](execution.md#add-read-only-directories-on-linux).
+In `0.24.0-alpha.7` or later, `LocalStorageMount(source, destination=None, strategy="local_bind", read_only=True)` adds an existing same-path directory to a Linux local executor's read-only mounts. Pass `LocalStorageMount(source=path)` in `Environment.local(mounts=[...])`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` must remain `True`. Existing explicit calls remain valid; `read_only=False` is unsupported. See [read-only directory requirements and restore limits](execution.md#add-read-only-directories-on-linux).
 
 ### NetworkPolicy
 
@@ -433,7 +433,7 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 ### ModelSettings
 
-Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in development builds after alpha.6, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](configuration.md#model-and-session-settings).
+Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](configuration.md#model-and-session-settings).
 
 ## Tracing
 
@@ -445,7 +445,7 @@ Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. 
 
 ### Native workflow scopes and TraceOptions
 
-These APIs require a development build newer than alpha.6; follow the [matching-source setup](installation.md#examples-and-upgrades). Import them from `agents.telemetry`.
+These APIs require `0.24.0-alpha.7` or later; install a [matching preview wheel](installation.md). Import them from `agents.telemetry`.
 
 ```text
 trace(name, *, options=None) -> TraceScope
@@ -461,7 +461,7 @@ Use a `TraceScope` as a synchronous context manager, or call `start()` and `end(
 
 ### Native processors and delivery
 
-Processor registration, `force_flush`, and shutdown budgets were added after alpha.6. Use the same [development-build setup](installation.md#examples-and-upgrades) and `agents.telemetry` namespace.
+Processor registration, `force_flush`, and shutdown budgets require `0.24.0-alpha.7` or later. Use the same [matching preview wheel](installation.md) and `agents.telemetry` namespace.
 
 ```text
 await configure(*, traces=None, logs=None, metrics=None, environment="dev",
@@ -479,11 +479,11 @@ A processor implements `on_trace_event(event: TraceLifecycleEvent)` synchronousl
 
 ### WebSearch
 
-`WebSearch(mode="cached", route="standalone", allowed_domains=None, blocked_domains=None, location=None)` enables native web search at Session opening. `mode` also accepts `"live"`; `route` also accepts `"hosted"` for the provider-hosted protocol. The provider must support the chosen route. Omission disables both routes. The declaration is fixed for the opening. In development builds newer than alpha.6, explicit selections can omit it to disable search for that operation or preparation. Domain filters and approximate location require the hosted route and provider support. It does not grant executor network access. See [the tools guide](tools.md#native-web-search).
+`WebSearch(mode="cached", route="standalone", allowed_domains=None, blocked_domains=None, location=None)` enables native web search at Session opening. `mode` also accepts `"live"`; `route` also accepts `"hosted"` for the provider-hosted protocol. The provider must support the chosen route. Omission disables both routes. The declaration is fixed for the opening. In `0.24.0-alpha.7` or later, explicit selections can omit it to disable search for that operation or preparation. Domain filters and approximate location require the hosted route and provider support. It does not grant executor network access. See [the tools guide](tools.md#native-web-search).
 
 ### Checklist and NativeGoals
 
-Put `Checklist()` in the opening tools to enable native checklist updates, then read them with `await session.checklist()`. Put `NativeGoals()` in the opening tools of a `LocalStorage` Session to enable native goals, then inspect `await session.goal()`. These declarations grant separate tools. Redeclare `NativeGoals()` when reopening a local conversation. Saved data alone grants no tools. In development builds newer than alpha.6, explicit selections can omit a planning declaration to disable its tools for that operation or preparation. Reopening does not itself start work. See [current checklists and goals](sessions.md#current-checklists-and-goals).
+Put `Checklist()` in the opening tools to enable native checklist updates, then read them with `await session.checklist()`. Put `NativeGoals()` in the opening tools of a `LocalStorage` Session to enable native goals, then inspect `await session.goal()`. These declarations grant separate tools. Redeclare `NativeGoals()` when reopening a local conversation. Saved data alone grants no tools. In `0.24.0-alpha.7` or later, explicit selections can omit a planning declaration to disable its tools for that operation or preparation. Reopening does not itself start work. See [current checklists and goals](sessions.md#current-checklists-and-goals).
 
 ### Saved checklist and goal data
 

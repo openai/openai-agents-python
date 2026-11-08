@@ -4,7 +4,7 @@ Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlie
 
 ## Unreleased
 
-## 0.24.0-alpha.7 (unreleased)
+## 0.24.0-alpha.7 (2026-11-08)
 
 ### Highlights
 

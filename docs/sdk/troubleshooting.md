@@ -21,7 +21,7 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | Streamed text is incomplete or an `EventGap` appears | The observation stream can drop records. Use `turn.get_result()` and its final output; see [streaming](sessions.md#stream-observations). |
 | A result fails validation | Catch [`OutputValidationError`](configuration.md#structured-output). A new submission can repeat completed tool effects; validation does not undo them. |
 | A provider or native operation fails | Inspect available `NativeError` metadata and [effect status](sessions.md#failures-and-recovery). Missing metadata remains unknown. |
-| A provider stream succeeds but the SDK rejects its output | With a matching post-alpha.6 development build, inspect the typed [response integrity reason](sessions.md#diagnose-response-integrity-failures) and compare [retained response facts](sessions.md#inspect-response-attempts) with the SDK result. Earlier tool effects can remain. |
+| A provider stream succeeds but the SDK rejects its output | With `0.24.0-alpha.7` or later, inspect the typed [response integrity reason](sessions.md#diagnose-response-integrity-failures) and compare [retained response facts](sessions.md#inspect-response-attempts) with the SDK result. Earlier tool effects can remain. |
 | Usage totals appear inflated or usage is missing | Check [usage accounting](observability.md#read-usage-without-double-counting). Replace cumulative snapshots when updating a display, and keep missing usage as unknown. |
 | A scripted test uses an unexpected request or leaves responses unused | Each script entry is one model response. Check [request snapshots and exact exhaustion](testing.md). |
 
@@ -81,7 +81,7 @@ Include these details in a failure report:
 - SDK version, Python version, operating system and failed operation.
 - A small reproduction with synthetic inputs, and whether it fails with [scripted responses](testing.md) or only with the live provider.
 - Available `NativeError` fields `status_code`, `code`, `request_id`, `category` and `effects`, if your data policy permits them.
-- On matching development builds after alpha.6, the optional `response_integrity_reason`. See [response integrity failures](sessions.md#diagnose-response-integrity-failures) for its values and limits.
+- In `0.24.0-alpha.7` or later, the optional `response_integrity_reason`. See [response integrity failures](sessions.md#diagnose-response-integrity-failures) for its values and limits.
 
 Messages, request snapshots, prompts, tool results and checkpoints can contain private data. Inspect and redact reports before sending them to [GitHub issues](https://github.com/openai/openai-agents-python/issues). Never include credentials. Report vulnerabilities through [private security reporting](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/SECURITY.md).
 

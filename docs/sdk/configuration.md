@@ -14,7 +14,7 @@ When opening a Session:
 - Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
 - [Portable restore](state.md#save-and-restore-a-portable-checkpoint) keeps the saved model and settings instead.
 
-Development builds after `0.24.0-alpha.6` also support `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching-source setup](installation.md#examples-and-upgrades) for this option.
+SDK version `0.24.0-alpha.7` or later also supports `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching preview wheel](installation.md) for this option.
 
 An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
 
@@ -282,7 +282,7 @@ These hooks have separate owners. A context projection does not change admitted 
 
 ## Check a proposed completion
 
-`before_complete` requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). Set `Agent(before_complete=callback)` to check a proposed root or child answer before the turn completes. The callback receives `CompletionContext` from `agents`, including application `context`, proposed `text`, native identity, and `continuation_count`.
+`before_complete` requires [`0.24.0-alpha.7` or later](installation.md). Set `Agent(before_complete=callback)` to check a proposed root or child answer before the turn completes. The callback receives `CompletionContext` from `agents`, including application `context`, proposed `text`, native identity, and `continuation_count`.
 
 Return `None` to accept, `ContinueTurn("specific feedback")` to continue the same turn, or `StopTurn(...)` to stop it. Continuation feedback becomes model-visible conversation data and saved history. Bound root continuations with [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage). Root budgets exclude children, so use `continuation_count` and `StopTurn` to bound child continuations.
 
@@ -290,7 +290,7 @@ The callback sees proposed text before output-type validation. Rejected text may
 
 ## Edit the next sampling request
 
-`prepare_request` requires a development build newer than `0.24.0-alpha.6`. Follow the [matching-source setup](installation.md#examples-and-upgrades) before using it.
+`prepare_request` requires `0.24.0-alpha.7` or later. Install a [matching preview wheel](installation.md) before using it.
 
 Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` for advanced edits to a detached copy of the next HTTP model request. Use it to change sampling instructions or selected tool descriptions and parameter schemas within the profile below. Prefer [`transform_context`](#choose-a-model-context-hook) for model input, [`before_step`](sessions.md#update-tools-instructions-and-model-settings) for tool selection, and [tool policies](tools.md#inspect-or-change-tool-values) for execution arguments or results.
 
@@ -333,7 +333,7 @@ These limits apply:
 - A manual call waits for an application reply in the live Session. Pending code cells cannot be saved as portable checkpoints.
 - `exec` and `wait` are reserved function names.
 
-In development builds after alpha.6, `LocalStorage` rejects `programmatic_tool_calling=True` before opening. Use an ephemeral Session for code mode; see [storage support limits](state.md#choose-how-to-store-a-conversation) and the [matching-source setup](installation.md#examples-and-upgrades).
+In `0.24.0-alpha.7` or later, `LocalStorage` rejects `programmatic_tool_calling=True` before opening. Use an ephemeral Session for code mode; see [storage support limits](state.md#choose-how-to-store-a-conversation) and the [matching preview wheel](installation.md).
 
 Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor argument and result transforms](execution.md#executor-policies) also support direct calls without this option.
 

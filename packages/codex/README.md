@@ -6,7 +6,7 @@ The Agents SDK uses Codex to run model turns and keep conversation history. Your
 
 Install a prebuilt preview wheel with pip. The [installation guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/installation.md) covers preview availability, supported Python versions, and setup.
 
-For an existing v0 application, prefer a [direct migration to native v1](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) when you choose to upgrade. You can stay on v0. The development branch also retains [classic](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md) for workflows that need a staged package upgrade; classic is not included in the published preview linked by the installation guide.
+For an existing v0 application, prefer a [direct migration to native v1](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md) when you choose to upgrade. You can stay on v0. The SDK also retains [classic](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CLASSIC.md) for workflows that need a staged package upgrade.
 
 ## Agent and Session API
 
