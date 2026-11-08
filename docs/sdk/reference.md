@@ -385,7 +385,7 @@ For a Windows x64 job-local named pipe, explicitly select `write_policy="legacy"
 
 ### LocalStorageMount
 
-In development builds newer than alpha.6, `LocalStorageMount(source, destination, strategy, read_only=True)` adds an existing same-path directory to a Linux local executor's read-only mounts. Pass the declaration in `Environment.local(mounts=[...])`. Supply `strategy` explicitly; `read_only=False` is unsupported. See [read-only directory requirements and restore limits](execution.md#add-read-only-directories-on-linux).
+In development builds newer than alpha.6, `LocalStorageMount(source, destination=None, strategy="local_bind", read_only=True)` adds an existing same-path directory to a Linux local executor's read-only mounts. Pass `LocalStorageMount(source=path)` in `Environment.local(mounts=[...])`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` must remain `True`. Existing explicit calls remain valid; `read_only=False` is unsupported. See [read-only directory requirements and restore limits](execution.md#add-read-only-directories-on-linux).
 
 ### NetworkPolicy
 
