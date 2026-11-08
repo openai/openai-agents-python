@@ -225,7 +225,7 @@ async def test_invalid_async_contextual_return_never_delivered_after_one_charge(
         assert len(responses.requests) == 1
 
 
-@pytest.mark.parametrize("mode", ["async", "sync-with-deadline"])
+@pytest.mark.parametrize("mode", ["async", "sync-with-deadline", "result-policy"])
 async def test_invalid_callback_result_does_not_expose_rejected_input_or_validation_chain(
     responses, mode
 ):
@@ -243,7 +243,8 @@ async def test_invalid_callback_result_does_not_expose_rejected_input_or_validat
 
     debit = function_tool(
         name="debit",
-        callback_timeout=10 if mode == "sync-with-deadline" else None,
+        callback_timeout=10 if mode != "async" else None,
+        timeout_behavior="error_as_result" if mode == "result-policy" else "raise_exception",
     )(debit_sync if mode == "sync-with-deadline" else debit_async)
 
     responses.respond(function_call("debit", {"units": 7, "key": original}, "private-debit"))

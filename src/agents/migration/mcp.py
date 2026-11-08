@@ -280,6 +280,8 @@ def _capture_tool(
             callback=invoke,
             context_parameter=None,
             callback_timeout=declaration.callback_timeout,
+            timeout_behavior=declaration.timeout_behavior,
+            timeout_error_function=declaration.timeout_error_function,
             before=declaration.before,
             after=declaration.after,
             context=session_context,

@@ -19,7 +19,10 @@ from agents import (
     HttpMCP,
     InteractionRequired,
     ToolContext,
+    ToolOutput,
     ToolRef,
+    ToolTimeoutBehavior,
+    ToolTimeoutError,
     TurnStoppedError,
     function_tool,
 )
@@ -535,6 +538,111 @@ async def test_cancelled_selected_call_keeps_the_borrowed_connection_open(
             next_turn = await session.submit("Finish", tools=[])
             assert (await next_turn.get_result()).final_output == "after cancellation"
         assert len(peer.calls) == 1
+        assert await client.list_tools()
+
+
+@pytest.mark.parametrize(
+    ("policy", "formatter"),
+    [
+        (None, "sync"),
+        ("raise_exception", "sync"),
+        ("error_as_result", "default"),
+        ("error_as_result", "sync"),
+        ("error_as_result", "async"),
+    ],
+    ids=[
+        "default-exception",
+        "explicit-exception",
+        "default-result",
+        "sync-result",
+        "async-result",
+    ],
+)
+async def test_selected_mcp_retains_timeout_policy_and_borrowed_connection(
+    responses: ResponsesFixture, policy: ToolTimeoutBehavior | None, formatter: str
+) -> None:
+    release = asyncio.Event()
+    peer = Peer(release_call=release)
+    context = object()
+    hooks: list[str] = []
+    errors: list[ToolTimeoutError] = []
+
+    async def before(call: ToolContext[object]) -> Allow:
+        assert call.context is context
+        assert call.call.tool == ToolRef("search", "catalog")
+        hooks.append("before")
+        return Allow()
+
+    async def after(call: ToolContext[object], output: ToolOutput) -> ToolOutput:
+        assert call.context is context
+        hooks.append("after")
+        return output
+
+    def format_sync(call: ToolContext[object], error: ToolTimeoutError) -> str:
+        assert call.context is context
+        assert call.call.tool == ToolRef("search", "catalog")
+        assert call.call_id == "selected-timeout"
+        assert error.tool_name == "search" and error.timeout_seconds == 0.1
+        errors.append(error)
+        return "selected-timeout-retry"
+
+    async def format_async(call: ToolContext[object], error: ToolTimeoutError) -> str:
+        await asyncio.sleep(0)
+        return format_sync(call, error)
+
+    responses.respond(mcp_call("search", "catalog", "selected-timeout"))
+    if policy == "error_as_result":
+        responses.respond(assistant_output("recovered"))
+    responses.respond(mcp_call("search", "catalog", "selected-success"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(30),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        [selected] = await select_mcp_tools(
+            MCPNamespace("catalog", client), context=context, tool_names=["search"], approval=before
+        )
+        configured = replace(
+            selected,
+            callback_timeout=0.1,
+            timeout_error_function={"default": None, "sync": format_sync, "async": format_async}[
+                formatter
+            ],
+            after=after,
+        )
+        if policy is not None:
+            configured = replace(configured, timeout_behavior=policy)
+        agent = Agent(instructions="Read.", provider=provider(responses), tools=[configured])
+        try:
+            async with agent.session(context=context) as session:
+                turn = await session.submit("Read")
+                if policy == "error_as_result":
+                    assert (await turn.get_result()).final_output == "recovered"
+                    text = tool_output(responses.requests[1], "selected-timeout")
+                    assert (
+                        "callback timeout" if formatter == "default" else "selected-timeout-retry"
+                    ) in text
+                    assert peer.label not in text
+                else:
+                    with pytest.raises(ToolTimeoutError) as caught:
+                        await turn.get_result()
+                    assert caught.value.tool_name == "search"
+                    assert caught.value.timeout_seconds == 0.1
+                    assert len(responses.requests) == 1
+            assert peer.call_entered.is_set()
+            assert hooks == ["before"]
+            assert len(errors) == int(policy == "error_as_result" and formatter != "default")
+        finally:
+            release.set()
+
+        # Closing the timed-out Session leaves the application-owned connection usable.
+        assert await client.list_tools()
+        async with agent.session(context=context) as session:
+            assert (await (await session.submit("Read again")).get_result()).final_output == "done"
+        assert hooks == ["before", "before", "after"]
+        assert peer.label in tool_output(responses.requests[-1], "selected-success")
+        assert peer.calls == [{"name": "search", "arguments": {"key": "43"}}] * 2
         assert await client.list_tools()
 
 

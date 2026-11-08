@@ -21,7 +21,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from .manual import _CapturedManual as _CapturedManual
 
 if TYPE_CHECKING:
-    from ._function_tools import ToolContext
+    from ._function_tools import ToolContext, ToolTimeoutBehavior, ToolTimeoutError
     from .native_interception import Allow, Deny, ReplaceArguments
 
 _TOOL_RESPONSE = TypeAdapter(FunctionCallResponse)
@@ -345,6 +345,10 @@ class _CapturedFunction:
     callback: Callable[..., Any]
     context_parameter: inspect.Parameter | None
     callback_timeout: float | None
+    timeout_behavior: ToolTimeoutBehavior
+    timeout_error_function: (
+        Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None
+    )
     before: (
         Callable[
             [ToolContext[Any]],
