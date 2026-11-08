@@ -78,6 +78,8 @@ NewOutputT = TypeVar("NewOutputT")
 TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
 
+_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()
+
 
 class ModelSettings(TypedDict, total=False, closed=True):
     """Native model overrides. Omission preserves the native default.
@@ -657,7 +659,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
-        max_function_concurrency: int | None = None,
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -665,6 +667,9 @@ class Agent(Generic[ContextT, OutputT]):
         including validation and hooks through reply settlement. None adds no
         limit. Manual requests and native tools do not consume slots. Each child
         owner has an independent limit. Callback deadlines exclude this wait.
+        When a DeferredTools.start session hook omits this argument, the restored
+        Session inherits the source limit. An explicit value, including None,
+        overrides that limit.
 
         on_interaction handles supported live requests for this Session's entire
         lifetime, including requests without Turn IDs. Return the exact request's

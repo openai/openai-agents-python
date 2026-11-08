@@ -88,6 +88,7 @@ from ._trace_context import (
     _trace_context as _trace_context,
 )
 from .agent import (
+    _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
     Agent as Agent,
     CodexAccount as CodexAccount,
     ContextT as ContextT,
@@ -1815,12 +1816,15 @@ class Session(Generic[ContextT, OutputT]):
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        max_function_concurrency: int | None = None,
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
+        function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
+        if function_concurrency_omitted:
+            max_function_concurrency = None
         if max_function_concurrency is not None and (
             isinstance(max_function_concurrency, bool)
             or not isinstance(max_function_concurrency, int)
@@ -1844,7 +1848,8 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
-            max_function_concurrency = selected.max_function_concurrency
+            if function_concurrency_omitted:
+                max_function_concurrency = selected.max_function_concurrency
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
