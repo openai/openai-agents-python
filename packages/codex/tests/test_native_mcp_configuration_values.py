@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import operator
 import pickle
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,35 +19,89 @@ from agents import (
     Environment,
     HostedVerificationMCP,
     HttpMCP,
+    NativeError,
     NativeProvider,
+    RunBudget,
     StdioMCP,
+    TurnNeedsAttention,
+    TurnStoppedError,
 )
+from tests._asyncio import timeout
+from tests.native_fixtures import ResponsesFixture, responses as responses
+from tests.test_native_agent import provider
+from tests.test_native_mcp_tools import Peer, mcp_call
 
 _SECRET = "synthetic-mcp-credential-for-traceback-tests"
 
 
-def assert_private_frames(error: BaseException) -> None:
-    assert error.__cause__ is None
-    assert error.__context__ is None
+def assert_private_frames(
+    error: BaseException,
+    *,
+    allow_chain: bool = False,
+    require_traceback: bool = True,
+    application_files: tuple[str, ...] | None = None,
+) -> None:
+    if application_files is None:
+        application_files = (__file__,)
+    if not allow_chain:
+        assert error.__cause__ is None
+        assert error.__context__ is None
     assert _SECRET not in str(error)
-    current = error.__traceback__
+
+    def check(value: Any, seen: set[int]) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, str):
+            assert _SECRET not in value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                check(key, seen)
+                check(item, seen)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                check(item, seen)
+        elif not isinstance(value, type) and type(value).__module__.startswith(
+            ("agents.", "_agents_codex.")
+        ):
+            items = (
+                (getattr(value, field.name, None) for field in fields(value))
+                if is_dataclass(value)
+                else getattr(value, "__dict__", {}).values()
+            )
+            for item in items:
+                check(item, seen)
+
+    pending, seen_errors = [error], set()
     inspected = 0
-    while current is not None:
-        frame = current.tb_frame
-        if frame.f_code.co_filename != __file__:
-            inspected += 1
-            values = frame.f_locals
-            assert _SECRET not in repr(values)
-            for value in values.values():
-                if is_dataclass(value) and not isinstance(value, type):
-                    assert _SECRET not in repr(vars(value))
-        current = current.tb_next
-    assert inspected > 0
+    while pending:
+        current_error = pending.pop()
+        if id(current_error) in seen_errors:
+            continue
+        seen_errors.add(id(current_error))
+        assert _SECRET not in str(current_error)
+        current = current_error.__traceback__
+        while current is not None:
+            frame = current.tb_frame
+            if frame.f_code.co_filename not in application_files:
+                inspected += 1
+                values = frame.f_locals
+                assert _SECRET not in repr(values)
+                check(dict(values), set())
+            current = current.tb_next
+        pending.extend(
+            cause
+            for cause in (current_error.__cause__, current_error.__context__)
+            if cause is not None
+        )
+    if require_traceback:
+        assert inspected > 0
 
 
+@pytest.mark.parametrize("route", ["session", "run", "sync"])
 @pytest.mark.parametrize("preceding_http_server", [False, True])
 async def test_opening_failure_does_not_retain_mcp_configuration(
-    preceding_http_server: bool, tmp_path: Path
+    preceding_http_server: bool, route: str, tmp_path: Path
 ) -> None:
     stdio = StdioMCP(
         name="local",
@@ -60,9 +115,14 @@ async def test_opening_failure_does_not_retain_mcp_configuration(
     )
     agent = Agent(instructions="test", tools=[http, stdio] if preceding_http_server else [stdio])
     with pytest.raises(ValueError, match="requires a Session environment") as captured:
-        async with agent.session():
-            pytest.fail("invalid configuration opened a session")
-    assert_private_frames(captured.value)
+        if route == "session":
+            async with agent.session():
+                pytest.fail("invalid configuration opened a session")
+        elif route == "run":
+            await agent.run("test")
+        else:
+            await asyncio.to_thread(agent.run_sync, "test")
+    assert_private_frames(captured.value, allow_chain=route == "sync")
     assert stdio.env == {"TOKEN": _SECRET}
     assert http.headers == {"X-Token": _SECRET}
     assert stdio._config(Environment.local(cwd=tmp_path))["env"] == {"TOKEN": _SECRET}
@@ -79,6 +139,143 @@ async def test_later_opening_failure_does_not_retain_mcp_configuration() -> None
             pytest.fail("a closed provider opened a session")
     assert_private_frames(captured.value)
     assert server._config()["http_headers"] == {"X-Token": _SECRET}
+
+
+@pytest.mark.parametrize("kind", ["stdio", "http"])
+def test_invalid_tool_selection_does_not_retain_credentials(kind: str) -> None:
+    server = (
+        StdioMCP(name="local", command="peer", tools=[], env={"TOKEN": _SECRET})
+        if kind == "stdio"
+        else HttpMCP(
+            name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+        )
+    )
+    with pytest.raises(ValueError, match="not declared") as captured:
+        server.tool("missing")
+    assert_private_frames(captured.value)
+
+
+@pytest.mark.parametrize("route", ["submit", "resource", "update", "wait"])
+async def test_lazy_mcp_failure_does_not_retain_credentials(
+    responses: ResponsesFixture, route: str
+) -> None:
+    server = HttpMCP(
+        name="remote",
+        url="http://127.0.0.1:1/mcp",
+        tools=["ping"],
+        startup_timeout=0.1,
+        headers={"X-Token": _SECRET},
+    )
+    async with provider(responses) as client:
+        async with Agent(instructions="test", tools=[server]).session(provider=client) as session:
+            with pytest.raises(RuntimeError, match="MCP|mcp|remote") as captured:
+                if route == "resource":
+                    await session.list_mcp_resources("remote")
+                elif route == "update":
+                    await session.update(tools=[server.tool("ping")])
+                else:
+                    turn = await session.submit("test")
+                    if route == "wait":
+                        await turn.wait_for_request_or_result()
+                    else:
+                        await turn.get_result()
+            assert_private_frames(captured.value, allow_chain=True)
+            assert server.headers == {"X-Token": _SECRET}
+    assert not responses.requests
+
+
+@pytest.mark.parametrize("route", ["result", "request", "attention"])
+async def test_submitted_turn_error_does_not_retain_mcp_credentials(
+    responses: ResponsesFixture, route: str
+) -> None:
+    peer = Peer()
+    async with peer.serve() as url, provider(responses) as client:
+        server = HttpMCP(name="remote", url=url, tools=["search"], headers={"X-Token": _SECRET})
+        async with Agent(instructions="test", tools=[server]).session(provider=client) as session:
+            turn = await session.submit("stop before sampling", budget=RunBudget(max_requests=0))
+            if route == "attention":
+                result = await turn.wait_for_attention()
+                assert isinstance(result, TurnNeedsAttention)
+                error = result.error
+            else:
+                with pytest.raises(NativeError) as captured:
+                    if route == "request":
+                        await turn.wait_for_request_or_result()
+                    else:
+                        await turn.get_result()
+                error = captured.value
+            assert isinstance(error, NativeError)
+            assert error.code == "run_budget_exceeded"
+            assert_private_frames(error, allow_chain=True, require_traceback=route != "attention")
+    assert not responses.requests
+
+
+async def test_mcp_error_boundary_preserves_application_error_and_cause(
+    responses: ResponsesFixture,
+) -> None:
+    original = RuntimeError("application failure")
+    cause = ValueError("application cause")
+    server = HttpMCP(
+        name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+    )
+    async with provider(responses) as client:
+        with pytest.raises(RuntimeError) as captured:
+            async with Agent(instructions="test", tools=[server]).session(provider=client):
+                raise original from cause
+    assert captured.value is original
+    assert original.__cause__ is cause
+    frames = []
+    traceback = original.__traceback__
+    while traceback is not None:
+        frames.append(traceback.tb_frame.f_code.co_filename)
+        traceback = traceback.tb_next
+    assert __file__ in frames
+    assert_private_frames(original, allow_chain=True, require_traceback=False)
+
+
+@pytest.mark.parametrize("method", ["items", "turns", "subagents"])
+async def test_closed_history_iterator_does_not_retain_mcp_credentials(
+    responses: ResponsesFixture, method: str
+) -> None:
+    server = HttpMCP(
+        name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+    )
+    async with provider(responses) as client:
+        async with Agent(instructions="test", tools=[server]).session(provider=client) as session:
+            iterator = getattr(session, method)()
+        try:
+            with pytest.raises(RuntimeError, match="closed") as captured:
+                await iterator.__anext__()
+            assert_private_frames(captured.value, allow_chain=True)
+        finally:
+            await iterator.aclose()
+
+
+async def test_cancelled_mcp_turn_keeps_error_private_and_joins_work(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(release_call=asyncio.Event())
+    async with timeout(20), peer.serve() as url, provider(responses) as client:
+        responses.respond(mcp_call("search", "mcp__remote", "held"))
+        server = HttpMCP(
+            name="remote",
+            url=url,
+            tools=["search"],
+            approval_mode="preapproved",
+            headers={"X-Token": _SECRET},
+        )
+        async with Agent(instructions="test", tools=[server]).session(provider=client) as session:
+            turn = await session.submit("hold the tool")
+            try:
+                await peer.call_entered.wait()
+                await turn.cancel()
+                with pytest.raises((TurnStoppedError, NativeError)) as captured:
+                    await turn.get_result()
+                assert_private_frames(captured.value, allow_chain=True)
+            finally:
+                peer.release_call.set()
+    assert len(peer.calls) == 1
+    assert len(responses.requests) == 1
 
 
 @pytest.mark.parametrize("empty", [False, True])

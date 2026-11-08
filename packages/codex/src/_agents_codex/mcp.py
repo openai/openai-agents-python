@@ -28,6 +28,7 @@ from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
 
@@ -799,4 +800,5 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
     )
 
 
+_protect_mcp_methods(_MCP, lambda owner: (owner,))
 _preserve_module_identity(globals(), "agents.mcp")

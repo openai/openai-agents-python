@@ -291,7 +291,11 @@
     {
       "path": "0066-caller-controlled-mcp-prompts.patch",
       "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
+    },
+    {
+      "path": "0091-mcp-windows-env-precedence.patch",
+      "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
     }
   ],
-  "result_tree": "62fd05c563d1e0f54d96226de086c2824f3e6c98"
+  "result_tree": "8a4499b32dbec78bf6055b804adfa122278f42bd"
 }

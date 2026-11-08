@@ -38,6 +38,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
@@ -77,30 +78,6 @@ SessionContextT = TypeVar("SessionContextT")
 NewOutputT = TypeVar("NewOutputT")
 TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
-
-
-def _clear_mcp_opening_frames(error: BaseException) -> None:
-    # Opening can copy credentials into several SDK frames. Keep the original
-    # error, cleanup owner, exception chain, and application frames intact.
-    pending, seen = [error], set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        traceback = current.__traceback__
-        while traceback is not None:
-            frame = traceback.tb_frame
-            if frame.f_globals.get("__name__", "").startswith("_agents_codex."):
-                try:
-                    frame.clear()
-                except RuntimeError:
-                    # The context manager's current frame is still executing.
-                    pass
-            traceback = traceback.tb_next
-        pending.extend(
-            cause for cause in (current.__cause__, current.__context__) if cause is not None
-        )
 
 
 class ModelSettings(TypedDict, total=False, closed=True):
@@ -764,7 +741,6 @@ class Agent(Generic[ContextT, OutputT]):
         """
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
-        from .mcp import _MCP
         from .session import Session
         from .telemetry import _capture
 
@@ -774,7 +750,6 @@ class Agent(Generic[ContextT, OutputT]):
         finally:
             del trace_options
         trace_error: BaseException | None = None
-        session: Session[SessionContextT, OutputT] | None = None
         try:
             session = await Session[SessionContextT, OutputT]._open(
                 self,
@@ -819,8 +794,6 @@ class Agent(Generic[ContextT, OutputT]):
                     raise
 
         except BaseException as error:
-            if session is None and any(isinstance(tool, _MCP) for tool in self.tools):
-                _clear_mcp_opening_frames(error)
             trace_error = error
             raise
         finally:
@@ -1331,4 +1304,5 @@ class Agent(Generic[ContextT, OutputT]):
             del trace_options
 
 
+_protect_mcp_methods(Agent, lambda owner: owner.tools)
 _preserve_module_identity(globals(), "agents.agent")
