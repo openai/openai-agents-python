@@ -8,6 +8,8 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides. Use [the guides for your installed release](versions.md): development-branch guides can change between releases.
 
+For the current [v0-to-native migration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/MIGRATION.md), including classic, use the [matching-source build and installation](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source). The alpha.6 downloads below predate classic and cannot run the current [migration tutorial](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/migration/README.md). Keep the built SDK, examples, and guides on the same source commit.
+
 ## Requirements
 
 Use standard CPython 3.10 through 3.14 on one of these platforms:

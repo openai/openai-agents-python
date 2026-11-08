@@ -23,7 +23,7 @@ Tests use Git to create temporary repositories, verify release sources, and dete
 
 ## Build the SDK from source
 
-Source builds are for SDK development. Users install prebuilt wheels as described in the [installation guide](docs/sdk/installation.md).
+Use a source build for SDK development or APIs that are newer than the published preview, including the current [migration tutorial](examples/codex/migration/README.md). For released APIs, install the matching prebuilt wheel as described in the [installation guide](docs/sdk/installation.md).
 
 Install standard CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and the [platform-specific native build tools](packages/codex/MAINTAINING.md#build-from-this-source), including a compiler and Protocol Buffers. The build downloads pinned public Codex and RMCP sources. Python package installers do not install these system tools.
 
