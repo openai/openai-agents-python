@@ -147,8 +147,21 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     timeout_error_function: (
         Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None
     ) = field(default=None, repr=False)
+    namespace: str | None = None
+    namespace_description: str | None = None
 
     def __post_init__(self) -> None:
+        if self.namespace is not None and (
+            not isinstance(self.namespace, str) or not self.namespace.strip()
+        ):
+            raise ValueError("FunctionTool namespace must be a nonempty string or None")
+        if self.namespace_description is not None:
+            if not isinstance(self.namespace_description, str):
+                raise TypeError("FunctionTool namespace_description must be a string or None")
+            if self.namespace is None:
+                raise ValueError("FunctionTool namespace_description requires namespace")
+        if self.namespace is not None and self._bind is None:
+            raise ValueError("FunctionTool namespaces require a registered Python callback")
         if not isinstance(self.defer_loading, bool):
             raise TypeError("FunctionTool defer_loading must be a bool")
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
@@ -189,17 +202,25 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
 
     @property
     def ref(self) -> ToolRef:
-        """Select this bare Python tool by its declared identity."""
-        return ToolRef(self.name)
+        """Select this function by its declared qualified identity."""
+        return ToolRef(self.name, self.namespace)
 
     def _spec_json(self) -> str:
+        function = {
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_type.model_json_schema(),
+            "deferLoading": self.defer_loading,
+        }
+        if self.namespace is None:
+            return json.dumps(function)
         return json.dumps(
             {
-                "type": "function",
-                "name": self.name,
-                "description": self.description,
-                "inputSchema": self.input_type.model_json_schema(),
-                "deferLoading": self.defer_loading,
+                "type": "namespace",
+                "name": self.namespace,
+                "description": self.namespace_description or "",
+                "tools": [function],
             }
         )
 
@@ -300,11 +321,20 @@ def _policy_hints(policy: Callable[..., Any]) -> dict[str, Any]:
 def function_tool(
     function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any],
     /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
 ) -> _PythonTool[ToolContextT]: ...
 
 
 @overload
-def function_tool(function: Callable[ParametersT, Any], /) -> _PythonTool[object]: ...
+def function_tool(
+    function: Callable[ParametersT, Any],
+    /,
+    *,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+) -> _PythonTool[object]: ...
 
 
 @overload
@@ -324,6 +354,8 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
     | None = None,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
 ) -> _ToolDecorator: ...
 
 
@@ -345,6 +377,8 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
     | None = None,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
 ) -> _PythonTool[Any] | _ToolDecorator:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -375,6 +409,11 @@ def function_tool(
     mode after callback cleanup, while the invocation is still admitted.
     Formatter errors fail the turn. Without a deadline, these options are inactive.
     Timeout does not undo effects already performed by application code.
+
+    namespace qualifies this callback without changing its short name.
+    namespace_description describes that native namespace. Equal short names
+    in different namespaces remain distinct. Manual functions do not support
+    namespaces. A Session captures this identity before native opening.
 
     Observe tool starts and results through Session.events().
 
@@ -438,6 +477,7 @@ def function_tool(
                 timeout_error_function=declaration.timeout_error_function,
                 before=declaration.before,
                 after=declaration.after,
+                namespace=declaration.namespace,
             )
 
         return FunctionTool(
@@ -453,6 +493,8 @@ def function_tool(
             defer_loading=defer_loading,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
+            namespace=namespace,
+            namespace_description=namespace_description,
         )
 
     return decorate(function) if function is not None else decorate

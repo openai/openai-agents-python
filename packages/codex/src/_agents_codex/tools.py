@@ -358,11 +358,11 @@ class _CapturedFunction:
     )
     after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None
     context: Any = field(repr=False)
-    namespace: None = field(default=None, init=False)
+    namespace: str | None = None
 
     @property
     def _ref(self) -> ToolRef:
-        return ToolRef(self.name)
+        return ToolRef(self.name, self.namespace)
 
     def _parse_arguments(self, arguments: Any) -> BaseModel:
         if isinstance(arguments, str):

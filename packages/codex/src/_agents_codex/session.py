@@ -758,6 +758,7 @@ class _Submission:
     issued: Turn[Any] | None = None
     task: asyncio.Task[None] | None = None
     callbacks: set[asyncio.Task[None]] = field(default_factory=set)
+    function_admission: asyncio.Semaphore | None = None
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
     stopping: bool = False
@@ -822,6 +823,7 @@ class _ChildCallbacks:
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: set[asyncio.Task[None]] = field(default_factory=set)
+    function_admission: asyncio.Semaphore | None = None
     calls: set[str] = field(default_factory=set)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
@@ -1821,11 +1823,18 @@ class Session(Generic[ContextT, OutputT]):
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        max_function_concurrency: int | None = None,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
+        if max_function_concurrency is not None and (
+            isinstance(max_function_concurrency, bool)
+            or not isinstance(max_function_concurrency, int)
+            or max_function_concurrency <= 0
+        ):
+            raise ValueError("max_function_concurrency must be a positive integer or None")
         parent_trace = _trace_context(parent_trace)
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
@@ -2542,6 +2551,7 @@ class Session(Generic[ContextT, OutputT]):
                     output,
                     instructions,
                     _start_readers=False,
+                    max_function_concurrency=max_function_concurrency,
                 )
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
@@ -2847,6 +2857,7 @@ class Session(Generic[ContextT, OutputT]):
         instructions: str,
         *,
         _start_readers: bool = True,
+        max_function_concurrency: int | None = None,
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -2871,6 +2882,7 @@ class Session(Generic[ContextT, OutputT]):
         )
         self._home = home
         self._catalog = catalog
+        self._max_function_concurrency = max_function_concurrency
         # MCP publication keeps this exact captured tuple; rebinding an idle
         # Python catalog creates another. No second set of bindings is made.
         self._bound_tools = catalog.tools
@@ -8400,6 +8412,8 @@ class Session(Generic[ContextT, OutputT]):
         scope = _Invocation(self)
         token = _invocation.set(scope)
         started: ToolStarted | None = None
+        permit: asyncio.Semaphore | None = None
+        acquired = False
         status: Literal["completed", "failed", "cancelled"] = "cancelled"
         try:
             request = json.dumps(message)
@@ -8413,6 +8427,14 @@ class Session(Generic[ContextT, OutputT]):
             ref = entry._ref
             if message["tool"] != ref.name or message.get("namespace") != ref.namespace:
                 raise NativeError("Native tool request does not match its captured declaration")
+            if self._max_function_concurrency is not None:
+                if state.function_admission is None:
+                    state.function_admission = asyncio.Semaphore(self._max_function_concurrency)
+                permit = state.function_admission
+                # This task is already owned by state.callbacks, including while
+                # queued. Native authority must be checked again after this wait.
+                await permit.acquire()
+                acquired = True
             # Pydantic validators are application code too. Admit the original
             # native request before argument validation can execute that code.
             if not self._admit_tool(state, request):
@@ -8708,6 +8730,11 @@ class Session(Generic[ContextT, OutputT]):
             finally:
                 scope.active = False
                 _invocation.reset(token)
+                if acquired:
+                    assert permit is not None
+                    # Fatal exits set state.failure above before opening a slot.
+                    # Cleanup and the native reply ACK are already settled.
+                    permit.release()
 
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""

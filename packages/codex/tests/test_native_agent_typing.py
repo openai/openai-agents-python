@@ -840,3 +840,32 @@ async def trace_context_types(agent: Agent[None, str], ctx: ToolContext[None]) -
         )
     assert_type(await agent.run("Read", parent_trace=headers), Completed[str])
     assert_type(agent.run_sync("Read", parent_trace=parent), Completed[str])
+
+
+@function_tool(namespace="records", namespace_description="Read synthetic records.")
+def namespaced_record(ctx: ToolContext[dict[str, str]], key: str) -> str:
+    return ctx.context[key]
+
+
+def direct_namespaced_record(ctx: ToolContext[dict[str, str]], key: str) -> str:
+    return ctx.context[key]
+
+
+direct_namespaced_tool = function_tool(direct_namespaced_record, namespace="direct")
+assert_type(namespaced_record.ref, ToolRef)
+assert_type(namespaced_record.namespace, str | None)
+assert_type(namespaced_record.namespace_description, str | None)
+
+
+async def native_function_admission_types() -> None:
+    agent = Agent[dict[str, str]](
+        instructions="Read records.", tools=[namespaced_record, direct_namespaced_tool]
+    )
+    async with agent.session(context={"record": "value"}, max_function_concurrency=2) as session:
+        assert_type(session, Session[dict[str, str], str])
+    assert_type(await agent.run("read", context={}, max_function_concurrency=1), Completed[str])
+
+
+def native_function_admission_sync_types() -> None:
+    agent = Agent[dict[str, str]](instructions="Read records.", tools=[namespaced_record])
+    assert_type(agent.run_sync("read", context={}, max_function_concurrency=1), Completed[str])

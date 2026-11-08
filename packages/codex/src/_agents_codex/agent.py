@@ -592,6 +592,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -612,6 +613,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -632,6 +634,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -652,8 +655,14 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        max_function_concurrency bounds automatic Python callbacks per turn owner,
+        including validation and hooks through reply settlement. None adds no
+        limit. Manual requests and native tools do not consume slots. Each child
+        owner has an independent limit. Callback deadlines exclude this wait.
 
         on_interaction handles supported live requests for this Session's entire
         lifetime, including requests without Turn IDs. Return the exact request's
@@ -754,6 +763,7 @@ class Agent(Generic[ContextT, OutputT]):
                 tool_selection=tools,
                 instruction_files=instruction_files,
                 reconciled_calls=reconciled_calls,
+                max_function_concurrency=max_function_concurrency,
                 parent_trace=parent_trace,
                 **cast(
                     "_TracingOpeningOptions",
@@ -807,6 +817,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -828,6 +839,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -850,6 +862,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -873,11 +886,14 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
         parent_trace sets the W3C parent for native work, including a restored
         manual continuation. trace_options controls captured SDK workflow policy.
+
+        max_function_concurrency follows session() and bounds automatic callbacks.
 
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
@@ -1034,6 +1050,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
+            if max_function_concurrency is not None:
+                options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
             async with session_factory(
@@ -1139,6 +1157,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1160,6 +1179,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1182,6 +1202,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1205,6 +1226,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1240,6 +1262,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
+                if max_function_concurrency is not None:
+                    options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:
                     options["environment"] = environment
                 if prepare_request is not None:
