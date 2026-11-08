@@ -301,32 +301,6 @@ async def test_invalid_preparation_never_dispatches(
         assert not responses.requests
 
 
-async def test_no_edit_still_rechecks_dispatch_admission(responses: ResponsesFixture) -> None:
-    responses.respond(assistant_output("must not arrive"))
-    async with (
-        timeout(15),
-        Agent(
-            model="gpt-5.5", instructions="No effect", provider=provider(responses)
-        ).session() as session,
-    ):
-        native = session._native
-
-        class RevokeAfterReply:
-            def __getattr__(self, name):
-                return getattr(native, name)
-
-            def _reply_prepared_request(self, request_id, data_json=None, error=False):
-                accepted = native._reply_prepared_request(request_id, data_json, error)
-                native._prepare_requests(False)
-                return accepted
-
-        session._native = RevokeAfterReply()
-        turn = await session.submit("Try", prepare_request=lambda turn, request, **indices: None)
-        with pytest.raises(NativeError):
-            await turn.get_result()
-        assert not responses.requests
-
-
 async def test_cancellation_joins_ignoring_callback_before_later_turn(
     responses: ResponsesFixture,
 ) -> None:

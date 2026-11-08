@@ -220,6 +220,14 @@ jobs:
           from native_env import build_environment, cargo_build_options
           environment = build_environment(root)
           options, build_target = cargo_build_options(root, environment)
+          environment["PYO3_PYTHON"] = sys.executable
+          environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
+          subprocess.run(
+              ["cargo", "test", "--release", "--locked", *options, "--lib",
+               "python_tools::managed_tests::prepared_request_rechecks_admission_after_no_edit_reply",
+               "--", "--exact"],
+              cwd=root, env=environment, check=True,
+          )
           subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
           target = Path(environment["CARGO_TARGET_DIR"])
           if not target.is_absolute():

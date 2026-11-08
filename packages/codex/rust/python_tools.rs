@@ -3544,6 +3544,68 @@ pub(crate) mod managed_tests {
         thread
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_request_rechecks_admission_after_no_edit_reply() {
+        use codex_protocol::user_input::UserInput;
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let provider = crate::engine::settlement_tests::Provider::start().await;
+            let directory = tempfile::tempdir().unwrap();
+            let engine = real_engine(&directory, &provider.url).await;
+            let native = engine
+                .start_with_tools(Default::default(), None, Some(vec![]), false)
+                .await
+                .unwrap();
+            let state = native.current().unwrap();
+            let tools = state
+                .thread
+                .thread_extension_data()
+                .get::<PythonTools>()
+                .unwrap();
+            tools.prepare_requests(true).unwrap();
+            let started = crate::ops::submit_replaceable(
+                &state,
+                json!({
+                    "input": [UserInput::Text { text: "Try".into(), text_elements: vec![] }],
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(started["status"], "started");
+            let request = tools.next_request().await;
+            assert_eq!(request["msg"]["type"], "_sdk_prepare_request");
+            assert_eq!(request["msg"]["turn_id"], started["turn_id"]);
+            let request_id = request["msg"]["request_id"].as_u64().unwrap();
+            // Keep these synchronous: Core cannot consume the accepted reply
+            // until this task yields on the current-thread executor.
+            assert!(tools.reply_prepared_request(request_id, None, false));
+            tools.prepare_requests(false).unwrap();
+
+            let failure = "Fatal error: Native request preparation failed or was cancelled";
+            let mut errors = Vec::new();
+            loop {
+                let event = state.next_event().await.unwrap();
+                if event["msg"]["type"] == "error" {
+                    errors.push(event["msg"]["message"].as_str().unwrap().to_owned());
+                }
+                if matches!(
+                    event["msg"]["type"].as_str(),
+                    Some("task_complete" | "turn_complete")
+                ) {
+                    assert_eq!(event["id"], started["turn_id"]);
+                    assert_eq!(event["msg"]["error"]["message"], failure);
+                    break;
+                }
+            }
+            assert_eq!(errors, vec![failure]);
+            assert!(provider.requests.lock().unwrap().is_empty());
+            state.close().await.unwrap();
+            engine.close().await.unwrap();
+        })
+        .await
+        .expect("revoked prepared request did not settle");
+    }
+
     #[tokio::test]
     async fn prepared_request_marker_survives_operation_and_thread_retirement() {
         use codex_extension_api::ModelRequestContributor;

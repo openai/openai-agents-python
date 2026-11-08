@@ -1,10 +1,11 @@
 """Deferred restore keeps the selected root output and the opening default."""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
 
-from agents import Agent, InteractionRequired, NativeOutput, PromptedOutput
+from agents import Agent, InteractionRequired, NativeOutput, PromptedOutput, Turn, function_tool
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -14,8 +15,132 @@ from tests.native_fixtures import (
     tool_output,
 )
 from tests.test_deferred_jobs import Journal, Output, Provider, declared, done
+from tests.test_native_function_concurrency import queued
 from tests.test_native_manual_tools import next_request, provider
 from tests.test_native_output_modes import output_format
+
+
+@pytest.mark.parametrize(
+    "limit, restore_options, expected",
+    [
+        pytest.param(None, {}, 2, id="inherit-unlimited"),
+        pytest.param(1, {}, 1, id="inherit-limited"),
+        pytest.param(
+            None, {"max_function_concurrency": 1}, 1, id="explicit-limit-unlimited-source"
+        ),
+        pytest.param(2, {"max_function_concurrency": 1}, 1, id="explicit-limit-limited-source"),
+        pytest.param(1, {"max_function_concurrency": None}, 2, id="explicit-unlimited"),
+    ],
+)
+async def test_deferred_start_preserves_function_admission_without_changing_hook_arguments(
+    responses, monkeypatch, limit, restore_options, expected
+):
+    journal, backend = Journal(), Provider([done()])
+    jobs, manual = declared(journal, backend)
+    entered = []
+    release = asyncio.Event()
+
+    async def admission_settled(session):
+        await queued(session, 2)
+        # Both callbacks must reach user code or the admission queue before observation.
+        while True:
+            admission = session._active.function_admission
+            waiting = len(admission._waiters or ()) if admission is not None else 0
+            if len(entered) + waiting == 2:
+                return
+            await asyncio.sleep(0)
+
+    @function_tool
+    async def work(value: int) -> str:
+        entered.append(value)
+        await release.wait()
+        return str(value)
+
+    responses.respond(function_call("render", {"pages": 2}, "deferred-render"))
+    responses.respond(
+        function_call("work", {"value": 1}, "work-1"),
+        function_call("work", {"value": 2}, "work-2"),
+    )
+    responses.respond(assistant_output("finished"))
+    agent = Agent(
+        instructions="Render, then work.",
+        tools=[manual, work],
+        provider=provider(responses),
+    )
+    hook_calls = []
+    async with timeout(20), agent.session(max_function_concurrency=limit) as original:
+        turn = await original.submit("Render.")
+        request = await next_request(original.interactions(), manual)
+        session_factory = agent.session
+
+        @asynccontextmanager
+        async def hook(*, state, context):
+            # Existing application hooks need no new concurrency keyword.
+            hook_calls.append(state)
+            async with session_factory(state=state, context=context, **restore_options) as restored:
+                yield restored
+
+        monkeypatch.setattr(agent, "session", hook)
+        async with jobs.start(original, request) as (restored, resumed):
+            assert isinstance(resumed, Turn)
+            try:
+                await admission_settled(restored)
+                assert len(entered) == expected
+            finally:
+                release.set()
+            assert (await resumed.get_result()).final_output == "finished"
+            assert sorted(entered) == [1, 2]
+            saved = await restored.save_state()
+        with pytest.raises(InteractionRequired):
+            await turn.get_result()
+        # Explicit destinations choose a current policy rather than saved host state.
+        entered.clear()
+        release = asyncio.Event()
+        destination_limit = 1 if limit is None else 2
+        responses.respond(
+            function_call("work", {"value": 3}, "explicit-3"),
+            function_call("work", {"value": 4}, "explicit-4"),
+        )
+        responses.respond(assistant_output("explicit"))
+        async with session_factory(
+            state=saved, max_function_concurrency=destination_limit
+        ) as destination:
+            explicit = await destination.submit("Use the destination policy.")
+            try:
+                await admission_settled(destination)
+                assert len(entered) == destination_limit
+            finally:
+                release.set()
+            assert (await explicit.get_result()).final_output == "explicit"
+            assert sorted(entered) == [3, 4]
+    assert len(hook_calls) == 1
+    assert len(responses.requests) == 5
+
+
+@pytest.mark.parametrize("limit", [0, -1, True])
+async def test_deferred_start_rejects_invalid_hook_concurrency(responses, monkeypatch, limit):
+    journal, backend = Journal(), Provider([done()])
+    jobs, manual = declared(journal, backend)
+    responses.respond(function_call("render", {"pages": 2}, "deferred-render"))
+    agent = Agent(instructions="Render.", tools=[manual], provider=provider(responses))
+    async with timeout(20), agent.session(max_function_concurrency=1) as original:
+        await original.submit("Render.")
+        request = await next_request(original.interactions(), manual)
+        session_factory = agent.session
+
+        @asynccontextmanager
+        async def hook(*, state, context):
+            async with session_factory(
+                state=state, context=context, max_function_concurrency=limit
+            ) as restored:
+                yield restored
+
+        monkeypatch.setattr(agent, "session", hook)
+        with pytest.raises(ValueError, match="max_function_concurrency must be a positive integer"):
+            async with jobs.start(original, request):
+                pytest.fail("The hook's invalid concurrency limit was accepted")
+    assert len(responses.requests) == 1
+    assert backend.calls == []
 
 
 @pytest.mark.parametrize(

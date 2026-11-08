@@ -3847,7 +3847,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'classic-modal'", specifier = ">=3.14.3,<4" },
     { name = "any-llm-sdk", marker = "python_full_version >= '3.11' and extra == 'classic-any-llm'", specifier = ">=1.11.0,<2" },
     { name = "asyncpg", marker = "extra == 'classic-sqlalchemy'", specifier = ">=0.29.0" },
-    { name = "blaxel", marker = "extra == 'classic-blaxel'", specifier = ">=0.2.50" },
+    { name = "blaxel", marker = "extra == 'classic-blaxel'", specifier = ">=0.2.51" },
     { name = "boto3", marker = "extra == 'classic-s3'", specifier = ">=1.34" },
     { name = "cbor2", marker = "extra == 'classic-modal'", specifier = ">=5.9.0" },
     { name = "cbor2", marker = "extra == 'classic-vercel'", specifier = ">=5.9.0" },

@@ -28,6 +28,8 @@ agent = Agent(
 
 Read the token in application code and pass its value as `bearer_token`. The declaration keeps that value. Restore uses the application's current declarations and credentials.
 
+The custom `headers` and explicit `env` options below are intended for a forthcoming preview. The `0.24.0-alpha.7` wheel does not include them.
+
 Pass custom HTTP fields through `headers`, for example `headers={"X-Region": "eu"}`. The declaration captures a copy of the map and rejects duplicate names regardless of case. If you supply an `Authorization` header, omit `bearer_token` so the declaration has one source of authorization. `HostedVerificationMCP` also accepts custom headers; `ChatGPTAppsMCP` keeps its fixed authentication fields.
 
 Headers belong to the MCP connection. They are not forwarded to the model provider or an unrelated executor. Supply current headers through the application's declarations when restoring a Session.
@@ -58,8 +60,8 @@ Configure the server's process environment as follows:
 - Use an absolute `cwd`. If omitted, host servers use Codex's runtime directory and remote servers use the Environment's working directory.
 - Use `env_vars` to select variables from the machine that runs the server. Codex reads their values at startup.
 - Use `env` to supply string values directly, for example `env={"REGION": "eu"}`. Explicit values override names selected by `env_vars`, and empty strings are preserved. The declaration copies the map without changing the application's environment.
+- Windows targets treat environment names as case-insensitive. They reject duplicate explicit aliases before starting the server; a single explicit value still overrides an inherited alias.
 - Literal values are sent only to the selected server process, including a server on a remote Environment. Executor control credentials remain protected; `NODE_REPL_AUTH_TOKEN` cannot be supplied this way.
-- Variable names follow the server's platform: they are case-insensitive on Windows and case-sensitive on Unix. On Windows, one `env` map cannot contain names that differ only by case.
 - Pass arguments as separate values. Codex does not expand them in a shell. The declaration captures the arguments and variable names.
 
 Restore uses the application's current server declarations and Environment.
