@@ -233,6 +233,10 @@ async def test_manual_followup_and_restored_followup_bind_current_ephemeral_owne
         source = await stack.enter_async_context(agent.session())
         original = await source.submit("read A")
         action = await next_request(source.interactions(), lookup)
+        # Manual calls can arrive before response metadata is retained.
+        async for event in original.events():
+            if isinstance(event, ModelResponseLinked):
+                break
         original_rows = [row async for row in source.turns()]
         prior_ids = {
             response["id"] for row in original_rows for response in row.get("responses", [])

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "049c406ca1a05671dad2eeedbdc18b19e494f9f8",
+  "baseline_commit": "8622ae31021f420789560840694a175c2c6928df",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -335,10 +335,10 @@
           "@dataclass(frozen=True)\nclass MCPResultContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    server_name: str\n    tool_name: str",
           "@dataclass(frozen=True)\nclass MCPCallContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call: ToolCallInfo\n    server_name: str\n    tool_name: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)",
           "@dataclass(frozen=True, kw_only=True)\nclass _MCP(Generic[ContextT_contra]):\n    name: str\n    tools: Sequence[str]\n    approval_mode: Literal['native', 'preapproved'] = 'native'\n    startup_timeout: float = 10\n    execution_timeout: float = 60\n    transform_result: Callable[[MCPResultContext[ContextT_contra], dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]] | None = field(default=None, repr=False)\n    transform_result_timeout: float | None = None\n    before: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], Allow | StopTurn | ReplaceArguments | Awaitable[Allow | StopTurn | ReplaceArguments]] | None = field(default=None, repr=False)\n    approval: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n\n    def tool(self, raw_name: str) -> ToolRef:\n        pass",
-          "@dataclass(frozen=True, kw_only=True)\nclass StdioMCP(_MCP[ContextT_contra]):\n    command: str = field(repr=False)\n    args: Sequence[str] = field(default=(), repr=False)\n    env_vars: Sequence[str] = field(default=(), repr=False)\n    cwd: str | None = field(default=None, repr=False)\n    location: Literal['host', 'environment'] = 'host'",
-          "@dataclass(frozen=True, kw_only=True)\nclass HttpMCP(_MCP[ContextT_contra]):\n    url: str = field(repr=False)\n    bearer_token: str | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass StdioMCP(_MCP[ContextT_contra]):\n    command: str = field(repr=False)\n    args: Sequence[str] = field(default=(), repr=False)\n    env_vars: Sequence[str] = field(default=(), repr=False)\n    cwd: str | None = field(default=None, repr=False)\n    location: Literal['host', 'environment'] = 'host'\n    env: Mapping[str, str] | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass HttpMCP(_MCP[ContextT_contra]):\n    url: str = field(repr=False)\n    bearer_token: str | None = field(default=None, repr=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass HostedVerificationMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)",
-          "@dataclass(frozen=True, kw_only=True)\nclass ChatGPTAppsMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)\n    url: str = field(default='https://chatgpt.com/backend-api/ps/mcp', init=False, repr=False)\n    bearer_token: None = field(default=None, init=False, repr=False)\n    access_token: str = field(repr=False)\n    account_id: str = field(repr=False)"
+          "@dataclass(frozen=True, kw_only=True)\nclass ChatGPTAppsMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)\n    url: str = field(default='https://chatgpt.com/backend-api/ps/mcp', init=False, repr=False)\n    bearer_token: None = field(default=None, init=False, repr=False)\n    headers: ClassVar[None] = None\n    access_token: str = field(repr=False)\n    account_id: str = field(repr=False)"
         ],
         "exports": {
           "ChatGPTAppsMCP": "agents.mcp.ChatGPTAppsMCP",
@@ -371,7 +371,7 @@
           "from __future__ import annotations",
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
           "from dataclasses import dataclass as dataclass, field as field",
-          "from typing import Any as Any, Generic as Generic, Literal as Literal",
+          "from typing import Any as Any, ClassVar as ClassVar, Generic as Generic, Literal as Literal",
           "from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar",
           "from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef",
           "from .native_agents import ChildInvocation",

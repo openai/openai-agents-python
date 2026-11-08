@@ -9,6 +9,7 @@ from _agents_codex.mcp import (
     Awaitable as Awaitable,
     Callable as Callable,
     ChatGPTAppsMCP as ChatGPTAppsMCP,
+    ClassVar as ClassVar,
     ContextT_co as ContextT_co,
     ContextT_contra as ContextT_contra,
     Generic as Generic,

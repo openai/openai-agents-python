@@ -17,6 +17,7 @@ from types import MappingProxyType as _MappingProxyType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    ClassVar as ClassVar,
     Generic as Generic,
     Literal as Literal,
     get_origin as get_origin,
@@ -603,7 +604,8 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
     name: Literal["codex_apps"] = field(default="codex_apps", init=False)
     url: str = field(default="https://chatgpt.com/backend-api/ps/mcp", init=False, repr=False)
     bearer_token: None = field(default=None, init=False, repr=False)
-    headers: None = field(default=None, init=False, repr=False)
+    # ClassVar removes the inherited field; Apps accepts no custom headers.
+    headers: ClassVar[None] = None  # type: ignore[misc]
     access_token: str = field(repr=False)
     account_id: str = field(repr=False)
 

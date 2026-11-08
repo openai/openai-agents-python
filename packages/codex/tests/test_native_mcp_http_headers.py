@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
-from dataclasses import replace
-from typing import Any
+from dataclasses import asdict, fields, replace
+from typing import Any, ClassVar
 
 import pytest
 
@@ -75,6 +75,11 @@ def test_http_headers_authentication_is_unambiguous() -> None:
 
 def test_chatgpt_apps_keeps_fixed_authentication() -> None:
     assert "headers" not in inspect.signature(ChatGPTAppsMCP).parameters
+    server = ChatGPTAppsMCP(tools=[], access_token="token", account_id="account")
+    assert "headers" not in {item.name for item in fields(server)}
+    assert "headers" not in asdict(server)
+    assert inspect.get_annotations(ChatGPTAppsMCP, eval_str=True)["headers"] == ClassVar[None]
+    assert "http_headers" not in server._config()
     with pytest.raises(TypeError):
         ChatGPTAppsMCP(
             tools=[], access_token="token", account_id="account", headers={"X-Tenant": "secret"}
