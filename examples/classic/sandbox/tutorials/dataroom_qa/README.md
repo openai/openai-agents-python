@@ -41,4 +41,4 @@ uv run python examples/classic/sandbox/tutorials/dataroom_qa/main.py --docker
 
 ## How instructions are loaded
 
-At startup, the wrapper loads this folder's `AGENTS.md` into the agent instructions and builds a hard-coded manifest that maps the shared SEC packet from `examples/classic/sandbox/tutorials/data/dataroom/` into the sandbox as `data/...`.
+At startup, the wrapper uses the `AGENTS_MD` string in `main.py` as the agent instructions and mounts it as `AGENTS.md` in the sandbox. Its manifest maps the shared SEC packet from `examples/classic/sandbox/tutorials/data/dataroom/` into the sandbox as `data/...`.

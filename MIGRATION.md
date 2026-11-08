@@ -28,7 +28,9 @@ When a bypass is required, define `NO_PROXY`, `no_proxy`, or both. Every defined
 
 ## Replace the runner for one supported workflow
 
-Keep the Agent and tools together in the Classic namespace. For a workflow with an explicit Model object, change the runner call:
+Keep the Agent and tools together in the Classic namespace. The Python snippets below are reference fragments for an existing application: put calls containing `await` inside an async function. They assume a supported Classic `agent` with an explicit Model and an `app_context` object unless stated otherwise. For a complete runnable script, use [the scripted example](examples/codex/migration.py).
+
+Start by changing the runner call:
 
 ```python
 # Before: existing v0 or Classic execution.
@@ -45,12 +47,13 @@ result = await SDKRunner.run(agent, "Greet Ada.", context=app_context)
 print(result.final_output)
 ```
 
-These fragments assume you already created `agent` and `app_context`. Do not pass a Classic Agent directly to the native `agents.Agent` API or mix native tools into the Classic Agent.
+Do not pass a Classic Agent directly to the native `agents.Agent` API or mix native tools into the Classic Agent.
 
-Select a Model explicitly, either on `agent.model` or with the per-run `model` argument. A non-`None` run argument takes precedence over the Agent. If the selected value is a name rather than a Model object, pass its Classic ModelProvider through `model_provider=provider`. You can reuse the provider from your Classic `RunConfig`. An explicit Model object does not use a provider; omit `model_provider` in that case. For example, with your existing OpenAI credentials:
+Select a Model explicitly, either on `agent.model` or with the per-run `model` argument. A non-`None` run argument takes precedence over the Agent. If the selected value is a name rather than a Model object, pass its Classic ModelProvider through `model_provider=provider`. You can reuse the provider from your Classic `RunConfig`. An explicit Model object does not use a provider; omit `model_provider` in that case. For example, if `agent.model` is an explicit Responses model name, use your existing OpenAI credentials and a Classic provider:
 
 ```python
 from agents.classic import OpenAIProvider
+from agents.migration import SDKRunner
 
 provider = OpenAIProvider()
 try:
@@ -99,9 +102,9 @@ It needs no model credentials and makes no external model requests. Its scripted
 | Classic Session stores | Pass `session` to read and append settled, uncompacted history. `OpenAIResponsesCompactionSession` works as a store. Use `agents.classic.Runner` for automatic compaction or opaque compacted history. |
 | Raw conversation history input, Classic RunState, or same-turn continuation | Unsupported |
 
-Unsupported Agent, tool, and model settings fail before provider resolution or model/tool execution. Fix the reported configuration or keep that workflow on `agents.classic.Runner`. Do not remove a guardrail or approval policy merely to make a workflow eligible.
+Unsupported Agent declarations, tool declarations, and supplied model settings fail before provider resolution or model/tool execution. Settings derived from the resolved Model are checked after provider resolution and before the Model call. Fix the reported configuration or keep that workflow on `agents.classic.Runner`. Do not remove a guardrail or approval policy merely to make a workflow eligible.
 
-Tool callbacks receive the application context, cumulative usage, original tool call and raw argument string, and active Agent. `ToolContext.turn_input` contains the input supplied to `Model.get_response` for the response that requested the tool. The context does not carry a Classic `RunConfig` or approval state.
+Tool callbacks receive the application context, cumulative usage, original tool call and raw argument string, and active Agent. `ToolContext.turn_input` contains the input supplied to the selected Model invocation for the response that requested the tool. The context does not carry a Classic `RunConfig` or approval state.
 
 Ordinary `ModelSettings`, such as temperature, maximum output tokens, reasoning, verbosity, and provider response storage, pass to your selected Model. The adapter rejects `retry`, `timeout`, `context_management`, `extra_query`, `extra_body`, `extra_headers`, and `extra_args` when they are not `None`. These settings can require runner behavior or replace request fields that the adapter must control.
 
@@ -123,7 +126,7 @@ Without persistence options, each call starts a fresh native conversation. Use t
 | Native local | Pass `storage=LocalStorage(path)` and keep `result.native_result.turn.session_id` | Pass the original profile as `storage` and the saved ID as `resume` |
 | Native custom | Pass `storage=CustomStorage(backend)` and keep the same Session ID | Pass storage backed by the original canonical store and the saved ID as `resume` |
 
-Save a portable checkpoint after a completed turn. Restore it with your current Agent.
+Save a portable checkpoint after a completed turn. In this fragment, `current_agent` is your current Classic Agent with matching instructions and tool declarations, bound to the Model and callbacks you want to use after restore.
 
 ```python
 from agents import SessionState
@@ -142,7 +145,7 @@ second = await SDKRunner.run(
 )
 ```
 
-Keep the profile and Session ID together when you use native local storage.
+Keep the profile and Session ID together when you use native local storage. This fragment uses the same `current_agent` convention as the portable example.
 
 ```python
 from pathlib import Path
@@ -157,7 +160,7 @@ second = await SDKRunner.run(
 )
 ```
 
-A successful reopen preserves the native Session ID and recorded history. Use the current Agent and application bindings for each run, including the selected Model, context, and tool callbacks. For a named Model, pass the current provider. For portable restore, use a checkpoint from the runner with matching instructions and tool declarations. Verify checkpoint integrity before restoring. Keep checkpoint contents and storage profiles private.
+A successful reopen preserves the native Session ID and recorded history. Use the current Agent and application bindings for each run, including the selected Model, context, and tool callbacks. For a named Model, pass the current provider. For portable restore, use a checkpoint created by SDKRunner with matching instructions and tool declarations. Restoring history does not restore Python callbacks, Model objects, credentials, or application context. Verify checkpoint integrity before restoring. Keep checkpoint contents and storage profiles private.
 
 The native history keeps recorded item identities. The Model receives the projected native request and may see only part of that history after compaction. A Model response that reuses a recorded function call ID fails before any tool in that response runs.
 
@@ -171,7 +174,7 @@ If local storage reports an unknown tool outcome, check your application records
 
 Pass your existing `agents.classic.Session` to `SDKRunner.run()` or `SDKRunner.start()`. The selected Model receives the stored messages, reasoning, and complete function call pairs in order. Your new text follows that history. The native loop starts a fresh turn and executes tools for that turn only.
 
-A declared `SessionSettings.limit` bounds the stored history that SDKRunner sends to the Model. SDKRunner checks the complete store snapshot first and reserves every stored function call ID. It then takes the latest items in order and omits any function output whose call falls outside that window. With a limit of zero or less, the Model receives only the new input. If the snapshot reaches SDKRunner's read bound, the run stops before calling the Model.
+In the following fragment, `existing_session` is an application-owned Classic Session containing settled history. A declared `SessionSettings.limit` bounds the stored history that SDKRunner sends to the Model. SDKRunner checks the complete store snapshot first and reserves every stored function call ID. It then takes the latest items in order and omits any function output whose call falls outside that window. With a limit of zero or less, the Model receives only the new input. If the snapshot reaches SDKRunner's read bound, the run stops before calling the Model.
 
 ```python
 from agents.migration import SDKRunner
@@ -200,7 +203,7 @@ If you cancel during an append, SDKRunner waits for the write to settle. It then
 
 ## Approve a static tool call
 
-Set `needs_approval=True` on a supported Classic function tool and pass an async `on_approval` callback. The callback receives the Classic tool context for the exact call. That context includes the original arguments and the input supplied to the Model. Return `Allow()` to dispatch the tool or `Deny(reason)` to record a tool failure the Model can read.
+Set `needs_approval=True` on a supported Classic function tool and pass an async `on_approval` callback. In this fragment, `agent_with_approval_tool` declares that tool and an explicit Model; `app_policy.permits` is your application's async policy check. The callback receives the Classic tool context for the exact call. That context includes the original arguments and the input supplied to the Model. Return `Allow()` to dispatch the tool or `Deny(reason)` to record a tool failure the Model can read.
 
 ```python
 from agents import Allow, Deny
@@ -295,6 +298,18 @@ Your application remains responsible for background work that its callbacks star
 
 ## Move a workflow fully to the native API
 
-For native streaming, manual tool requests, or child execution, port that workflow's declarations to `agents.Agent` and native tools. Follow the [native quickstart](docs/sdk/index.md), [tool guide](docs/sdk/tools.md), and [session guide](docs/sdk/sessions.md) from your installed SDK version.
+For live native semantic events, manual tool requests, or child execution, port that workflow's declarations to `agents.Agent` and native tools. Follow the [native quickstart](docs/sdk/index.md), [tool guide](docs/sdk/tools.md), and [session guide](docs/sdk/sessions.md) from your installed SDK version.
 
 Test model inputs, tool effects, output handling, and failure behavior at each migration step. You can keep some workflows on Classic while others use `SDKRunner` or native declarations. Choose the runner explicitly for each workflow; the adapter never falls back to Classic after starting native execution.
+
+## Reuse a Classic MCP client with native declarations
+
+`agents.migration.mcp` provides a separate integration for an application-owned Classic MCP client. It does not enable MCP on SDKRunner. For native-owned connections, use the [native MCP guide](docs/sdk/mcp.md).
+
+Create an `MCPNamespace` with a namespace name and your application-owned Classic `MCPServer`. Open the client connection before discovery, either directly or through the namespace's `authenticate` callback. Call `await select_mcp_tools(namespace, context=app_context, tool_names=["search"])` to select a tool named `search` before opening a native Session. Attach the returned tools to a native Agent, and pass the exact same `app_context` object to the Session or run. An equal but different context object is rejected. Omit `tool_names` to select all tools allowed by the client's filter; an empty list selects none. A missing or filtered-out requested name fails selection.
+
+The optional namespace `authenticate` callback runs before discovery. Selection refreshes the client's supported tool cache. Your application owns authentication and connection cleanup; closing a native Session does not close the Classic client. Use a separate client for each credential scope and keep that scope stable while the selected tools are in use. If the Classic client uses a callable tool filter, pass `filter_context=(run_context, agent)`. Both objects must come from `agents.classic`, and `run_context.context` must be the same application context object.
+
+Selected names use ASCII letters, digits, underscores, or hyphens. Each namespace and tool name together, including the two separator bytes, must fit within 128 bytes. Tool input schemas must describe JSON objects. The optional per-call `approval` callback receives a native `ToolContext` and returns `Allow()` or `Deny(reason)`, either directly or through an awaitable. Classic approval requirements, metadata or result hooks, custom error policies, and tool guardrails are unsupported for selected tools; keep those workflows on Classic Runner.
+
+To restore an idle native checkpoint, select tools again from the current clients with the destination application's context. Match the saved namespace, tool names, and schemas. A Session whose catalog contains selected MCP tools cannot suspend for portable manual restore; answer manual requests in the live Session. Discovery and selection do not transfer credentials or persist client connections.

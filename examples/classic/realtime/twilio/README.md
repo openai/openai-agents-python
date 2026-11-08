@@ -25,10 +25,10 @@ This example demonstrates how to connect the OpenAI Realtime API to a phone call
 
     ```bash
     export TWILIO_PUBLIC_BASE_URL="https://your-public-host.example"
-    uv run --with-requirements requirements.txt server.py
+    uv run --with-requirements examples/classic/realtime/twilio/requirements.txt python -m examples.classic.realtime.twilio.server
     ```
 
-    Set `TWILIO_PUBLIC_BASE_URL` to your actual tunnel's HTTPS origin, without a path, query, or credentials. The server refuses to start without the required Twilio configuration. Restart the server when the public URL or Auth Token changes.
+    Run this command from the repository root. Set `TWILIO_PUBLIC_BASE_URL` to your actual tunnel's HTTPS origin, without a path, query, or credentials. The server refuses to start without the required Twilio configuration. Restart the server when the public URL or Auth Token changes.
 
 3. **Configure your Twilio phone number:**
     - Log into your Twilio Console

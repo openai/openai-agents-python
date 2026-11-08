@@ -42,6 +42,12 @@ The example asks the model to list files in that workspace. The final answer des
 
 Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
 
+### Add read-only directories on Linux
+
+Development builds newer than alpha.6 support `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path, destination=path, strategy="local_bind")`. Both paths must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.
+
+Mounts are unsupported on macOS and WSS Environments. The SDK rejects overlapping mounts, overlaps with `cwd`, write roots, or SDK storage, and files hard-linked to writable directories. Keep the mount paths stable while the Session runs. Active mounts prohibit per-turn `writable_roots` replacement, including an empty list. Restore requires the same applied executor policy, including the mounted directories. Mounts do not copy files into a checkpoint or limit the application's Python callbacks.
+
 ### Replace write roots between turns
 
 The executor limits writes to `cwd` and any additional `writable_roots`, while preserving native metadata protections. Linux commands can also write to a private temporary filesystem whose contents disappear when the sandbox exits. Paths resolve on the executor. If a linked Git worktree must update Git state, explicitly grant its required Git directories after checking which paths those grants expose.

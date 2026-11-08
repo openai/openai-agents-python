@@ -1,7 +1,7 @@
 """Refresh reference material before each request without adding a history message.
 
 Run with:
-    uv run examples/codex/model_context.py reference.txt "What does the reference say?"
+    python examples/codex/model_context.py reference.txt "What does the reference say?"
 """
 
 import argparse

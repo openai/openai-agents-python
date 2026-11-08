@@ -166,7 +166,9 @@ search = WebSearch(mode="cached", route="standalone")
 agent = Agent(instructions="Research the user's question.", tools=[search])
 ```
 
-Keep the original `search` declaration in every explicit turn or step selection, such as `tools=[search]`. Turns, steps, and idle updates cannot add search or change its mode or route. Open a new Session to change the declaration.
+In development builds newer than alpha.6, explicit turn and step selections can omit `search` to disable search for that operation or preparation. To enable it, select the captured declaration, such as `tools=[search]`. Turns, steps, and idle updates cannot add a search capability absent at opening or change the declaration's settings. Open a new Session to change the declaration.
+
+The hosted route also accepts `allowed_domains`, `blocked_domains`, and approximate `location` settings. These controls require a compatible hosted-search provider and model; they are unsupported on the standalone route. Supply domains without a URL scheme. A location can contain `country`, `region`, `city`, and `timezone`; use a two-letter country code and an IANA timezone such as `America/Chicago`. The Session captures these settings at opening, and the provider applies them. Search history can retain cited URLs and consulted sources, but this interface does not return source passages.
 
 Saved history retains search results but does not enable search. To search after restore, declare `WebSearch` again in the current Agent or opening Session tools. `Environment.network` controls executor commands, not web search.
 
@@ -268,7 +270,7 @@ Here `lookup` selects the last accepted definition, `current_lookup`. It does no
 
 For an idle checkpoint restore, supply matching saved Python and manual definitions. MCP declarations come from the opening `tools=` override, or otherwise `Agent.tools`. Storage does not supply credentials or callbacks. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
-If the Session opened with `NativeAgents`, retain that declaration in every explicit selection. Update tools only after all native children close. See [Session updates](sessions.md#update-tools-instructions-and-model-settings).
+In development builds newer than alpha.6, an explicit selection can omit the captured `NativeAgents` declaration to disable collaboration calls for that operation or step. Idle tool updates preserve the opening executor and collaboration grants in the defaults. Update tools only after all native children close. See [Session updates](sessions.md#update-tools-instructions-and-model-settings).
 
 For MCP connection and process restrictions, see [replace and restore MCP connections](mcp.md#replace-and-restore-mcp-connections).
 

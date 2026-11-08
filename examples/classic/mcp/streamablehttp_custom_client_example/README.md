@@ -4,13 +4,15 @@ This repository example targets MCP Python SDK v2 and `httpx2`, and is intended 
 
 This example demonstrates how to use the new `httpx_client_factory` parameter in `MCPServerStreamableHttp` to configure custom HTTP client behavior for MCP StreamableHTTP connections.
 
-## Features Demonstrated
+## Client configuration
 
-- **Custom SSL Configuration**: Configure SSL certificates and verification settings
 - **Custom Headers**: Add custom headers to all HTTP requests
 - **Custom Timeouts**: Set custom timeout values for requests
-- **Proxy Configuration**: Configure HTTP proxy settings
-- **Custom Retry Logic**: Set up custom retry behavior (through httpx configuration)
+- **Authentication**: Forward an optional `httpx2.Auth` object to the client
+
+Both examples send the fictional credentials `demo-user` / `demo-password` to demonstrate forwarding. The bundled localhost server ignores these credentials and does not enforce authentication.
+
+The factory preserves TLS certificate verification for HTTPS servers. If your server uses a private certificate authority, create an `ssl.SSLContext` with that authority's certificate and pass it as `verify` when constructing the client. The bundled server uses plain HTTP on localhost.
 
 ## Running the Example
 
@@ -27,25 +29,47 @@ This example demonstrates how to use the new `httpx_client_factory` parameter in
 ### Basic Custom Client
 
 ```python
+import asyncio
+
 import httpx2
 from agents.classic.mcp import MCPServerStreamableHttp
 
-def create_custom_http_client() -> httpx2.AsyncClient:
+
+def create_custom_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
+    if headers is None:
+        headers = {"X-Custom-Client": "my-app"}
+    if timeout is None:
+        timeout = httpx2.Timeout(60.0, read=120.0)
     return httpx2.AsyncClient(
-        verify=False,  # Disable SSL verification for testing
-        timeout=httpx2.Timeout(60.0, read=120.0),
-        headers={"X-Custom-Client": "my-app"},
+        timeout=timeout,
+        headers=headers,
+        auth=auth,
     )
 
-async with MCPServerStreamableHttp(
-    name="Custom Client Server",
-    params={
-        "url": "http://localhost:<port>/mcp",
-        "httpx_client_factory": create_custom_http_client,
-    },
-) as server:
-    # Use the server...
+
+async def main() -> None:
+    async with MCPServerStreamableHttp(
+        name="Custom Client Server",
+        params={
+            "url": "http://localhost:8000/mcp",
+            "timeout": 60.0,
+            "sse_read_timeout": 120.0,
+            # Fictional demo credentials; the bundled localhost server ignores them.
+            "auth": httpx2.BasicAuth("demo-user", "demo-password"),
+            "httpx_client_factory": create_custom_http_client,
+        },
+    ) as server:
+        print(await server.list_tools())
+
+
+asyncio.run(main())
 ```
+
+Start a Streamable HTTP MCP server on port `8000` before running this snippet, or change the URL to your server's address.
 
 ## Use Cases
 
@@ -53,7 +77,6 @@ async with MCPServerStreamableHttp(
 - **SSL/TLS Requirements**: Use custom SSL certificates for secure connections
 - **Custom Authentication**: Add custom headers for API authentication
 - **Network Optimization**: Configure timeouts and connection pooling
-- **Debugging**: Disable SSL verification for development environments
 
 ## Benefits
 

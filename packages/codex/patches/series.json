@@ -281,9 +281,13 @@
       "sha256": "6a36e7a5778bd0253cd286ccef32afad19813c913f4310dee576e9cb37e87cac"
     },
     {
-      "path": "0064-buffered-responses.patch",
+      "path": "0064-recognize-proc-mount-diagnostics.patch",
+      "sha256": "23c937dfd49b125b3cf5cce8cddb784c7219321e52d36a7d75bb3ec506710e64"
+    },
+    {
+      "path": "0065-buffered-responses.patch",
       "sha256": "f26b628dc280a965259ecbd1c29d58d316a236955400e211b0cab6d4a27aa361"
     }
   ],
-  "result_tree": "6984d1c3fd6ec6f667876ff3fb9fc431fd05fbd9"
+  "result_tree": "c6fe9f04d9a0f7ce4e38be865d6b93d87bd447b8"
 }

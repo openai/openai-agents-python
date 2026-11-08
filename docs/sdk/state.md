@@ -301,6 +301,20 @@ This operation has stricter limits than model-generated compaction:
 
 Cancelling the call waits for the summary update to finish. An accepted summary remains applied.
 
+### Retain selected context items
+
+Development builds newer than alpha.6 can keep selected original items beside a supplied summary. Capture `snapshot = await session.model_context()` while idle, choose zero-based indices from `snapshot.items`, and pass `summary=...`, `snapshot=snapshot`, and `retain=indices` together to `session.compact()`.
+
+Pass the exact snapshot issued by the same live Session while its context is unchanged. Editing `snapshot.items` does not edit the retained originals. Duplicate indices count once, and selected items keep native order. System and developer items are always retained. Keep both a tool call and its result, or omit both. An empty selection retains no additional items. Capture a new snapshot after context changes or restore. The [supplied-summary limits](#supply-a-trusted-summary) still apply.
+
+### Supply summaries through a callback
+
+`Agent(before_compact=callback)` also requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). The callback runs before automatic or explicit model-based compaction for roots and children. It receives `CompactionContext` from `agents`, with detached active `items`, application `context`, native identity, and `trigger="auto"` or `"manual"`.
+
+Return a nonempty summary string to skip model summarization, or `None` to let Codex generate the summary. Include details your application still needs from discarded assistant and tool messages. Codex retains ownership of compaction and records the summary in history; the summary does not replace application instructions. A supplied `session.compact(summary=...)` bypasses this callback. Returning `None` lets `transform_context` run on the model summarization request.
+
+Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks and discards late results. A callback must not mutate its own Session. A raised exception fails compaction instead of falling back to a model summary. Restore uses current callbacks and application context.
+
 ## Inspect recorded items and turns
 
 `ContextCompacted` from `agents.observation` reports explicit or native automatic compaction, with native item and turn IDs. The pinned history format retains the summary, completed turn, and replacement history, but not the observation's compaction item ID.

@@ -121,7 +121,10 @@
         "conversation history",
         "manual suspend",
         "CustomStorage",
-        "code mode limits"
+        "code mode limits",
+        "model_context",
+        "retain",
+        "before_compact"
       ]
     },
     {
@@ -137,7 +140,9 @@
         "Docker",
         "skills",
         "capability_directories",
-        "result policies"
+        "result policies",
+        "LocalStorageMount",
+        "read-only mounts"
       ]
     },
     {
@@ -178,7 +183,10 @@
       "aliases": [
         "structured output",
         "prepare_request",
-        "PreparedRequest"
+        "PreparedRequest",
+        "tool_choice",
+        "before_complete",
+        "ContinueTurn"
       ]
     },
     {
@@ -193,7 +201,10 @@
         "TraceContext",
         "TraceOptions",
         "TraceProcessor",
-        "force_flush"
+        "force_flush",
+        "RunBudget",
+        "token budget",
+        "cost budget"
       ]
     },
     {

@@ -6,7 +6,7 @@ The classic source comes from v0 `main` commit `814de8b1cfdaf6c70212dca9ca23563d
 
 ## Install from the matching source
 
-Follow [the contributor setup](CONTRIBUTING.md) for the native build prerequisites, then install this source with the classic extra:
+Follow [the contributor setup](CONTRIBUTING.md) for the native build prerequisites, then install this source with the classic extra from the repository root:
 
 ```sh
 python -m pip install '.[classic]'
@@ -51,7 +51,7 @@ Change imports for each existing workflow together:
 | `from agents.extensions import ...` | `from agents.classic.extensions import ...` |
 | `from agents.testing import ...` | `from agents.classic.testing import ...` |
 
-The same prefix change applies to other public v0 submodules. Keep each workflow's Agent, tools, Runner, configuration, tracing and session objects within classic. Libraries that import `agents` internally also need an update before they can work with classic objects. An import change in your application does not rewrite those libraries.
+The same prefix change applies to other public v0 submodules. Keep each workflow's Agent, tools, Runner, configuration, tracing, and session objects within classic. Libraries that import `agents` internally also need an update before they can work with classic objects. An import change in your application does not rewrite those libraries.
 
 Run `python examples/codex/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
 
@@ -64,11 +64,11 @@ from agents import Agent as NativeAgent
 from agents.classic import Agent as ClassicAgent, Runner
 ```
 
-Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions or RunState objects into native APIs. Keep existing conversations in classic; start a fresh native conversation when porting a workflow. This package provides no automatic conversion to native checkpoints.
+Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions, or RunState objects into native APIs. A direct port to native declarations starts a fresh native conversation; the package does not automatically convert Classic persisted data to native checkpoints. To continue settled Classic Session history through the native loop, use the supported SDKRunner path below.
 
-For a supported single-agent workflow, the experimental [SDKRunner migration adapter](MIGRATION.md) can run an existing Classic Agent and function tools through the native loop. It has a narrower contract than the Classic Runner and rejects unsupported features before execution. Keep workflows that require those features on Classic until you port them to the native API.
+For a supported single-agent workflow, the experimental [SDKRunner migration adapter](MIGRATION.md) can run an existing Classic Agent and function tools through the native loop. It has a narrower contract than the Classic Runner. Unsupported declarations fail before execution; Model responses are validated as they arrive. Keep workflows that require those features on Classic until you port them to the native API.
 
-Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
+Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings, and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
 
 Keep a copy of persisted data and the previous dependency lock while migrating. Returning to the prior v0 environment remains an application deployment decision; do not write native checkpoints into a classic store.
 

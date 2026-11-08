@@ -21,6 +21,6 @@ Prior to running the agent, the user is prompted to provide a local directory pa
 Under the hood:
 
 1. The server is spun up in a subprocess, and exposes a bunch of tools like `git_log()`
-2. We add the server instance to the Agent via `mcp_agents`.
+2. We add the server instance to the Agent via `mcp_servers`.
 3. Each time the agent runs, we call out to the MCP server to fetch the list of tools via `server.list_tools()`. The result is cached.
-4. If the LLM chooses to use an MCP tool, we call the MCP server to run the tool via `server.run_tool()`.
+4. If the LLM chooses to use an MCP tool, we call the MCP server to run the tool via `server.call_tool()`.

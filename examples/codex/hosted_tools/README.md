@@ -1,11 +1,9 @@
 # Provider-hosted tools
 
-These examples use the native Agent loop with OpenAI Responses. Install the SDK
-and matching native build before running them from the repository root. Supply
-`OPENAI_API_KEY` through your environment. Live requests can incur charges.
+These examples use the native Agent loop with OpenAI Responses. The hosted tool declarations were added after `0.24.0-alpha.6`. Follow the [development-branch setup](../../../docs/sdk/installation.md#examples-and-upgrades), activate that Python environment, and use example files from the same build. Run the commands from the repository root. Supply `OPENAI_API_KEY` through your environment. Live requests can incur charges.
 
-Each example selects `gpt-5.2`, whose model page lists these three tools. Account
-access and supported tool options can vary. This does not establish support for
+Each example selects `gpt-5.2` with OpenAI Responses. Account access and supported
+tool options can vary. This does not establish support for
 Codex login, Responses Lite, Azure deployments, or other providers. `Agent.model`
 selects the model that runs the agent loop. `ImageGeneration.model` selects the
 image generator.
