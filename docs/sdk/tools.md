@@ -146,6 +146,8 @@ In your activated Python environment, run `python context_agent.py`. The script 
 
 In `Agent[Account, str]`, `Account` is the application context type and `str` is the final output type. The SDK passes the `Account` instance to the Python function through `ctx.context`; the model does not supply that parameter. The context object itself is not model input. The function's returned display name is a tool result, so the model does receive `"Ada"`.
 
+Mypy can lose a tool's application context type when the tool returns `Any`. Use an explicit `Agent[Application, str]` with your context class, as in `Agent[Account, str]` above, to keep `context=` arguments checked when opening Sessions or starting runs. Use the same pattern if inference does not retain the context type.
+
 For context together with structured output, see the [complete typed-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/typed_context.py).
 
 ## Native web search

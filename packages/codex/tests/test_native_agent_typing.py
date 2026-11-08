@@ -198,7 +198,9 @@ native_roles = NativeAgents(
     ],
     max_children=2,
 )
-child_agent = Agent(model="gpt-5.5", instructions="Delegate.", tools=[native_roles])
+child_agent: Agent[None, str] = Agent(
+    model="gpt-5.5", instructions="Delegate.", tools=[native_roles]
+)
 assert_type(child_agent, Agent[None, str])
 
 
@@ -840,3 +842,119 @@ async def trace_context_types(agent: Agent[None, str], ctx: ToolContext[None]) -
         )
     assert_type(await agent.run("Read", parent_trace=headers), Completed[str])
     assert_type(agent.run_sync("Read", parent_trace=parent), Completed[str])
+
+
+# Policy requirements survive context-free bodies and dynamically typed hooks.
+def contextual_before(context: ToolContext[Application]) -> ReplaceArguments:
+    return ReplaceArguments({"key": context.context.tenant})
+
+
+def contextual_after(context: ToolContext[Application], output: ToolOutput) -> ToolOutput:
+    return ToolOutput.text(context.context.tenant)
+
+
+def neutral_after(context: ToolContext[Any], output: ToolOutput) -> ToolOutput:
+    return output
+
+
+@function_tool(before=contextual_before)
+def policy_only(key: str) -> str:
+    return key
+
+
+@function_tool(after=contextual_after)
+def after_only(key: str) -> str:
+    return key
+
+
+@function_tool(
+    callback_timeout=1,
+    timeout_behavior="error_as_result",
+    timeout_error_function=format_timeout,
+)
+def formatter_only(key: str) -> str:
+    return key
+
+
+@function_tool(before=contextual_before, after=neutral_after)
+def mixed_policies(key: str) -> str:
+    return key
+
+
+@function_tool(after=neutral_after)
+def body_with_neutral_policy(context: ToolContext[Application], key: str) -> str:
+    return context.context.tenant + key
+
+
+@function_tool(timeout_error_function=format_timeout, timeout_behavior="error_as_result")
+def inactive_formatter(key: str) -> str:
+    return key
+
+
+@function_tool(callback_timeout=1, timeout_error_function=format_timeout)
+def raising_formatter(key: str) -> str:
+    return key
+
+
+assert_type(Agent(instructions="Read.", tools=[policy_only]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[after_only]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[formatter_only]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[mixed_policies]), Agent[Application, str])
+assert_type(Agent(instructions="Read.", tools=[body_with_neutral_policy]), Agent[Application, str])
+Agent(instructions="Read.", tools=[inactive_formatter]).session()
+Agent(instructions="Read.", tools=[raising_formatter]).session()
+
+
+def child_approval(context: ToolContext[Application], call: agents.NativeToolCall) -> bool:
+    return bool(context.context.tenant)
+
+
+def neutral_child_approval(context: ToolContext[Any], call: agents.NativeToolCall) -> bool:
+    return True
+
+
+contextual_children = NativeAgents(before_step=stop_child_step)
+approval_children = NativeAgents(approval=child_approval)
+mixed_children = NativeAgents(before_step=stop_child_step, approval=neutral_child_approval)
+assert_type(Agent(instructions="Delegate.", tools=[contextual_children]), Agent[Application, str])
+assert_type(Agent(instructions="Delegate.", tools=[approval_children]), Agent[Application, str])
+assert_type(Agent(instructions="Delegate.", tools=[mixed_children]), Agent[Application, str])
+child_roster: list[Tool[Application]] = [plain, lookup, contextual_children, approval_children]
+Agent[Application, str](instructions="Delegate.", tools=child_roster)
+
+
+@function_tool(before=contextual_before)
+def policy_with_dynamic_body(context: ToolContext[Any], key: str) -> str:
+    return key
+
+
+assert_type(Agent(instructions="Read.", tools=[policy_with_dynamic_body]), Agent[Application, str])
+
+
+# Keep explicit context annotations checked when callback return annotations use Any.
+@function_tool(before=contextual_before)
+def explicitly_typed_dynamic_result(context: ToolContext[Application]) -> Any:
+    return context.context.tenant
+
+
+explicit_dynamic_result_agent: Agent[Application, str] = Agent(
+    instructions="Read.", tools=[explicitly_typed_dynamic_result]
+)
+explicit_dynamic_result_agent.session(context=Application("a"))
+assert_type(Agent(instructions="Read.", tools=[plain, policy_only]), Agent[Application, str])
+assert_type(
+    Agent(instructions="Read.", tools=[plain, body_with_neutral_policy]), Agent[Application, str]
+)
+assert_type(
+    Agent(instructions="Read.", tools=[plain, policy_with_dynamic_body]), Agent[Application, str]
+)
+
+
+async def neutral_child_step(step: ChildStepContext[Any]) -> None:
+    return None
+
+
+mixed_approval_children = NativeAgents(before_step=neutral_child_step, approval=child_approval)
+assert_type(
+    Agent(instructions="Delegate.", tools=[mixed_approval_children]), Agent[Application, str]
+)

@@ -131,7 +131,7 @@ async def test_local_prompted_capability_truth_and_zero_retry_path(responses, tm
         with pytest.raises(CapabilityError):
             local.capabilities.require("prompted_output")
         local.capabilities.require("prompted_output", allow_limited=True)
-        with pytest.raises(CapabilityError, match="LocalStorage"):
+        with pytest.raises(CapabilityError, match="Persistent storage"):
             await local.submit("invalid budget")
         assert not responses.requests
         responses.respond(assistant_output('{"label":"valid"}'))

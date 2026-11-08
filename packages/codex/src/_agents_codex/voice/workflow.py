@@ -23,7 +23,7 @@ async def _join(task: asyncio.Task[Any]) -> None:
     """Join owned cleanup even if the caller receives another cancellation."""
     while not task.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.wait((task,))
         except asyncio.CancelledError:
             continue
     task.result()
@@ -59,14 +59,16 @@ class NativeSessionVoiceWorkflow:
         if self._invocation is not None:
             raise RuntimeError("NativeSessionVoiceWorkflow already has an active run")
 
-        # Reserve before awaiting admission. Shielding retains the exact Turn if
+        # Reserve before awaiting admission. A passive wait retains the exact Turn if
         # cancellation races with submit returning its locally issued handle.
         invocation = _Invocation(asyncio.create_task(self._session.submit(transcription)))
         self._invocation = invocation
         completed = False
         primary_error: BaseException | None = None
         try:
-            turn = await asyncio.shield(invocation.submission)
+            if not invocation.submission.done():
+                await asyncio.wait((invocation.submission,))
+            turn = invocation.submission.result()
             result = await turn.get_result()
             if invocation.cancellation is not None:
                 raise asyncio.CancelledError

@@ -3,8 +3,10 @@
 
 from typing import TYPE_CHECKING, Any
 
+import agents
 from agents import (
     Agent,
+    ChildStepContext,
     CompletionContext,
     Environment,
     FunctionTool,
@@ -225,3 +227,59 @@ if TYPE_CHECKING:
     def unsupported_interaction_methods(form: FormRequest, url: UrlRequest) -> None:
         form.reply_url_accept()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         url.reply({"answer": "not a form"})  # pyright: ignore[reportArgumentType]
+
+
+if TYPE_CHECKING:
+    from .test_native_agent_typing import (
+        after_only,
+        approval_children,
+        body_with_neutral_policy,
+        contextual_children,
+        explicit_dynamic_result_agent,
+        formatter_only,
+        mixed_approval_children,
+        mixed_children,
+        mixed_policies,
+        policy_only,
+        policy_with_dynamic_body,
+    )
+
+    for policy_tool in (
+        policy_only,
+        after_only,
+        formatter_only,
+        mixed_policies,
+        policy_with_dynamic_body,
+    ):
+        policy_required = Agent(instructions="Read.", tools=[policy_tool])
+        policy_required.session()  # pyright: ignore[reportCallIssue]
+        policy_required.session(context="wrong")  # pyright: ignore[reportArgumentType]
+        Agent[None, str](instructions="Read.", tools=[policy_tool])  # pyright: ignore[reportArgumentType]
+    Agent(instructions="Read.", tools=[body_with_neutral_policy]).session()  # pyright: ignore[reportCallIssue]
+
+    for child_declaration in (
+        contextual_children,
+        approval_children,
+        mixed_children,
+        mixed_approval_children,
+    ):
+        child_required = Agent(instructions="Delegate.", tools=[child_declaration])
+        child_required.session()  # pyright: ignore[reportCallIssue]
+        child_required.session(context="wrong")  # pyright: ignore[reportArgumentType]
+        Agent[None, str](instructions="Delegate.", tools=[child_declaration])  # pyright: ignore[reportArgumentType]
+        Agent(instructions="Delegate.").session(tools=[child_declaration])  # pyright: ignore[reportArgumentType]
+
+if TYPE_CHECKING:
+
+    def wrong_child_approval(context: ToolContext[str], call: agents.NativeToolCall) -> bool:
+        return bool(context.context)
+
+    def wrong_child_step(step: ChildStepContext[str]) -> None:
+        return None
+
+    NativeAgents[Application](approval=wrong_child_approval)  # pyright: ignore[reportArgumentType]
+    NativeAgents[Application](before_step=wrong_child_step)  # pyright: ignore[reportArgumentType]
+
+if TYPE_CHECKING:
+    explicit_dynamic_result_agent.session()  # pyright: ignore[reportCallIssue]
+    explicit_dynamic_result_agent.session(context="wrong")  # pyright: ignore[reportArgumentType]
