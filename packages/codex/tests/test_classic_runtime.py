@@ -13,13 +13,17 @@ from agents.classic import (
     GuardrailFunctionOutput,
     InputGuardrail,
     InputGuardrailTripwireTriggered,
+    OpenAIResponsesCompactionSession,
     RunConfig,
     Runner,
     RunState,
+    SessionSettings,
+    SQLiteSession,
     handoff,
 )
 from agents.classic._run_state_agent_identity import _agent_identity_signature
-from agents.classic.items import HandoffOutputItem, ToolCallOutputItem
+from agents.classic.items import HandoffOutputItem, ToolCallOutputItem, TResponseInputItem
+from agents.classic.memory.session import SessionABC
 
 from .classic_support import (
     DeterministicModel,
@@ -30,6 +34,76 @@ from .classic_support import (
 )
 
 CONFIG = RunConfig(tracing_disabled=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["custom", "sqlite"])
+@pytest.mark.parametrize("settings", ["omitted", "unlimited", "wrapper_limit", "run_limit"])
+async def test_classic_compaction_preserves_retrieval_settings(
+    store_kind: str, settings: str
+) -> None:
+    class HistorySession(SessionABC):
+        session_id = "compaction-settings"
+
+        def __init__(self) -> None:
+            self.session_settings = SessionSettings(limit=2)
+            self.items: list[TResponseInputItem] = []
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            # SessionABC defines None as all items. Runner applies retrieval metadata
+            # when this store is used directly; its wrapper has independent settings.
+            return list(self.items if limit is None else self.items[-limit:])
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.items.extend(items)
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return self.items.pop() if self.items else None
+
+        async def clear_session(self) -> None:
+            self.items.clear()
+
+    backing = (
+        SQLiteSession("compaction-settings", session_settings=SessionSettings(limit=2))
+        if store_kind == "sqlite"
+        else HistorySession()
+    )
+    history: list[TResponseInputItem] = [
+        {"role": "user", "content": "oldest"},
+        {"role": "assistant", "content": "middle"},
+        {"role": "user", "content": "newest"},
+    ]
+    try:
+        await backing.add_items(history)
+        session = OpenAIResponsesCompactionSession(
+            backing.session_id, backing, should_trigger_compaction=lambda _: False
+        )
+        if settings == "unlimited":
+            session.session_settings = SessionSettings(limit=None)
+        elif settings == "wrapper_limit":
+            session.session_settings = SessionSettings(limit=1)
+        config = (
+            RunConfig(tracing_disabled=True, session_settings=SessionSettings(limit=1))
+            if settings == "run_limit"
+            else CONFIG
+        )
+        model = DeterministicModel([[text_message("answer")]])
+        result = await Runner.run(
+            Agent(name="compaction", model=model), "next", session=session, run_config=config
+        )
+        expected = history
+        if settings in ("wrapper_limit", "run_limit"):
+            expected = history[-1:]
+        elif store_kind == "sqlite":
+            expected = history[-2:]
+        assert model.calls[0].input == [*expected, {"role": "user", "content": "next"}]
+        assert result.final_output == "answer"
+        assert backing.session_settings is not None
+        assert backing.session_settings.limit == 2
+        model.assert_complete()
+    finally:
+        if isinstance(backing, SQLiteSession):
+            backing.close()
 
 
 def test_classic_sync_run() -> None:
