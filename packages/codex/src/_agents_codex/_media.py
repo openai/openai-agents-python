@@ -18,7 +18,7 @@ def _record(value: object) -> dict[str, Any]:
 def _source(value: object, *, file: bool = False) -> str:
     if not isinstance(value, str):
         raise TypeError("Media source must be a string")
-    if not value or (file and not value.strip()):
+    if not value or (file and value.isspace()):
         raise ValueError("Media source must be nonempty")
     return value
 
@@ -65,18 +65,28 @@ def _capture_file(value: object) -> dict[str, Any]:
         if parsed.scheme.lower() != "https" or not parsed.hostname:
             raise ValueError("File URL must be an absolute HTTPS URL")
     elif key == "file_data":
-        payload = source
+        start = 0
         if source[:5].lower() == "data:":
-            metadata, separator, payload = source[5:].partition(",")
-            if not separator or not metadata.lower().endswith(";base64"):
+            comma = source.find(",", 5)
+            if comma < 12 or source[comma - 7 : comma].lower() != ";base64":
                 raise ValueError("File data must contain base64 data")
-        try:
-            decoded = base64.b64decode(payload + "=" * (-len(payload) % 4), validate=True)
-            canonical = base64.b64encode(decoded).decode("ascii")
-        except (ValueError, UnicodeError) as error:
-            raise ValueError("File data must contain base64 data") from error
-        if not payload or (payload != canonical and payload != canonical.rstrip("=")):
+            start = comma + 1
+        if start == len(source):
             raise ValueError("File data must contain canonical base64 data")
+        # Aligned chunks bound validation scratch space without copying the payload.
+        chunk_size = 32 * 1024
+        for offset in range(start, len(source), chunk_size):
+            end = min(offset + chunk_size, len(source))
+            payload = source[offset:end]
+            if end != len(source) and "=" in payload:
+                raise ValueError("File data must contain canonical base64 data")
+            try:
+                decoded = base64.b64decode(payload + "=" * (-len(payload) % 4), validate=True)
+                canonical = base64.b64encode(decoded).decode("ascii")
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("File data must contain base64 data") from error
+            if payload != canonical and payload != canonical.rstrip("="):
+                raise ValueError("File data must contain canonical base64 data")
     result: dict[str, Any] = {key: source}
     filename = data.get("filename")
     if filename is not None:

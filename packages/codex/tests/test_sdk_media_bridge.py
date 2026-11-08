@@ -127,3 +127,41 @@ def test_live_native_tool_projection_preserves_ids_detail_and_files() -> None:
         if event.get("item", {}).get("type") == "function_call_output"
     )
     assert item["output"] == _response_content(output)
+
+
+@pytest.mark.parametrize("data_url", [False, True])
+def test_large_inline_file_validation_uses_bounded_scratch_space(data_url: bool) -> None:
+    import tracemalloc
+
+    # Allocate the caller-owned input before measuring validation overhead.
+    source = "AAAA" * (8 * 1024 * 1024)
+    if data_url:
+        source = "DATA:application/pdf;BASE64," + source
+    ToolOutputFile(file_data="Zg==")
+    tracemalloc.start()
+    try:
+        file = ToolOutputFile(file_data=source)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert file.file_data is source
+    assert peak < 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize("suffix", ["Zg==", "Zg", "Zm8=", "Zm8"])
+def test_inline_file_preserves_canonical_encodings_across_validation_chunks(suffix: str) -> None:
+    source = "AAAA" * 8192 + suffix
+    assert ToolOutputFile(file_data=source).file_data == source
+    data_url = "DATA:application/pdf;BASE64," + source
+    assert ToolOutputFile(file_data=data_url).file_data == data_url
+
+
+@pytest.mark.parametrize("suffix", ["Zh==", "Zh", "Zm9=", "Zm9", "____", "AA A"])
+def test_inline_file_rejects_invalid_encoding_after_a_validation_chunk(suffix: str) -> None:
+    with pytest.raises(ValueError, match="base64"):
+        ToolOutputFile(file_data="AAAA" * 8192 + suffix)
+
+
+def test_inline_file_rejects_padding_before_another_validation_chunk() -> None:
+    with pytest.raises(ValueError, match="base64"):
+        ToolOutputFile(file_data="AAAA" * 8191 + "Zg==AAAA")

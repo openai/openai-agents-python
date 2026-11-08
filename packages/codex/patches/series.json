@@ -302,8 +302,8 @@
     },
     {
       "path": "0090-native-session-media-history.patch",
-      "sha256": "a91209a1c6704ad038ec2505bef22cc8db479bfe19173a2e3ba330035d4115b0"
+      "sha256": "17c3e90f5903457e5b4b377186640c92b5c2152a4c4286ee6670157d124d06fa"
     }
   ],
-  "result_tree": "4c8d7974d26c5324fa5829f31eef80bd47730206"
+  "result_tree": "c82459a4735f65c83102c85c94ec000b674fb6ab"
 }

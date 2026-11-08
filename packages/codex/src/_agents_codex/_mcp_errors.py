@@ -1,4 +1,4 @@
-"""Keep captured MCP credentials out of errors returned by public SDK calls."""
+"""Remove SDK traceback frames that can retain MCP credentials."""
 
 from __future__ import annotations
 
@@ -96,11 +96,14 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
             manager: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
         ) -> AsyncIterator[Any]:
             value = None
+            # The manager captures declarations when it opens. Caller-owned
+            # override lists can change while that captured Session is live.
+            protected = _uses_mcp(args, kwargs, declarations)
             try:
                 async with manager as value:
                     yield value
             except BaseException as error:
-                if _uses_mcp(args, kwargs, declarations):
+                if protected or _uses_mcp(args, kwargs, declarations):
                     _strip_mcp_frames(error)
                     raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
                 raise
