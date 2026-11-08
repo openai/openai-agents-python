@@ -28,7 +28,7 @@ MIGRATION_WHEEL=/absolute/path/to/the-wheel-you-built.whl
 
 The same wheel provides the native API and the optional classic API. Keep both environments outside the checkout so a source import cannot hide the installed SDK. `PYTHONPATH="$SDK_ROOT"` below exposes the example modules; the SDK package lives under `src/` and comes from the selected environment.
 
-If a proxy is configured, add `127.0.0.1` to its bypass list before running native scripts. Install any transport extras required by your proxy in the relevant environment. The walkthrough run commands below use live models. Its maintained tests and optional advanced scripts use scripted replies without API keys.
+If a proxy is configured, add `127.0.0.1` to its bypass list before running native scripts. Install any transport extras required by your proxy in the relevant environment. The walkthrough run commands below use live models. The maintained tests use scripted replies without API keys.
 
 ## 1. Run the v0 application
 
@@ -68,13 +68,15 @@ Install the same wheel with its classic dependencies:
 
 ```sh
 "$MIGRATION_WORK/v1-env/bin/python" -m pip install "${MIGRATION_WHEEL}[classic]"
+PYTHONPATH="$SDK_ROOT" "$MIGRATION_WORK/v1-env/bin/python" \
+  -m examples.codex.migration.classic
 ```
 
 The maintained [classic.py](classic.py) makes this import change and keeps the rest of `v0.py` unchanged. Run your workflow's checks. Then apply the same native port in step 2. Classic is optional and does not convert saved execution state. See [classic setup and lifecycle](../../../CLASSIC.md).
 
 ## Check without model credentials
 
-Prepare this checkout's [contributor environment](../../../CONTRIBUTING.md) with `make sync`, which installs the classic dependencies used by the tests. The `uv run --no-sync` command below uses that checkout environment, not the separate wheel environment created above. The maintained tests inject scripted providers into these application declarations. They check the actual tool result, the typed final output, host-supplied context, and denial of an invoice outside that context. The optional advanced checks retain both real released-v0 migration routes.
+Prepare this checkout's [contributor environment](../../../CONTRIBUTING.md) with `make sync`, which installs the classic dependencies used by the tests. The `uv run --no-sync` command below uses that checkout environment, not the separate wheel environment created above. The maintained tests inject scripted providers into these application declarations. They check the actual tool result, the typed final output, host-supplied context, and denial of an invoice outside that context. Set `MIGRATION_V0_PYTHON` to qualify both direct and staged migration against released v0.24.0, including SQLite continuation and a native checkpoint round trip.
 
 ```sh
 MIGRATION_V0_PYTHON="$MIGRATION_WORK/v0-env/bin/python" \
@@ -83,4 +85,8 @@ MIGRATION_V0_PYTHON="$MIGRATION_WORK/v0-env/bin/python" \
 
 Without `MIGRATION_V0_PYTHON`, tests requiring the separate released-v0 environment are skipped. These checks make no model-service or tracing requests; native tests use local Responses HTTP servers. Scripted replies test application behavior, not model quality or production provider compatibility.
 
-For specialists, allowed and denied writes, SQLite continuation, reviewed business facts, and native checkpoint restore, continue with the [optional advanced application](advanced/README.md). The [migration guide](../../../MIGRATION.md) covers remaining contracts and state ownership.
+## Keep state and advanced features separate
+
+Keep v0/classic conversations and pending work on their owning engine. Start native conversations from selected current application facts; no API converts old execution history or pending approvals. Native checkpoints restore only native work and require a matching Codex revision. See [state compatibility and recovery](../../../docs/sdk/state.md).
+
+Reuse the existing [specialist-agent recipe](../recipes/specialist_agents.py) and [safe-effects recipe](../recipes/safe_effects.py) when those features are needed. The [migration guide](../../../MIGRATION.md) provides the compatibility checklist and remaining API mappings.
