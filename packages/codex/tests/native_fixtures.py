@@ -76,6 +76,7 @@ class ResponsesFixture:
     delta_gate: asyncio.Event | None = None
     before_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     progress_while_before_event: bool = False
+    finite_http_response: bool = False
 
     def respond(self, *events: dict[str, Any]) -> None:
         self.replies.append(list(events))
@@ -108,6 +109,16 @@ class ResponsesFixture:
                 },
             },
         ]
+        if self.finite_http_response:
+            if self.before_event is not None or self.delta_gate is not None:
+                raise ValueError("Finite HTTP responses cannot pause between events")
+            body = bytearray()
+            for event in events:
+                body.extend(f"data: {json.dumps(event)}\n\n".encode())
+                if event["type"] == "response.failed":
+                    break
+            # Content-Length makes HTTP completion coincide with the final SSE bytes.
+            return web.Response(body=bytes(body), content_type="text/event-stream")
         # This is the same minimal event envelope used by Codex's core tests.
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
