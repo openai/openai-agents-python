@@ -116,6 +116,8 @@ class ExecutorPeer:
     # Override advertised admission metadata, not real executor enforcement.
     advertised_platform: str | None = None
     synthetic_process_starts: list[str] = field(default_factory=list)
+    capture_handshake_headers: bool = False
+    handshake_headers: list[dict[str, str]] = field(default_factory=list, repr=False)
 
     async def wait_disconnected(self) -> None:
         assert self.transports, "Executor transport was never opened"
@@ -183,6 +185,10 @@ class ExecutorPeer:
 
                 async def proxy(request: web.Request) -> web.WebSocketResponse:
                     self.attempts += 1
+                    if self.capture_handshake_headers:
+                        self.handshake_headers.append(
+                            {key.lower(): value for key, value in request.headers.items()}
+                        )
                     self.transports.append(request.transport)
                     if request.headers.get("Authorization") != "Bearer " + self.token:
                         if self.auth_status == 403:

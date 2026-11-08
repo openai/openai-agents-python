@@ -16,6 +16,8 @@ def main() -> None:
     parser.add_argument("--label", default="private-stdio-result")
     parser.add_argument("--field", default="key")
     parser.add_argument("--env-var", default="N19_STDIO_CURRENT")
+    parser.add_argument("--observe-env", action="append", default=[])
+    parser.add_argument("--resources", action="store_true")
     parser.add_argument("--hold", action="store_true")
     parser.add_argument("--writable", action="store_true")
     parser.add_argument("--exit-after-key")
@@ -39,7 +41,16 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, stop)
     atexit.register(record, "exit")
-    record("start", cwd=os.getcwd(), selected_env=os.environ.get(options.env_var))
+    record(
+        "start",
+        cwd=os.getcwd(),
+        selected_env=os.environ.get(options.env_var),
+        **(
+            {"observed_env": {name: os.environ.get(name) for name in options.observe_env}}
+            if options.observe_env
+            else {}
+        ),
+    )
     calls = 0
     pending_call = None
     for line in sys.stdin:
@@ -81,10 +92,17 @@ def main() -> None:
                 if options.invalid_init
                 else {
                     "protocolVersion": "2025-06-18",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {
+                        "tools": {},
+                        **({"resources": {}} if options.resources else {}),
+                    },
                     "serverInfo": {"name": "native-stdio-fixture", "version": "1"},
                 }
             )
+        elif method == "resources/list" and options.resources:
+            result = {"resources": [{"uri": "fixture://environment", "name": "environment"}]}
+        elif method == "resources/read" and options.resources:
+            result = {"contents": [{"uri": "fixture://environment", "text": "resource-only"}]}
         elif method == "tools/list":
             if options.list_release is not None:
                 while not options.list_release.exists():

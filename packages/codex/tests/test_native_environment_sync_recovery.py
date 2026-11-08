@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from agents import Agent, Environment, NativeProvider, function_tool, get_cleanup
+from agents import Agent, Environment, HttpMCP, NativeProvider, function_tool, get_cleanup
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -274,6 +274,7 @@ async def test_sync_child_owned_provider_retains_only_child_manager(
 
 @pytest.mark.parametrize("call_route", ["async", "sync"])
 @pytest.mark.parametrize("implicit_provider", [True, False], ids=["implicit", "borrowed"])
+@pytest.mark.parametrize("mcp_credentials", [False, True])
 @pytest.mark.parametrize("delayed_native_join", [3], indirect=True)
 async def test_interrupted_opening_exposes_existing_provider_cleanup(
     responses: ResponsesFixture,
@@ -281,6 +282,7 @@ async def test_interrupted_opening_exposes_existing_provider_cleanup(
     delayed_native_join: list[str],
     call_route: str,
     implicit_provider: bool,
+    mcp_credentials: bool,
 ) -> None:
     from _agents_codex import session as native_session
     from agents import _native
@@ -325,7 +327,21 @@ async def test_interrupted_opening_exposes_existing_provider_cleanup(
     monkeypatch.setattr(native_session, "_close_after_error", observe_interruption)
     monkeypatch.setattr(_native.NativeThread, "_submit", forbid_submission)
     shared = None if implicit_provider else provider(responses)
-    agent = Agent(instructions="Inspect.", model="gpt-5.5", provider=shared)
+    agent = Agent(
+        instructions="Inspect.",
+        model="gpt-5.5",
+        provider=shared,
+        tools=[
+            HttpMCP(
+                name="remote",
+                url="https://example.invalid",
+                tools=[],
+                headers={"X-Token": "synthetic-cleanup-test-credential"},
+            )
+        ]
+        if mcp_credentials
+        else [],
+    )
 
     @asynccontextmanager
     async def manager():

@@ -16,6 +16,7 @@ from typing import (
 
 from typing_extensions import TypeVar as TypeVar
 
+from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -175,6 +176,8 @@ class Turn(Generic[OutputT]):
         try:
             return await self.wait_for_request_or_result()
         except TurnStoppedError as error:
+            if _uses_mcp((self,), {}, lambda owner: owner._session._opening_agent.tools):
+                _strip_mcp_frames(error)
             return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
         except NativeError as error:
             if error.code == "run_budget_exceeded":
@@ -197,6 +200,8 @@ class Turn(Generic[OutputT]):
                 reason = "quota_blocked"
             else:
                 raise
+            if _uses_mcp((self,), {}, lambda owner: owner._session._opening_agent.tools):
+                _strip_mcp_frames(error)
             return TurnNeedsAttention(reason, error, self._session.rate_limits())
 
     async def steer(self, input: UserInput) -> None:
@@ -349,4 +354,5 @@ def _child_submission_id(child_id: str, incarnation: str, turn_id: str) -> str:
     return f"child:{child_id}:{incarnation}:{turn_id}"
 
 
+_protect_mcp_methods(Turn, lambda owner: owner._session._opening_agent.tools)
 _preserve_module_identity(globals(), "agents.turn")

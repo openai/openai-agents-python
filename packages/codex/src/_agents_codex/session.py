@@ -75,6 +75,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._mcp_errors import _protect_mcp_methods
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._projection import (
     _error_code as _error_code,
@@ -9717,4 +9718,5 @@ def get_cleanup(
     return None
 
 
+_protect_mcp_methods(Session, lambda owner: owner._opening_agent.tools)
 _preserve_module_identity(globals(), "agents.session")

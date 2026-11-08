@@ -297,9 +297,13 @@
       "sha256": "4e2bb732edab48888aa9bdca723f591caaf87465c86c0ce0a76ea5baa60c1081"
     },
     {
+      "path": "0091-mcp-windows-env-precedence.patch",
+      "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
+    },
+    {
       "path": "0068-decisions.patch",
       "sha256": "719016d07cee3a19cce862f02bb905a40d67a21963c59aafbd3e940e339b162b"
     }
   ],
-  "result_tree": "d71665f9cfd9735304262392472144f5d9ec3871"
+  "result_tree": "63c186ba6d947c141c895a01824375d86b31f0b9"
 }
