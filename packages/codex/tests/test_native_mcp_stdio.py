@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +40,12 @@ from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import Peer, declarations, mcp_call
 
 SERVER = Path(__file__).parent / "fixtures/native_stdio_mcp.py"
+
+
+def test_stdio_new_fields_preserve_existing_constructor_order() -> None:
+    expected = ["command", "args", "env_vars", "cwd", "location", "env"]
+    assert [item.name for item in fields(StdioMCP)][-6:] == expected
+    assert list(inspect.signature(StdioMCP).parameters)[-6:] == expected
 
 
 def stdio(log: Path, *args: str, **kwargs: Any) -> StdioMCP[Any]:

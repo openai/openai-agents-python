@@ -412,9 +412,9 @@ class StdioMCP(_MCP[ContextT_contra]):
     command: str = field(repr=False)
     args: Sequence[str] = field(default=(), repr=False)
     env_vars: Sequence[str] = field(default=(), repr=False)
-    env: Mapping[str, str] | None = field(default=None, repr=False)
     cwd: str | None = field(default=None, repr=False)
     location: Literal["host", "environment"] = "host"
+    env: Mapping[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
