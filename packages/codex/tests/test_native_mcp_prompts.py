@@ -21,6 +21,8 @@ from tests.test_native_agent import provider
 from tests.test_native_mcp_stdio import assert_stopped, records
 from tests.test_native_mcp_tools import Peer, declarations
 
+PROMPT_BYTE_LIMIT = 8 * 1024 * 1024
+
 
 @dataclass
 class PromptPeer(Peer):
@@ -28,6 +30,7 @@ class PromptPeer(Peer):
     tools: bool = False
     mode: str = "normal"
     page_count: int = 0
+    catalog_pages: int = 4
     later_entered: asyncio.Event = field(default_factory=asyncio.Event)
     release_later: asyncio.Event | None = None
 
@@ -52,6 +55,21 @@ class PromptPeer(Peer):
             }
         else:
             params = body.get("params", {})
+            if self.mode == "oversized-response":
+                assert request.headers.get("MCP-Protocol-Version") == "2025-06-18"
+                payload = bytearray(
+                    b'{"jsonrpc":"2.0","id":' + json.dumps(body["id"]).encode() + b',"result":'
+                )
+                if method == "prompts/list":
+                    payload.extend(b'{"prompts":[{"name":"large","_meta":{"padding":"')
+                else:
+                    payload.extend(b'{"messages":[{"role":"user","content":{"type":"text","text":"')
+                # Build just over 8 MiB without retaining multiple large JSON strings.
+                chunk = b"x" * (64 * 1024)
+                for _ in range(PROMPT_BYTE_LIMIT // len(chunk)):
+                    payload.extend(chunk)
+                payload.extend(b'"}}]}}')
+                return web.Response(body=payload, content_type="application/json")
             if method == "prompts/list":
                 self.page_count += 1
                 if "cursor" in params:
@@ -78,6 +96,17 @@ class PromptPeer(Peer):
                     result = {"prompts": [{"name": "many"}] * 2049}
                 elif self.mode == "cursor":
                     result = {"prompts": [], "nextCursor": "x" * (64 * 1024 + 1)}
+                elif self.mode == "catalog-bytes":
+                    result = {
+                        "prompts": [
+                            {
+                                "name": str(self.page_count),
+                                "_meta": {"padding": "x" * (3 * 1024 * 1024)},
+                            }
+                        ]
+                    }
+                    if self.page_count < self.catalog_pages:
+                        result["nextCursor"] = str(self.page_count)
                 elif self.mode == "malformed" and "cursor" in params:
                     result = {"prompts": [{"description": "missing name"}]}
                 else:
@@ -210,6 +239,80 @@ async def test_terminal_page_100_succeeds(responses: ResponsesFixture) -> None:
             assert peer.page_count == 100
 
 
+@pytest.mark.parametrize("pages", [2, 4])
+async def test_prompt_catalog_byte_budget_preserves_session_usability(
+    responses: ResponsesFixture, pages: int
+) -> None:
+    peer = PromptPeer(mode="catalog-bytes", catalog_pages=pages)
+    async with timeout(30), peer.serve() as url:
+        async with Agent(
+            instructions="Preview.",
+            tools=[HttpMCP(name="catalog", url=url, tools=[])],
+            provider=provider(responses),
+        ).session() as session:
+            if pages == 2:
+                prompts = await session.list_mcp_prompts("catalog")
+                assert [prompt["name"] for prompt in prompts] == ["1", "2"]
+                assert all(
+                    prompt.get("_meta", {}).get("padding") == "x" * (3 * 1024 * 1024)
+                    for prompt in prompts
+                )
+                expected_cursors = [None, "1"]
+            else:
+                # Each response is below 8 MiB; the third page exceeds the total budget.
+                with pytest.raises(
+                    NativeError,
+                    match=r"prompts/list exceeded the catalog byte limit of 8388608 bytes",
+                ):
+                    await session.list_mcp_prompts("catalog")
+                expected_cursors = [None, "1", "2"]
+            peer.mode = "normal"
+            assert await session.get_mcp_prompt("catalog", "review") == prompt_result(
+                "prompts/get", {"name": "review"}
+            )
+            assert [
+                row.get("params", {}).get("cursor")
+                for row in peer.requests
+                if row.get("method") == "prompts/list"
+            ] == expected_cursors
+            assert sum(row.get("method") == "initialize" for row in peer.requests) == 1
+            assert not responses.requests
+
+
+@pytest.mark.parametrize("method", ["prompts/list", "prompts/get"])
+async def test_legacy_http_prompt_responses_enforce_byte_limit(
+    responses: ResponsesFixture, method: str
+) -> None:
+    peer = PromptPeer(mode="oversized-response")
+    async with timeout(30), peer.serve() as url:
+        async with Agent(
+            instructions="Preview.",
+            tools=[HttpMCP(name="catalog", url=url, tools=[])],
+            provider=provider(responses),
+        ).session() as session:
+            with pytest.raises(NativeError, match=r"MCP response body exceeds\s*8388608\s*bytes"):
+                if method == "prompts/list":
+                    await session.list_mcp_prompts("catalog")
+                else:
+                    await session.get_mcp_prompt("catalog", "large")
+            assert [
+                row["method"]
+                for row in peer.requests
+                if row.get("method", "").startswith("prompts/")
+            ] == [method]
+            peer.mode = "normal"
+            assert await session.list_mcp_prompts("catalog") == [
+                PROMPT,
+                PROMPT,
+                {"name": "welcome"},
+            ]
+            assert await session.get_mcp_prompt("catalog", "review") == prompt_result(
+                "prompts/get", {"name": "review"}
+            )
+            assert sum(row.get("method") == "initialize" for row in peer.requests) == 1
+            assert not responses.requests
+
+
 async def test_missing_capability_and_advertised_get_error(responses: ResponsesFixture) -> None:
     missing, advertised = PromptPeer(prompts=False), PromptPeer()
     async with timeout(20), missing.serve() as absent_url, advertised.serve() as present_url:
@@ -230,7 +333,7 @@ async def test_missing_capability_and_advertised_get_error(responses: ResponsesF
         assert not any(row.get("method", "").startswith("prompts/") for row in missing.requests)
 
 
-async def test_arguments_validate_before_activation_and_copy_before_await(
+async def test_arguments_copy_before_await(
     responses: ResponsesFixture,
 ) -> None:
     release = asyncio.Event()
@@ -241,10 +344,6 @@ async def test_arguments_validate_before_activation_and_copy_before_await(
             tools=[HttpMCP(name="catalog", url=url, tools=[])],
             provider=provider(responses),
         ).session() as session:
-            for invalid in ({"language": 1}, {1: "language"}):
-                with pytest.raises(TypeError, match="string"):
-                    await session.get_mcp_prompt("catalog", "review", invalid)  # type: ignore[arg-type]
-            assert not peer.requests
             args = {"language": "before"}
             pending = asyncio.create_task(session.get_mcp_prompt("catalog", "review", args))
             await peer.ready_entered.wait()

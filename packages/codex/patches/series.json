@@ -290,8 +290,8 @@
     },
     {
       "path": "0066-caller-controlled-mcp-prompts.patch",
-      "sha256": "106d4913f8d7eda4a107e7a4fbc9e9ce4849a3ef4b8b8158ee1c6c14981a5872"
+      "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
     }
   ],
-  "result_tree": "4e91c69e1272d502cb587a9617a7576f8426e800"
+  "result_tree": "62fd05c563d1e0f54d96226de086c2824f3e6c98"
 }

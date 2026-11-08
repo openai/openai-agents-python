@@ -4118,8 +4118,9 @@ class Session(Generic[ContextT, OutputT]):
         """Return all prompts from a selected ordinary MCP server while idle.
 
         Native pagination either completes or raises without returning a partial
-        list. It inherits the native catalog limits: 100 pages, 2,048 items,
-        64 KiB per cursor, and the configured execution timeout for collection.
+        list. Native catalog limits are 100 pages, 2,048 items, 64 KiB per cursor,
+        8 MiB across serialized JSON prompt arrays, and the configured execution
+        timeout for collection.
         MCP declarations default that timeout to 60 seconds. Activation and
         cleanup have their own lifetimes.
         Missing prompt capability returns an empty list. Results never enter
@@ -4132,23 +4133,16 @@ class Session(Generic[ContextT, OutputT]):
     ) -> MCPGetPromptResult:
         """Get caller-owned prompt messages without submitting model work.
 
-        Arguments are copied as strings before activation; omitted arguments and
+        Arguments are copied before activation; omitted arguments and
         an explicit empty mapping remain distinct. The server validates prompt
         names and required arguments. Missing prompt capability raises an error.
+        HTTP POST responses are limited to 8 MiB. Legacy SSE continuations use
+        the transport's per-event limit, which defaults to 16 MiB.
         Lifetime and cleanup rules match ``read_mcp_resource``.
         """
-        if not isinstance(name, str):
-            raise TypeError("MCP prompt name must be a string")
         params: dict[str, Any] = {"name": name}
         if arguments is not None:
-            if not isinstance(arguments, Mapping):
-                raise TypeError("MCP prompt arguments must be a mapping of strings")
-            copied = dict(arguments)
-            if not all(
-                isinstance(key, str) and isinstance(value, str) for key, value in copied.items()
-            ):
-                raise TypeError("MCP prompt arguments must have string keys and values")
-            params["arguments"] = copied
+            params["arguments"] = dict(arguments)
         return cast(MCPGetPromptResult, await self._mcp_request("get_mcp_prompt", server, params))
 
     async def list_mcp_resources(
