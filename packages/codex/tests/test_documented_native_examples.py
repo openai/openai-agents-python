@@ -345,9 +345,11 @@ async def test_exact_apps_registration_uses_synthetic_native_backend(responses, 
 async def test_exact_native_delegation_and_enumeration_without_commands(
     tmp_path, monkeypatch, capsys
 ):
+    from asyncio import wait_for
+
     from agents import Agent
     from tests.native_executor_fixtures import ExecutorPeer
-    from tests.test_native_child_agents import child_peer, metadata, trust
+    from tests.test_native_child_agents import child_peer, handles, metadata, trust
     from tests.test_native_executor_tools import declaration
 
     async with (
@@ -378,9 +380,14 @@ async def test_exact_native_delegation_and_enumeration_without_commands(
         monkeypatch.setattr(Agent, "__init__", configure)
         tree = ast.parse(_code("native_children"))
         scope = next(node for node in tree.body if isinstance(node, ast.AsyncWith))
+        scope.body.extend(
+            ast.parse(
+                "root_result = result\nawait wait_for(handles(session, 2), timeout=10)\n"
+            ).body
+        )
         scope.body.extend(ast.parse(_code("child_results")).body)
         ast.fix_missing_locations(tree)
-        ns = {"environment": declaration(executor)}
+        ns = {"environment": declaration(executor), "handles": handles, "wait_for": wait_for}
         try:
             await eval(
                 compile(
@@ -388,6 +395,7 @@ async def test_exact_native_delegation_and_enumeration_without_commands(
                 ),
                 ns,
             )
+            assert ns["root_result"].final_output == "root complete"
             assert ns["result"].final_output in {"alpha complete", "beta complete"}
             output = capsys.readouterr().out
             assert "alpha complete" in output and "beta complete" in output
