@@ -7,11 +7,20 @@ import json
 import operator
 import pickle
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agents import ChatGPTAppsMCP, HostedVerificationMCP, HttpMCP, StdioMCP
+from agents import (
+    Agent,
+    ChatGPTAppsMCP,
+    Environment,
+    HostedVerificationMCP,
+    HttpMCP,
+    NativeProvider,
+    StdioMCP,
+)
 
 _SECRET = "synthetic-mcp-credential-for-traceback-tests"
 
@@ -33,6 +42,43 @@ def assert_private_frames(error: BaseException) -> None:
                     assert _SECRET not in repr(vars(value))
         current = current.tb_next
     assert inspected > 0
+
+
+@pytest.mark.parametrize("preceding_http_server", [False, True])
+async def test_opening_failure_does_not_retain_mcp_configuration(
+    preceding_http_server: bool, tmp_path: Path
+) -> None:
+    stdio = StdioMCP(
+        name="local",
+        command="unused-peer",
+        tools=[],
+        location="environment",
+        env={"TOKEN": _SECRET},
+    )
+    http = HttpMCP(
+        name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+    )
+    agent = Agent(instructions="test", tools=[http, stdio] if preceding_http_server else [stdio])
+    with pytest.raises(ValueError, match="requires a Session environment") as captured:
+        async with agent.session():
+            pytest.fail("invalid configuration opened a session")
+    assert_private_frames(captured.value)
+    assert stdio.env == {"TOKEN": _SECRET}
+    assert http.headers == {"X-Token": _SECRET}
+    assert stdio._config(Environment.local(cwd=tmp_path))["env"] == {"TOKEN": _SECRET}
+
+
+async def test_later_opening_failure_does_not_retain_mcp_configuration() -> None:
+    server = HttpMCP(
+        name="remote", url="https://example.invalid", tools=[], headers={"X-Token": _SECRET}
+    )
+    provider = NativeProvider(api_key="unused-provider-key")
+    await provider.aclose()
+    with pytest.raises(RuntimeError, match="NativeProvider is closed") as captured:
+        async with Agent(instructions="test", tools=[server]).session(provider=provider):
+            pytest.fail("a closed provider opened a session")
+    assert_private_frames(captured.value)
+    assert server._config()["http_headers"] == {"X-Token": _SECRET}
 
 
 @pytest.mark.parametrize("empty", [False, True])

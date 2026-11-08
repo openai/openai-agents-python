@@ -502,8 +502,6 @@ class StdioMCP(_MCP[ContextT_contra]):
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
         config.update(command=self.command, args=list(self.args))
-        if self.env is not None:
-            config["env"] = dict(self.env)
         if self.location == "environment":
             if environment is None:
                 raise ValueError(
@@ -534,6 +532,8 @@ class StdioMCP(_MCP[ContextT_contra]):
             config["env_vars"] = list(self.env_vars)
             if self.cwd is not None:
                 config["cwd"] = self.cwd
+        if self.env is not None:
+            config["env"] = dict(self.env)
         return config
 
 
