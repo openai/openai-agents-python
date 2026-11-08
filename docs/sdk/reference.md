@@ -373,7 +373,8 @@ Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
 
 Environment options have these limits:
 
-- `tools` selects any combination of `exec_command`, `write_stdin` and `apply_patch`, defaulting to none. `write_stdin` requires `exec_command`.
+- `tools` selects any combination of `exec_command`, `write_stdin`, `apply_patch`, `project_glob` and `project_grep`, defaulting to none. `write_stdin` requires `exec_command`.
+- See [executor tool selection](execution.md#select-executor-tools) for project search and its runtime constraints.
 - `approval` returns bool or `StopTurn`, without a transform deadline. It sees original arguments. Denial skips `transform_arguments`. `policy_timeout` bounds only transforms.
 - Result transforms support default-mode direct calls and generated calls with `Agent(programmatic_tool_calling=True)`. Result control also withholds raw command-output deltas and output fields in controlled execution records. See [executor policies](execution.md#transform-executor-arguments-and-results).
 - `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots. See [native skill setup](execution.md#supply-native-skills) for the `skills/NAME/SKILL.md` layout and restore rules.

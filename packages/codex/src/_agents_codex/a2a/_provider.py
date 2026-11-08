@@ -66,6 +66,8 @@ class A2AJobProvider(Generic[_Input]):
     token for the fixed endpoint. reserve atomically spends an approved mutation;
     its reservation survives lost acknowledgments. Generic A2A creation has no
     idempotency guarantee. The host owns projection, storage, and wake-up scheduling.
+    Encoded Messages are copied before asynchronous discovery. Projected values are
+    captured as JSON: object identity is not preserved, and tuples become lists.
 
     The credential filter recognizes only the current operation's bearer. The host
     must validate peer data against its durable credential policy before logging,
@@ -168,7 +170,7 @@ class A2AJobProvider(Generic[_Input]):
                 public = json.loads(_json(value, self.limits.message_bytes))
                 if _private_text(public, credentials):
                     return JobUpdate("unknown", receipt)
-                return JobUpdate("completed", receipt, value)
+                return JobUpdate("completed", receipt, public)
             if task.status.state in (p.TASK_STATE_INPUT_REQUIRED, p.TASK_STATE_AUTH_REQUIRED):
                 kind = (
                     "auth_required"
@@ -211,7 +213,8 @@ class A2AJobProvider(Generic[_Input]):
 
     async def start(self, claim: JobClaim, arguments: _Input) -> JobUpdate:
         await self._check(claim, "start")
-        message = self._encode(arguments)
+        message = p.Message()
+        message.CopyFrom(self._encode(arguments))
         if (
             not message.message_id
             or message.role != p.ROLE_USER

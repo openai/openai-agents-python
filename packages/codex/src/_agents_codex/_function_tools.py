@@ -67,6 +67,8 @@ if TYPE_CHECKING:
     from .turn import Turn
 
 ToolContextT = TypeVar("ToolContextT")
+PolicyContextT = TypeVar("PolicyContextT")
+PolicyContextT_contra = TypeVar("PolicyContextT_contra", contravariant=True)
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
 BinderT_co = TypeVar(
     "BinderT_co", bound=Callable[..., _CapturedFunction] | None, covariant=True, default=None
@@ -205,7 +207,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
 
     def _capture(self, context: object) -> _CapturedFunction | _CapturedManual:
         if self._bind is not None:
-            return self._bind(context, self)
+            # The callback body and its policies share the Session context.
+            return self._bind(context, context, self)
         return _CapturedManual(
             self.name,
             self._spec_json(),
@@ -241,10 +244,14 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
 # The frozen binder consumes application context. Keeping its callable type
 # preserves that requirement when type checkers join mixed tool lists.
 _PythonTool: TypeAlias = FunctionTool[
-    Any, Any, Callable[[ToolContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]
+    Any,
+    Any,
+    Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], _CapturedFunction],
 ]
 Tool: TypeAlias = (
-    _PythonTool[ToolContextT]
+    _PythonTool[ToolContextT, ToolContextT]
+    | _PythonTool[ToolContextT, object]
+    | _PythonTool[object, ToolContextT]
     | FunctionTool[Any, Any]
     | HttpMCP[object]
     | StdioMCP[object]
@@ -256,20 +263,29 @@ Tool: TypeAlias = (
     | FileSearch
     | CodeInterpreter
     | ImageGeneration
-    | NativeAgents
+    | NativeAgents[ToolContextT]
 )
 
 
-class _ToolDecorator(Protocol):
+class _ToolDecorator(Protocol[PolicyContextT_contra]):
+    @overload
+    def __call__(
+        self,
+        function: Callable[Concatenate[ToolContext[object], ParametersT], Any],
+        /,
+    ) -> _PythonTool[Any, PolicyContextT_contra]: ...
+
     @overload
     def __call__(
         self,
         function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any],
         /,
-    ) -> _PythonTool[ToolContextT]: ...
+    ) -> _PythonTool[ToolContextT, PolicyContextT_contra]: ...
 
     @overload
-    def __call__(self, function: Callable[ParametersT, Any], /) -> _PythonTool[object]: ...
+    def __call__(
+        self, function: Callable[ParametersT, Any], /
+    ) -> _PythonTool[Any, PolicyContextT_contra]: ...
 
 
 def _requires_context(annotation: Any) -> bool:
@@ -296,15 +312,55 @@ def _policy_hints(policy: Callable[..., Any]) -> dict[str, Any]:
     return get_type_hints(annotated)
 
 
+_BeforePolicy: TypeAlias = Callable[
+    [ToolContext[PolicyContextT]],
+    Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
+]
+_AfterPolicy: TypeAlias = Callable[
+    [ToolContext[PolicyContextT], ToolOutput], ToolOutput | Awaitable[ToolOutput]
+]
+_TimeoutFormatter: TypeAlias = Callable[
+    [ToolContext[PolicyContextT], ToolTimeoutError], str | Awaitable[str]
+]
+
+
 @overload
 def function_tool(
     function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any],
     /,
-) -> _PythonTool[ToolContextT]: ...
+) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
 @overload
-def function_tool(function: Callable[ParametersT, Any], /) -> _PythonTool[object]: ...
+def function_tool(function: Callable[ParametersT, Any], /) -> _PythonTool[object, object]: ...
+
+
+@overload
+def function_tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    callback_timeout: None = None,
+    before: _BeforePolicy[object] | None = None,
+    after: _AfterPolicy[object] | None = None,
+    defer_loading: bool = False,
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+    timeout_error_function: _TimeoutFormatter[Any] | None = None,
+) -> _ToolDecorator[object]: ...
+
+
+@overload
+def function_tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    callback_timeout: None = None,
+    before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
+    after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
+    defer_loading: bool = False,
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+    timeout_error_function: _TimeoutFormatter[Any] | None = None,
+) -> _ToolDecorator[PolicyContextT]: ...
 
 
 @overload
@@ -313,18 +369,56 @@ def function_tool(
     name: str | None = None,
     description: str | None = None,
     callback_timeout: float | None = None,
-    before: Callable[
-        [ToolContext[Any]],
-        Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
-    ]
-    | None = None,
-    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]]
-    | None = None,
+    before: _BeforePolicy[object] | None = None,
+    after: _AfterPolicy[object] | None = None,
+    defer_loading: bool = False,
+    timeout_behavior: Literal["raise_exception"] = "raise_exception",
+    timeout_error_function: _TimeoutFormatter[Any] | None = None,
+) -> _ToolDecorator[object]: ...
+
+
+@overload
+def function_tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    callback_timeout: float | None = None,
+    before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
+    after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
+    defer_loading: bool = False,
+    timeout_behavior: Literal["raise_exception"] = "raise_exception",
+    timeout_error_function: _TimeoutFormatter[Any] | None = None,
+) -> _ToolDecorator[PolicyContextT]: ...
+
+
+@overload
+def function_tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    callback_timeout: float | None = None,
+    before: _BeforePolicy[object] | None = None,
+    after: _AfterPolicy[object] | None = None,
     defer_loading: bool = False,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
-    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+    timeout_error_function: _TimeoutFormatter[object] | None = None,
+) -> _ToolDecorator[object]: ...
+
+
+@overload
+def function_tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    callback_timeout: float | None = None,
+    before: _BeforePolicy[object] | _BeforePolicy[PolicyContextT] | None = None,
+    after: _AfterPolicy[object] | _AfterPolicy[PolicyContextT] | None = None,
+    defer_loading: bool = False,
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+    timeout_error_function: _TimeoutFormatter[object]
+    | _TimeoutFormatter[PolicyContextT]
     | None = None,
-) -> _ToolDecorator: ...
+) -> _ToolDecorator[PolicyContextT]: ...
 
 
 def function_tool(
@@ -345,7 +439,7 @@ def function_tool(
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",
     timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
     | None = None,
-) -> _PythonTool[Any] | _ToolDecorator:
+) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
     Model arguments must have type annotations and accept keyword arguments.
@@ -382,7 +476,7 @@ def function_tool(
     where the current model supports it; unsupported models get the direct schema.
     """
 
-    def decorate(callback: Callable[..., Any]) -> _PythonTool[object]:
+    def decorate(callback: Callable[..., Any]) -> _PythonTool[Any, Any]:
         parameters = list(inspect.signature(callback).parameters.values())
         hints = get_type_hints(callback, include_extras=True)
         selected_name = name if name is not None else callback.__name__
@@ -421,7 +515,12 @@ def function_tool(
             callback, name=selected_name, hints=hints, skip_first=context_parameter is not None
         )
 
-        def bind(context: object, declaration: FunctionTool[Any, Any, Any]) -> _CapturedFunction:
+        def bind(
+            context: object,
+            policy_context: object,
+            declaration: FunctionTool[Any, Any, Any],
+        ) -> _CapturedFunction:
+            assert context is policy_context
             if declaration.input_type is not model or declaration.output_type is not output_type:
                 raise TypeError("Declare a new callback with function_tool to change its types")
             return _CapturedFunction(

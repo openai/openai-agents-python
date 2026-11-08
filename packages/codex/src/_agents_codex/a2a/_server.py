@@ -460,7 +460,9 @@ class NativeA2AExecutor(AgentExecutor):
                         )
                     )
                     try:
-                        record = await asyncio.shield(work)
+                        if not work.done():
+                            await asyncio.wait((work,))
+                        record = work.result()
                     except BaseException as error:
                         cancel_once(work)
                         await _close_after_error(error, lambda: _join(work))

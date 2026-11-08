@@ -85,7 +85,9 @@ async def _join(task: asyncio.Future[Any], *, outcome: Future[Any] | None = None
     try:
         while True:
             try:
-                value = await asyncio.shield(task)
+                if not task.done():
+                    await asyncio.wait((task,))
+                value = task.result()
                 break
             except asyncio.CancelledError as error:
                 if task.done() and task.cancelled():

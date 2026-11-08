@@ -472,8 +472,8 @@ async def test_local_manual_export_rejects_before_sealing_or_spending_grants(res
         turn = await session.submit("Begin")
         request = await next_request(session.interactions(), lookup)
         status = await session.checkpoint_status(kind="manual_wait")
-        assert status.status == "not_ready" and "local" in status.reasons[0].lower()
-        with pytest.raises(ValueError, match="Native local storage"):
+        assert status.status == "not_ready" and "persistent storage" in status.reasons[0].lower()
+        with pytest.raises(ValueError, match="Persistent storage"):
             await session.suspend()
         await request.respond("known receipt")
         assert (await turn.get_result()).final_output == "still-live"
