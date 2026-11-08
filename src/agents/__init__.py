@@ -8,6 +8,8 @@ if TYPE_CHECKING:
         FunctionTool as FunctionTool,
         Tool as Tool,
         ToolContext as ToolContext,
+        ToolTimeoutBehavior as ToolTimeoutBehavior,
+        ToolTimeoutError as ToolTimeoutError,
         function_tool as function_tool,
     )
     from ._trace_context import TraceContext as TraceContext
@@ -242,6 +244,8 @@ _MODULES = {
     "ToolOutputText": ".tools",
     "ToolOutputImage": ".tools",
     "ToolContext": "._function_tools",
+    "ToolTimeoutBehavior": "._function_tools",
+    "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",
     "MCPCallContext": ".mcp",
     "function_tool": "._function_tools",

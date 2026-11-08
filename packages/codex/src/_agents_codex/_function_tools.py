@@ -74,6 +74,24 @@ BinderT_co = TypeVar(
 ParametersT = ParamSpec("ParametersT")
 
 
+ToolTimeoutBehavior: TypeAlias = Literal["raise_exception", "error_as_result"]
+
+
+class ToolTimeoutError(TimeoutError):
+    """A function invocation exceeded its callback deadline.
+
+    Cleanup is joined before the timeout settles. Effects already performed
+    by the callback are not undone.
+    """
+
+    def __init__(self, tool_name: str, timeout_seconds: float):
+        self.tool_name = tool_name
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"Tool {tool_name!r} exceeded its callback timeout after {timeout_seconds:g} seconds"
+        )
+
+
 @dataclass(frozen=True)
 class ToolContext(Generic[ContextT_co]):
     """Application context and the admitted native invocation's identity.
@@ -125,6 +143,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         field(default=None, repr=False)
     )
     defer_loading: bool = False
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception"
+    timeout_error_function: (
+        Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None
+    ) = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.defer_loading, bool):
@@ -135,6 +157,12 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             callback = getattr(self, name)
             if callback is not None and not callable(callback):
                 raise TypeError(f"FunctionTool {name} must be callable")
+        if self.timeout_behavior not in ("raise_exception", "error_as_result"):
+            raise ValueError(
+                "FunctionTool timeout_behavior must be raise_exception or error_as_result"
+            )
+        if self.timeout_error_function is not None and not callable(self.timeout_error_function):
+            raise TypeError("FunctionTool timeout_error_function must be callable or None")
         duration = self.callback_timeout
         if duration is not None and (
             isinstance(duration, bool)
@@ -145,7 +173,11 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                 "FunctionTool callback_timeout must be a positive finite number or None"
             )
         if self._bind is None and (
-            self.before is not None or self.after is not None or self.callback_timeout is not None
+            self.before is not None
+            or self.after is not None
+            or self.callback_timeout is not None
+            or self.timeout_behavior != "raise_exception"
+            or self.timeout_error_function is not None
         ):
             raise TypeError("Callback settings require a callback registered with function_tool")
 
@@ -189,7 +221,10 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
             )
         if self._bind is not None:
             if context is None:
-                for name in ("before", "after"):
+                policies: tuple[str, ...] = ("before", "after")
+                if self.callback_timeout is not None and self.timeout_behavior == "error_as_result":
+                    policies += ("timeout_error_function",)
+                for name in policies:
                     callback = getattr(self, name)
                     if callback is None:
                         continue
@@ -286,6 +321,9 @@ def function_tool(
     after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]]
     | None = None,
     defer_loading: bool = False,
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+    | None = None,
 ) -> _ToolDecorator: ...
 
 
@@ -304,6 +342,9 @@ def function_tool(
     after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]]
     | None = None,
     defer_loading: bool = False,
+    timeout_behavior: ToolTimeoutBehavior = "raise_exception",
+    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]]
+    | None = None,
 ) -> _PythonTool[Any] | _ToolDecorator:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -325,6 +366,15 @@ def function_tool(
     Already-entered sync work cannot be forcibly stopped and remains joined;
     a callback that refuses to finish can delay completion. Argument validation,
     result conversion and effects already performed are outside this deadline.
+
+    ``timeout_behavior="raise_exception"`` preserves turn failure with
+    ToolTimeoutError. With ``"error_as_result"``, joined expiry returns a failed
+    textual ToolOutput to the model without validating the normal return type
+    or running the after hook. ``timeout_error_function(context, error)`` can
+    supply this text synchronously or asynchronously; it runs only in result
+    mode after callback cleanup, while the invocation is still admitted.
+    Formatter errors fail the turn. Without a deadline, these options are inactive.
+    Timeout does not undo effects already performed by application code.
 
     Observe tool starts and results through Session.events().
 
@@ -384,6 +434,8 @@ def function_tool(
                 context=context,
                 context_parameter=context_parameter,
                 callback_timeout=declaration.callback_timeout,
+                timeout_behavior=declaration.timeout_behavior,
+                timeout_error_function=declaration.timeout_error_function,
                 before=declaration.before,
                 after=declaration.after,
             )
@@ -399,6 +451,8 @@ def function_tool(
             before=before,
             after=after,
             defer_loading=defer_loading,
+            timeout_behavior=timeout_behavior,
+            timeout_error_function=timeout_error_function,
         )
 
     return decorate(function) if function is not None else decorate

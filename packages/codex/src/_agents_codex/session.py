@@ -60,7 +60,12 @@ from ._events import (
     SessionItem as SessionItem,
     WebSearchCallItem,
 )
-from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext
+from ._function_tools import (
+    FunctionTool as FunctionTool,
+    Tool as Tool,
+    ToolContext as ToolContext,
+    ToolTimeoutError as ToolTimeoutError,
+)
 from ._history import project_history as project_history
 from ._lifecycle import (
     _close_after_error as _close_after_error,
@@ -8456,6 +8461,7 @@ class Session(Generic[ContextT, OutputT]):
                 args = (context,)
             if not self._admit_tool(state, request):
                 return
+            timeout_output: ToolOutput | None = None
             duration = entry.callback_timeout
             if duration is None:
                 value = await _call_callback(
@@ -8464,12 +8470,84 @@ class Session(Generic[ContextT, OutputT]):
                     *args,
                     **kwargs,
                 )
+            elif entry.timeout_behavior == "error_as_result":
+                loop = asyncio.get_running_loop()
+                cutoff = loop.time() + duration
+                expired = False
+                timeout_error = ToolTimeoutError(entry.name, duration)
+
+                def admit_body() -> bool:
+                    return not expired and self._admit_tool(state, request)
+
+                def expire_body(cancel_body: bool = True) -> None:
+                    nonlocal expired
+                    if self._closing or state.stopping or state.failure.done():
+                        return
+                    expired = True
+                    if cancel_body:
+                        cancel_once(body)
+
+                timer = loop.call_at(cutoff, expire_body)
+
+                async def invoke_body() -> Any:
+                    try:
+                        if admit_body():
+                            return await _call_callback(entry.callback, admit_body, *args, **kwargs)
+                        return None
+                    finally:
+                        timer.cancel()
+                        # Settle at body exit, before unrelated ready work can
+                        # delay the parent. Busy callbacks may outlast the timer.
+                        if loop.time() >= cutoff:
+                            expire_body(cancel_body=False)
+
+                try:
+                    body = asyncio.create_task(invoke_body())
+                    try:
+                        # Do not let parent cancellation cancel an already
+                        # unwinding body a second time and cut cleanup short.
+                        await asyncio.wait((body,))
+                    except BaseException as error:
+                        cancel_once(body)
+
+                        async def join_body() -> None:
+                            await _join(body)
+
+                        await _close_after_error(error, join_body)
+                        raise
+                finally:
+                    timer.cancel()
+                body_error = None if body.cancelled() else body.exception()
+                if not self._admit_tool(state, request):
+                    return
+                if expired:
+                    if body_error is not None:
+                        timeout_error.__cause__ = body_error
+                    # No late value is validated or serialized. Format only
+                    # under the still-live parent's native admission.
+                    text = str(timeout_error)
+                    if entry.timeout_error_function is not None:
+                        text = await _call_callback(
+                            entry.timeout_error_function,
+                            lambda: self._admit_tool(state, request),
+                            context,
+                            timeout_error,
+                        )
+                        if not self._admit_tool(state, request):
+                            return
+                        if not isinstance(text, str):
+                            raise TypeError("Function timeout_error_function must return str")
+                    timeout_output = ToolOutput.error(text)
+                    timeout_output._validate()
+                    value = None
+                else:
+                    value = body.result()
             else:
                 loop = asyncio.get_running_loop()
                 cutoff = loop.time() + duration
                 callback_task = asyncio.current_task()
                 assert callback_task is not None
-                timeout_error = TimeoutError(f"Tool {entry.name!r} exceeded its callback timeout")
+                timeout_error = ToolTimeoutError(entry.name, duration)
 
                 def expire_callback(cancel_body: bool = True) -> None:
                     if self._closing or state.stopping or state.failure.done():
@@ -8494,26 +8572,27 @@ class Session(Generic[ContextT, OutputT]):
                         expire_callback(cancel_body=False)
             if not self._admit_tool(state, request):
                 return
-            output: ToolOutput | None = None
-            try:
-                value = entry.output_adapter.validate_python(value)
-                if isinstance(value, ToolOutput):
-                    output = value
-                else:
-                    wire = entry.output_adapter.dump_json(value, warnings="error").decode()
-                    # Declared strings retain raw text; other results keep JSON wire semantics.
-                    text = json.loads(wire) if isinstance(value, str) else wire
-                    output = ToolOutput.text(text if isinstance(text, str) else wire)
-                    del wire, text
-                output._validate()
-            except Exception:
-                output = None
-            if output is None:
-                # End ownership of the original admission request and every
-                # invocation data reference without altering caller-owned objects.
-                del request, message, raw_arguments, parsed, kwargs, context, args, value
-                raise ValueError("Tool result failed validation")
-            if entry.after is not None:
+            output: ToolOutput | None = timeout_output
+            if timeout_output is None:
+                try:
+                    value = entry.output_adapter.validate_python(value)
+                    if isinstance(value, ToolOutput):
+                        output = value
+                    else:
+                        wire = entry.output_adapter.dump_json(value, warnings="error").decode()
+                        # Declared strings retain raw text; other results keep JSON wire semantics.
+                        text = json.loads(wire) if isinstance(value, str) else wire
+                        output = ToolOutput.text(text if isinstance(text, str) else wire)
+                        del wire, text
+                    output._validate()
+                except Exception:
+                    output = None
+                if output is None:
+                    # End ownership of the original admission request and every
+                    # invocation data reference without altering caller-owned objects.
+                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    raise ValueError("Tool result failed validation")
+            if entry.after is not None and timeout_output is None:
                 output = await _call_callback(
                     entry.after, lambda: self._admit_tool(state, request), context, output
                 )
@@ -8529,6 +8608,7 @@ class Session(Generic[ContextT, OutputT]):
                     # The hook may have mutated the original callback result.
                     del request, message, raw_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
+            assert output is not None
             reply = json.dumps({"request": message, "response": output.to_native()})
             if not self._admit_tool(state, request):
                 return

@@ -965,7 +965,7 @@
           "@dataclass(frozen=True)\nclass ToolOutputText:\n    text: str",
           "@dataclass(frozen=True)\nclass ToolOutputImage:\n    image_url: str",
           "@dataclass\nclass ToolOutput:\n    content_items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] | list[dict[str, Any]]\n    success: bool = True\n\n    @classmethod\n    def text(cls, value: str) -> ToolOutput:\n        pass\n\n    @classmethod\n    def image(cls, image_url: str) -> ToolOutput:\n        pass\n\n    @classmethod\n    def error(cls, message: str) -> ToolOutput:\n        pass\n\n    def to_native(self) -> dict[str, Any]:\n        pass",
-          "@dataclass(frozen=True)\nclass _CapturedFunction:\n    name: str\n    spec_json: str\n    model: type[BaseModel]\n    field_names: tuple[str, ...]\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    callback: Callable[..., Any]\n    context_parameter: inspect.Parameter | None\n    callback_timeout: float | None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None\n    context: Any = field(repr=False)\n    namespace: None = field(default=None, init=False)",
+          "@dataclass(frozen=True)\nclass _CapturedFunction:\n    name: str\n    spec_json: str\n    model: type[BaseModel]\n    field_names: tuple[str, ...]\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    callback: Callable[..., Any]\n    context_parameter: inspect.Parameter | None\n    callback_timeout: float | None\n    timeout_behavior: ToolTimeoutBehavior\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None\n    context: Any = field(repr=False)\n    namespace: None = field(default=None, init=False)",
           "@dataclass(frozen=True)\nclass _ToolCatalog:\n    generation: int\n    tools: tuple[_CapturedFunction | _CapturedManual, ...]\n\n    def manual_slots(self) -> list[int]:\n        pass\n\n    def native_specs(self) -> str:\n        pass"
         ],
         "exports": {
@@ -1001,7 +1001,7 @@
           "from pydantic import BaseModel as BaseModel, TypeAdapter as TypeAdapter",
           "from typing_extensions import NotRequired, Required, TypedDict",
           "from .manual import _CapturedManual as _CapturedManual",
-          "from ._function_tools import ToolContext",
+          "from ._function_tools import ToolContext, ToolTimeoutBehavior, ToolTimeoutError",
           "from .native_interception import Allow, Deny, ReplaceArguments"
         ],
         "references": {
@@ -1009,6 +1009,8 @@
           "Deny": "agents.native_interception.Deny",
           "ReplaceArguments": "agents.native_interception.ReplaceArguments",
           "ToolContext": "agents._function_tools.ToolContext",
+          "ToolTimeoutBehavior": "agents._function_tools.ToolTimeoutBehavior",
+          "ToolTimeoutError": "agents._function_tools.ToolTimeoutError",
           "_CapturedManual": "agents.manual._CapturedManual"
         }
       },
@@ -1196,6 +1198,8 @@
       "ToolOutputImage": "agents.tools.ToolOutputImage",
       "ToolOutputText": "agents.tools.ToolOutputText",
       "ToolRef": "agents.tools.ToolRef",
+      "ToolTimeoutBehavior": "agents._function_tools.ToolTimeoutBehavior",
+      "ToolTimeoutError": "agents._function_tools.ToolTimeoutError",
       "TraceContext": "agents._trace_context.TraceContext",
       "Turn": "agents.turn.Turn",
       "TurnNeedsAttention": "agents.turn.TurnNeedsAttention",
@@ -1293,22 +1297,24 @@
           "ContextT_co = TypeVar('ContextT_co', covariant=True, default=None)",
           "BinderT_co = TypeVar('BinderT_co', bound=Callable[..., _CapturedFunction] | None, covariant=True, default=None)",
           "ParametersT = ParamSpec('ParametersT')",
+          "ToolTimeoutBehavior: TypeAlias = Literal['raise_exception', 'error_as_result']",
+          "class ToolTimeoutError(TimeoutError):\n\n    def __init__(self, tool_name: str, timeout_seconds: float):\n        pass",
           "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)",
-          "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    timeout_behavior: ToolTimeoutBehavior = 'raise_exception'\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None = field(default=None, repr=False)\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
           "_PythonTool: TypeAlias = FunctionTool[Any, Any, Callable[[ToolContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]]",
           "Tool: TypeAlias = _PythonTool[ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | ImageGeneration | NativeAgents",
           "class _ToolDecorator(Protocol):\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[ParametersT, Any], /) -> _PythonTool[object]:\n        pass",
           "def _requires_context(annotation: Any) -> bool:\n    pass",
           "@overload\ndef function_tool(function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT]:\n    pass",
           "@overload\ndef function_tool(function: Callable[ParametersT, Any], /) -> _PythonTool[object]:\n    pass",
-          "@overload\ndef function_tool(*, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False) -> _ToolDecorator:\n    pass",
-          "def function_tool(function: Callable[..., Any] | None=None, /, *, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False) -> _PythonTool[Any] | _ToolDecorator:\n    pass"
+          "@overload\ndef function_tool(*, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False, timeout_behavior: ToolTimeoutBehavior='raise_exception', timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None=None) -> _ToolDecorator:\n    pass",
+          "def function_tool(function: Callable[..., Any] | None=None, /, *, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False, timeout_behavior: ToolTimeoutBehavior='raise_exception', timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None=None) -> _PythonTool[Any] | _ToolDecorator:\n    pass"
         ],
         "exports": {},
         "imports": [
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping",
           "from dataclasses import dataclass as dataclass, field as field",
-          "from typing import Any as Any, Concatenate as Concatenate, Generic as Generic, Protocol as Protocol, TypeAlias as TypeAlias, overload as overload",
+          "from typing import Any as Any, Concatenate as Concatenate, Generic as Generic, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias, overload as overload",
           "from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar",
           "from ._trace_context import TraceContext as TraceContext",
           "from .manual import ActionRequested as ActionRequested, InputT as InputT, ResultT as ResultT",
@@ -3319,6 +3325,8 @@
       "ToolOutputImage",
       "ToolOutputText",
       "ToolRef",
+      "ToolTimeoutBehavior",
+      "ToolTimeoutError",
       "TraceContext",
       "Turn",
       "TurnNeedsAttention",
@@ -3335,7 +3343,7 @@
       "get_cleanup"
     ],
     "root_imports": [
-      "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, function_tool as function_tool",
+      "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider",
       "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLiteSessionStore as SQLiteSessionStore",

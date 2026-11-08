@@ -29,7 +29,8 @@ def test_callback_deadline_rejects_invalid_duration(duration):
         function_tool(callback_timeout=duration)(callback)
 
 
-async def test_callback_completes_with_context_before_its_deadline(responses):
+@pytest.mark.parametrize("timeout_behavior", ["raise_exception", "error_as_result"])
+async def test_callback_completes_with_context_before_its_deadline(responses, timeout_behavior):
     application = Application()
     hooks = []
 
@@ -43,7 +44,9 @@ async def test_callback_completes_with_context_before_its_deadline(responses):
         hooks.append("after")
         return output
 
-    @function_tool(callback_timeout=0.25, before=before, after=after)
+    @function_tool(
+        callback_timeout=0.25, before=before, after=after, timeout_behavior=timeout_behavior
+    )
     async def lookup(context: ToolContext[Application], key: str) -> str:
         application.calls.append(context)
         return f"{context.context.tenant}:{key}"

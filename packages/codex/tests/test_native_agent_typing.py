@@ -48,6 +48,8 @@ from agents import (
     ToolContext,
     ToolOutput,
     ToolRef,
+    ToolTimeoutBehavior,
+    ToolTimeoutError,
     TraceContext,
     Turn,
     UserInput,
@@ -415,6 +417,26 @@ application_tool: Tool[Application] = lookup
 named_application_tool: Tool[Application] = named_lookup
 plain_tool: Tool[object] = plain
 assert_type(lookup.callback_timeout, float | None)
+assert_type(lookup.timeout_behavior, ToolTimeoutBehavior)
+assert_type(ToolTimeoutError("lookup", 1).tool_name, str)
+assert_type(ToolTimeoutError("lookup", 1).timeout_seconds, float)
+
+
+async def format_timeout(context: ToolContext[Application], error: ToolTimeoutError) -> str:
+    return f"{context.context.tenant}: {error.tool_name} timed out"
+
+
+@function_tool(
+    callback_timeout=1,
+    timeout_behavior="error_as_result",
+    timeout_error_function=format_timeout,
+)
+async def timeout_lookup(context: ToolContext[Application], key: str) -> int:
+    return len(key)
+
+
+assert_type(timeout_lookup.timeout_behavior, ToolTimeoutBehavior)
+
 agent = Agent(instructions="Use the tool.", tools=[plain, lookup], output_type=Answer)
 assert_type(agent, Agent[Application, Answer])
 assert_type(Agent(instructions="Use the tool.", tools=[lookup, plain]), Agent[Application, str])
