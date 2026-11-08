@@ -790,7 +790,7 @@ async def test_provider_http_pool_close_and_duplicate_ownership(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
-@pytest.mark.parametrize("invalid", ["malformed", "missing"])
+@pytest.mark.parametrize("invalid", ["malformed", "malformed-der", "missing"])
 async def test_provider_http_pool_invalid_ca_retires_warm_socket(
     tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, invalid: str
 ) -> None:
@@ -811,11 +811,26 @@ async def test_provider_http_pool_invalid_ca_retires_warm_socket(
             assert original_socket() >= 0
             if invalid == "malformed":
                 trust.write_text("not a PEM certificate\n")
+            elif invalid == "malformed-der":
+                trust.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
             else:
                 trust.unlink()
-            await rejected(peer, agent, "invalid-file-cannot-reuse-trusted-A")
+            async with agent.session() as session:
+                handle = await session.submit("invalid-file-cannot-reuse-trusted-A")
+                waiter = asyncio.create_task(handle.get_result())
+                try:
+                    # Invalid local CA material can fail before a TLS handshake.
+                    # Observe retirement before cancellation can close the socket.
+                    await wait_for_socket_close(original_socket)
+                    assert len(peer.requests) == 1
+                    await handle.cancel()
+                    with pytest.raises((NativeError, TurnStoppedError)):
+                        await waiter
+                finally:
+                    if not waiter.done():
+                        await handle.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
             assert len(peer.requests) == 1
-            await wait_for_socket_close(original_socket)
             trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
             await completed(peer, agent, "valid-after-invalid-ca")
             assert len(peer.requests) == 2

@@ -147,13 +147,13 @@ index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45
      ///
      /// # Exceptional use only
 diff --git a/codex-rs/http-client/src/custom_ca.rs b/codex-rs/http-client/src/custom_ca.rs
-index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d253dcf61e 100644
+index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..13a21b37368a32cc975f6d32d579747a84164e47 100644
 --- a/codex-rs/http-client/src/custom_ca.rs
 +++ b/codex-rs/http-client/src/custom_ca.rs
 @@ -40,12 +40,15 @@
  //! - those subprocess tests also scrub inherited CA environment variables before launch so their
  //!   result depends only on the test fixtures and env vars set by the test itself
- 
+
 +use std::collections::VecDeque;
  use std::env;
  use std::fs;
@@ -163,10 +163,10 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
  use std::sync::Arc;
 +use std::sync::LazyLock;
 +use std::sync::Mutex;
- 
+
  use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
  use rustls::ClientConfig;
-@@ -54,6 +57,8 @@ use rustls_pki_types::CertificateDer;
+@@ -54,6 +57,8 @@
  use rustls_pki_types::pem::PemObject;
  use rustls_pki_types::pem::SectionKind;
  use rustls_pki_types::pem::{self};
@@ -175,7 +175,16 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
  use thiserror::Error;
  use tracing::info;
  use tracing::warn;
-@@ -306,28 +311,8 @@ fn build_reqwest_client_with_env(
+@@ -290,7 +295,7 @@
+ ///
+ /// This exists so tests can exercise precedence behavior deterministically without mutating the
+ /// real process environment. It selects the CA bundle, delegates file parsing to
+-/// [`ConfiguredCaBundle::load_certificates`], preserves the caller's chosen `reqwest` builder
++/// [`ConfiguredCaBundle::load_reqwest_certificates`], preserves the caller's chosen `reqwest` builder
+ /// configuration, forces rustls when a custom CA is configured, and finally registers each parsed
+ /// certificate with that builder.
+ fn build_reqwest_client_with_env(
+@@ -306,28 +311,8 @@
          );
          builder = builder.use_rustls_tls();
  
@@ -206,7 +215,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
          }
          return match builder.build() {
              Ok(client) => Ok(client),
-@@ -424,6 +409,71 @@ impl EnvSource for ProcessEnv {
+@@ -424,6 +409,71 @@
      }
  }
  
@@ -278,7 +287,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
  /// Identifies the CA bundle selected for a client and the policy decision that selected it.
  ///
  /// This is the concrete output of the environment-precedence logic. Callers use `source_env` for
-@@ -436,6 +486,94 @@ struct ConfiguredCaBundle {
+@@ -436,6 +486,105 @@
  }
  
  impl ConfiguredCaBundle {
@@ -286,79 +295,70 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +        &self,
 +        cache: &Mutex<ReqwestCaCache>,
 +    ) -> Result<Arc<[reqwest::Certificate]>, BuildCustomCaTransportError> {
-+        self.load_reqwest_certificates_and_digest(cache)
-+            .map(|(certificates, _, _)| certificates)
-+    }
-+
-+    fn load_reqwest_certificates_and_digest(
-+        &self,
-+        cache: &Mutex<ReqwestCaCache>,
-+    ) -> Result<(Arc<[reqwest::Certificate]>, [u8; 32], bool), BuildCustomCaTransportError> {
-+        // Always read first, including after a hit. Rotation, deletion and access
-+        // errors retain their current file/env context; errors are never cached.
-+        let result = (|| {
-+            let pem_data = self.read_pem_data()?;
-+            let digest = Sha256::digest(&pem_data).into();
-+            // Keep PEM normalization and its tracing events outside the lock.
-+            // Cache only the expensive reqwest/native-TLS certificate wrappers.
-+            let certificates = self.parse_certificate_bytes(&pem_data)?;
-+            info!(
-+                source_env = self.source_env,
-+                ca_path = %self.path.display(),
-+                certificate_count = certificates.len(),
-+                "loaded certificates from custom CA bundle"
-+            );
-+            let der_bytes = certificates
-+                .iter()
-+                .map(|certificate| certificate.len())
-+                .sum();
-+            let parse =
-+                || -> Result<(Arc<[reqwest::Certificate]>, usize), BuildCustomCaTransportError> {
-+                    let certificates = certificates
-+                        .iter()
-+                        .enumerate()
-+                        .map(|(idx, cert)| {
-+                            reqwest::Certificate::from_der(cert.as_ref()).map_err(|source| {
-+                                BuildCustomCaTransportError::RegisterCertificate {
-+                                    source_env: self.source_env,
-+                                    path: self.path.clone(),
-+                                    certificate_index: idx + 1,
-+                                    source,
-+                                }
-+                            })
-+                        })
-+                        .collect::<Result<Vec<_>, _>>()?;
-+                    Ok((Arc::from(certificates), der_bytes))
-+                };
-+            // Avoid monopolizing the cache for unusually large input. The same
-+            // parsing/errors still apply, but none of this input is retained.
-+            if pem_data.len() > CA_CACHE_MAX_BYTES
-+                || certificates.len() > CA_CACHE_MAX_CERTIFICATES
-+                || der_bytes > CA_CACHE_MAX_BYTES
-+            {
-+                return parse().map(|(certificates, _)| (certificates, digest, false));
-+            }
-+            // Coalesce concurrent wrapper construction. No file I/O, tracing,
-+            // await or client construction occurs under this lock. A poisoned cache can
-+            // recover: entries change only after a successful parse completes.
++        // Only client construction uses this cache. Pool lookups keep a fresh DER
++        // snapshot and avoid certificate wrappers and this lock on a hit.
++        let (certificates, digest, admissible) = self.load_certificates_and_digest()?;
++        let der_bytes = certificates
++            .iter()
++            .map(|certificate| certificate.len())
++            .sum();
++        let parse = || {
++            self.reqwest_certificates(&certificates)
++                .map(|certificates| (Arc::from(certificates), der_bytes))
++        };
++        let result = if admissible {
++            // No file I/O, tracing, await or client construction under the lock.
 +            cache
 +                .lock()
 +                .unwrap_or_else(std::sync::PoisonError::into_inner)
 +                .load(digest, parse)
-+                .map(|certificates| (certificates, digest, true))
-+        })();
-+        match &result {
-+            Ok(_) => {}
-+            Err(BuildCustomCaTransportError::RegisterCertificate {
-+                certificate_index,
-+                source,
-+                ..
-+            }) => warn!(
++        } else {
++            parse().map(|(certificates, _)| certificates)
++        };
++        result.inspect_err(|error| self.warn_registration_error(error))
++    }
++
++    fn warn_registration_error(&self, error: &BuildCustomCaTransportError) {
++        if let BuildCustomCaTransportError::RegisterCertificate {
++            certificate_index,
++            source,
++            ..
++        } = error
++        {
++            warn!(
 +                source_env = self.source_env,
 +                ca_path = %self.path.display(),
-+                certificate_index,
++                certificate_index = *certificate_index,
 +                error = %source,
 +                "failed to register CA certificate"
++            );
++        }
++    }
++
++    fn load_certificates_and_digest(
++        &self,
++    ) -> Result<(Vec<CertificateDer<'static>>, [u8; 32], bool), BuildCustomCaTransportError> {
++        // Read and parse again before each pool lookup. Rotation, deletion and
++        // access errors keep their current file/env context; errors are not retained.
++        let result = (|| {
++            let pem_data = self.read_pem_data()?;
++            let digest = Sha256::digest(&pem_data).into();
++            let certificates = self.parse_certificate_bytes(&pem_data)?;
++            let der_bytes: usize = certificates
++                .iter()
++                .map(|certificate| certificate.len())
++                .sum();
++            let admissible = pem_data.len() <= CA_CACHE_MAX_BYTES
++                && certificates.len() <= CA_CACHE_MAX_CERTIFICATES
++                && der_bytes <= CA_CACHE_MAX_BYTES;
++            Ok((certificates, digest, admissible))
++        })();
++        match &result {
++            Ok((certificates, _, _)) => info!(
++                source_env = self.source_env,
++                ca_path = %self.path.display(),
++                certificate_count = certificates.len(),
++                "loaded certificates from custom CA bundle"
 +            ),
 +            Err(error) => warn!(
 +                source_env = self.source_env,
@@ -370,10 +370,30 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +        result
 +    }
 +
++    fn reqwest_certificates(
++        &self,
++        certificates: &[CertificateDer<'_>],
++    ) -> Result<Vec<reqwest::Certificate>, BuildCustomCaTransportError> {
++        certificates
++            .iter()
++            .enumerate()
++            .map(|(idx, certificate)| {
++                reqwest::Certificate::from_der(certificate.as_ref()).map_err(|source| {
++                    BuildCustomCaTransportError::RegisterCertificate {
++                        source_env: self.source_env,
++                        path: self.path.clone(),
++                        certificate_index: idx + 1,
++                        source,
++                    }
++                })
++            })
++            .collect()
++    }
++
      /// Loads certificates from this selected CA bundle.
      ///
      /// The bundle already represents the output of environment-precedence selection, so this is
-@@ -476,7 +614,13 @@ impl ConfiguredCaBundle {
+@@ -476,7 +625,13 @@
      fn parse_certificates(
          &self,
      ) -> Result<Vec<CertificateDer<'static>>, BuildCustomCaTransportError> {
@@ -388,7 +408,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
          let normalized_pem = NormalizedPem::from_pem_data(self.source_env, &self.path, &pem_data);
  
          let mut certificates = Vec::new();
-@@ -817,8 +961,114 @@ mod tests {
+@@ -817,8 +972,111 @@
              BuildCustomCaTransportError::InvalidCaFile { .. }
          ));
      }
@@ -400,12 +420,6 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +        let first = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
 +        let same = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
 +        assert_eq!(first.digest(), same.digest());
-+        let (Some((_, first_certs, _, _)), Some((_, same_certs, _, _))) =
-+            (&first.bundle, &same.bundle)
-+        else {
-+            panic!("expected custom CA")
-+        };
-+        assert!(std::sync::Arc::ptr_eq(first_certs, same_certs));
 +        fs::write(
 +            &path,
 +            include_str!("../tests/fixtures/test-intermediate.pem"),
@@ -420,7 +434,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +    }
 +
 +    #[test]
-+    fn sdk_oversized_receipt_is_valid_but_not_retained() {
++    fn sdk_oversized_receipt_is_valid_but_not_pooled() {
 +        let dir = TempDir::new().unwrap();
 +        let large = format!("{}{}", TEST_CERT, "\n".repeat(super::CA_CACHE_MAX_BYTES));
 +        let path = write_cert_file(&dir, "sdk-large.pem", &large);
@@ -438,13 +452,14 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +#[path = "custom_ca_cache_tests.rs"]
 +mod cache_tests;
 +
-+// A successful receipt validates exactly the freshly read bytes used for its hash.
++// The receipt holds freshly parsed public DER for its hash. Certificate wrappers
++// are constructed only when the existing model HTTP pool needs a new client.
 +// The construction receipt holds its path only for scoped build errors. Pool entries
 +// retain neither that receipt/path nor raw PEM, private material or error values.
 +pub(crate) struct SdkModelCaSnapshot {
 +    bundle: Option<(
 +        ConfiguredCaBundle,
-+        Arc<[reqwest::Certificate]>,
++        Vec<CertificateDer<'static>>,
 +        [u8; 32],
 +        bool,
 +    )>,
@@ -458,8 +473,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +    fn load_with_env(env: &dyn EnvSource) -> Result<Self, BuildCustomCaTransportError> {
 +        let bundle = match env.configured_ca_bundle() {
 +            Some(bundle) => {
-+                let (certificates, digest, admissible) =
-+                    bundle.load_reqwest_certificates_and_digest(&REQWEST_CA_CACHE)?;
++                let (certificates, digest, admissible) = bundle.load_certificates_and_digest()?;
 +                Some((bundle, certificates, digest, admissible))
 +            }
 +            None => None,
@@ -485,10 +499,13 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +            ensure_rustls_crypto_provider();
 +            // Only SSL_CERT_FILE with SSL_CERT_DIR absent can reach this SDK path.
 +            // rustls-native-certs would otherwise reopen this same file. Its roots
-+            // are already present in the validated snapshot; keep webpki roots.
++            // are present in the freshly parsed snapshot; keep webpki roots.
 +            builder = builder.use_rustls_tls().tls_built_in_native_certs(false);
-+            for certificate in certificates.iter() {
-+                builder = builder.add_root_certificate(certificate.clone());
++            for certificate in bundle
++                .reqwest_certificates(certificates)
++                .inspect_err(|error| bundle.warn_registration_error(error))?
++            {
++                builder = builder.add_root_certificate(certificate);
 +            }
 +            return builder.build().map_err(|source| {
 +                BuildCustomCaTransportError::BuildClientWithCustomCa {

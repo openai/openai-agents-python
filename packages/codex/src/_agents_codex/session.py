@@ -1354,6 +1354,13 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
+def _check_buffered_native_agents(
+    native_agents: NativeAgents | None, provider: NativeProvider | None
+) -> None:
+    if native_agents is not None and provider is not None and provider.response_mode == "buffered":
+        raise CapabilityError("Buffered Responses do not support native child agents")
+
+
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
@@ -1881,6 +1888,7 @@ class Session(Generic[ContextT, OutputT]):
                 *restored_defaults,
                 *(_MCPResourceRef(name) for name in restored_resource_servers),
             )
+        _check_buffered_native_agents(native_agents, agent.provider)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -2286,6 +2294,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
                     "_before_complete": agent.before_complete is not None,

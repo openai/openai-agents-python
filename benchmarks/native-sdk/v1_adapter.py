@@ -17,13 +17,21 @@ class Adapter:
         *,
         with_tool: bool = False,
         sync_tool: bool = False,
+        response_mode: str = "streaming",
     ):
+        if response_mode not in ("streaming", "buffered"):
+            raise ValueError("Unknown native response mode")
+        if response_mode == "buffered" and stream:
+            raise ValueError("Buffered benchmarks require final-result workloads")
+        # Omit the new keyword by default so older native SDK wheels still work.
+        provider_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
         self.stream = stream
         self.tool_calls = 0
         self.provider = NativeProvider(
             base_url=base_url,
             api_key="synthetic-benchmark-key",
             supports_websockets=False,
+            **provider_options,
         )
 
         def synchronous_echo(value: str) -> str:

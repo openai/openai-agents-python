@@ -28,6 +28,16 @@ WORKLOADS = {
     for value in [
         Workload("cold_first_result", mode="oneshot", iterations=1, prefill=0),
         Workload("oneshot_text", mode="oneshot", iterations=20),
+        *[
+            Workload(
+                f"oneshot_output_64k_{chunks}_plain",
+                mode="oneshot",
+                iterations=20,
+                output_chars=65536,
+                chunks=chunks,
+            )
+            for chunks in (1, 256, 4096)
+        ],
         Workload("warm_text", iterations=1),
         Workload("warm_tool", iterations=1, tools_per_round=1, tool_rounds=1),
         Workload("warm_chain_5", iterations=1, tools_per_round=1, tool_rounds=5),

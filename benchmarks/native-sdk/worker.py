@@ -102,13 +102,19 @@ def quantile(values, fraction):
     return values[lower] + (values[upper] - values[lower]) * (position - lower)
 
 
-async def exercise(Adapter, workload, base_url, cold_start_ns, initial_stats):
+async def exercise(
+    Adapter, workload, base_url, cold_start_ns, initial_stats, *, response_mode="streaming"
+):
+    owner_cpu_before = time.process_time_ns()
+    owner_before = time.perf_counter_ns()
+    adapter_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
     construction_start = time.perf_counter_ns()
     adapter = Adapter(
         base_url,
         stream=workload.stream,
         with_tool=workload.tools_per_round > 0,
         sync_tool=workload.sync_tool,
+        **adapter_options,
     )
     construction_ns = time.perf_counter_ns() - construction_start
     prefix = workload.name.replace("_", "-")
@@ -173,7 +179,10 @@ async def exercise(Adapter, workload, base_url, cold_start_ns, initial_stats):
             measured_calls = adapter.tool_calls - calls_before
             before_close = time.perf_counter_ns()
         sessions_close_ns = time.perf_counter_ns() - before_close
-    final_close_ns = time.perf_counter_ns() - before_close
+    owner_after = time.perf_counter_ns()
+    owner_cpu_after = time.process_time_ns()
+    final_close_ns = owner_after - before_close
+    charged_operations = workload.concurrency * (workload.prefill + workload.iterations)
     count = workload.iterations * workload.concurrency
     expected_calls = count * workload.tools_per_round * workload.tool_rounds
     if measured_calls != expected_calls:
@@ -201,6 +210,13 @@ async def exercise(Adapter, workload, base_url, cold_start_ns, initial_stats):
         row["expected_history"] = list(history) if workload.mode == "conversation" else [identity]
     latencies = [row["latency_ms"] for row in operations if not row["warmup"]]
     return {
+        "charged_operations": charged_operations,
+        "full_owner_wall_ms": (owner_after - owner_before) / 1e6,
+        "full_owner_cpu_ms": (owner_cpu_after - owner_cpu_before) / 1e6,
+        "full_owner_wall_ms_per_operation": (owner_after - owner_before) / 1e6 / charged_operations,
+        "full_owner_cpu_ms_per_operation": (owner_cpu_after - owner_cpu_before)
+        / 1e6
+        / charged_operations,
         "construction_ms": construction_ns / 1e6,
         "cold_first_result_ms": cold_first_result_ms,
         "opening_ms": opening_ns / 1e6,
@@ -282,6 +298,39 @@ def validate_receipts(workload, result, stats):
                 raise AssertionError(f"Incorrect tool-output history for {operation['id']}")
 
 
+def validate_transport(workload, stats, *, engine, response_mode):
+    """Validate actual provider work, independent of public observation granularity."""
+    expected_stream = workload.stream if engine == "v0" else response_mode == "streaming"
+    expected_requests = (
+        workload.concurrency * (workload.prefill + workload.iterations) * (workload.tool_rounds + 1)
+    )
+    receipts = stats.get("receipts", [])
+    if (
+        stats.get("requests") != expected_requests
+        or len(receipts) != expected_requests
+        or stats.get("errors") != 0
+        or stats.get("receipts_dropped") != 0
+    ):
+        raise ValueError("Incomplete provider transport receipts")
+    for receipt in receipts:
+        if type(receipt.get("stream")) is not bool or receipt["stream"] != expected_stream:
+            raise ValueError("Provider transport differs from the scheduled response mode")
+        expected_chunks = (
+            workload.chunks
+            if expected_stream and receipt.get("round") == workload.tool_rounds
+            else 0
+        )
+        if receipt.get("text_chunks") != expected_chunks:
+            raise ValueError("Provider wire text chunk count differs from the scheduled work")
+    expected_chunks = (
+        workload.concurrency * (workload.prefill + workload.iterations) * workload.chunks
+        if expected_stream
+        else 0
+    )
+    if stats.get("emitted_text_chunks") != expected_chunks:
+        raise ValueError("Provider total wire text chunks differ from the scheduled work")
+
+
 def main():
     reject_inherited_overrides()
 
@@ -291,6 +340,7 @@ def main():
     signal.signal(signal.SIGTERM, stop_requested)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=["v0", "v1"], required=True)
+    parser.add_argument("--response-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument("--case", choices=WORKLOADS, default="oneshot_text")
     parser.add_argument("--iterations", type=int)
     parser.add_argument("--output", type=Path, required=True)
@@ -314,7 +364,20 @@ def main():
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
     os.environ["no_proxy"] = "127.0.0.1,localhost"
     workload = get_workload(args.case, iterations=args.iterations)
+    if args.response_mode == "buffered" and not args.import_only:
+        if args.engine != "v1" or workload.stream:
+            parser.error("Buffered mode requires a native final-result workload")
     result = {
+        "response_mode": args.response_mode
+        if args.engine == "v1" and not args.import_only
+        else None,
+        "wire_transport": None
+        if args.import_only
+        else (
+            "sse"
+            if (workload.stream if args.engine == "v0" else args.response_mode == "streaming")
+            else "json"
+        ),
         "engine": args.engine,
         "case": "startup_import" if args.import_only else args.case,
         "sample_index": args.sample_index,
@@ -334,6 +397,7 @@ def main():
                 child = subprocess.Popen(
                     [
                         server_python,
+                        "-B",
                         str(Path(__file__).with_name("protocol_peer.py")),
                         "--tools-per-round",
                         str(workload.tools_per_round),
@@ -362,7 +426,16 @@ def main():
             if profiler:
                 profiler.enable()
             result.update(
-                asyncio.run(exercise(module.Adapter, workload, base_url, start, initial_stats))
+                asyncio.run(
+                    exercise(
+                        module.Adapter,
+                        workload,
+                        base_url,
+                        start,
+                        initial_stats,
+                        response_mode=args.response_mode,
+                    )
+                )
             )
             if profiler:
                 profiler.disable()
@@ -370,6 +443,9 @@ def main():
             stats = stats_at(base_url)
             result["server"] = stats
             validate_receipts(workload, result, stats)
+            validate_transport(
+                workload, stats, engine=args.engine, response_mode=args.response_mode
+            )
         result["versions"] = {
             name: importlib.metadata.version(name)
             for name in ("openai-agents", "pydantic", "typing-extensions")
@@ -381,6 +457,8 @@ def main():
             "cache_tag": sys.implementation.cache_tag,
             "pointer_bits": sys.maxsize.bit_length() + 1,
             "abiflags": getattr(sys, "abiflags", ""),
+            "dont_write_bytecode": sys.dont_write_bytecode,
+            "pycache_prefix": sys.pycache_prefix,
         }
         result["module_file"] = str(Path(importlib.import_module("agents").__file__).resolve())
     except BaseException as error:

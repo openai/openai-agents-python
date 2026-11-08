@@ -9,7 +9,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, NativeProvider
+from agents import Agent, CapabilityError, CodexLogin, NativeAgents, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -97,6 +97,41 @@ def test_invalid_websocket_capability_fails_before_startup(value, forbid_native_
         NativeProvider(supports_websockets=value)
 
 
+@pytest.mark.parametrize("value", [None, 0, 1, True, "json", "", [], {}])
+def test_invalid_response_mode_fails_before_startup(value, forbid_native_startup):
+    with pytest.raises(ValueError, match="response_mode must be 'streaming' or 'buffered'"):
+        NativeProvider(response_mode=value)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"supports_websockets": True}, "Buffered Responses cannot use WebSockets"),
+        ({"auth": CodexLogin()}, "Buffered Responses require API-key authentication"),
+    ],
+)
+def test_unsupported_buffered_connection_fails_before_startup(
+    options, message, forbid_native_startup
+):
+    with pytest.raises(ValueError, match=message):
+        NativeProvider(response_mode="buffered", **options)
+
+
+@pytest.mark.parametrize("override", [False, True], ids=["agent-provider", "session-provider"])
+async def test_buffered_native_children_fail_before_startup(override, forbid_native_startup):
+    buffered = NativeProvider(response_mode="buffered")
+    agent = Agent(
+        instructions="Answer.",
+        provider=NativeProvider() if override else buffered,
+        tools=[NativeAgents()],
+    )
+    with pytest.raises(
+        CapabilityError, match="Buffered Responses do not support native child agents"
+    ):
+        async with agent.session(provider=buffered if override else None):
+            pytest.fail("Buffered native children reached Session startup")
+
+
 @pytest.mark.parametrize(
     ("connection", "expected"),
     [
@@ -107,6 +142,7 @@ def test_invalid_websocket_capability_fails_before_startup(value, forbid_native_
         (NativeProvider(base_url="https://provider.example/v1"), False),
         (NativeProvider(base_url="https://provider.example/v1", supports_websockets=True), True),
         (NativeProvider(base_url="https://provider.example/v1", supports_websockets=False), False),
+        (NativeProvider(response_mode="buffered"), False),
     ],
     ids=[
         "omitted",
@@ -116,6 +152,7 @@ def test_invalid_websocket_capability_fails_before_startup(value, forbid_native_
         "custom",
         "custom-enabled",
         "custom-disabled",
+        "buffered",
     ],
 )
 async def test_provider_websocket_capability_is_captured(connection, expected, monkeypatch):
