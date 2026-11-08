@@ -68,8 +68,14 @@ def text(value: str) -> _ScriptItem:
     )
 
 
-def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) -> _ScriptItem:
-    """Ask the native loop to invoke a declared tool with these arguments."""
+def tool_call(
+    name: str,
+    arguments: Mapping[str, JsonValue],
+    *,
+    call_id: str,
+    namespace: str | None = None,
+) -> _ScriptItem:
+    """Ask the native loop to invoke a declared tool, optionally in a namespace."""
     return _ScriptItem(
         json.dumps(
             {
@@ -78,6 +84,7 @@ def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) ->
                     "type": "function_call",
                     "call_id": call_id,
                     "name": name,
+                    **({"namespace": namespace} if namespace is not None else {}),
                     "arguments": json.dumps(dict(arguments)),
                 },
             }

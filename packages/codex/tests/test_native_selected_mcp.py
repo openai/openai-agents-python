@@ -93,7 +93,9 @@ async def test_application_selects_one_project_before_opening_session(
             pytest.fail("An unselected namespace attempted authentication")
 
         projects = {
-            "a": MCPNamespace("project_a", chosen, authenticate=authorize_chosen),
+            "a": MCPNamespace(
+                "project_a", chosen, description="Project A records", authenticate=authorize_chosen
+            ),
             "b": MCPNamespace("project_b", other, authenticate=authorize_other),
         }
         assert not auth_attempts and not selected.requests and not unselected.requests
@@ -102,6 +104,9 @@ async def test_application_selects_one_project_before_opening_session(
         )
         assert auth_attempts == ["a"]
         assert [tool.ref for tool in tools] == [ToolRef("search", namespace="project_a")]
+        assert [(tool.namespace, tool.namespace_description) for tool in tools] == [
+            ("project_a", "Project A records")
+        ]
         assert selected.calls == []
         assert unselected.requests == []
 
@@ -113,7 +118,14 @@ async def test_application_selects_one_project_before_opening_session(
             instructions="Search for the record.", provider=provider(responses), tools=tools
         )
         async with agent.session(context=context) as session:
-            assert (await (await session.submit("Read record")).get_result()).final_output == "done"
+            assert (
+                await (
+                    await session.submit(
+                        "Read record",
+                        tools=[tool for tool in tools if tool.namespace == "project_a"],
+                    )
+                ).get_result()
+            ).final_output == "done"
 
         request, *_, continuation = responses.requests
         assert set(declarations(request)) == {("project_a", "search")}
