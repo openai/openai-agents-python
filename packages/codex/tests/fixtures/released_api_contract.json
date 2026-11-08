@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "049c406ca1a05671dad2eeedbdc18b19e494f9f8",
+  "baseline_commit": "6b3299b3ed0f4d9d0a0b833962d7c2ee216b9df3",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -942,7 +942,7 @@
         "declarations": [
           "@dataclass(frozen=True)\nclass _ScriptItem:\n    encoded: str",
           "def text(value: str) -> _ScriptItem:\n    pass",
-          "def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) -> _ScriptItem:\n    pass",
+          "def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str, namespace: str | None=None) -> _ScriptItem:\n    pass",
           "@dataclass(frozen=True)\nclass ScriptedResponse:\n    items: Sequence[_ScriptItem]\n    usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)\n    headers: Mapping[str, str] | None = field(default=None, kw_only=True)",
           "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Sequence[_ScriptItem] | ScriptedResponse) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
         ],
