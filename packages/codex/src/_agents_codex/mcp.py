@@ -13,17 +13,22 @@ from collections.abc import (
     Sequence as Sequence,
 )
 from dataclasses import dataclass as dataclass, field as field
+from functools import wraps as _wraps
+from traceback import clear_frames as _clear_frames
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    ClassVar as ClassVar,
     Generic as Generic,
     Literal as Literal,
+    NoReturn as _NoReturn,
     get_origin as get_origin,
 )
 from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict, TypeVar as TypeVar
 
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef
 
@@ -35,6 +40,58 @@ if TYPE_CHECKING:
 
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
 ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
+
+
+class _McpValues(dict[str, str]):
+    """An immutable capture that retains ordinary dataclass copy support."""
+
+    __slots__ = ("_initialized",)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        try:
+            if getattr(self, "_initialized", False):
+                self._immutable()
+            super().__init__(*args, **kwargs)
+            self._initialized = True
+        finally:
+            del self, args, kwargs
+
+    def _immutable(self: object, *args: Any, **kwargs: Any) -> _NoReturn:
+        del self, args, kwargs
+        raise TypeError("MCP configuration values are immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+
+    def __copy__(self) -> _McpValues:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _McpValues:
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[dict[str, str]]]:
+        return type(self), (dict(self),)
+
+
+def _protect_mcp_initializer(declaration: type[Any]) -> None:
+    """Keep rejected credentials out of generated initializer traceback frames."""
+    initialize = declaration.__init__
+
+    @_wraps(initialize)
+    def protected(self: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            initialize(self, *args, **kwargs)
+        except BaseException as error:
+            _clear_frames(error.__traceback__)
+            object.__setattr__(error, "__context__", None)
+            object.__setattr__(error, "__cause__", None)
+            for name in ("env", "headers", "bearer_token", "access_token"):
+                if name in self.__dict__:
+                    object.__setattr__(self, name, None)
+            raise
+        finally:
+            del self, args, kwargs
+
+    declaration.__init__ = protected
 
 
 class MCPResource(TypedDict):
@@ -383,7 +440,10 @@ class StdioMCP(_MCP[ContextT_contra]):
     ``location="host"`` starts the command on the application host.
     ``location="environment"`` requires ``agent.session(environment=...)``
     and starts it on that executor. ``env_vars`` names variables from
-    the selected location, never from the other machine. ``args`` are individual
+    the selected location, never from the other machine. ``env`` captures literal
+    values for this child at construction; these override inherited names without
+    changing the parent environment. Reserved process identity variables remain
+    excluded. ``args`` are individual
     arguments without shell expansion. An omitted ``cwd`` uses Core's runtime
     directory on the host or the Session environment's working directory remotely.
 
@@ -410,6 +470,7 @@ class StdioMCP(_MCP[ContextT_contra]):
     env_vars: Sequence[str] = field(default=(), repr=False)
     cwd: str | None = field(default=None, repr=False)
     location: Literal["host", "environment"] = "host"
+    env: Mapping[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -426,6 +487,16 @@ class StdioMCP(_MCP[ContextT_contra]):
         for name in self.env_vars:
             if not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
                 raise ValueError("MCP env_vars must name environment variables")
+        if self.env is not None:
+            if not isinstance(self.env, Mapping):
+                raise TypeError("MCP env must be a mapping of strings")
+            captured = dict(self.env)
+            for name, value in captured.items():
+                _launch_text(name, "env name")
+                if "=" in name:
+                    raise ValueError("MCP env names must contain no equals sign")
+                _launch_text(value, "env value", allow_empty=True)
+            object.__setattr__(self, "env", _McpValues(captured))
         if self.cwd is not None:
             _launch_text(self.cwd, "cwd")
 
@@ -462,6 +533,8 @@ class StdioMCP(_MCP[ContextT_contra]):
             config["env_vars"] = list(self.env_vars)
             if self.cwd is not None:
                 config["cwd"] = self.cwd
+        if self.env is not None:
+            config["env"] = dict(self.env)
         return config
 
 
@@ -473,6 +546,8 @@ class HttpMCP(_MCP[ContextT_contra]):
     to read credentials from the environment. Session owns the connection. Both timeouts
     are seconds. ``approval_mode="native"`` keeps native approval rules;
     "preapproved" allows selected names subject to native constraints.
+    ``headers`` captures literal HTTP fields at construction. Names are
+    case-insensitive. Use either an Authorization header or ``bearer_token``.
     Use ``tools=[]`` for a resource-only or prompt-only server. The idle Session's resource
     methods return data without adding it to model context.
 
@@ -496,6 +571,7 @@ class HttpMCP(_MCP[ContextT_contra]):
 
     url: str = field(repr=False)
     bearer_token: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -524,12 +600,35 @@ class HttpMCP(_MCP[ContextT_contra]):
                 not 0x21 <= ord(character) <= 0x7E for character in self.bearer_token
             ):
                 raise ValueError("bearer_token must contain visible ASCII characters")
+        if self.headers is not None:
+            if not isinstance(self.headers, Mapping):
+                raise TypeError("MCP headers must be a string mapping")
+            headers = dict(self.headers)
+            names: set[str] = set()
+            for name, value in headers.items():
+                if not isinstance(name, str) or not re.fullmatch(
+                    r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name
+                ):
+                    raise ValueError("MCP header names must be HTTP tokens")
+                _launch_text(value, "header value", allow_empty=True)
+                if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in value):
+                    raise ValueError("MCP header values must be valid HTTP field values")
+                normalized = name.lower()
+                if normalized in names:
+                    raise ValueError("MCP headers must have distinct case-insensitive names")
+                if normalized == "authorization" and self.bearer_token is not None:
+                    raise ValueError("Use either bearer_token or an Authorization header")
+                names.add(normalized)
+            object.__setattr__(self, "headers", _McpValues(headers))
 
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
         config["url"] = self.url
+        headers = dict(self.headers or {})
         if self.bearer_token is not None:
-            config["http_headers"] = {"Authorization": "Bearer " + self.bearer_token}
+            headers["Authorization"] = "Bearer " + self.bearer_token
+        if headers:
+            config["http_headers"] = headers
         return config
 
 
@@ -560,6 +659,8 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
     name: Literal["codex_apps"] = field(default="codex_apps", init=False)
     url: str = field(default="https://chatgpt.com/backend-api/ps/mcp", init=False, repr=False)
     bearer_token: None = field(default=None, init=False, repr=False)
+    # ClassVar removes the inherited field; Apps accepts no custom headers.
+    headers: ClassVar[None] = None  # type: ignore[misc]
     access_token: str = field(repr=False)
     account_id: str = field(repr=False)
 
@@ -590,6 +691,12 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
         config = super()._config(environment)
         config["auth"] = "chatgpt"
         return config
+
+
+for _declaration in (StdioMCP, HttpMCP, HostedVerificationMCP, ChatGPTAppsMCP):
+    _protect_mcp_initializer(_declaration)
+    _protect_mcp_methods(_declaration, lambda owner: (owner,))
+del _declaration
 
 
 def _launch_text(value: object, name: str, *, allow_empty: bool = False) -> None:
@@ -694,4 +801,5 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
     )
 
 
+_protect_mcp_methods(_MCP, lambda owner: (owner,))
 _preserve_module_identity(globals(), "agents.mcp")

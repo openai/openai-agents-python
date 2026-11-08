@@ -295,7 +295,11 @@
     {
       "path": "0067-reject-ambiguous-code-mode-names.patch",
       "sha256": "4e2bb732edab48888aa9bdca723f591caaf87465c86c0ce0a76ea5baa60c1081"
+    },
+    {
+      "path": "0091-mcp-windows-env-precedence.patch",
+      "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
     }
   ],
-  "result_tree": "5a513dbbfd836c809192bdbe6c779d3156f700fc"
+  "result_tree": "afbd3fe4a27ca847c61bb8ba444bd9214cb238b0"
 }

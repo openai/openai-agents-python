@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import pytest
@@ -22,7 +23,15 @@ from tests.test_native_agent import provider
 from tests.test_native_child_agents import ChildPeer, agent_for, handles, metadata, trust
 from tests.test_native_code_mode import code_call
 from tests.test_native_executor_tools import declaration
-from tests.test_native_mcp_stdio import assert_stopped, records, stdio
+from tests.test_native_mcp_stdio import (
+    B04_ENV_NAMES,
+    assert_literal_observation,
+    assert_stopped,
+    env_observation_args,
+    literal_values,
+    records,
+    stdio,
+)
 from tests.test_native_mcp_tools import mcp_call
 
 
@@ -151,12 +160,18 @@ async def test_local_stdio_works_with_remote_executor(
 async def test_remote_stdio_uses_executor_cwd_and_variables_and_closes_process(
     responses, tmp_path, monkeypatch, programmatic_tool_calling, selection
 ) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-parent-api-key")
     monkeypatch.setenv("N19_STDIO_CURRENT", "synthetic-remote-environment-value")
+    monkeypatch.setenv("B04_LITERAL", "executor-inherited-literal")
+    monkeypatch.setenv("NODE_REPL_AUTH_TOKEN", "synthetic-protected-executor")
+    monkeypatch.setenv("B04_UNREQUESTED_SECRET", "synthetic-unrequested-host-secret")
     async with timeout(30), ExecutorPeer(tmp_path / "remote").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
         # The executor inherited its environment at startup. The host now has a
         # different value, which the SDK must never copy into the remote launch.
         monkeypatch.setenv("N19_STDIO_CURRENT", "synthetic-host-secret-must-stay-local")
+        monkeypatch.setenv("B04_LITERAL", "host-conflicting-literal")
+        parent = {name: os.environ.get(name) for name in B04_ENV_NAMES}
         log = peer.root / "remote-stdio.jsonl"
         if selection == "all-three":
             environment = declaration(peer)
@@ -176,11 +191,21 @@ async def test_remote_stdio_uses_executor_cwd_and_variables_and_closes_process(
         responses.respond(assistant_output("remote done"))
         async with Agent(
             instructions="Read the remote MCP record.",
-            tools=[stdio(log, env_vars=["N19_STDIO_CURRENT"], location="environment")],
+            tools=[
+                stdio(
+                    log,
+                    *env_observation_args(),
+                    env_vars=["N19_STDIO_CURRENT", "B04_LITERAL", "NODE_REPL_AUTH_TOKEN"],
+                    env=literal_values("remote-literal"),
+                    location="environment",
+                )
+            ],
             programmatic_tool_calling=programmatic_tool_calling,
             provider=provider(responses),
         ).session(environment=environment) as session:
             assert (await (await session.submit("read")).get_result()).final_output == "remote done"
+            for secret in ("remote-literal", "synthetic-child-grant"):
+                assert secret not in (await session.save_state()).to_json()
             if selection != "all-three":
                 for request in responses.requests:
                     declared = list(request.get("tools", []))
@@ -195,10 +220,20 @@ async def test_remote_stdio_uses_executor_cwd_and_variables_and_closes_process(
         launch = next(item for item in records(log) if item["event"] == "start")
         assert launch["cwd"] == str(peer.root)
         assert launch["selected_env"] == "synthetic-remote-environment-value"
+        assert_literal_observation(log, "remote-literal")
+        assert {name: os.environ.get(name) for name in B04_ENV_NAMES} == parent
+        assert "synthetic-child-grant" not in json.dumps(responses.requests)
         assert (
             sum(item.get("message", {}).get("method") == "tools/call" for item in records(log)) == 1
         )
         executor_wire = json.dumps(peer.requests)
+        assert "synthetic-unrequested-host-secret" not in executor_wire
+        for secret in (
+            "remote-literal",
+            "synthetic-child-grant",
+            "synthetic-unrequested-host-secret",
+        ):
+            assert secret not in json.dumps(responses.requests)
         assert "native_stdio_mcp.py" in executor_wire
         assert "synthetic-host-secret-must-stay-local" not in executor_wire
         assert "synthetic-host-secret-must-stay-local" not in json.dumps(responses.requests)
