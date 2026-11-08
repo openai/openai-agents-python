@@ -647,7 +647,15 @@ class DeferredTools:
             tool, provider_id, provider, project, max_output_bytes, require_reconciliation
         )
 
-    def _live(self, session: Session[Any, Any], request: ActionRequested[Any, Any]) -> _Job:
+    def _live(
+        self,
+        session: Session[Any, Any],
+        request: ActionRequested[Any, Any],
+        *,
+        interrupted: asyncio.Event | None = None,
+    ) -> _Job:
+        if interrupted is not None and interrupted.is_set():
+            raise asyncio.CancelledError
         session._check_open()
         job = self._jobs.get(request.name)
         active = session._active
@@ -822,6 +830,8 @@ class DeferredTools:
         A positive wait permits one additional bounded observation after start.
         The total timeout covers authorization, provider I/O, persistence and
         delivery. Timeouts never authorize another create. No poller survives.
+        Cancellation stops new provider work and delivery after host cleanup.
+        Effects that already began can still be recorded before returning.
         Keep using the original prepared state while siblings are outstanding.
         A later restore can deliver their already saved results on fresh grants.
 
@@ -845,10 +855,14 @@ class DeferredTools:
         digest = session._manual_source_digest
         if active is None or not active.restored_pending or digest is None:
             raise ValueError("Restore the prepared checkpoint before advancing a deferred job")
+        interrupted = asyncio.Event()
         try:
             return await _wait_for_job(
-                self._advance(session, request, job, digest, operation, response, wait_seconds),
+                self._advance(
+                    session, request, job, digest, operation, response, wait_seconds, interrupted
+                ),
                 timeout_seconds,
+                interrupted=interrupted,
             )
         except asyncio.TimeoutError:
             return "unknown"
@@ -940,6 +954,7 @@ class DeferredTools:
         operation: _Operation,
         response: object,
         wait: float,
+        interrupted: asyncio.Event,
     ) -> Turn[Any] | _Pause:
         # An application can mutate the model on an event it already received.
         fresh = session._manual_request(request.submission_id, set(), _call_id=request.call_id)
@@ -955,7 +970,7 @@ class DeferredTools:
         claim = await self._journal.claim(binding, operation)
         if claim.binding != binding or not claim.key or type(claim.generation) is not int:
             raise PermissionError
-        self._live(session, fresh)
+        self._live(session, fresh, interrupted=interrupted)
         action = claim.action
         if action in ("busy", "unknown"):
             return action
@@ -970,7 +985,9 @@ class DeferredTools:
         if action == "deliver":
             if claim.result_json is None:
                 raise ValueError
-            return await self._deliver(session, fresh, job, claim, adapter, claim.result_json)
+            return await self._deliver(
+                session, fresh, job, claim, adapter, claim.result_json, interrupted=interrupted
+            )
         if action != "project":
             if action in ("observe", "respond", "cancel") and (
                 update is None or not update.receipt
@@ -1001,7 +1018,10 @@ class DeferredTools:
             else:
                 args = ()
             invoke = cast(Callable[..., Awaitable[JobUpdate]], method)
-            update = await self._provider_update(session, fresh, claim, action, invoke, *args)
+            update = await self._provider_update(
+                session, fresh, claim, action, invoke, *args, _interrupted=interrupted
+            )
+            self._live(session, fresh, interrupted=interrupted)
             if wait and action == "start" and update is not None and update.status == "pending":
                 claim = replace(claim, update=update)
                 phase: Literal["authorizing", "provider", "recording"] = "authorizing"
@@ -1018,9 +1038,11 @@ class DeferredTools:
                             claim,
                             "observe",
                             job.provider.observe,
+                            _interrupted=interrupted,
                             _phase=observing_phase,
                         ),
                         wait,
+                        interrupted=interrupted,
                     )
                 except asyncio.TimeoutError:
                     return "pending" if phase == "provider" else "unknown"
@@ -1032,13 +1054,15 @@ class DeferredTools:
             return update.status
         claim = replace(claim, update=update)
         await self._journal.authorize(claim, "project")
-        self._live(session, fresh)
+        self._live(session, fresh, interrupted=interrupted)
         value = job.project(update.value)
         if type(value) is not job.tool.output_type:
             raise ValueError
         value = adapter.validate_python(value)
         raw = adapter.dump_json(value, warnings="error").decode()
-        return await self._deliver(session, fresh, job, claim, adapter, raw, projected=value)
+        return await self._deliver(
+            session, fresh, job, claim, adapter, raw, interrupted=interrupted, projected=value
+        )
 
     async def _record(self, claim: JobClaim, update: JobUpdate) -> JobUpdate:
         if not isinstance(update, JobUpdate):
@@ -1064,13 +1088,14 @@ class DeferredTools:
         action: _Action,
         invoke: Callable[..., Awaitable[JobUpdate]],
         *args: object,
+        _interrupted: asyncio.Event,
         _phase: Callable[[Literal["authorizing", "provider", "recording"]], None] | None = None,
     ) -> JobUpdate | None:
         try:
             if _phase is not None:
                 _phase("authorizing")
             await self._journal.authorize(claim, action)
-            self._live(session, request)
+            self._live(session, request, interrupted=_interrupted)
             if _phase is not None:
                 _phase("provider")
             try:
@@ -1081,6 +1106,7 @@ class DeferredTools:
                 return None
             if _phase is not None:
                 _phase("recording")
+            # Record effects that already began, even if the host finished after interruption.
             return await self._record(claim, update)
         except asyncio.TimeoutError:
             # A journal timeout is uncertain even during the shorter optional wait.
@@ -1095,6 +1121,7 @@ class DeferredTools:
         adapter: TypeAdapter[Any],
         raw: str,
         *,
+        interrupted: asyncio.Event,
         projected: BaseModel | None = None,
     ) -> Turn[Any]:
         secrets = tuple(
@@ -1122,8 +1149,9 @@ class DeferredTools:
             if adapter.dump_json(value, warnings="error").decode() != raw:
                 raise ValueError
             await self._journal.save_result(claim, raw)
+        self._live(session, request, interrupted=interrupted)
         await self._journal.authorize(claim, "deliver")
-        self._live(session, request)
+        self._live(session, request, interrupted=interrupted)
         return await session._respond(request, value, expected_json=raw)
 
 

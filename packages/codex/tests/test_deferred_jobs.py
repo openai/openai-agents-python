@@ -1526,6 +1526,110 @@ async def test_optional_read_is_joined_on_total_timeout_or_cancellation(response
 
 
 @pytest.mark.parametrize(
+    ("action", "stop"),
+    [
+        ("start", "caller"),
+        ("start", "deadline"),
+        ("observe", "observation"),
+        ("project", "caller"),
+        ("deliver", "caller"),
+    ],
+)
+async def test_cancelled_advance_stops_after_atomic_authorization(responses, action, stop):
+    entered, authorized = asyncio.Event(), asyncio.Event()
+
+    class Store(Journal):
+        async def authorize(self, claim, operation):
+            if operation == action:
+                entered.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    # A host store may finish an atomic write before returning.
+                    await super().authorize(claim, operation)
+                    authorized.set()
+            else:
+                await super().authorize(claim, operation)
+
+    accepted = JobUpdate("pending", "secret-task-receipt")
+    journal = Store()
+    backend = Provider([accepted] if action == "observe" else [done()])
+    projected = []
+
+    def project(value):
+        projected.append(value)
+        return Output(report=value["public"])
+
+    jobs, tool = declared(journal, backend, project=project)
+    agent = Agent(instructions="Render.", tools=[tool], provider=provider(responses))
+    async with timeout(5):
+        state, _ = await prepare_one(agent, jobs, tool, responses)
+        responses.respond(assistant_output("finished"))
+        async with agent.session(state=state) as fresh:
+            req = await next_request(fresh.interactions(), tool)
+            driving = asyncio.create_task(
+                jobs.advance(
+                    fresh,
+                    req,
+                    timeout_seconds=0.05 if stop == "deadline" else 2,
+                    wait_seconds=0.05 if stop == "observation" else 0,
+                )
+            )
+            await entered.wait()
+            if stop == "caller":
+                driving.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await driving
+            else:
+                assert await driving == "unknown"
+            assert authorized.is_set()
+            assert len(responses.requests) == 1
+            assert backend.calls == ([] if action == "start" else [("start", 2)])
+            assert len(projected) == (1 if action == "deliver" else 0)
+            (row,) = journal.rows.values()
+            expected = None if action == "start" else accepted if action == "observe" else done()
+            assert row.update == expected
+            assert (row.result is not None) == (action == "deliver")
+
+
+async def test_cancelled_advance_records_an_already_entered_effect(responses):
+    entered, recorded = asyncio.Event(), asyncio.Event()
+
+    class Backend(Provider):
+        async def start(self, claim, arguments):
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                return await super().start(claim, arguments)
+
+    class Store(Journal):
+        async def record(self, claim, update):
+            await super().record(claim, update)
+            recorded.set()
+
+    journal, backend = Store(), Backend([done()])
+    jobs, tool = declared(journal, backend)
+    agent = Agent(instructions="Render.", tools=[tool], provider=provider(responses))
+    async with timeout(5):
+        state, _ = await prepare_one(agent, jobs, tool, responses)
+        responses.respond(assistant_output("finished"))
+        async with agent.session(state=state) as fresh:
+            req = await next_request(fresh.interactions(), tool)
+            driving = asyncio.create_task(jobs.advance(fresh, req))
+            await entered.wait()
+            driving.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await driving
+            assert recorded.is_set()
+            assert "project" not in journal.log and "deliver" not in journal.log
+            assert len(responses.requests) == 1
+    (row,) = journal.rows.values()
+    assert row.update == done() and row.result is None
+    assert backend.calls == [("start", 2)]
+
+
+@pytest.mark.parametrize(
     ("first_stop", "cancel_during_cleanup", "cleanup_error"),
     [
         ("caller", True, False),

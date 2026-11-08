@@ -11,10 +11,7 @@ Follow the [development-branch setup](../../../docs/sdk/installation.md#examples
 python examples/codex/storage_mounts/main.py /absolute/workspace /absolute/data
 ```
 
-The example accepts existing directories and resolves their paths in trusted
-application code. Pass `strategy="local_bind"` explicitly. `read_only` defaults
-to `True`. Equivalent dictionaries accept only `source`, `destination`,
-`strategy`, and `read_only`.
+The example accepts existing directories and resolves their paths in trusted application code. `LocalStorageMount(source=path)` defaults `destination` to `source`, `strategy` to `"local_bind"`, and `read_only` to `True`. Equivalent dictionaries accept only `source`, `destination`, `strategy`, and `read_only`, with the same defaults.
 
 ## Supported paths
 

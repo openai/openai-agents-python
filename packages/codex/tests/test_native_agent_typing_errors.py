@@ -11,6 +11,7 @@ from agents import (
     HttpMCP,
     InputImage,
     InteractionRequired,
+    LocalStorageMount,
     MCPResultContext,
     ModelSettings,
     NativeAgents,
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     )
     Environment(url="wss://executor.invalid", cwd="/workspace", tools=["shell"])  # pyright: ignore[reportArgumentType]
     Environment.local(cwd="/workspace", write_policy="legacy")  # pyright: ignore[reportArgumentType]
+    LocalStorageMount(source="/archive", read_only=False)  # pyright: ignore[reportArgumentType]
     Environment(
         url="wss://executor.invalid",
         cwd="/workspace",
