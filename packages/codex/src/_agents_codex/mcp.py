@@ -13,13 +13,15 @@ from collections.abc import (
     Sequence as Sequence,
 )
 from dataclasses import dataclass as dataclass, field as field
-from types import MappingProxyType as _MappingProxyType
+from functools import wraps as _wraps
+from traceback import clear_frames as _clear_frames
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     ClassVar as ClassVar,
     Generic as Generic,
     Literal as Literal,
+    NoReturn as _NoReturn,
     get_origin as get_origin,
 )
 from urllib.parse import unquote as unquote, urlsplit as urlsplit
@@ -37,6 +39,47 @@ if TYPE_CHECKING:
 
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
 ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
+
+
+class _McpValues(dict[str, str]):
+    """An immutable capture that retains ordinary dataclass copy support."""
+
+    def _immutable(self: object, *args: Any, **kwargs: Any) -> _NoReturn:
+        del self, args, kwargs
+        raise TypeError("MCP configuration values are immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+
+    def __copy__(self) -> _McpValues:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _McpValues:
+        return self
+
+    def __reduce__(self) -> tuple[Any, tuple[dict[str, str]]]:
+        return type(self), (dict(self),)
+
+
+def _protect_mcp_initializer(declaration: type[Any]) -> None:
+    """Keep rejected credentials out of generated initializer traceback frames."""
+    initialize = declaration.__init__
+
+    @_wraps(initialize)
+    def protected(self: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            initialize(self, *args, **kwargs)
+        except BaseException as error:
+            _clear_frames(error.__traceback__)
+            error.__context__ = None
+            error.__cause__ = None
+            for name in ("env", "headers", "bearer_token", "access_token"):
+                if name in self.__dict__:
+                    object.__setattr__(self, name, None)
+            raise
+        finally:
+            del self, args, kwargs
+
+    declaration.__init__ = protected
 
 
 class MCPResource(TypedDict):
@@ -441,7 +484,7 @@ class StdioMCP(_MCP[ContextT_contra]):
                 if "=" in name:
                     raise ValueError("MCP env names must contain no equals sign")
                 _launch_text(value, "env value", allow_empty=True)
-            object.__setattr__(self, "env", _MappingProxyType(captured))
+            object.__setattr__(self, "env", _McpValues(captured))
         if self.cwd is not None:
             _launch_text(self.cwd, "cwd")
 
@@ -564,7 +607,7 @@ class HttpMCP(_MCP[ContextT_contra]):
                 if normalized == "authorization" and self.bearer_token is not None:
                     raise ValueError("Use either bearer_token or an Authorization header")
                 names.add(normalized)
-            object.__setattr__(self, "headers", _MappingProxyType(headers))
+            object.__setattr__(self, "headers", _McpValues(headers))
 
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
@@ -636,6 +679,11 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
         config = super()._config(environment)
         config["auth"] = "chatgpt"
         return config
+
+
+for _declaration in (StdioMCP, HttpMCP, HostedVerificationMCP, ChatGPTAppsMCP):
+    _protect_mcp_initializer(_declaration)
+del _declaration
 
 
 def _launch_text(value: object, name: str, *, allow_empty: bool = False) -> None:
