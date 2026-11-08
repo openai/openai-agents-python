@@ -116,17 +116,45 @@ def test_duplicate_qualified_identity_and_native_names_still_fail():
         Agent(
             instructions="test", tools=[replace(first, namespace="mcp__catalog"), remote]
         ).validate()
-    with pytest.raises(ValueError, match="shares a ToolRef"):
+    with pytest.raises(ValueError, match="collaboration namespace"):
         Agent(
             instructions="test",
             tools=[replace(first, namespace="collaboration", name="spawn_agent"), NativeAgents()],
         ).validate()
     flattened = replace(first, namespace=None, namespace_description=None, name="books__lookup")
-    with pytest.raises(ValueError, match="code-mode tool name"):
-        Agent(
-            instructions="test", tools=[first, flattened], programmatic_tool_calling=True
-        ).validate()
+    # Code Mode checks the effective step roster, which can select either member.
+    Agent(instructions="test", tools=[first, flattened], programmatic_tool_calling=True).validate()
     assert effects == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_native_agents_reserves_collaboration_before_opening(responses, reverse):
+    lookup = lookup_for("collaboration", [])
+    native_agents = NativeAgents()
+    tools = [native_agents, lookup] if reverse else [lookup, native_agents]
+    agent = Agent(instructions="Use lookup.", tools=tools, provider=provider(responses))
+    with pytest.raises(ValueError, match="collaboration namespace.*lookup"):
+        agent.validate()
+    with pytest.raises(ValueError, match="collaboration namespace.*lookup"):
+        async with agent.session():
+            pytest.fail("A native-owned namespace was admitted")
+    with pytest.raises(ValueError, match="collaboration namespace.*lookup"):
+        async with Agent(instructions="Overrides.", provider=agent.provider).session(tools=tools):
+            pytest.fail("Opening overrides admitted a native-owned namespace")
+    assert responses.requests == []
+
+
+async def test_collaboration_function_without_native_agents_keeps_its_qualified_identity(responses):
+    effects = []
+    lookup = lookup_for("collaboration", effects)
+    agent = Agent(instructions="Use lookup.", tools=[lookup], provider=provider(responses))
+    agent.validate()
+    responses.respond(namespaced_call("collaboration", "lookup", {"key": "A"}, "lookup"))
+    responses.respond(assistant_output("selected"))
+    async with timeout(15), agent.session(context=effects) as session:
+        result = await (await session.submit("read")).get_result()
+    assert result.final_output == "selected"
+    assert effects == ["collaboration:A"]
 
 
 @pytest.mark.parametrize("namespace", ["", " ", 1])

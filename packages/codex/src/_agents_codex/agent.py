@@ -393,6 +393,8 @@ class Agent(Generic[ContextT, OutputT]):
     receive results. The cells use the SDK's bundled host and do not grant
     shell tools or a local workspace. Pass Environment to session() for
     remote execution. Use on_interaction or a Session to answer manual requests made by code cells.
+    Each effective Code Mode selection must have unique generated identifiers.
+    If names collide, select one function per step or use direct mode.
     """
 
     instructions: str
@@ -553,7 +555,6 @@ class Agent(Generic[ContextT, OutputT]):
             python_tools,
             _tool_names(mcp_tools),
             self.tools,
-            self.programmatic_tool_calling,
             native_agents=native_agents,
         )
         native = importlib.import_module("agents._native")

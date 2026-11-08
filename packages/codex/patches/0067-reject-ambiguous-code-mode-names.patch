@@ -1,0 +1,204 @@
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -552,7 +552,7 @@
+     )
+     .map_err(|error| CodexErrorDetails::InvalidRequest(error.to_string()))?;
+     let code_mode_tool_names =
+-        register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes);
++        register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes)?;
+     for name in [
+         codex_code_mode::PUBLIC_TOOL_NAME,
+         codex_code_mode::WAIT_TOOL_NAME,
+@@ -983,10 +983,10 @@
+     model_info: &ModelInfo,
+     registry: &mut ToolRegistry,
+     indirect_prefixes: &IndirectNamespacePrefixes<'_>,
+-) -> BTreeMap<String, ToolName> {
++) -> CodexResult<BTreeMap<String, ToolName>> {
+     let tool_mode = effective_tool_mode(turn_context, model_info);
+     if !matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
+-        return BTreeMap::new();
++        return Ok(BTreeMap::new());
+     }
+ 
+     let mut code_mode_tool_names = BTreeMap::new();
+@@ -1041,13 +1041,11 @@
+             Entry::Vacant(entry) => {
+                 entry.insert(tool_name);
+             }
+-            Entry::Occupied(_) => {
+-                tracing::warn!(
+-                    tool_name = %tool_name,
+-                    code_mode_name = %code_mode_name,
+-                    "skipping tool with a duplicate normalized code-mode name"
+-                );
+-                continue;
++            Entry::Occupied(entry) => {
++                return Err(CodexErrorDetails::InvalidRequest(format!(
++                    "Code Mode tool names collide after normalization: tools.{} is shared by {} and {}; select one tool or use direct mode",
++                    entry.key(), entry.get(), tool_name,
++                )).into());
+             }
+         }
+ 
+@@ -1106,7 +1104,7 @@
+     )));
+     registry.prepend_trusted(Arc::new(execute_handler));
+ 
+-    code_mode_tool_names
++    Ok(code_mode_tool_names)
+ }
+ 
+ #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -1936,97 +1936,62 @@
+ }
+ 
+ #[tokio::test]
+-async fn code_mode_uses_the_first_normalized_tool_identity() {
+-    for (code_mode_only, winner_exposure, shadow_is_deferred) in [
++async fn code_mode_rejects_ambiguous_normalized_tool_identities() {
++    for (code_mode_only, first_exposure, second_is_deferred) in [
+         (false, ToolExposure::Direct, true),
+         (false, ToolExposure::Deferred, false),
+         (true, ToolExposure::Direct, true),
+         (true, ToolExposure::Deferred, false),
+     ] {
+-        let plan = probe_with(
+-            |turn| {
+-                update_config(turn, |config| {
+-                    config.tool_registry.turn_metadata_includes_tool_info = true;
+-                });
+-                set_feature(turn, Feature::CodeMode, /*enabled*/ true);
+-                if code_mode_only {
+-                    set_feature(turn, Feature::CodeModeOnly, /*enabled*/ true);
+-                }
+-                update_turn_settings_for_test(turn, |settings| {
+-                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+-                    Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
+-                });
+-            },
+-            ToolPlanInputs {
+-                tool_runtimes: vec![mcp_runtime(
+-                    "winner",
+-                    "normalized-alias",
+-                    "lookup",
+-                    winner_exposure,
+-                )],
+-                dynamic_tools: vec![dynamic_tool(
+-                    Some("normalized_alias"),
+-                    "lookup",
+-                    shadow_is_deferred,
+-                )],
+-                ..ToolPlanInputs::default()
+-            },
++        let (_session, mut turn) = make_session_and_context().await;
++        set_feature(&mut turn, Feature::CodeMode, true);
++        set_feature(&mut turn, Feature::CodeModeOnly, code_mode_only);
++        update_turn_settings_for_test(&mut turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
++        });
++        let mcp = codex_mcp::McpBinding::empty(mcp_config_for_test(&turn.config));
++        let mut registry = build_core_tool_registry(
++            &turn,
++            turn.model_info(),
++            &turn.initial_environments,
++            &mcp,
++            None,
++            None,
++        );
++        let hosted_specs = append_source_tools(
++            &turn,
++            turn.model_info(),
++            &mut registry,
++            vec![mcp_runtime(
++                "first",
++                "normalized-alias",
++                "lookup",
++                first_exposure,
++            )],
++            Vec::new(),
++            &[dynamic_tool(
++                Some("normalized_alias"),
++                "lookup",
++                second_is_deferred,
++            )],
++        );
++        let error = super::finalize_tool_router(
++            &turn,
++            turn.model_info(),
++            registry,
++            hosted_specs,
++            &Default::default(),
+         )
+-        .await;
+-
+-        let winner_name = ToolName::namespaced("normalized-alias", "lookup");
+-        let shadow_name = ToolName::namespaced("normalized_alias", "lookup");
+-        plan.assert_registered_contains(&[&winner_name.to_string(), &shadow_name.to_string()]);
+-        assert_eq!(plan.exposure(&winner_name.to_string()), winner_exposure);
+-        assert_eq!(
+-            plan.exposure(&shadow_name.to_string()),
+-            if shadow_is_deferred {
+-                ToolExposure::Deferred
+-            } else {
+-                ToolExposure::Direct
+-            },
+-        );
+-
+-        let tool_namespaces = plan
+-            .tool_namespaces_info
+-            .as_ref()
+-            .expect("opted-in Responses Lite plan should contain the supported tools");
+-        assert_eq!(
+-            plan.code_mode_tool_names.get("normalized_alias__lookup"),
+-            Some(&winner_name),
+-        );
+-        assert_eq!(
+-            tool_namespaces["normalized-alias"].functions["lookup"]
+-                .code_mode_name
+-                .as_deref(),
+-            Some("normalized_alias__lookup"),
+-        );
+-        assert!(
+-            tool_namespaces
+-                .get("normalized_alias")
+-                .and_then(|namespace| namespace.functions.get("lookup"))
+-                .and_then(|function| function.code_mode_name.as_ref())
+-                .is_none()
+-        );
+-
+-        if !code_mode_only && !shadow_is_deferred {
+-            let ToolSpec::Namespace(namespace) = plan.visible_spec("normalized_alias") else {
+-                panic!("expected the shadowed dynamic tool to remain directly visible");
+-            };
+-            let [ResponsesApiNamespaceTool::Function(shadow)] = namespace.tools.as_slice() else {
+-                panic!("expected exactly one shadowed dynamic tool");
+-            };
+-            assert_eq!(shadow.description, "lookup dynamic tool");
+-        }
+-
+-        let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
+-            panic!("expected code mode exec tool");
+-        };
+-        assert!(!exec.description.contains("lookup dynamic tool"));
+-        assert_eq!(
+-            exec.description.contains("lookup test tool"),
+-            code_mode_only && winner_exposure == ToolExposure::Direct,
+-        );
++        .err()
++        .expect("ambiguous Code Mode names must fail before sampling");
++        assert!(matches!(
++            error.details(),
++            CodexErrorDetails::InvalidRequest(_)
++        ));
++        let message = error.to_string();
++        assert!(message.contains("tools.normalized_alias__lookup"));
++        assert!(message.contains("normalized-alias"));
++        assert!(message.contains("normalized_alias"));
+     }
+ }
+ 
