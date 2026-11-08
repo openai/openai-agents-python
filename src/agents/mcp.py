@@ -15,6 +15,7 @@ from _agents_codex.mcp import (
     HostedVerificationMCP as HostedVerificationMCP,
     HttpMCP as HttpMCP,
     Literal as Literal,
+    Mapping as Mapping,
     MCPBlobResourceContents as MCPBlobResourceContents,
     MCPCallContext as MCPCallContext,
     MCPGetPromptResult as MCPGetPromptResult,

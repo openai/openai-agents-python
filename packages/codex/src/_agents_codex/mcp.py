@@ -13,6 +13,7 @@ from collections.abc import (
     Sequence as Sequence,
 )
 from dataclasses import dataclass as dataclass, field as field
+from types import MappingProxyType as _MappingProxyType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -383,7 +384,10 @@ class StdioMCP(_MCP[ContextT_contra]):
     ``location="host"`` starts the command on the application host.
     ``location="environment"`` requires ``agent.session(environment=...)``
     and starts it on that executor. ``env_vars`` names variables from
-    the selected location, never from the other machine. ``args`` are individual
+    the selected location, never from the other machine. ``env`` captures literal
+    values for this child at construction; these override inherited names without
+    changing the parent environment. Reserved process identity variables remain
+    excluded. ``args`` are individual
     arguments without shell expansion. An omitted ``cwd`` uses Core's runtime
     directory on the host or the Session environment's working directory remotely.
 
@@ -408,6 +412,7 @@ class StdioMCP(_MCP[ContextT_contra]):
     command: str = field(repr=False)
     args: Sequence[str] = field(default=(), repr=False)
     env_vars: Sequence[str] = field(default=(), repr=False)
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     cwd: str | None = field(default=None, repr=False)
     location: Literal["host", "environment"] = "host"
 
@@ -426,12 +431,24 @@ class StdioMCP(_MCP[ContextT_contra]):
         for name in self.env_vars:
             if not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
                 raise ValueError("MCP env_vars must name environment variables")
+        if self.env is not None:
+            if not isinstance(self.env, Mapping):
+                raise TypeError("MCP env must be a mapping of strings")
+            captured = dict(self.env)
+            for name, value in captured.items():
+                _launch_text(name, "env name")
+                if "=" in name:
+                    raise ValueError("MCP env names must contain no equals sign")
+                _launch_text(value, "env value", allow_empty=True)
+            object.__setattr__(self, "env", _MappingProxyType(captured))
         if self.cwd is not None:
             _launch_text(self.cwd, "cwd")
 
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
         config.update(command=self.command, args=list(self.args))
+        if self.env is not None:
+            config["env"] = dict(self.env)
         if self.location == "environment":
             if environment is None:
                 raise ValueError(
@@ -473,6 +490,8 @@ class HttpMCP(_MCP[ContextT_contra]):
     to read credentials from the environment. Session owns the connection. Both timeouts
     are seconds. ``approval_mode="native"`` keeps native approval rules;
     "preapproved" allows selected names subject to native constraints.
+    ``headers`` captures literal HTTP fields at construction. Names are
+    case-insensitive. Use either an Authorization header or ``bearer_token``.
     Use ``tools=[]`` for a resource-only or prompt-only server. The idle Session's resource
     methods return data without adding it to model context.
 
@@ -496,6 +515,7 @@ class HttpMCP(_MCP[ContextT_contra]):
 
     url: str = field(repr=False)
     bearer_token: str | None = field(default=None, repr=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -524,12 +544,35 @@ class HttpMCP(_MCP[ContextT_contra]):
                 not 0x21 <= ord(character) <= 0x7E for character in self.bearer_token
             ):
                 raise ValueError("bearer_token must contain visible ASCII characters")
+        if self.headers is not None:
+            if not isinstance(self.headers, Mapping):
+                raise TypeError("MCP headers must be a string mapping")
+            headers = dict(self.headers)
+            names: set[str] = set()
+            for name, value in headers.items():
+                if not isinstance(name, str) or not re.fullmatch(
+                    r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name
+                ):
+                    raise ValueError("MCP header names must be HTTP tokens")
+                _launch_text(value, "header value", allow_empty=True)
+                if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in value):
+                    raise ValueError("MCP header values must be valid HTTP field values")
+                normalized = name.lower()
+                if normalized in names:
+                    raise ValueError("MCP headers must have distinct case-insensitive names")
+                if normalized == "authorization" and self.bearer_token is not None:
+                    raise ValueError("Use either bearer_token or an Authorization header")
+                names.add(normalized)
+            object.__setattr__(self, "headers", _MappingProxyType(headers))
 
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
         config["url"] = self.url
+        headers = dict(self.headers or {})
         if self.bearer_token is not None:
-            config["http_headers"] = {"Authorization": "Bearer " + self.bearer_token}
+            headers["Authorization"] = "Bearer " + self.bearer_token
+        if headers:
+            config["http_headers"] = headers
         return config
 
 
@@ -560,6 +603,7 @@ class ChatGPTAppsMCP(HttpMCP[ContextT_contra]):
     name: Literal["codex_apps"] = field(default="codex_apps", init=False)
     url: str = field(default="https://chatgpt.com/backend-api/ps/mcp", init=False, repr=False)
     bearer_token: None = field(default=None, init=False, repr=False)
+    headers: None = field(default=None, init=False, repr=False)
     access_token: str = field(repr=False)
     account_id: str = field(repr=False)
 
