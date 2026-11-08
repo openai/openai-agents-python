@@ -75,6 +75,29 @@ search_settings: ModelSettings = {"tool_choice": "required"}
 search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
 assert_type(search_agent, Agent[None, str])
 
+# API choice and model identity remain separate through declaration and overrides.
+decisions_agent = Agent(
+    instructions="Classify.",
+    model="decision-model",
+    api="decisions",
+    fallback_model="generation-model",
+    min_route_probability=0.8,
+)
+assert_type(decisions_agent, Agent[None, str])
+assert_type(decisions_agent.model, str | None)
+assert_type(decisions_agent.api, Literal["responses", "decisions"])
+
+
+async def decisions_api_override_types() -> None:
+    assert_type(
+        await decisions_agent.run("Classify.", model="another-decision", api="decisions"),
+        Completed[str],
+    )
+    async with decisions_agent.session(model="generation-model", api="responses") as session:
+        assert_type(session, Session[None, str])
+    assert_type(decisions_agent.run_sync("Classify.", api="decisions"), Completed[str])
+
+
 code_interpreter = CodeInterpreter(container="cntr_existing", allowed_callers=["direct"])
 assert_type(code_interpreter.allowed_callers, Sequence[Literal["direct", "programmatic"]] | None)
 automatic_code_interpreter = CodeInterpreter(
@@ -383,6 +406,12 @@ async def typed_standard_environment_manager() -> None:
 
 class Answer(BaseModel):
     answer: str
+
+
+decisions_typed = Agent(instructions="Classify.", api="decisions", output_type=Answer)
+assert_type(decisions_typed, Agent[None, Answer])
+assert_type(decisions_typed.fallback_model, str | None)
+assert_type(decisions_typed.min_route_probability, float | None)
 
 
 class Choice(RootModel[int | str]):

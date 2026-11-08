@@ -291,7 +291,11 @@
     {
       "path": "0066-caller-controlled-mcp-prompts.patch",
       "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
+    },
+    {
+      "path": "0067-decision-model.patch",
+      "sha256": "d855357f84615873993a9b970d9eed73a03c4001b7321ad6db945ff79105defd"
     }
   ],
-  "result_tree": "62fd05c563d1e0f54d96226de086c2824f3e6c98"
+  "result_tree": "74cd456550ff1f59a84b1ccb4ffbb113fefd6e8d"
 }

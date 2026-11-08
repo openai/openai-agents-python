@@ -29,7 +29,7 @@ from contextlib import (
     suppress as suppress,
 )
 from contextvars import ContextVar as ContextVar, copy_context as copy_context
-from copy import deepcopy as deepcopy
+from copy import copy as copy, deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
 from importlib.resources import files as _package_files
 from os import PathLike as PathLike
@@ -94,6 +94,7 @@ from .agent import (
     ModelSettings as ModelSettings,
     NativeProvider as NativeProvider,
     OutputT as OutputT,
+    _check_decision_model,
     _copy_model_settings as _copy_model_settings,
 )
 from .canonical_storage import (
@@ -1797,6 +1798,59 @@ def _configure_child_roles(
         }
 
 
+def _native_provider_config(
+    provider: NativeProvider, *, codex_login: bool, web_search: WebSearch | None
+) -> dict[str, Any]:
+    return {
+        "name": "OpenAI" if codex_login else "Native agent provider",
+        "base_url": (
+            _CODEX_RESPONSES_BASE_URL
+            if codex_login
+            else provider.base_url or "https://api.openai.com/v1"
+        ),
+        "wire_api": "responses",
+        "requires_openai_auth": True,
+        "supports_websockets": provider._websockets_enabled,
+        # Both native web protocols require a compatible Responses
+        # provider. The declaration admits that provider capability.
+        "supports_standalone_web_search": (
+            web_search is not None and web_search.route == "standalone"
+        ),
+    }
+
+
+def _prepare_session_model(
+    agent: Agent[Any, Any],
+    *,
+    state: SessionState | None,
+    storage: LocalStorage | CustomStorage | None,
+    resume: str | None,
+    environment: EnvironmentSource[Any] | None,
+) -> tuple[str | None, dict[str, Any]]:
+    _check_decision_model(agent)
+    model = agent.model
+    if agent.api == "decisions":
+        if (
+            state is not None
+            or storage is not None
+            or resume is not None
+            or environment is not None
+        ):
+            raise ValueError("Decisions does not support checkpoints, storage or environments")
+        model = model if model is not None else "gpt-6-luna"
+        decision_model: dict[str, Any] = {"model": model}
+        if agent.fallback_model is not None:
+            decision_model["fallback_model"] = agent.fallback_model
+        if agent.min_route_probability is not None:
+            decision_model["min_route_probability"] = agent.min_route_probability
+        return agent.fallback_model or model, {
+            "decision_model": decision_model,
+            "supports_websockets": False,
+            "stream_max_retries": 0,
+        }
+    return model, {}
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -1817,6 +1871,7 @@ class Session(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
+        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1843,6 +1898,11 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
+            if api is not None:
+                agent = copy(agent)
+                if api != agent.api:
+                    object.__setattr__(agent, "model", None)
+                object.__setattr__(agent, "api", api)
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -1856,7 +1916,16 @@ class Session(Generic[ContextT, OutputT]):
                 instructions=agent.instructions,
                 name=agent.name,
                 tools=agent.tools if tool_selection is None else tool_selection,
-                model=agent.model if model is None else model,
+                model=(
+                    model
+                    if model is not None
+                    else None
+                    if api is not None and api != agent.api
+                    else agent.model
+                ),
+                api=agent.api if api is None else api,
+                fallback_model=agent.fallback_model,
+                min_route_probability=agent.min_route_probability,
                 model_settings=cast(
                     ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
                 ),
@@ -1867,6 +1936,9 @@ class Session(Generic[ContextT, OutputT]):
                 before_compact=agent.before_compact,
                 before_complete=agent.before_complete,
             )
+        model, decision_config = _prepare_session_model(
+            agent, state=state, storage=storage, resume=resume, environment=environment
+        )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
         instructions, instruction_receipts = _load_instruction_files(
@@ -1989,7 +2061,6 @@ class Session(Generic[ContextT, OutputT]):
             programmatic_tool_calling,
             native_agents=native_agents,
         )
-        model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
         native = importlib.import_module("agents._native")
@@ -2225,22 +2296,9 @@ class Session(Generic[ContextT, OutputT]):
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
                     "model_provider": provider_id,
-                    f"model_providers.{provider_id}": {
-                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
-                        "base_url": (
-                            _CODEX_RESPONSES_BASE_URL
-                            if codex_login is not None
-                            else provider.base_url or "https://api.openai.com/v1"
-                        ),
-                        "wire_api": "responses",
-                        "requires_openai_auth": True,
-                        "supports_websockets": provider._websockets_enabled,
-                        # Both native web protocols require a compatible Responses
-                        # provider. The declaration admits that provider capability.
-                        "supports_standalone_web_search": (
-                            web_search is not None and web_search.route == "standalone"
-                        ),
-                    },
+                    f"model_providers.{provider_id}": _native_provider_config(
+                        provider, codex_login=codex_login is not None, web_search=web_search
+                    ),
                     "agents.enabled": False,
                     "features.goals": goals,
                     "tools.update_plan.enabled": checklist,
@@ -2274,6 +2332,10 @@ class Session(Generic[ContextT, OutputT]):
                         "enabled": True,
                         "disable_in_process_fallback": True,
                     }
+                if decision_config:
+                    cast(dict[str, Any], config[f"model_providers.{provider_id}"]).update(
+                        decision_config
+                    )
                 if model is not None:
                     config["model"] = model
                 if native_agents is not None:
@@ -2731,7 +2793,9 @@ class Session(Generic[ContextT, OutputT]):
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
-                session._websockets_enabled = provider._websockets_enabled
+                session._websockets_enabled = cast(
+                    bool, decision_config.get("supports_websockets", provider._websockets_enabled)
+                )
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
                     session._manual_source_digest = hashlib.sha256(
@@ -4834,6 +4898,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise SessionBusyError("Session already has an active submission or mutation")
             if self._checkpoint_task is not None:
                 raise RuntimeError("Session is saving a checkpoint")
+            if self._opening_agent is not None and self._opening_agent.api == "decisions":
+                if output.mode == "prompted":
+                    raise ValueError("Decisions requires plain output or native structured output")
             if prepare_request is not None:
                 _check_output(output)
             if output.max_retries and self._storage is not None:
@@ -5061,6 +5128,14 @@ class Session(Generic[ContextT, OutputT]):
         Cancellation joins publication; accepted changes stay applied.
         """
         self._check_idle_update()
+        if (
+            self._opening_agent is not None
+            and self._opening_agent.api == "decisions"
+            and (model is not None or model_settings is not None)
+        ):
+            raise ValueError(
+                "Model updates are unsupported with the Decisions API; open a new Session"
+            )
         settings = _native_model_settings(model, model_settings)
         if tools is not None:
             if instructions is not None or settings:
@@ -5094,6 +5169,10 @@ class Session(Generic[ContextT, OutputT]):
                 environment=self._executor,
                 native_agents=self._native_agents,
             )
+            if self._opening_agent.api == "decisions" and any(
+                tool.defer_loading or tool._bind is None for tool in python
+            ):
+                raise ValueError("Decisions supports only eager bound FunctionTool tools")
             for tool in python:
                 tool._check_context(self._context)
             for server in mcp:
@@ -8924,6 +9003,8 @@ class Session(Generic[ContextT, OutputT]):
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:
+        if self._opening_agent is not None and self._opening_agent.api == "decisions":
+            raise CapabilityError("Decisions does not support checkpoint capture or restoration")
         if self._active is not None and self._active.budget is not None:
             raise CapabilityError(
                 "Cannot checkpoint an active run with a budget. Reply in the live Session."

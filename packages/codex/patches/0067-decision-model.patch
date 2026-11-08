@@ -1,0 +1,3873 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 3b372ed32ccd1a9b2fbb651cd019e83990db09f9..0aed8c09d1744fff8185ffa8163b31d42f105189 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -2931,6 +2931,7 @@ dependencies = [
+  "assert_cmd",
+  "assert_matches",
+  "async-channel",
++ "async-stream",
+  "base64 0.22.1",
+  "bm25",
+  "chrono",
+@@ -3348,6 +3349,7 @@ name = "codex-extension-api"
+ version = "0.0.0"
+ dependencies = [
+  "codex-api",
++ "codex-client",
+  "codex-config",
+  "codex-context-fragments",
+  "codex-exec-server-protocol",
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index af878ff8e0d340a6bcd0137012468d65a2b103fd..c4441c951d241660d2daaf9e2532872eae548021 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -592,6 +592,7 @@ mod thread_processor_behavior_tests {
+     async fn derive_config_from_params_uses_session_thread_config_model_provider() -> Result<()> {
+         let temp_dir = TempDir::new()?;
+         let session_provider = ModelProviderInfo {
++            decision_model: None,
+             name: "session".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             model_catalog_url: None,
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 1f0f4668a3d6a79774bd228eca9a73b0f0654274..dac85dcb7481deeefc301973a2f48089f7107b9b 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -108,6 +108,15 @@ pub enum ResponseEvent {
+         /// so we rely on fallback logic when this is `None`.
+         end_turn: Option<bool>,
+     },
++    /// A completed inference call that has not yet produced this model step's output.
++    IntermediateCompleted {
++        observation: codex_protocol::protocol::ResponseObservation,
++        model: String,
++        final_response: bool,
++        response_id: String,
++        token_usage: Option<TokenUsage>,
++        usage_metadata: Option<ResponseUsageMetadata>,
++    },
+     OutputTextDelta(String),
+     ToolCallInputDelta {
+         item_id: String,
+diff --git a/codex-rs/codex-api/src/decisions.rs b/codex-rs/codex-api/src/decisions.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..de9497e7cf3d3bf0ee956de6f01789b10d349d5d
+--- /dev/null
++++ b/codex-rs/codex-api/src/decisions.rs
+@@ -0,0 +1,1493 @@
++//! Bounded adaptation of a Responses request to Decisions questions.
++//!
++//! This module never sends requests or executes tools. Unsupported routes remain
++//! selectable, and only route selection can request a generative handoff.
++use serde_json::{Map, Value, json};
++use std::collections::HashMap;
++use std::collections::HashSet;
++
++#[derive(Debug, thiserror::Error, PartialEq)]
++pub enum DecisionError {
++    #[error("unsupported Decisions input")]
++    UnsupportedInput,
++    #[error("invalid Decisions request configuration")]
++    InvalidRequest,
++    #[error("invalid Decisions answer")]
++    InvalidAnswer,
++    #[error("Decisions refused a question")]
++    Refusal,
++    #[error("invalid Decisions plan state")]
++    InvalidState,
++}
++
++#[derive(Debug, PartialEq)]
++pub enum DecisionAction {
++    Questions(Vec<Value>),
++    Output(Value),
++    Handoff(String),
++}
++
++#[derive(Debug)]
++pub struct DecisionPlan {
++    input: Vec<Value>,
++    routes: Vec<Route>,
++    threshold: Option<f64>,
++    state: State,
++}
++
++#[derive(Debug)]
++struct Route {
++    name: Option<String>,
++    namespace: Option<String>,
++    description: String,
++    schema: Option<Node>,
++}
++
++#[derive(Debug)]
++enum State {
++    New,
++    Routing(Vec<Value>),
++    Filling { route: usize, questions: Vec<Value> },
++    Done,
++}
++
++#[derive(Debug)]
++enum Node {
++    Constant(Value),
++    Object(Vec<(String, Node)>),
++    Field { question: Value, kind: FieldKind },
++}
++
++#[derive(Debug)]
++enum FieldKind {
++    Boolean,
++    Probability,
++    Choice(Vec<Value>),
++    Score { minimum: f64, width: usize },
++}
++
++impl DecisionPlan {
++    pub fn new(request: &Value, min_route_probability: Option<f64>) -> Result<Self, DecisionError> {
++        if min_route_probability.is_some_and(|v| !unit(v)) {
++            return Err(DecisionError::InvalidRequest);
++        }
++        let input = normalize_input(request)?;
++        let choice = request.get("tool_choice").unwrap_or(&Value::Null);
++        let mode = choice.as_str().unwrap_or("auto");
++        if (!choice.is_null() && !choice.is_string() && !choice.is_object())
++            || !matches!(mode, "auto" | "none" | "required")
++        {
++            return Err(DecisionError::InvalidRequest);
++        }
++        let forced = if choice.is_object() {
++            if choice["type"] != "function"
++                || choice["name"].as_str().is_none_or(str::is_empty)
++                || choice
++                    .get("namespace")
++                    .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(str::is_empty))
++            {
++                return Err(DecisionError::InvalidRequest);
++            }
++            Some((&choice["name"], choice.get("namespace")))
++        } else {
++            None
++        };
++        let mut routes = Vec::new();
++        if mode != "required" && forced.is_none() {
++            let format = &request["text"]["format"];
++            let schema = if format["type"] == "json_schema" {
++                compile(&format["schema"])
++            } else {
++                None
++            };
++            routes.push(Route {
++                name: None,
++                namespace: None,
++                description: "Return the final answer to the user".into(),
++                schema,
++            });
++        }
++        if mode != "none" {
++            let tools = match request.get("tools") {
++                None => &[][..],
++                Some(v) => v
++                    .as_array()
++                    .ok_or(DecisionError::InvalidRequest)?
++                    .as_slice(),
++            };
++            for tool in tools {
++                if tool["type"] == "namespace" {
++                    let namespace = tool["name"].as_str().ok_or(DecisionError::InvalidRequest)?;
++                    let members = tool["tools"]
++                        .as_array()
++                        .ok_or(DecisionError::InvalidRequest)?;
++                    for member in members {
++                        add_tool(
++                            &mut routes,
++                            member,
++                            Some(namespace),
++                            tool["description"].as_str().unwrap_or(""),
++                            forced,
++                        )?;
++                    }
++                } else {
++                    add_tool(&mut routes, tool, None, "", forced)?;
++                }
++            }
++        }
++        if routes.is_empty() || routes.len() > 255 {
++            return Err(DecisionError::InvalidRequest);
++        }
++        let mut names = HashSet::new();
++        for route in &routes {
++            if !names.insert((route.namespace.clone(), route.name.clone())) {
++                return Err(DecisionError::InvalidRequest);
++            }
++        }
++        Ok(Self {
++            input,
++            routes,
++            threshold: min_route_probability,
++            state: State::New,
++        })
++    }
++
++    pub fn input(&self) -> &[Value] {
++        &self.input
++    }
++
++    pub fn next(&mut self) -> Result<DecisionAction, DecisionError> {
++        if !matches!(self.state, State::New) {
++            return Err(DecisionError::InvalidState);
++        }
++        if self.routes.iter().all(|r| r.schema.is_none()) {
++            self.state = State::Done;
++            return Ok(DecisionAction::Handoff(
++                "No route has a supported bounded schema".into(),
++            ));
++        }
++        if self.routes.len() == 1 {
++            return self.select(0);
++        }
++        let choices: Vec<Value> = self
++            .routes
++            .iter()
++            .enumerate()
++            .map(|(i, r)| json!({"value": format!("route_{i}"), "description": r.description}))
++            .collect();
++        let questions = vec![json!({"type":"choice", "name":"route", "instructions":
++            "Choose the next action. Select a function only when it is needed; otherwise return the final answer.",
++            "choices":choices})];
++        self.state = State::Routing(questions.clone());
++        Ok(DecisionAction::Questions(questions))
++    }
++
++    pub fn accept(&mut self, answers: &[Value]) -> Result<DecisionAction, DecisionError> {
++        // Consume the pending stage even when validation fails. An answer failure
++        // must never become a fallback or allow replay of partial field results.
++        let state = std::mem::replace(&mut self.state, State::Done);
++        match state {
++            State::Routing(questions) => {
++                validate_answers(&questions, answers)?;
++                let selected = answers[0]["choice"]
++                    .as_str()
++                    .ok_or(DecisionError::InvalidAnswer)?;
++                let index = (0..self.routes.len())
++                    .find(|i| selected == format!("route_{i}"))
++                    .ok_or(DecisionError::InvalidAnswer)?;
++                let probability = answers[0]["probabilities"]
++                    .as_array()
++                    .ok_or(DecisionError::InvalidAnswer)?
++                    .iter()
++                    .find(|p| p["value"] == selected)
++                    .and_then(|p| p["probability"].as_f64())
++                    .ok_or(DecisionError::InvalidAnswer)?;
++                if self
++                    .threshold
++                    .is_some_and(|threshold| probability < threshold)
++                {
++                    return Ok(DecisionAction::Handoff(
++                        "Selected route probability is below the configured threshold".into(),
++                    ));
++                }
++                self.select(index)
++            }
++            State::Filling { route, questions } => {
++                validate_answers(&questions, answers)?;
++                let schema = self.routes[route]
++                    .schema
++                    .as_ref()
++                    .ok_or(DecisionError::InvalidState)?;
++                let value = schema.fill(&mut answers.iter())?;
++                Ok(DecisionAction::Output(self.output(route, value)))
++            }
++            _ => Err(DecisionError::InvalidState),
++        }
++    }
++
++    fn select(&mut self, route: usize) -> Result<DecisionAction, DecisionError> {
++        let Some(schema) = self.routes[route].schema.as_ref() else {
++            self.state = State::Done;
++            return Ok(DecisionAction::Handoff(
++                "Selected route has an unsupported schema".into(),
++            ));
++        };
++        let mut questions = Vec::new();
++        schema.questions(&mut questions);
++        if questions.is_empty() {
++            let value = schema.fill(&mut [].iter())?;
++            self.state = State::Done;
++            return Ok(DecisionAction::Output(self.output(route, value)));
++        }
++        self.state = State::Filling {
++            route,
++            questions: questions.clone(),
++        };
++        Ok(DecisionAction::Questions(questions))
++    }
++
++    fn output(&self, route: usize, value: Value) -> Value {
++        let route = &self.routes[route];
++        if let Some(name) = &route.name {
++            let mut output = json!({"type":"function_call", "name":name,
++                "arguments":value.to_string(), "call_id":format!("call_{}", uuid::Uuid::new_v4().simple())});
++            if let Some(namespace) = &route.namespace {
++                output["namespace"] = json!(namespace);
++            }
++            output
++        } else {
++            json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":value.to_string()}]})
++        }
++    }
++}
++
++fn add_tool(
++    routes: &mut Vec<Route>,
++    tool: &Value,
++    namespace: Option<&str>,
++    namespace_description: &str,
++    forced: Option<(&Value, Option<&Value>)>,
++) -> Result<(), DecisionError> {
++    // Only function declarations are admitted. Other native tools require the
++    // ordinary model transport and cannot be fabricated into function calls.
++    if tool["type"] != "function" {
++        return Err(DecisionError::InvalidRequest);
++    }
++    let name = tool["name"].as_str().ok_or(DecisionError::InvalidRequest)?;
++    if let Some((forced_name, forced_namespace)) = forced {
++        if forced_name != name || forced_namespace.and_then(Value::as_str) != namespace {
++            return Ok(());
++        }
++    }
++    let mut description = format!(
++        "Call {}{}: {}",
++        namespace.map(|n| format!("{n}.")).unwrap_or_default(),
++        name,
++        tool["description"].as_str().unwrap_or("")
++    );
++    if let Some(namespace) = namespace.filter(|_| !namespace_description.trim().is_empty()) {
++        description.push_str(&format!("\nNamespace {namespace}: {namespace_description}"));
++    }
++    let mut schema = compile(&tool["parameters"]);
++    if let Some(schema) = &mut schema {
++        // Field inference is a separate request, without the routing choices.
++        schema.prepend_context(&description);
++    }
++    routes.push(Route {
++        name: Some(name.into()),
++        namespace: namespace.map(str::to_owned),
++        description,
++        schema,
++    });
++    Ok(())
++}
++
++impl Node {
++    fn prepend_context(&mut self, context: &str) {
++        match self {
++            Self::Constant(_) => {}
++            Self::Object(fields) => {
++                for (_, node) in fields {
++                    node.prepend_context(context);
++                }
++            }
++            Self::Field { question, .. } => {
++                let instructions = question["instructions"].as_str().unwrap_or("");
++                question["instructions"] = json!(format!("{context}\n{instructions}"));
++            }
++        }
++    }
++
++    fn questions(&self, out: &mut Vec<Value>) {
++        match self {
++            Self::Constant(_) => {}
++            Self::Object(fields) => {
++                for (_, node) in fields {
++                    node.questions(out);
++                }
++            }
++            Self::Field { question, .. } => out.push(question.clone()),
++        }
++    }
++
++    fn fill<'a>(
++        &self,
++        answers: &mut impl Iterator<Item = &'a Value>,
++    ) -> Result<Value, DecisionError> {
++        match self {
++            Self::Constant(value) => Ok(value.clone()),
++            Self::Object(fields) => {
++                let mut value = Map::new();
++                for (name, node) in fields {
++                    value.insert(name.clone(), node.fill(answers)?);
++                }
++                Ok(Value::Object(value))
++            }
++            Self::Field { kind, .. } => {
++                let answer = answers.next().ok_or(DecisionError::InvalidAnswer)?;
++                match kind {
++                    FieldKind::Boolean => Ok(json!(
++                        answer["probability"]
++                            .as_f64()
++                            .ok_or(DecisionError::InvalidAnswer)?
++                            >= 0.5
++                    )),
++                    FieldKind::Probability => Ok(answer["probability"].clone()),
++                    FieldKind::Choice(values) => {
++                        let index = (0..values.len())
++                            .find(|i| answer["choice"] == format!("value_{i}"))
++                            .ok_or(DecisionError::InvalidAnswer)?;
++                        Ok(values[index].clone())
++                    }
++                    FieldKind::Score { minimum, width } => {
++                        let score = answer["score"]
++                            .as_f64()
++                            .filter(|v| v.is_finite() && *v >= 0.0 && *v <= *width as f64)
++                            .ok_or(DecisionError::InvalidAnswer)?;
++                        Ok(json!(score + minimum))
++                    }
++                }
++            }
++        }
++    }
++}
++
++fn compile(schema: &Value) -> Option<Node> {
++    // Bound traversal before resolving references or finite unions. This also
++    // covers nested union branches, which do not create output containers.
++    fn bounded(value: &Value, depth: usize, remaining: &mut usize) -> bool {
++        if depth > 32 || *remaining == 0 {
++            return false;
++        }
++        *remaining -= 1;
++        match value {
++            Value::Array(values) => values.iter().all(|v| bounded(v, depth + 1, remaining)),
++            Value::Object(values) => values.values().all(|v| bounded(v, depth + 1, remaining)),
++            _ => true,
++        }
++    }
++    if !bounded(schema, 0, &mut 10000) {
++        return None;
++    }
++    let mut count = 0;
++    compile_node(
++        schema,
++        schema,
++        "$",
++        &mut Vec::new(),
++        &mut count,
++        &mut 10000,
++        0,
++    )
++    .ok()
++}
++
++fn compile_node(
++    schema: &Value,
++    root: &Value,
++    path: &str,
++    refs: &mut Vec<String>,
++    count: &mut usize,
++    remaining_nodes: &mut usize,
++    depth: usize,
++) -> Result<Node, ()> {
++    if depth > 32 || *remaining_nodes == 0 {
++        return Err(());
++    }
++    *remaining_nodes -= 1;
++    let object = schema.as_object().ok_or(())?;
++    // Reject constraints we cannot enforce, rather than silently weakening the
++    // schema. Annotation keywords do not alter the set of valid output values.
++    const KEYS: &[&str] = &[
++        "$ref",
++        "$defs",
++        "definitions",
++        "$schema",
++        "title",
++        "description",
++        "default",
++        "examples",
++        "type",
++        "properties",
++        "required",
++        "additionalProperties",
++        "enum",
++        "const",
++        "minimum",
++        "maximum",
++        "anyOf",
++        "oneOf",
++    ];
++    if object.keys().any(|key| !KEYS.contains(&key.as_str())) {
++        return Err(());
++    }
++    if let Some(reference) = schema.get("$ref") {
++        let reference = reference.as_str().ok_or(())?;
++        if !reference.starts_with("#/")
++            || refs.iter().any(|r| r == reference)
++            || object.keys().any(|k| {
++                !matches!(
++                    k.as_str(),
++                    "$ref" | "$defs" | "definitions" | "$schema" | "title" | "description"
++                )
++            })
++        {
++            return Err(());
++        }
++        let target = root.pointer(&reference[1..]).ok_or(())?;
++        refs.push(reference.into());
++        let result = compile_node(target, root, path, refs, count, remaining_nodes, depth + 1);
++        refs.pop();
++        let mut node = result?;
++        let annotations = schema_annotations(schema);
++        if !annotations.is_empty() {
++            node.prepend_context(&format!("Field {path} at this reference. {annotations}"));
++        }
++        return Ok(node);
++    }
++    if let Some(values) = finite_values(schema) {
++        if values.is_empty() || values.len() > 255 {
++            return Err(());
++        }
++        let mut unique = Vec::new();
++        for value in values {
++            if !scalar_matches(schema, &value) || unique.contains(&value) {
++                return Err(());
++            }
++            unique.push(value);
++        }
++        if unique.len() == 1 {
++            return Ok(Node::Constant(unique.remove(0)));
++        }
++        return field(count, path, schema, FieldKind::Choice(unique));
++    }
++    if schema.get("enum").is_some()
++        || schema.get("const").is_some()
++        || schema.get("anyOf").is_some()
++        || schema.get("oneOf").is_some()
++    {
++        return Err(());
++    }
++    match schema["type"].as_str() {
++        Some("object") => {
++            if schema["additionalProperties"] != false {
++                return Err(());
++            }
++            let empty_properties = Map::new();
++            let properties = match schema.get("properties") {
++                Some(value) => value.as_object().ok_or(())?,
++                None => &empty_properties,
++            };
++            let required = match schema.get("required") {
++                Some(value) => value.as_array().ok_or(())?.as_slice(),
++                None => &[],
++            };
++            if required.len() != properties.len()
++                || required
++                    .iter()
++                    .any(|v| v.as_str().is_none_or(|k| !properties.contains_key(k)))
++                || required.iter().collect::<HashSet<_>>().len() != required.len()
++            {
++                return Err(());
++            }
++            if schema.get("minimum").is_some() || schema.get("maximum").is_some() {
++                return Err(());
++            }
++            let mut fields = Vec::new();
++            for (name, property) in properties {
++                fields.push((
++                    name.clone(),
++                    compile_node(
++                        property,
++                        root,
++                        &format!("{path}/{}", name.replace('~', "~0").replace('/', "~1")),
++                        refs,
++                        count,
++                        remaining_nodes,
++                        depth + 1,
++                    )?,
++                ));
++            }
++            let mut node = Node::Object(fields);
++            let annotations = schema_annotations(schema);
++            if !annotations.is_empty() {
++                node.prepend_context(&format!("Field {path}. {annotations}"));
++            }
++            Ok(node)
++        }
++        Some("boolean") => field(count, path, schema, FieldKind::Boolean),
++        Some("number") | Some("integer") => {
++            let min = schema["minimum"]
++                .as_f64()
++                .filter(|v| v.is_finite())
++                .ok_or(())?;
++            let max = schema["maximum"]
++                .as_f64()
++                .filter(|v| v.is_finite())
++                .ok_or(())?;
++            if schema["type"] == "number" && min == 0.0 && max == 1.0 {
++                field(count, path, schema, FieldKind::Probability)
++            } else if min.fract() == 0.0
++                && max.fract() == 0.0
++                && max > min
++                && (max - min) <= 254.0
++                && min.abs() <= 9_007_199_254_740_991.0
++                && max.abs() <= 9_007_199_254_740_991.0
++            {
++                let width = (max - min) as usize;
++                if schema["type"] == "number" && width <= 9 {
++                    field(
++                        count,
++                        path,
++                        schema,
++                        FieldKind::Score {
++                            minimum: min,
++                            width,
++                        },
++                    )
++                } else if schema["type"] == "integer" {
++                    field(
++                        count,
++                        path,
++                        schema,
++                        FieldKind::Choice(
++                            (0..=width).map(|i| json!(min as i64 + i as i64)).collect(),
++                        ),
++                    )
++                } else {
++                    Err(())
++                }
++            } else {
++                Err(())
++            }
++        }
++        _ => Err(()),
++    }
++}
++
++fn finite_values(schema: &Value) -> Option<Vec<Value>> {
++    if let Some(value) = schema.get("const") {
++        return Some(vec![value.clone()]);
++    }
++    if let Some(values) = schema.get("enum") {
++        return values.as_array().cloned();
++    }
++    if schema["type"].as_str() == Some("null") {
++        return Some(vec![Value::Null]);
++    }
++    if let Some(types) = schema["type"].as_array() {
++        let mut values = Vec::new();
++        for kind in types {
++            match kind.as_str()? {
++                "null" => values.push(Value::Null),
++                "boolean" => {
++                    values.push(json!(true));
++                    values.push(json!(false));
++                }
++                _ => return None,
++            }
++        }
++        return Some(values);
++    }
++    if let Some(branches) = schema
++        .get("anyOf")
++        .or_else(|| schema.get("oneOf"))
++        .and_then(Value::as_array)
++    {
++        let mut values = Vec::new();
++        for branch in branches {
++            let branch_values = if branch["type"] == "boolean" {
++                vec![json!(true), json!(false)]
++            } else {
++                finite_values(branch)?
++            };
++            // Union branches must be finite scalar schemas, with no hidden constraints.
++            for value in branch_values {
++                if !scalar_matches(branch, &value) {
++                    return None;
++                }
++                values.push(value);
++            }
++        }
++        return Some(values);
++    }
++    None
++}
++
++fn scalar_matches(schema: &Value, value: &Value) -> bool {
++    if value.is_array() || value.is_object() {
++        return false;
++    }
++    let Some(object) = schema.as_object() else {
++        return false;
++    };
++    if object.keys().any(|k| {
++        !matches!(
++            k.as_str(),
++            "type"
++                | "const"
++                | "enum"
++                | "minimum"
++                | "maximum"
++                | "title"
++                | "description"
++                | "default"
++                | "examples"
++                | "anyOf"
++                | "oneOf"
++                | "$defs"
++                | "definitions"
++                | "$schema"
++        )
++    }) {
++        return false;
++    }
++    let matches_type = |kind: &str| match kind {
++        "null" => value.is_null(),
++        "boolean" => value.is_boolean(),
++        "string" => value.is_string(),
++        "number" => value.is_number(),
++        "integer" => value.as_f64().is_some_and(|v| v.fract() == 0.0),
++        _ => false,
++    };
++    if let Some(kind) = schema.get("type") {
++        if let Some(kind) = kind.as_str() {
++            if !matches_type(kind) {
++                return false;
++            }
++        } else if let Some(types) = kind.as_array() {
++            if !types.iter().any(|t| t.as_str().is_some_and(matches_type)) {
++                return false;
++            }
++        } else {
++            return false;
++        }
++    }
++    if schema.get("const").is_some_and(|v| v != value) {
++        return false;
++    }
++    if schema
++        .get("enum")
++        .is_some_and(|v| v.as_array().is_none_or(|values| !values.contains(value)))
++    {
++        return false;
++    }
++    for (key, lower) in [("minimum", true), ("maximum", false)] {
++        if let Some(bound) = schema.get(key) {
++            let Some(bound) = bound.as_f64() else {
++                return false;
++            };
++            if let Some(number) = value.as_f64() {
++                if !bound.is_finite() || (lower && number < bound) || (!lower && number > bound) {
++                    return false;
++                }
++            }
++        }
++    }
++    for keyword in ["anyOf", "oneOf"] {
++        if let Some(branches) = schema.get(keyword) {
++            let Some(branches) = branches.as_array() else {
++                return false;
++            };
++            let matches = branches
++                .iter()
++                .filter(|branch| scalar_matches(branch, value))
++                .count();
++            if matches == 0 || (keyword == "oneOf" && matches != 1) {
++                return false;
++            }
++        }
++    }
++    true
++}
++
++fn schema_annotations(schema: &Value) -> String {
++    let mut annotations = Vec::new();
++    for key in ["title", "description"] {
++        if let Some(value) = schema[key]
++            .as_str()
++            .filter(|value| !value.trim().is_empty())
++        {
++            annotations.push(format!("{key}: {value}"));
++        }
++    }
++    for key in ["default", "examples"] {
++        if let Some(value) = schema.get(key) {
++            annotations.push(format!("{key}: {value}"));
++        }
++    }
++    annotations.join("\n")
++}
++
++fn choice_description(schema: &Value, value: &Value) -> String {
++    fn append_branches(schema: &Value, value: &Value, description: &mut String) {
++        for keyword in ["anyOf", "oneOf"] {
++            if let Some(branches) = schema[keyword].as_array() {
++                for branch in branches
++                    .iter()
++                    .filter(|branch| scalar_matches(branch, value))
++                {
++                    let annotations = schema_annotations(branch);
++                    if !annotations.is_empty() {
++                        description.push('\n');
++                        description.push_str(&annotations);
++                    }
++                    append_branches(branch, value, description);
++                }
++            }
++        }
++    }
++    let mut description = value.to_string();
++    append_branches(schema, value, &mut description);
++    description
++}
++
++fn field(count: &mut usize, path: &str, schema: &Value, kind: FieldKind) -> Result<Node, ()> {
++    *count += 1;
++    if *count > 400 {
++        return Err(());
++    }
++    let context = format!("Field {path}. {}", schema_annotations(schema));
++    let mut question = json!({"name":format!("field_{}", *count), "instructions":context});
++    match &kind {
++        FieldKind::Boolean => {
++            question["type"] = json!("predicate");
++            question["instructions"] = json!(format!(
++                "Determine whether this boolean field is true. {context}"
++            ));
++        }
++        FieldKind::Probability => {
++            question["type"] = json!("predicate");
++            question["instructions"] = json!(format!(
++                "Estimate the probability represented by this field. {context}"
++            ));
++        }
++        FieldKind::Choice(values) => {
++            question["type"] = json!("choice");
++            question["choices"] = json!(
++                values
++                    .iter()
++                    .enumerate()
++                    .map(
++                        |(i, v)| json!({"value":format!("value_{i}"), "description":choice_description(schema, v)})
++                    )
++                    .collect::<Vec<_>>()
++            );
++        }
++        FieldKind::Score { minimum, width } => {
++            question["type"] = json!("score");
++            question["levels"] = json!(
++                (0..=*width)
++                    .map(|i| json!({"label":format!("{}", *minimum + i as f64)}))
++                    .collect::<Vec<_>>()
++            );
++        }
++    }
++    Ok(Node::Field { question, kind })
++}
++
++fn unit(value: f64) -> bool {
++    value.is_finite() && (0.0..=1.0).contains(&value)
++}
++
++fn validate_answers(questions: &[Value], answers: &[Value]) -> Result<(), DecisionError> {
++    if questions.len() != answers.len() {
++        return Err(DecisionError::InvalidAnswer);
++    }
++    for (question, answer) in questions.iter().zip(answers) {
++        if answer["name"] != question["name"] {
++            return Err(DecisionError::InvalidAnswer);
++        }
++        if answer["type"] == "refusal" {
++            return Err(DecisionError::Refusal);
++        }
++        if answer["type"] != question["type"] {
++            return Err(DecisionError::InvalidAnswer);
++        }
++        if answer["type"] == "predicate" {
++            if !answer["probability"].as_f64().is_some_and(unit) {
++                return Err(DecisionError::InvalidAnswer);
++            }
++            continue;
++        }
++        if !answer["confidence"].as_f64().is_some_and(unit) {
++            return Err(DecisionError::InvalidAnswer);
++        }
++        let entries = answer["probabilities"]
++            .as_array()
++            .ok_or(DecisionError::InvalidAnswer)?;
++        let expected: Vec<Value> = if question["type"] == "choice" {
++            question["choices"]
++                .as_array()
++                .ok_or(DecisionError::InvalidState)?
++                .iter()
++                .map(|c| c["value"].clone())
++                .collect()
++        } else {
++            (0..question["levels"]
++                .as_array()
++                .ok_or(DecisionError::InvalidState)?
++                .len())
++                .map(|i| json!(i))
++                .collect()
++        };
++        if entries.len() != expected.len() {
++            return Err(DecisionError::InvalidAnswer);
++        }
++        let mut seen = Vec::new();
++        let mut total = 0.0;
++        for entry in entries {
++            let value = &entry["value"];
++            if !expected.contains(value) || seen.contains(value) {
++                return Err(DecisionError::InvalidAnswer);
++            }
++            seen.push(value.clone());
++            total += entry["probability"]
++                .as_f64()
++                .filter(|v| unit(*v))
++                .ok_or(DecisionError::InvalidAnswer)?;
++            if question["type"] == "score" {
++                let index = value.as_u64().ok_or(DecisionError::InvalidAnswer)? as usize;
++                if entry["label"] != question["levels"][index]["label"] {
++                    return Err(DecisionError::InvalidAnswer);
++                }
++            }
++        }
++        if (total - 1.0).abs() > 1e-5 {
++            return Err(DecisionError::InvalidAnswer);
++        }
++        if question["type"] == "choice" {
++            if !expected.contains(&answer["choice"]) {
++                return Err(DecisionError::InvalidAnswer);
++            }
++        } else if !answer["score"]
++            .as_f64()
++            .is_some_and(|v| v.is_finite() && v >= 0.0 && v <= (expected.len() - 1) as f64)
++        {
++            return Err(DecisionError::InvalidAnswer);
++        }
++    }
++    Ok(())
++}
++
++fn normalize_input(request: &Value) -> Result<Vec<Value>, DecisionError> {
++    let mut out = Vec::new();
++    if let Some(instructions) = request.get("instructions").filter(|v| !v.is_null()) {
++        let text = instructions
++            .as_str()
++            .ok_or(DecisionError::UnsupportedInput)?;
++        out.push(json!({"type":"message", "role":"developer", "content":text}));
++    }
++    let input = request
++        .get("input")
++        .ok_or(DecisionError::UnsupportedInput)?;
++    if let Some(text) = input.as_str() {
++        out.push(json!({"type":"message", "role":"user", "content":text}));
++        return Ok(out);
++    }
++    let items = input.as_array().ok_or(DecisionError::UnsupportedInput)?;
++    let mut calls = HashMap::new();
++    let mut outputs = HashSet::new();
++    for item in items {
++        let kind = item["type"].as_str().unwrap_or("message");
++        match kind {
++            "reasoning" => continue,
++            "message" => {
++                let role = item["role"]
++                    .as_str()
++                    .filter(|r| matches!(*r, "user" | "developer" | "system" | "assistant"))
++                    .ok_or(DecisionError::UnsupportedInput)?;
++                let content = normalize_content(&item["content"], role)?;
++                let mut message = json!({"type":"message", "role":role, "content":content});
++                if let Some(phase) = item.get("phase").filter(|v| !v.is_null()) {
++                    if role != "assistant"
++                        || !matches!(phase.as_str(), Some("commentary" | "final_answer"))
++                    {
++                        return Err(DecisionError::UnsupportedInput);
++                    }
++                    message["phase"] = phase.clone();
++                }
++                out.push(message);
++            }
++            "function_call" | "custom_tool_call" => {
++                let call_id = nonempty(item, "call_id")?;
++                if calls.insert(call_id.to_owned(), kind.to_owned()).is_some() {
++                    return Err(DecisionError::UnsupportedInput);
++                }
++                let name = nonempty(item, "name")?;
++                let key = if kind == "function_call" {
++                    "arguments"
++                } else {
++                    "input"
++                };
++                let payload = item[key].as_str().ok_or(DecisionError::UnsupportedInput)?;
++                let mut call = json!({"type":kind, "name":name, "call_id":call_id, key:payload});
++                if let Some(namespace) = item.get("namespace").filter(|v| !v.is_null()) {
++                    if namespace.as_str().is_none_or(str::is_empty) {
++                        return Err(DecisionError::UnsupportedInput);
++                    }
++                    call["namespace"] = namespace.clone();
++                }
++                out.push(call);
++            }
++            "function_call_output" | "custom_tool_call_output" => {
++                let call_id = nonempty(item, "call_id")?;
++                let expected_call = if kind == "function_call_output" {
++                    "function_call"
++                } else {
++                    "custom_tool_call"
++                };
++                if calls.get(call_id).map(String::as_str) != Some(expected_call)
++                    || !outputs.insert(call_id.to_owned())
++                {
++                    return Err(DecisionError::UnsupportedInput);
++                }
++                let output = normalize_content(&item["output"], "tool")?;
++                out.push(json!({"type":kind, "call_id":call_id, "output":output}));
++            }
++            _ => return Err(DecisionError::UnsupportedInput),
++        }
++    }
++    Ok(out)
++}
++
++fn nonempty<'a>(value: &'a Value, key: &str) -> Result<&'a str, DecisionError> {
++    value[key]
++        .as_str()
++        .filter(|v| !v.is_empty())
++        .ok_or(DecisionError::UnsupportedInput)
++}
++
++fn normalize_content(content: &Value, role: &str) -> Result<Value, DecisionError> {
++    if content.is_string() {
++        return Ok(content.clone());
++    }
++    let parts = content.as_array().ok_or(DecisionError::UnsupportedInput)?;
++    let mut out = Vec::new();
++    for part in parts {
++        let kind = part["type"]
++            .as_str()
++            .ok_or(DecisionError::UnsupportedInput)?;
++        let normalized = match kind {
++            "input_text" | "output_text" if role == "assistant" || kind == "input_text" => {
++                let text = part["text"]
++                    .as_str()
++                    .ok_or(DecisionError::UnsupportedInput)?;
++                json!({"type": if role == "assistant" { "output_text" } else { "input_text" }, "text":text})
++            }
++            "refusal" if role == "assistant" => {
++                json!({"type":"refusal", "refusal":part["refusal"].as_str().ok_or(DecisionError::UnsupportedInput)?})
++            }
++            "input_image" if matches!(role, "user" | "tool") => {
++                let url = part["image_url"]
++                    .as_str()
++                    .filter(|u| {
++                        u.starts_with("data:")
++                            || u.starts_with("https://")
++                            || u.starts_with("http://")
++                    })
++                    .ok_or(DecisionError::UnsupportedInput)?;
++                let mut image = json!({"type":"input_image", "image_url":url});
++                if let Some(detail) = part.get("detail").filter(|v| !v.is_null()) {
++                    if !matches!(detail.as_str(), Some("auto" | "low" | "high" | "original")) {
++                        return Err(DecisionError::UnsupportedInput);
++                    }
++                    image["detail"] = detail.clone();
++                }
++                out.push(image);
++                continue;
++            }
++            _ => return Err(DecisionError::UnsupportedInput),
++        };
++        out.push(normalized);
++    }
++    Ok(Value::Array(out))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn request(schema: Value) -> Value {
++        json!({"input":[{"role":"user","content":"Evaluate the supplied evidence"}],
++            "text":{"format":{"type":"json_schema","schema":schema}}})
++    }
++
++    fn object(properties: Value) -> Value {
++        let required: Vec<_> = properties.as_object().unwrap().keys().cloned().collect();
++        json!({"type":"object","additionalProperties":false,"properties":properties,"required":required})
++    }
++
++    fn questions(action: DecisionAction) -> Vec<Value> {
++        match action {
++            DecisionAction::Questions(q) => q,
++            other => panic!("expected questions, got {other:?}"),
++        }
++    }
++
++    fn choice(question: &Value, selected: usize, probability: f64, confidence: f64) -> Value {
++        let choices = question["choices"].as_array().unwrap();
++        let remaining = (1.0 - probability) / (choices.len() - 1) as f64;
++        json!({"type":"choice", "name":question["name"], "choice":choices[selected]["value"],
++            "confidence":confidence,"probabilities":choices.iter().enumerate().map(|(i,c)|
++                json!({"value":c["value"],"probability":if i==selected {probability} else {remaining}})).collect::<Vec<_>>()})
++    }
++
++    fn predicate(question: &Value, probability: f64) -> Value {
++        json!({"type":"predicate","name":question["name"],"probability":probability})
++    }
++
++    fn output_value(action: DecisionAction) -> Value {
++        let DecisionAction::Output(output) = action else {
++            panic!("expected output")
++        };
++        // The synthesized value must also deserialize as the native response item.
++        let _: codex_protocol::models::ResponseItem =
++            serde_json::from_value(output.clone()).unwrap();
++        serde_json::from_str(output["content"][0]["text"].as_str().unwrap()).unwrap()
++    }
++
++    #[test]
++    fn nested_output_preserves_bool_enum_probability_score_and_constants() {
++        let mut plan = DecisionPlan::new(&request(object(json!({
++            "nested":object(json!({"ok":{"type":"boolean","description":"The evidence passes validation"}})),
++            "category":{"enum":[7,12,null],"description":"Category code"},
++            "probability":{"type":"number","minimum":0,"maximum":1},
++            "rating":{"type":"number","minimum":2,"maximum":4},
++            "version":{"const":"v1"}
++        }))), None).unwrap();
++        let q = questions(plan.next().unwrap());
++        assert_eq!(q.len(), 4);
++        assert!(
++            q.iter()
++                .any(|q| q["instructions"].as_str().unwrap().contains("$/nested/ok"))
++        );
++        let answers: Vec<Value> = q.iter().map(|q| {
++            let text = q["instructions"].as_str().unwrap();
++            if text.contains("$/category") { choice(q, 1, 1.0, 0.5) }
++            else if text.contains("$/nested/ok") { predicate(q, 0.5) }
++            else if text.contains("$/probability") { predicate(q, 0.73) }
++            else {
++                json!({"type":"score","name":q["name"],"score":1.25,"confidence":0.5,
++                    "probabilities":[{"value":0,"label":"2","probability":0.0},
++                        {"value":1,"label":"3","probability":0.75}, {"value":2,"label":"4","probability":0.25}]})
++            }
++        }).collect();
++        assert_eq!(
++            output_value(plan.accept(&answers).unwrap()),
++            json!({"nested":{"ok":true},"category":12,"probability":0.73,"rating":3.25,"version":"v1"})
++        );
++        assert_eq!(plan.accept(&answers), Err(DecisionError::InvalidState));
++    }
++
++    #[test]
++    fn selects_namespaced_tool_before_filling_arguments_and_emits_fresh_call_ids() {
++        let mut req = request(object(json!({"done":{"type":"boolean"}})));
++        req["tools"] = json!([{"type":"namespace","name":"support","tools":[
++            {"type":"function","name":"classify","description":"Classify this issue",
++             "parameters":object(json!({"code":{"type":"integer","minimum":10,"maximum":12}}))}]}]);
++        let run = || {
++            let mut plan = DecisionPlan::new(&req, None).unwrap();
++            let route = questions(plan.next().unwrap());
++            assert_eq!(route.len(), 1);
++            assert_eq!(route[0]["choices"].as_array().unwrap().len(), 2);
++            let fields = questions(plan.accept(&[choice(&route[0], 1, 1.0, 1.0)]).unwrap());
++            let DecisionAction::Output(item) =
++                plan.accept(&[choice(&fields[0], 2, 1.0, 1.0)]).unwrap()
++            else {
++                panic!("expected function call")
++            };
++            let _: codex_protocol::models::ResponseItem =
++                serde_json::from_value(item.clone()).unwrap();
++            assert_eq!(item["name"], "classify");
++            assert_eq!(item["namespace"], "support");
++            assert_eq!(
++                serde_json::from_str::<Value>(item["arguments"].as_str().unwrap()).unwrap(),
++                json!({"code":12})
++            );
++            item
++        };
++        assert_ne!(run()["call_id"], run()["call_id"]);
++    }
++
++    #[test]
++    fn selected_tool_context_reaches_fields_with_or_without_routing() {
++        for required in [false, true] {
++            let mut req = request(object(json!({"done":{"type":"boolean"}})));
++            req["tools"] = json!([{"type":"namespace","name":"support",
++                "description":"All values concern business accounts",
++                "tools":[{"type":"function","name":"classify",
++                    "description":"Set value true only for subscription purchases",
++                    "parameters":object(json!({"value":{"type":"boolean"}}))}]}]);
++            if required {
++                req["tool_choice"] = json!("required");
++            } else {
++                req["tools"][0]["tools"]
++                    .as_array_mut()
++                    .unwrap()
++                    .push(json!({
++                        "type":"function","name":"other","description":"Unselected tool rule",
++                        "parameters":object(json!({"value":{"type":"boolean"}}))
++                    }));
++            }
++            let mut plan = DecisionPlan::new(&req, None).unwrap();
++            let input = plan.input().to_vec();
++            let first = questions(plan.next().unwrap());
++            let fields = if required {
++                first
++            } else {
++                questions(plan.accept(&[choice(&first[0], 1, 1.0, 1.0)]).unwrap())
++            };
++            assert_eq!(fields.len(), 1);
++            let instructions = fields[0]["instructions"].as_str().unwrap();
++            assert!(instructions.contains("Call support.classify"));
++            assert!(instructions.contains("Set value true only for subscription purchases"));
++            assert!(instructions.contains("All values concern business accounts"));
++            assert!(!instructions.contains("Unselected tool rule"));
++            assert_eq!(plan.input(), input);
++            let DecisionAction::Output(output) =
++                plan.accept(&[predicate(&fields[0], 0.9)]).unwrap()
++            else {
++                panic!("expected selected function call")
++            };
++            assert_eq!(output["namespace"], "support");
++            assert_eq!(output["name"], "classify");
++            assert_eq!(
++                serde_json::from_str::<Value>(output["arguments"].as_str().unwrap()).unwrap(),
++                json!({"value":true})
++            );
++        }
++    }
++
++    #[test]
++    fn schema_context_preserves_ancestors_references_and_finite_alternatives() {
++        let mut nested = object(json!({"selection":{"oneOf":[
++            {"title":"Primary alternative","description":"Use for recurring purchases",
++             "anyOf":[{"const":"a","description":"Renewal-specific rule"}]},
++            {"const":"b","title":"Secondary alternative","description":"Use for one-time purchases"}
++        ]}}));
++        nested["description"] = json!("Selection concerns the current order");
++        let mut schema = object(json!({
++            "flag":{"$ref":"#/$defs/flag","title":"Order flag",
++                "description":"Apply the property-specific rule"},
++            "nested":nested
++        }));
++        schema["title"] = json!("Purchase classification");
++        schema["description"] = json!("Use the customer's submitted evidence");
++        schema["$defs"] = json!({"flag":{"type":"boolean","title":"Reusable flag",
++            "description":"The reusable flag represents eligibility","default":true,"examples":[false]}});
++        let mut plan = DecisionPlan::new(&request(schema), None).unwrap();
++        let fields = questions(plan.next().unwrap());
++        assert_eq!(fields.len(), 2);
++        for field in &fields {
++            let instructions = field["instructions"].as_str().unwrap();
++            assert!(instructions.contains("Purchase classification"));
++            assert!(instructions.contains("Use the customer's submitted evidence"));
++        }
++        let flag = fields.iter().find(|q| q["type"] == "predicate").unwrap();
++        let instructions = flag["instructions"].as_str().unwrap();
++        for text in [
++            "Order flag",
++            "Apply the property-specific rule",
++            "Reusable flag",
++            "The reusable flag represents eligibility",
++            "default: true",
++            "examples: [false]",
++        ] {
++            assert!(
++                instructions.contains(text),
++                "missing {text}: {instructions}"
++            );
++        }
++        assert!(!instructions.contains("Selection concerns the current order"));
++        let selection = fields.iter().find(|q| q["type"] == "choice").unwrap();
++        let instructions = selection["instructions"].as_str().unwrap();
++        assert!(instructions.contains("Field $/nested."));
++        assert!(instructions.contains("Selection concerns the current order"));
++        assert!(!instructions.contains("Apply the property-specific rule"));
++        let first = selection["choices"][0]["description"].as_str().unwrap();
++        assert!(first.contains("Primary alternative"));
++        assert!(first.contains("Use for recurring purchases"));
++        assert!(first.contains("Renewal-specific rule"));
++        assert!(!first.contains("Use for one-time purchases"));
++        let second = selection["choices"][1]["description"].as_str().unwrap();
++        assert!(second.contains("Secondary alternative"));
++        assert!(second.contains("Use for one-time purchases"));
++        assert!(!second.contains("Renewal-specific rule"));
++        let answers: Vec<_> = fields
++            .iter()
++            .map(|q| {
++                if q["type"] == "predicate" {
++                    predicate(q, 0.9)
++                } else {
++                    choice(q, 0, 1.0, 1.0)
++                }
++            })
++            .collect();
++        assert_eq!(
++            output_value(plan.accept(&answers).unwrap()),
++            json!({"flag":true,"nested":{"selection":"a"}})
++        );
++    }
++
++    #[test]
++    fn route_threshold_uses_selected_probability_instead_of_confidence() {
++        let mut req = request(object(json!({"ok":{"type":"boolean"}})));
++        req["tools"] = json!([{"type":"function","name":"act","parameters":object(json!({}))}]);
++        let mut plan = DecisionPlan::new(&req, Some(0.7)).unwrap();
++        let q = questions(plan.next().unwrap());
++        assert!(matches!(
++            plan.accept(&[choice(&q[0], 0, 0.6, 1.0)]).unwrap(),
++            DecisionAction::Handoff(_)
++        ));
++        let mut plan = DecisionPlan::new(&req, Some(0.7)).unwrap();
++        let q = questions(plan.next().unwrap());
++        assert!(matches!(
++            plan.accept(&[choice(&q[0], 0, 0.8, 0.0)]).unwrap(),
++            DecisionAction::Questions(_)
++        ));
++    }
++
++    #[test]
++    fn unfillable_route_remains_selectable_but_all_unfillable_skips_questions() {
++        let mut req = request(json!({"type":"string"}));
++        let mut plan = DecisionPlan::new(&req, None).unwrap();
++        assert!(matches!(plan.next().unwrap(), DecisionAction::Handoff(_)));
++        req["tools"] = json!([{"type":"function","name":"act","parameters":object(json!({}))}]);
++        let mut plan = DecisionPlan::new(&req, None).unwrap();
++        let q = questions(plan.next().unwrap());
++        assert_eq!(q[0]["choices"].as_array().unwrap().len(), 2);
++        assert!(matches!(
++            plan.accept(&[choice(&q[0], 0, 1.0, 1.0)]).unwrap(),
++            DecisionAction::Handoff(_)
++        ));
++    }
++
++    #[test]
++    fn fill_errors_are_typed_terminal_and_never_handoff() {
++        let req = request(object(json!({"ok":{"type":"boolean"}})));
++        for variant in 0..5 {
++            let mut plan = DecisionPlan::new(&req, None).unwrap();
++            let q = questions(plan.next().unwrap());
++            let answers = match variant {
++                0 => vec![],
++                1 => vec![json!({"type":"predicate","name":"spoofed","probability":0.5})],
++                2 => vec![json!({"type":"predicate","name":q[0]["name"],"probability":1.5})],
++                3 => vec![json!({"type":"choice","name":q[0]["name"],"choice":"true"})],
++                _ => vec![json!({"type":"refusal","name":q[0]["name"]})],
++            };
++            assert_eq!(
++                plan.accept(&answers),
++                Err(if variant == 4 {
++                    DecisionError::Refusal
++                } else {
++                    DecisionError::InvalidAnswer
++                })
++            );
++            assert_eq!(plan.next(), Err(DecisionError::InvalidState));
++        }
++    }
++
++    #[test]
++    fn choice_answers_require_exact_members_unique_distribution_and_valid_confidence() {
++        let req = request(json!({"enum":[false,"false",3]}));
++        for variant in 0..5 {
++            let mut plan = DecisionPlan::new(&req, None).unwrap();
++            let q = questions(plan.next().unwrap());
++            let mut answer = choice(&q[0], 0, 0.8, 0.9);
++            match variant {
++                0 => answer["probabilities"][1] = answer["probabilities"][0].clone(),
++                1 => answer["choice"] = json!(false),
++                2 => answer["confidence"] = json!(-0.1),
++                3 => answer["probabilities"][0]["probability"] = json!(2),
++                _ => {
++                    answer["probabilities"].as_array_mut().unwrap().pop();
++                }
++            }
++            assert_eq!(plan.accept(&[answer]), Err(DecisionError::InvalidAnswer));
++        }
++    }
++
++    #[test]
++    fn references_resolve_locally_and_cycles_are_unfillable() {
++        let mut schema = object(
++            json!({"ok":{"$ref":"#/$defs/flag", "description":"Property specific meaning"}}),
++        );
++        schema["$defs"] = json!({"flag":{"type":"boolean"}});
++        let mut plan = DecisionPlan::new(&request(schema.clone()), None).unwrap();
++        let q = questions(plan.next().unwrap());
++        assert_eq!(q.len(), 1);
++        assert!(
++            q[0]["instructions"]
++                .as_str()
++                .unwrap()
++                .contains("Property specific meaning")
++        );
++        schema["$defs"]["flag"] = json!({"$ref":"#/$defs/flag"});
++        let mut plan = DecisionPlan::new(&request(schema), None).unwrap();
++        assert!(matches!(plan.next().unwrap(), DecisionAction::Handoff(_)));
++    }
++
++    #[test]
++    fn nullable_finite_unions_work_and_unsupported_constraints_do_not_get_ignored() {
++        let mut plan = DecisionPlan::new(
++            &request(json!({"anyOf":[{"enum":[1,2]},{"type":"null"}]})),
++            None,
++        )
++        .unwrap();
++        let q = questions(plan.next().unwrap());
++        assert_eq!(
++            output_value(plan.accept(&[choice(&q[0], 2, 1.0, 1.0)]).unwrap()),
++            Value::Null
++        );
++        for schema in [
++            json!({"type":"string","enum":["a","b"],"pattern":"a"}),
++            json!({"type":"array","items":{"enum":["a","b"]}}),
++            json!({"type":"number"}),
++            json!({"type":"object","additionalProperties":true}),
++            json!({"anyOf":[object(json!({})),{"type":"null"}]}),
++        ] {
++            let mut plan = DecisionPlan::new(&request(schema), None).unwrap();
++            assert!(matches!(plan.next().unwrap(), DecisionAction::Handoff(_)));
++        }
++    }
++
++    #[test]
++    fn tool_choice_none_and_required_control_admitted_routes() {
++        let mut empty = DecisionPlan::new(
++            &request(json!({"type":"object","additionalProperties":false})),
++            None,
++        )
++        .unwrap();
++        assert_eq!(output_value(empty.next().unwrap()), json!({}));
++        let mut req = request(object(json!({"answer":{"const":true}})));
++        req["tools"] = json!([{"type":"function","name":"act","parameters":object(json!({}))}]);
++        req["tool_choice"] = json!("none");
++        let mut plan = DecisionPlan::new(&req, None).unwrap();
++        assert_eq!(output_value(plan.next().unwrap()), json!({"answer":true}));
++        req["tool_choice"] = json!("required");
++        let mut plan = DecisionPlan::new(&req, None).unwrap();
++        let DecisionAction::Output(item) = plan.next().unwrap() else {
++            panic!("expected tool")
++        };
++        assert_eq!(item["name"], "act");
++    }
++
++    #[test]
++    fn input_preserves_roles_order_images_and_call_linkage_without_reasoning() {
++        let mut req = request(json!({"const":true}));
++        req["instructions"] = json!("Application policy");
++        req["input"] = json!([
++            {"role":"developer","content":[{"type":"input_text","text":"Developer policy"}]},
++            {"role":"user","content":[{"type":"input_text","text":"User evidence"},{"type":"input_image","image_url":"https://example.test/image.png"}]},
++            {"type":"reasoning","encrypted_content":"opaque"},
++            {"type":"function_call","call_id":"call_1","namespace":"support","name":"lookup","arguments":"{}"},
++            {"type":"function_call_output","call_id":"call_1","output":"Evidence"},
++            {"role":"assistant","content":[{"type":"output_text","text":"Prior answer"}]}
++        ]);
++        let plan = DecisionPlan::new(&req, None).unwrap();
++        assert_eq!(plan.input().len(), 6);
++        assert_eq!(plan.input()[0]["role"], "developer");
++        assert_eq!(plan.input()[1]["role"], "developer");
++        assert_eq!(plan.input()[2]["role"], "user");
++        assert_eq!(plan.input()[3]["arguments"], "{}");
++        assert_eq!(plan.input()[3]["namespace"], "support");
++        assert_eq!(plan.input()[4]["call_id"], "call_1");
++        req["input"][4]["call_id"] = json!("unknown");
++        assert_eq!(
++            DecisionPlan::new(&req, None).unwrap_err(),
++            DecisionError::UnsupportedInput
++        );
++    }
++
++    #[test]
++    fn unsupported_input_content_fails_before_questions() {
++        let mut req = request(json!({"const":true}));
++        req["input"] =
++            json!([{"role":"user","content":[{"type":"input_file","file_id":"file_1"}]}]);
++        assert_eq!(
++            DecisionPlan::new(&req, None).unwrap_err(),
++            DecisionError::UnsupportedInput
++        );
++    }
++    #[test]
++    fn invalid_score_labels_and_values_fail_without_fallback() {
++        let req = request(json!({"type":"number","minimum":2,"maximum":3}));
++        for variant in 0..3 {
++            let mut plan = DecisionPlan::new(&req, None).unwrap();
++            let q = questions(plan.next().unwrap());
++            let mut answer = json!({"type":"score","name":q[0]["name"], "score":0.5,"confidence":0.8,
++                "probabilities":[{"value":0,"label":"2","probability":0.5},{"value":1,"label":"3","probability":0.5}]});
++            match variant {
++                0 => answer["probabilities"][0]["label"] = json!("spoofed"),
++                1 => answer["score"] = json!(1.5),
++                _ => answer["probabilities"][0]["value"] = json!(2),
++            }
++            assert_eq!(plan.accept(&[answer]), Err(DecisionError::InvalidAnswer));
++        }
++    }
++
++    #[test]
++    fn ref_expansion_and_question_counts_are_bounded_before_any_request() {
++        let properties: Map<String, Value> = (0..401)
++            .map(|i| (format!("flag_{i}"), json!({"type":"boolean"})))
++            .collect();
++        let mut plan =
++            DecisionPlan::new(&request(object(Value::Object(properties))), None).unwrap();
++        assert!(matches!(plan.next().unwrap(), DecisionAction::Handoff(_)));
++        let mut defs = Map::new();
++        defs.insert("leaf".into(), json!({"const":true}));
++        for i in 0..15 {
++            let target = if i == 0 {
++                "leaf".to_owned()
++            } else {
++                format!("branch_{}", i - 1)
++            };
++            defs.insert(format!("branch_{i}"), object(json!({"left":{"$ref":format!("#/$defs/{target}")},"right":{"$ref":format!("#/$defs/{target}")}})));
++        }
++        let schema = json!({"$ref":"#/$defs/branch_14","$defs":defs});
++        let mut plan = DecisionPlan::new(&request(schema), None).unwrap();
++        assert!(matches!(plan.next().unwrap(), DecisionAction::Handoff(_)));
++    }
++
++    #[test]
++    fn call_outputs_must_match_the_call_kind_and_ids() {
++        let mut req = request(json!({"const":true}));
++        req["input"] = json!([
++            {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
++            {"type":"custom_tool_call_output","call_id":"call_1","output":"Evidence"}
++        ]);
++        assert_eq!(
++            DecisionPlan::new(&req, None).unwrap_err(),
++            DecisionError::UnsupportedInput
++        );
++        req["input"][1]["type"] = json!("function_call_output");
++        assert!(DecisionPlan::new(&req, None).is_ok());
++        let duplicate = req["input"][1].clone();
++        req["input"].as_array_mut().unwrap().push(duplicate);
++        assert_eq!(
++            DecisionPlan::new(&req, None).unwrap_err(),
++            DecisionError::UnsupportedInput
++        );
++    }
++}
+diff --git a/codex-rs/codex-api/src/endpoint/decisions.rs b/codex-rs/codex-api/src/endpoint/decisions.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f429d92061b7fa26d086cf262ff06ea312f06734
+--- /dev/null
++++ b/codex-rs/codex-api/src/endpoint/decisions.rs
+@@ -0,0 +1,53 @@
++use crate::auth::SharedAuthProvider;
++use crate::endpoint::session::EndpointSession;
++use crate::error::ApiError;
++use crate::provider::Provider;
++use codex_client::HttpTransport;
++use codex_client::RequestTelemetry;
++use http::HeaderMap;
++use http::Method;
++use serde_json::Value;
++use std::sync::Arc;
++
++/// A nonstreaming Decisions response with its provider request identity.
++pub struct DecisionResponse {
++    pub body: Value,
++    pub request_id: Option<String>,
++}
++
++/// Uses the same provider authentication, retry policy, and transport as Responses.
++pub struct DecisionsClient<T: HttpTransport> {
++    session: EndpointSession<T>,
++}
++
++impl<T: HttpTransport> DecisionsClient<T> {
++    pub fn new(transport: T, provider: Provider, auth: SharedAuthProvider) -> Self {
++        Self {
++            session: EndpointSession::new(transport, provider, auth),
++        }
++    }
++
++    pub fn with_telemetry(mut self, telemetry: Option<Arc<dyn RequestTelemetry>>) -> Self {
++        self.session = self.session.with_request_telemetry(telemetry);
++        self
++    }
++
++    pub async fn create(
++        &self,
++        body: Value,
++        headers: HeaderMap,
++    ) -> Result<DecisionResponse, ApiError> {
++        let response = self
++            .session
++            .execute(Method::POST, "/decisions", headers, Some(body))
++            .await?;
++        let request_id = response
++            .headers
++            .get("x-request-id")
++            .and_then(|value| value.to_str().ok())
++            .map(str::to_owned);
++        let body = serde_json::from_slice(&response.body)
++            .map_err(|_| ApiError::Stream("Decisions returned invalid JSON".into()))?;
++        Ok(DecisionResponse { body, request_id })
++    }
++}
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index e846ffec067f08a72319286f2e2ac5c60cbadac6..5101ae6e4a9b1a7523f8553960ab834830101d3d 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -1,3 +1,4 @@
++pub(crate) mod decisions;
+ pub(crate) mod images;
+ pub(crate) mod memories;
+ pub(crate) mod models;
+@@ -9,6 +10,8 @@ pub(crate) mod responses_websocket;
+ pub(crate) mod search;
+ mod session;
+ 
++pub use decisions::DecisionResponse;
++pub use decisions::DecisionsClient;
+ pub use images::ImageRequestError;
+ pub use images::ImagesClient;
+ pub use memories::MemoriesClient;
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index ce0ed21cec52b9ebd98ed82711cf7eafc83000af..3ebe24cd43e9db3a250146014eec98114c69a2dc 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -2,6 +2,7 @@ pub(crate) mod api_bridge;
+ mod api_rate_limits;
+ pub(crate) mod auth;
+ pub(crate) mod common;
++pub mod decisions;
+ pub(crate) mod endpoint;
+ pub(crate) mod error;
+ pub(crate) mod files;
+@@ -51,6 +52,8 @@ pub use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+ pub use crate::common::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
+ pub use crate::common::create_text_param_for_request;
+ pub use crate::common::response_create_client_metadata;
++pub use crate::endpoint::DecisionResponse;
++pub use crate::endpoint::DecisionsClient;
+ pub use crate::endpoint::ImageRequestError;
+ pub use crate::endpoint::ImagesClient;
+ pub use crate::endpoint::MemoriesClient;
+diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
+index 0518ea887b30b950fc9b0bd2573b1e007da13e8b..bcaec91010550346dc92540a5f1d8b3075d0f5fd 100644
+--- a/codex-rs/config/src/thread_config.rs
++++ b/codex-rs/config/src/thread_config.rs
+@@ -296,6 +296,7 @@ mod tests {
+ 
+     fn test_provider(name: &str) -> ModelProviderInfo {
+         ModelProviderInfo {
++            decision_model: None,
+             name: name.to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             model_catalog_url: None,
+diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
+index da0af3bca082c5b811e4d4bc4d6bfdecbdca427b..d0fdcc1c157d5338452838283ceb2fbfd5e2491d 100644
+--- a/codex-rs/config/src/thread_config/remote.rs
++++ b/codex-rs/config/src/thread_config/remote.rs
+@@ -171,6 +171,7 @@ fn model_provider_from_proto(
+         }
+     };
+     let info = ModelProviderInfo {
++        decision_model: None,
+         name: provider.name,
+         base_url: provider.base_url,
+         model_catalog_url: provider.model_catalog_url.map(Into::into),
+@@ -216,6 +217,7 @@ fn model_provider_to_proto(
+         gateway_oauth: _,
+         aws: _,
+         wire_api,
++        decision_model: _,
+         query_params,
+         http_headers,
+         env_http_headers,
+@@ -551,6 +553,7 @@ mod tests {
+ 
+     fn expected_provider() -> ModelProviderInfo {
+         ModelProviderInfo {
++            decision_model: None,
+             name: "Local".to_string(),
+             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+             model_catalog_url: Some("http://127.0.0.1:8061/api/codex/models".into()),
+diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
+index cfd72368816f4356c17823d57f8640e49572a34c..beea9a486273e0767c4294e26347dfaca03a82e3 100644
+--- a/codex-rs/core/Cargo.toml
++++ b/codex-rs/core/Cargo.toml
+@@ -16,6 +16,7 @@ codex-utils-process = { workspace = true }
+ anyhow = { workspace = true }
+ arc-swap = { workspace = true }
+ async-channel = { workspace = true }
++async-stream = { workspace = true }
+ base64 = { workspace = true }
+ bm25 = { workspace = true }
+ chrono = { workspace = true, features = ["serde"] }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 81391ca070ff4ec0574028c86d0a1e05744007dd..674117ba6dc05b41775381d8e99eb59d32537858 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -35,6 +35,9 @@ use std::sync::atomic::Ordering;
+ #[path = "client_tool_metadata.rs"]
+ mod tool_metadata;
+ 
++#[path = "client_decisions.rs"]
++mod decisions;
++
+ use crate::CodexResponsesHeaders;
+ use crate::tools::ExecutedToolCalls;
+ use async_channel::Sender;
+@@ -470,6 +473,65 @@ fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap
+     headers
+ }
+ 
++// Keep EndpointSession's existing HttpTransport boundary. Only a trusted
++// contributor can claim streaming; claimed unary calls collect that same stream.
++struct ModelResponsesTransport<F> {
++    direct: Option<codex_extension_api::ModelHttpStream>,
++    fallback: F,
++    defaults: ApiHeaderMap,
++}
++
++impl<F> codex_client::HttpTransport for ModelResponsesTransport<F>
++where
++    F: Fn() -> std::result::Result<ReqwestTransport, codex_client::TransportError> + Send + Sync,
++{
++    async fn execute(
++        &self,
++        req: codex_client::Request,
++    ) -> std::result::Result<codex_client::Response, codex_client::TransportError> {
++        if self.direct.is_some() {
++            let mut response = codex_client::HttpTransport::stream(self, req).await?;
++            let mut body = Vec::new();
++            while let Some(chunk) = response.bytes.next().await {
++                let chunk = chunk?;
++                if body.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
++                    return Err(codex_client::TransportError::Network(
++                        "Model JSON response exceeds the 64 MiB transport limit".into(),
++                    ));
++                }
++                body.extend_from_slice(&chunk);
++            }
++            Ok(codex_client::Response {
++                status: response.status,
++                headers: response.headers,
++                body: body.into(),
++            })
++        } else {
++            codex_client::HttpTransport::execute(&(self.fallback)()?, req).await
++        }
++    }
++
++    async fn stream(
++        &self,
++        mut req: codex_client::Request,
++    ) -> std::result::Result<codex_client::StreamResponse, codex_client::TransportError> {
++        if let Some(direct) = &self.direct {
++            // Match the physical client's merge: explicit/auth/trace headers win,
++            // including all values of a repeated header. Preserve the same snapshot.
++            for name in self.defaults.keys() {
++                if !req.headers.contains_key(name) {
++                    for value in self.defaults.get_all(name) {
++                        req.headers.append(name, value.clone());
++                    }
++                }
++            }
++            direct(req).await
++        } else {
++            codex_client::HttpTransport::stream(&(self.fallback)()?, req).await
++        }
++    }
++}
++
+ impl ModelClient {
+     #[allow(clippy::too_many_arguments)]
+     /// Creates a new session-scoped `ModelClient`.
+@@ -1060,6 +1122,7 @@ impl ModelClient {
+     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
+     pub fn responses_websocket_enabled(&self) -> bool {
+         if !self.state.provider.info().supports_websockets
++            || self.state.provider.info().decision_model.is_some()
+             || self.state.disable_websockets.load(Ordering::Relaxed)
+         {
+             return false;
+@@ -1226,7 +1289,7 @@ impl ModelClient {
+         };
+         // Session startup attaches this only for an explicit API-key SDK Provider.
+         // Resolve current auth/provider/routing before reaching this transport seam.
+-        if endpoint == "/responses"
++        if matches!(endpoint, "/responses" | "/decisions")
+             && !api_provider.headers.contains_key(http::header::COOKIE)
+             && !api_provider
+                 .headers
+@@ -2413,6 +2476,20 @@ impl ModelClientSession {
+                 "Buffered Responses requires HTTP without Responses Lite or WebSockets".into(),
+             ));
+         }
++        let decision_options = self.client.state.provider.info().decision_model.clone();
++        if let Some(options) = &decision_options {
++            options
++                .validate(&model_info.slug)
++                .map_err(CodexErr::InvalidRequest)?;
++        }
++        let decision_turn = matches!(
++            responses_metadata.request_kind,
++            Some(crate::responses_metadata::CodexResponsesRequestKind::Turn)
++        );
++        let context_model = decision_options
++            .as_ref()
++            .filter(|_| decision_turn)
++            .map_or(model_info.slug.as_str(), |options| options.model.as_str());
+         let thread_id = self.client.state.thread_id.to_string();
+         let mut transformed = None;
+         for contributor in &self.client.request_contributors {
+@@ -2428,7 +2505,7 @@ impl ModelClientSession {
+                 .transform_context(codex_extension_api::ModelContextInput {
+                     thread_id: &thread_id,
+                     turn_id,
+-                    model: &model_info.slug,
++                    model: context_model,
+                     compaction: matches!(
+                         responses_metadata.request_kind,
+                         Some(crate::responses_metadata::CodexResponsesRequestKind::Compaction(_))
+@@ -2444,6 +2521,26 @@ impl ModelClientSession {
+             recorder.invalidate_wire_inventory_loss(&prompt.input, &projected.input);
+         }
+         let prompt = transformed.as_ref().unwrap_or(prompt);
++        if let Some(options) = decision_options {
++            if decision_turn {
++                return self
++                    .stream_decisions(
++                        prompt,
++                        model_info,
++                        session_telemetry,
++                        effort,
++                        summary,
++                        service_tier,
++                        responses_metadata,
++                        inference_trace,
++                        options,
++                    )
++                    .await;
++            }
++            if options.fallback_model.is_none() {
++                return Err(CodexErr::InvalidRequest("Decisions inference requires an explicit fallback for compaction or other generative requests".into()));
++            }
++        }
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
+@@ -2752,6 +2849,7 @@ where
+             observation_processed: observation_processed_for_stream,
+             observation_pending: false,
+             request_observation: None,
++            attempts: Default::default(),
+             rx_event,
+             interrupt: None,
+             consumer_dropped: consumer_dropped_for_stream,
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 5958654daba43d24e51cf75d77c24b3f4d949385..a8bd06d9917d6a96a3982fb882652b322a8a8695 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -185,11 +185,21 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
+     }
+ }
+ 
++#[derive(Clone)]
++pub(crate) struct ResponseAttempt {
++    pub(crate) model: String,
++    pub(crate) observation: Option<Arc<crate::request_observation::RequestObservationContext>>,
++}
++
++pub(crate) type ResponseAttempts =
++    Arc<std::sync::Mutex<std::collections::HashMap<String, ResponseAttempt>>>;
++
+ pub struct ResponseStream {
+     pub(crate) observation_processed: Arc<Notify>,
+     pub(crate) observation_pending: bool,
+     pub(crate) request_observation:
+         Option<Arc<crate::request_observation::RequestObservationContext>>,
++    pub(crate) attempts: ResponseAttempts,
+     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
+     pub(crate) interrupt: Option<oneshot::Sender<()>>,
+     /// Signals the mapper task that the consumer stopped polling before the
+@@ -197,6 +207,60 @@ pub struct ResponseStream {
+     pub(crate) consumer_dropped: CancellationToken,
+ }
+ 
++impl ResponseStream {
++    /// Polls each stage only after Core has retained the preceding response accounting.
++    pub(crate) fn from_stages(
++        stages: impl Stream<Item = Result<ResponseEvent>> + Send + 'static,
++        attempts: ResponseAttempts,
++    ) -> Self {
++        use futures::StreamExt;
++        let (tx_event, rx_event) = mpsc::channel(1);
++        let consumer_dropped = CancellationToken::new();
++        let dropped = consumer_dropped.clone();
++        let observation_processed = Arc::new(Notify::new());
++        let processed = Arc::clone(&observation_processed);
++        tokio::spawn(async move {
++            let mut stages = Box::pin(stages);
++            loop {
++                let event = tokio::select! {
++                    biased;
++                    _ = dropped.cancelled() => break,
++                    event = stages.next() => event,
++                };
++                let Some(event) = event else { break };
++                let accounting = matches!(
++                    &event,
++                    Ok(ResponseEvent::ResponseObserved(_)
++                        | ResponseEvent::IntermediateCompleted { .. })
++                );
++                let failed = event.is_err();
++                if tx_event.send(event).await.is_err() {
++                    break;
++                }
++                if accounting {
++                    tokio::select! {
++                        biased;
++                        _ = dropped.cancelled() => break,
++                        _ = processed.notified() => {}
++                    }
++                }
++                if failed {
++                    break;
++                }
++            }
++        });
++        Self {
++            observation_processed,
++            observation_pending: false,
++            request_observation: None,
++            attempts,
++            rx_event,
++            interrupt: None,
++            consumer_dropped,
++        }
++    }
++}
++
+ impl Stream for ResponseStream {
+     type Item = Result<ResponseEvent>;
+ 
+@@ -209,7 +273,9 @@ impl Stream for ResponseStream {
+         let event = self.rx_event.poll_recv(cx);
+         if matches!(
+             &event,
+-            Poll::Ready(Some(Ok(ResponseEvent::ResponseObserved(_))))
++            Poll::Ready(Some(Ok(
++                ResponseEvent::ResponseObserved(_) | ResponseEvent::IntermediateCompleted { .. }
++            )))
+         ) {
+             self.observation_pending = true;
+         }
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index e23385b0c2c145c7a66a45b5a6bee4d137531e3d..2a28b88d1b251fea0682f2e6dfc951b8c590d653 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -267,3 +267,51 @@ fn serializes_flex_service_tier_when_set() {
+         Some("flex")
+     );
+ }
++
++#[tokio::test]
++async fn dropping_accounting_stage_retires_producer_before_next_request() {
++    use codex_protocol::protocol::{ResponseObservation, ResponseObservationStatus, TokenUsage};
++    use futures::StreamExt;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use tokio::sync::Notify;
++
++    struct ProducerDrop(Arc<Notify>);
++    impl Drop for ProducerDrop {
++        fn drop(&mut self) {
++            self.0.notify_one();
++        }
++    }
++
++    let retired = Arc::new(Notify::new());
++    let advanced = Arc::new(AtomicUsize::new(0));
++    let producer_retired = retired.clone();
++    let producer_advanced = advanced.clone();
++    let stages = async_stream::stream! {
++        let _guard = ProducerDrop(producer_retired);
++        yield Ok(ResponseEvent::IntermediateCompleted {
++            observation: ResponseObservation {
++                response_id: Some("route_before_fill".into()),
++                status: ResponseObservationStatus::Completed,
++                incomplete_reason: None,
++                usage: None,
++            },
++            model: "decision-test".into(),
++            final_response: false,
++            response_id: "route_before_fill".into(),
++            token_usage: Some(TokenUsage::default()),
++            usage_metadata: None,
++        });
++        producer_advanced.fetch_add(1, Ordering::SeqCst);
++        yield Ok(ResponseEvent::Created { response_id: Some("fill_must_not_start".into()) });
++    };
++    let mut stream = ResponseStream::from_stages(stages, Default::default());
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ResponseEvent::IntermediateCompleted { .. }))
++    ));
++    drop(stream);
++    tokio::time::timeout(std::time::Duration::from_secs(5), retired.notified())
++        .await
++        .expect("dropping the stream must retire the producer");
++    assert_eq!(advanced.load(Ordering::SeqCst), 0);
++}
+diff --git a/codex-rs/core/src/client_decisions.rs b/codex-rs/core/src/client_decisions.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcfd3bee0b885b8bc30791711ce2d50078885a09
+--- /dev/null
++++ b/codex-rs/core/src/client_decisions.rs
+@@ -0,0 +1,633 @@
++//! Decisions inference uses the existing native admission, accounting, and tool loop.
++use super::*;
++use crate::client_common::{ResponseAttempt, ResponseAttempts};
++use codex_api::decisions::{DecisionAction, DecisionError, DecisionPlan};
++use codex_model_provider_info::DecisionModelOptions;
++use codex_protocol::ResponseUsageMetadata;
++use codex_protocol::protocol::{
++    ReceivedResponseUsage, ResponseObservation, ResponseObservationStatus, TokenUsage,
++};
++use serde_json::{Value, json};
++
++struct Completion {
++    id: String,
++    model: String,
++    usage: Option<TokenUsage>,
++    metadata: ResponseUsageMetadata,
++    observation: ResponseObservation,
++}
++
++fn counter(value: Option<&Value>, required: bool) -> Result<i64> {
++    match value {
++        Some(value) => value
++            .as_i64()
++            .filter(|value| (0..=9_007_199_254_740_991).contains(value))
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest("Decisions returned invalid token usage".into())
++            }),
++        None if !required => Ok(0),
++        None => Err(CodexErr::InvalidRequest(
++            "Decisions omitted required token usage".into(),
++        )),
++    }
++}
++
++fn completion(body: &Value, requested_model: &str) -> Result<Completion> {
++    let reported_model = body
++        .get("model")
++        .and_then(Value::as_str)
++        .filter(|model| !model.trim().is_empty());
++    let model = reported_model.unwrap_or(requested_model).to_owned();
++    // Decisions has no response ID. Keep its local identity separate from x-request-id.
++    let id = format!("sdk_decision_{}", Uuid::new_v4());
++    let usage = match body.get("usage").filter(|value| !value.is_null()) {
++        None => None,
++        Some(raw) => {
++            let input = counter(raw.get("input_tokens"), true)?;
++            let output = counter(raw.get("output_tokens"), true)?;
++            let cached = counter(
++                raw.get("input_tokens_details")
++                    .and_then(|value| value.get("cached_tokens")),
++                false,
++            )?;
++            let cache_write = counter(
++                raw.get("input_tokens_details")
++                    .and_then(|value| value.get("cache_write_tokens")),
++                false,
++            )?;
++            let reasoning = counter(
++                raw.get("output_tokens_details")
++                    .and_then(|value| value.get("reasoning_tokens")),
++                false,
++            )?;
++            let total = counter(raw.get("total_tokens"), true)?;
++            if cached > input
++                || cache_write > input
++                || reasoning > output
++                || total != input + output
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Decisions returned inconsistent token usage".into(),
++                ));
++            }
++            Some(TokenUsage {
++                input_tokens: input,
++                cached_input_tokens: cached,
++                cache_write_input_tokens: cache_write,
++                output_tokens: output,
++                reasoning_output_tokens: reasoning,
++                total_tokens: total,
++                ..TokenUsage::default()
++            })
++        }
++    };
++    let observed_usage = usage.as_ref().map(|usage| ReceivedResponseUsage {
++        input_tokens: Some(usage.input_tokens),
++        cached_input_tokens: Some(usage.cached_input_tokens),
++        cache_write_input_tokens: Some(usage.cache_write_input_tokens),
++        output_tokens: Some(usage.output_tokens),
++        reasoning_output_tokens: Some(usage.reasoning_output_tokens),
++        total_tokens: Some(usage.total_tokens),
++    });
++    Ok(Completion {
++        observation: ResponseObservation {
++            response_id: Some(id.clone()),
++            status: ResponseObservationStatus::Completed,
++            incomplete_reason: None,
++            usage: observed_usage,
++        },
++        id,
++        model,
++        usage,
++        metadata: ResponseUsageMetadata {
++            amount: None,
++            metadata: Some(
++                json!({"decisions": {"model": reported_model, "answers": body.get("answers")}}),
++            ),
++        },
++    })
++}
++
++fn remember_attempt(
++    attempts: &ResponseAttempts,
++    id: &str,
++    model: &str,
++    observation: Option<Arc<crate::request_observation::RequestObservationContext>>,
++) {
++    attempts.lock().expect("response attempts poisoned").insert(
++        id.to_owned(),
++        ResponseAttempt {
++            model: model.to_owned(),
++            observation,
++        },
++    );
++}
++
++fn buffered_stream(
++    events: Vec<ResponseEvent>,
++    request_id: Option<String>,
++) -> codex_api::ResponseStream {
++    let (sender, receiver) = mpsc::channel(events.len().max(1));
++    for event in events {
++        sender
++            .try_send(Ok(event))
++            .expect("buffered Decisions response fits its channel");
++    }
++    codex_api::ResponseStream {
++        rx_event: receiver,
++        upstream_request_id: request_id,
++        interrupt: None,
++    }
++}
++
++fn decision_error(error: DecisionError, provider: &SharedModelProvider) -> CodexErr {
++    if error == DecisionError::Refusal {
++        provider.map_api_error(ApiError::ContentFilter)
++    } else {
++        CodexErr::InvalidRequest(error.to_string())
++    }
++}
++
++impl ModelClientSession {
++    #[allow(clippy::too_many_arguments)]
++    pub(super) async fn stream_decisions(
++        &self,
++        prompt: &Prompt,
++        model_info: &ModelInfo,
++        session_telemetry: &SessionTelemetry,
++        effort: Option<ReasoningEffortConfig>,
++        summary: ReasoningSummaryConfig,
++        service_tier: Option<String>,
++        responses_metadata: &CodexResponsesMetadata,
++        inference_trace: &InferenceTraceContext,
++        options: DecisionModelOptions,
++    ) -> Result<ResponseStream> {
++        options
++            .validate(&model_info.slug)
++            .map_err(CodexErr::InvalidRequest)?;
++        if model_info.use_responses_lite || self.client.state.session_source.is_non_root_agent() {
++            return Err(CodexErr::InvalidRequest(
++                "Decisions inference requires a direct root using standard Responses output".into(),
++            ));
++        }
++        let mut request = self.client.build_responses_request(
++            prompt,
++            model_info,
++            effort.clone(),
++            summary,
++            service_tier.clone(),
++            responses_metadata,
++            false,
++        )?;
++        self.client
++            .prepare_response_items_for_request(&mut request.input);
++        let mut decision_request = serde_json::to_value(&request)?;
++        for contributor in self.client.request_contributors.iter() {
++            contributor
++                .restore_decision_request(&mut decision_request, prompt.tool_admission.as_ref())
++                .await
++                .map_err(CodexErr::InvalidRequest)?;
++        }
++        let mut plan = DecisionPlan::new(&decision_request, options.min_route_probability)
++            .map_err(|error| decision_error(error, &self.client.state.provider))?;
++        let first = plan
++            .next()
++            .map_err(|error| decision_error(error, &self.client.state.provider))?;
++        if let DecisionAction::Handoff(reason) = &first
++            && options.fallback_model.is_none()
++        {
++            return Err(CodexErr::InvalidRequest(format!(
++                "Decisions inference requires an explicit fallback: {reason}"
++            )));
++        }
++        let client = self.client.clone();
++        let prompt = prompt.clone();
++        let model_info = model_info.clone();
++        let telemetry = session_telemetry.clone();
++        let metadata = responses_metadata.clone();
++        let trace = inference_trace.clone();
++        let attempts = ResponseAttempts::default();
++        let staged_attempts = Arc::clone(&attempts);
++        let stages = async_stream::stream! {
++            let mut action = first;
++            loop {
++                match action {
++                    DecisionAction::Questions(questions) => {
++                        let mut client_metadata = request.client_metadata.clone();
++                        let mut interceptors = Some(crate::model_request::prepare(
++                            &client.request_contributors,
++                            &client.state.thread_id.to_string(),
++                            &options.model,
++                            codex_extension_api::ModelRequestKind::Generation,
++                            &mut client_metadata,
++                            prompt.tool_admission.clone(),
++                        ));
++                        crate::model_request::wait_if_sampling_stopped(
++                            prompt.sampling_stop.as_deref(),
++                        )
++                        .await;
++                        if let Some(admission) = &prompt.prepared_request_admission {
++                            if let Err(error) = admission.admit_request() {
++                                yield Err(CodexErr::Fatal(error));
++                                break;
++                            }
++                        }
++                        if let Err(error) = crate::model_request::admit_request(
++                            interceptors.as_ref().expect("active decision interceptors"),
++                        ) {
++                            yield Err(CodexErr::InvalidRequest(error));
++                            break;
++                        }
++                        let setup =
++                            match client.current_client_setup(ClientRouting::Workspace).await {
++                                Ok(setup) => setup,
++                                Err(error) => {
++                                    yield Err(error);
++                                    break;
++                                }
++                            };
++                        if setup
++                            .auth
++                            .as_ref()
++                            .is_some_and(CodexAuth::uses_codex_backend)
++                        {
++                            yield Err(CodexErr::InvalidRequest(
++                                "Decisions inference requires API-key provider authentication".into(),
++                            ));
++                            break;
++                        }
++                        let url = setup.api_provider.url_for_path("/decisions");
++                        let mut dispatchers = client
++                            .request_contributors
++                            .iter()
++                            .filter_map(|contributor| contributor.http_stream(&url));
++                        let direct = dispatchers.next();
++                        if dispatchers.next().is_some() {
++                            yield Err(CodexErr::Fatal(
++                                "Multiple model HTTP dispatchers claimed the route".into(),
++                            ));
++                            break;
++                        }
++                        let private_dispatch = direct.is_some();
++                        let physical = if private_dispatch {
++                            None
++                        } else {
++                            match client.build_api_transport(
++                                &setup.api_provider,
++                                "/decisions",
++                                setup.redirect_policy,
++                            ) {
++                                Ok(transport) => Some(transport),
++                                Err(error) => {
++                                    yield Err(error);
++                                    break;
++                                }
++                            }
++                        };
++                        let transport = ModelResponsesTransport {
++                            direct,
++                            fallback: || {
++                                physical.clone().ok_or_else(|| {
++                                    codex_client::TransportError::Build(
++                                        "Claimed Decisions route cannot fall back to I/O".into(),
++                                    )
++                                })
++                            },
++                            defaults: codex_login::default_client::default_headers(),
++                        };
++                        let auth_context = AuthRequestTelemetryContext::new(
++                            setup.auth.as_ref().map(CodexAuth::auth_mode),
++                            setup.api_auth.as_ref(),
++                            setup.agent_identity_telemetry.clone(),
++                            PendingUnauthorizedRetry::default(),
++                        );
++                        let (request_telemetry, _) = Self::build_streaming_telemetry(
++                            &telemetry,
++                            auth_context,
++                            RequestRouteTelemetry::for_endpoint("/decisions"),
++                            client.state.auth_env_telemetry.clone(),
++                        );
++                        let mut headers =
++                            client.responses_headers(setup.auth.as_ref(), &options.model);
++                        headers.extend(build_session_headers(
++                            Some(metadata.session_id.clone()),
++                            Some(metadata.thread_id.clone()),
++                        ));
++                        let attempt = trace.start_attempt();
++                        attempt.add_request_headers(&mut headers);
++                        let mut body = json!({"model": options.model, "input": plan.input(), "questions": questions});
++                        if let Some(key) = &request.prompt_cache_key {
++                            body["prompt_cache_key"] = json!(key);
++                        }
++                        attempt.record_started(&body);
++                        if private_dispatch {
++                            body["client_metadata"] = json!(client_metadata);
++                        }
++                        let observation = crate::request_observation::dispatching(
++                            prompt.tool_admission.as_ref(),
++                            &options.model,
++                            None,
++                            None,
++                            codex_extension_api::ModelRequestWire::Decisions,
++                            codex_extension_api::ModelRequestTransport::HttpJson,
++                        );
++                        let api = codex_api::DecisionsClient::new(
++                            crate::model_request::SamplingStopTransport {
++                                inner: transport,
++                                stop: prompt.sampling_stop.clone(),
++                            },
++                            setup.api_provider,
++                            setup.api_auth,
++                        )
++                        .with_telemetry(Some(request_telemetry));
++                        let response = match api.create(body, headers).await {
++                            Ok(response) => response,
++                            Err(error) => {
++                                attempt.record_failed(&error, None, &[]);
++                                yield Err(client.state.provider.map_api_error(error));
++                                break;
++                            }
++                        };
++                        let completed = match completion(&response.body, &options.model) {
++                            Ok(completed) => completed,
++                            Err(error) => {
++                                attempt.record_failed(&error, response.request_id.as_deref(), &[]);
++                                yield Err(error);
++                                break;
++                            }
++                        };
++                        remember_attempt(
++                            &staged_attempts,
++                            &completed.id,
++                            &completed.model,
++                            observation,
++                        );
++                        let next = response
++                            .body
++                            .get("answers")
++                            .and_then(Value::as_array)
++                            .ok_or(DecisionError::InvalidAnswer)
++                            .and_then(|answers| plan.accept(answers));
++                        let mut output = None;
++                        let next = match next {
++                            Ok(DecisionAction::Output(value)) => {
++                                match serde_json::from_value::<ResponseItem>(value) {
++                                    Ok(item) => {
++                                        output = Some(item);
++                                        Ok(None)
++                                    }
++                                    Err(_) => Err(DecisionError::InvalidAnswer),
++                                }
++                            }
++                            Ok(action) => Ok(Some(action)),
++                            Err(error) => Err(error),
++                        };
++                        attempt.record_completed(
++                            &completed.id,
++                            response.request_id.as_deref(),
++                            &completed.usage,
++                            output.as_slice(),
++                        );
++                        if let Some(usage) = &completed.usage {
++                            telemetry.sse_event_completed(usage, None);
++                        }
++                        let final_response = output.is_some();
++                        let response_id = completed.id.clone();
++                        yield Ok(ResponseEvent::IntermediateCompleted {
++                            observation: completed.observation,
++                            model: completed.model,
++                            final_response,
++                            response_id: completed.id,
++                            token_usage: completed.usage,
++                            usage_metadata: Some(completed.metadata),
++                        });
++                        if let Some(output) = output {
++                            // Account for the physical response before any output policy can reject it.
++                            crate::model_request::wait_if_sampling_stopped(
++                                prompt.sampling_stop.as_deref(),
++                            )
++                            .await;
++                            if let Err(error) = crate::model_request::admit_request(
++                                interceptors.as_ref().expect("active decision interceptors"),
++                            ) {
++                                yield Err(CodexErr::InvalidRequest(error));
++                                break;
++                            }
++                            let end_turn = matches!(output, ResponseItem::Message { .. });
++                            let stream = buffered_stream(
++                                vec![
++                                    ResponseEvent::Created {
++                                        response_id: Some(response_id.clone()),
++                                    },
++                                    ResponseEvent::OutputItemDone(output),
++                                    ResponseEvent::Completed {
++                                        response_id,
++                                        token_usage: None,
++                                        usage_metadata: None,
++                                        end_turn: Some(end_turn),
++                                    },
++                                ],
++                                response.request_id,
++                            );
++                            let (mut stream, _) = map_response_stream(
++                                stream,
++                                telemetry.clone(),
++                                InferenceTraceAttempt::disabled(),
++                                Arc::clone(&client.state.provider),
++                                interceptors.take().expect("active decision interceptors"),
++                            );
++                            while let Some(event) = stream.next().await {
++                                yield event;
++                            }
++                            break;
++                        }
++                        match next {
++                            Ok(Some(next)) => action = next,
++                            Err(error) => {
++                                yield Err(decision_error(error, &client.state.provider));
++                                break;
++                            }
++                            Ok(None) => unreachable!("a final decision has an output item"),
++                        }
++                    }
++                    DecisionAction::Handoff(reason) => {
++                        if options.fallback_model.is_none() {
++                            yield Err(CodexErr::InvalidRequest(format!(
++                                "Decisions inference requires an explicit fallback: {reason}"
++                            )));
++                            break;
++                        }
++                        let session = client.new_session();
++                        let mut recovery = RequestAuthRecovery::new(&client.state.provider);
++                        let fallback = session
++                            .stream_responses_api(
++                                &prompt,
++                                &model_info,
++                                &telemetry,
++                                effort.clone(),
++                                summary,
++                                service_tier.clone(),
++                                &metadata,
++                                &trace,
++                                &mut recovery,
++                            )
++                            .await;
++                        match fallback {
++                            Ok(mut stream) => {
++                                while let Some(event) = stream.next().await {
++                                    if let Ok(ResponseEvent::ResponseObserved(observed)) = &event {
++                                        if let Some(id) = &observed.response_id {
++                                            remember_attempt(
++                                                &staged_attempts,
++                                                id,
++                                                &model_info.slug,
++                                                stream.request_observation.clone(),
++                                            );
++                                        }
++                                    }
++                                    yield event;
++                                }
++                            }
++                            Err(error) => {
++                                yield Err(error);
++                            }
++                        }
++                        break;
++                    }
++                    DecisionAction::Output(output) => {
++                        let mut client_metadata = request.client_metadata.clone();
++                        let mut interceptors = Some(crate::model_request::prepare(
++                            &client.request_contributors,
++                            &client.state.thread_id.to_string(),
++                            &options.model,
++                            codex_extension_api::ModelRequestKind::Generation,
++                            &mut client_metadata,
++                            prompt.tool_admission.clone(),
++                        ));
++                        crate::model_request::wait_if_sampling_stopped(
++                            prompt.sampling_stop.as_deref(),
++                        )
++                        .await;
++                        if let Some(admission) = &prompt.prepared_request_admission {
++                            if let Err(error) = admission.admit_request() {
++                                yield Err(CodexErr::Fatal(error));
++                                break;
++                            }
++                        }
++                        if let Err(error) = crate::model_request::admit_request(
++                            interceptors.as_ref().expect("active decision interceptors"),
++                        ) {
++                            yield Err(CodexErr::InvalidRequest(error));
++                            break;
++                        }
++                        let output: ResponseItem = match serde_json::from_value(output) {
++                            Ok(output) => output,
++                            Err(_) => {
++                                yield Err(CodexErr::InvalidRequest(
++                                    "Decisions inference produced an invalid constant output".into(),
++                                ));
++                                break;
++                            }
++                        };
++                        let id = format!("sdk_decision_{}", Uuid::new_v4());
++                        let end_turn = matches!(output, ResponseItem::Message { .. });
++                        let stream = buffered_stream(
++                            vec![
++                                ResponseEvent::Created {
++                                    response_id: Some(id.clone()),
++                                },
++                                ResponseEvent::OutputItemDone(output),
++                                ResponseEvent::Completed {
++                                    response_id: id,
++                                    token_usage: Some(TokenUsage::default()),
++                                    usage_metadata: None,
++                                    end_turn: Some(end_turn),
++                                },
++                            ],
++                            None,
++                        );
++                        let (mut stream, _) = map_response_stream(
++                            stream,
++                            telemetry.clone(),
++                            InferenceTraceAttempt::disabled(),
++                            Arc::clone(&client.state.provider),
++                            interceptors.take().expect("active decision interceptors"),
++                        );
++                        while let Some(event) = stream.next().await {
++                            yield event;
++                        }
++                        break;
++                    }
++                }
++            }
++        };
++        Ok(ResponseStream::from_stages(stages, attempts))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn token_details_are_subsets_and_missing_usage_stays_unknown() {
++        let body = json!({"model":"decision-resolved", "answers":[], "usage": {"input_tokens":10,"output_tokens":3,"total_tokens":13,"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}});
++        let parsed = completion(&body, "decision-test").unwrap();
++        let usage = parsed.usage.unwrap();
++        assert_eq!(usage.total_tokens, 13);
++        assert_eq!(usage.cached_input_tokens, 4);
++        assert_eq!(usage.cache_write_input_tokens, 2);
++        assert_eq!(usage.reasoning_output_tokens, 1);
++        assert_eq!(
++            parsed.metadata.metadata.unwrap()["decisions"]["model"],
++            "decision-resolved"
++        );
++        assert_eq!(parsed.model, "decision-resolved");
++        let unknown = completion(&json!({}), "decision-test").unwrap();
++        assert!(unknown.usage.is_none());
++        assert_eq!(unknown.model, "decision-test");
++        assert!(unknown.metadata.metadata.unwrap()["decisions"]["model"].is_null());
++    }
++
++    #[test]
++    fn responses_without_body_ids_receive_distinct_local_identities() {
++        let body = json!({
++            "model": "decision-snapshot",
++            "answers": [],
++            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
++        });
++        let first = completion(&body, "decision-alias").unwrap();
++        let second = completion(&body, "decision-alias").unwrap();
++        assert!(!first.id.is_empty());
++        assert_ne!(first.id, second.id);
++        assert_eq!(
++            first.observation.response_id.as_deref(),
++            Some(first.id.as_str())
++        );
++        assert_eq!(
++            second.observation.response_id.as_deref(),
++            Some(second.id.as_str())
++        );
++        assert_eq!(first.model, "decision-snapshot");
++        assert_eq!(
++            first.metadata.metadata.unwrap()["decisions"]["model"],
++            "decision-snapshot"
++        );
++    }
++
++    #[test]
++    fn rejects_a_total_that_would_undercount_the_physical_response() {
++        let body = json!({"model":"decision-test", "usage":{"input_tokens":10,"output_tokens":3,"total_tokens":10}});
++        assert!(completion(&body, "decision-test").is_err());
++    }
++
++    #[test]
++    fn rejects_invalid_counter_without_exposing_response_contents() {
++        let body = json!({"model":"decision-test", "usage":{"input_tokens":-1,"output_tokens":0,"total_tokens":0},"secret":"do not echo"});
++        let error = completion(&body, "decision-test")
++            .err()
++            .unwrap()
++            .to_string();
++        assert!(!error.contains("do not echo"));
++    }
++}
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index a9a860bed4a69aa951a0c655bb853264e78be34f..43a6977ba26f9733b941995b4837724ac54a443f 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -2814,3 +2814,232 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
+     assert_eq!(server.received_requests().await.unwrap().len(), 3);
+     Ok(())
+ }
++
++#[tokio::test]
++async fn decisions_route_accounting_precedes_argument_fill() -> anyhow::Result<()> {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(path("/decisions"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "model": "gpt-test-resolved",
++            "answers": [{
++                "type": "choice", "name": "route", "choice": "route_1", "confidence": 1,
++                "probabilities": [
++                    {"value": "route_0", "probability": 0},
++                    {"value": "route_1", "probability": 1}
++                ]
++            }],
++            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let mut info = create_oss_provider_with_base_url(&server.uri(), WireApi::Responses);
++    info.decision_model = Some(codex_model_provider_info::DecisionModelOptions {
++        model: "gpt-test".into(),
++        fallback_model: None,
++        min_route_probability: None,
++    });
++    info.request_max_retries = Some(0);
++    let mut client = test_model_client(SessionSource::Cli);
++    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(info, None);
++    let prompt = Prompt {
++        tools: vec![ToolSpec::Function(ResponsesApiTool {
++            name: "approve".into(),
++            description: "Approve a requested action.".into(),
++            strict: true,
++            defer_loading: None,
++            parameters: serde_json::from_value(json!({
++                "type": "object", "properties": {"approved": {"type": "boolean"}},
++                "required": ["approved"], "additionalProperties": false
++            }))?,
++            output_schema: None,
++        })]
++        .into(),
++        ..Prompt::default()
++    };
++    let metadata = test_responses_metadata_for_client(
++        &client,
++        None,
++        format!("{}:0", client.state.thread_id),
++        None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    let mut session = client.new_session();
++    let mut stream = session
++        .stream(
++            &prompt,
++            &test_model_info(),
++            &test_session_telemetry(),
++            None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            None,
++            &metadata,
++            &InferenceTraceContext::disabled(),
++        )
++        .await?;
++    let first = stream.next().await.expect("route accounting event")?;
++    let ResponseEvent::IntermediateCompleted {
++        observation,
++        model,
++        final_response,
++        response_id,
++        token_usage,
++        usage_metadata,
++    } = first
++    else {
++        panic!("route identity, observation, and usage must arrive together");
++    };
++    assert!(!response_id.is_empty());
++    assert_eq!(
++        observation.response_id.as_deref(),
++        Some(response_id.as_str())
++    );
++    assert_eq!(
++        observation.status,
++        codex_protocol::protocol::ResponseObservationStatus::Completed
++    );
++    let observed_usage = observation.usage.expect("received route usage");
++    assert_eq!(observed_usage.input_tokens, Some(7));
++    assert_eq!(observed_usage.output_tokens, Some(3));
++    assert_eq!(observed_usage.total_tokens, Some(10));
++    assert_eq!(model, "gpt-test-resolved");
++    assert!(
++        !final_response,
++        "the selected tool still needs its boolean argument"
++    );
++    let usage = token_usage.expect("accountable route usage");
++    assert_eq!(usage.input_tokens, 7);
++    assert_eq!(usage.output_tokens, 3);
++    assert_eq!(usage.total_tokens, 10);
++    assert_eq!(
++        usage_metadata.unwrap().metadata.unwrap()["decisions"]["model"],
++        "gpt-test-resolved"
++    );
++    drop(stream);
++    let requests = server.received_requests().await.expect("received requests");
++    assert_eq!(requests.len(), 1);
++    let route_request: serde_json::Value = serde_json::from_slice(&requests[0].body)?;
++    assert_eq!(route_request["questions"][0]["name"], "route");
++    server.verify().await;
++    Ok(())
++}
++
++#[tokio::test]
++async fn decisions_output_does_not_invent_model_reroute_events() -> anyhow::Result<()> {
++    for constant in [false, true] {
++        let server = MockServer::start().await;
++        Mock::given(method("POST"))
++            .and(path("/decisions"))
++            .respond_with(
++                ResponseTemplate::new(200)
++                    .insert_header("x-request-id", "req_decision_output")
++                    .set_body_json(json!({
++                        "model": "decision-resolved-snapshot",
++                        "answers": [{"type": "predicate", "name": "field_1", "probability": 1}],
++                        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
++                    })),
++            )
++            .expect(if constant { 0 } else { 1 })
++            .mount(&server)
++            .await;
++        let mut info = create_oss_provider_with_base_url(&server.uri(), WireApi::Responses);
++        info.decision_model = Some(codex_model_provider_info::DecisionModelOptions {
++            model: "decision-alias".into(),
++            fallback_model: Some("gpt-test".into()),
++            min_route_probability: None,
++        });
++        info.request_max_retries = Some(0);
++        let mut client = test_model_client(SessionSource::Cli);
++        Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(info, None);
++        let field = if constant {
++            json!({"type": "boolean", "const": true})
++        } else {
++            json!({"type": "boolean"})
++        };
++        let prompt = Prompt {
++            output_schema: Some(json!({
++                "type": "object", "properties": {"approved": field},
++                "required": ["approved"], "additionalProperties": false
++            })),
++            ..Prompt::default()
++        };
++        let metadata = test_responses_metadata_for_client(
++            &client,
++            None,
++            format!("{}:0", client.state.thread_id),
++            None,
++            TestCodexResponsesRequestKind::Turn,
++        );
++        let mut session = client.new_session();
++        let mut stream = session
++            .stream(
++                &prompt,
++                &test_model_info(),
++                &test_session_telemetry(),
++                None,
++                codex_protocol::config_types::ReasoningSummary::None,
++                None,
++                &metadata,
++                &InferenceTraceContext::disabled(),
++            )
++            .await?;
++        let mut events = Vec::new();
++        while let Some(event) = stream.next().await {
++            events.push(event?);
++        }
++        assert!(
++            events
++                .iter()
++                .all(|event| !matches!(event, ResponseEvent::ServerModel(_))),
++            "a Decisions model is not evidence of a generative model reroute"
++        );
++        let mut completed = 0;
++        let mut observed = 0;
++        let mut output = 0;
++        let mut response_id = None;
++        for event in events {
++            match event {
++                ResponseEvent::IntermediateCompleted {
++                    model,
++                    response_id: id,
++                    usage_metadata,
++                    ..
++                } => {
++                    observed += 1;
++                    assert_eq!(model, "decision-resolved-snapshot");
++                    assert_eq!(
++                        usage_metadata.unwrap().metadata.unwrap()["decisions"]["model"],
++                        "decision-resolved-snapshot"
++                    );
++                    assert_ne!(id, "req_decision_output");
++                    response_id = Some(id);
++                }
++                ResponseEvent::OutputItemDone(item) => {
++                    let item = serde_json::to_value(item)?;
++                    let text = item["content"][0]["text"].as_str().expect("output text");
++                    assert_eq!(
++                        serde_json::from_str::<serde_json::Value>(text)?,
++                        json!({"approved": true})
++                    );
++                    output += 1;
++                }
++                ResponseEvent::Completed {
++                    response_id: id, ..
++                } => {
++                    assert!(!id.is_empty());
++                    if let Some(observed_id) = &response_id {
++                        assert_eq!(&id, observed_id);
++                    }
++                    completed += 1;
++                }
++                _ => {}
++            }
++        }
++        assert_eq!(observed, if constant { 0 } else { 1 });
++        assert_eq!(output, 1);
++        assert_eq!(completed, 1);
++        server.verify().await;
++    }
++    Ok(())
++}
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 58fa41947881c8f465c506a32cac58ab173b8f71..c35b7f123315c4a2f7e3677624de8a839b475fa6 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -876,6 +876,7 @@ mod tests {
+             observation_processed: Arc::new(tokio::sync::Notify::new()),
+             observation_pending: false,
+             request_observation: None,
++            attempts: Default::default(),
+             rx_event,
+             interrupt: None,
+             consumer_dropped: CancellationToken::new(),
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 29b77b8920e47b5bf445322d68e92f7d3cdfa0af..5f03a180b103a0afafe714bc983be36a2f09e326 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -1684,6 +1684,7 @@ impl Config {
+ 
+     pub fn to_models_manager_config(&self) -> ModelsManagerConfig {
+         ModelsManagerConfig {
++            force_standard_responses: self.model_provider.decision_model.is_some(),
+             model_context_window: self.model_context_window,
+             model_auto_compact_token_limit: self.model_auto_compact_token_limit,
+             tool_output_token_limit: self.tool_output_token_limit,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 3ce210281399ccbbc33ced4584805fbd7c39b714..9cdca473dffb246e3d8041040d5f6405f7ce2f31 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -2,7 +2,6 @@
+ use crate::tools::router::ToolRouter;
+ use codex_client::HttpTransport;
+ use codex_client::Request;
+-use codex_client::ReqwestTransport;
+ use codex_client::Response;
+ use codex_client::StreamResponse;
+ use codex_client::TransportError;
+@@ -31,13 +30,14 @@ pub(crate) async fn wait_if_sampling_stopped(stop: Option<&TurnSamplingStop>) {
+ 
+ // Responses HTTP retries invoke the transport again without returning to the
+ // outer model-request admission check. Retain the exact turn's stop at that boundary.
+-pub(crate) struct SamplingStopTransport {
+-    pub(crate) inner: ReqwestTransport,
++pub(crate) struct SamplingStopTransport<T> {
++    pub(crate) inner: T,
+     pub(crate) stop: Option<Arc<TurnSamplingStop>>,
+ }
+ 
+-impl HttpTransport for SamplingStopTransport {
++impl<T: HttpTransport> HttpTransport for SamplingStopTransport<T> {
+     async fn execute(&self, request: Request) -> Result<Response, TransportError> {
++        wait_if_sampling_stopped(self.stop.as_deref()).await;
+         self.inner.execute(request).await
+     }
+ 
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index d228557f2d322b6cbaaa64e20d1d700f9bf5a7ac..d7685f734d29f7cec9f75e2d9511cba452ce63bc 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -33,6 +33,7 @@ async fn interceptors_forward_before_completion_in_order_and_cancel_upstream() {
+                 observation_processed: Arc::new(tokio::sync::Notify::new()),
+                 observation_pending: false,
+                 request_observation: None,
++                attempts: Default::default(),
+                 rx_event,
+                 interrupt: None,
+                 consumer_dropped,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 30a4ca1b53eddbaf0c996969a8c876dc19a1fffa..03b64a4c6aa72c08cc0956ba2cd6025318c8b022 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4846,16 +4846,44 @@ impl Session {
+         turn_context: &TurnContext,
+         settings: &ResolvedStepSettings,
+         token_usage: Option<&TokenUsage>,
++    ) -> CodexResult<()> {
++        self.record_model_token_usage_info(turn_context, settings, token_usage, None, true)
++            .await
++    }
++
++    /// Intermediate inference contributes spending without replacing context measurements.
++    pub(crate) async fn record_model_token_usage_info(
++        &self,
++        turn_context: &TurnContext,
++        settings: &ResolvedStepSettings,
++        token_usage: Option<&TokenUsage>,
++        model: Option<&str>,
++        update_context: bool,
+     ) -> CodexResult<()> {
+         if let Some(token_usage) = token_usage {
+             let token_info = {
+                 let mut state = self.state.lock().await;
+-                state.update_token_info_from_usage(token_usage, settings.reported_context_window());
+-                state.replace_reported_context_window(settings.reported_context_window());
+-                if matches!(
+-                    turn_context.config.model_auto_compact_token_limit_scope,
+-                    AutoCompactTokenLimitScope::BodyAfterPrefix
+-                ) {
++                if update_context {
++                    state.update_token_info_from_usage(
++                        token_usage,
++                        settings.reported_context_window(),
++                    );
++                    state.replace_reported_context_window(settings.reported_context_window());
++                } else {
++                    let mut info = state.token_info().unwrap_or(TokenUsageInfo {
++                        total_token_usage: TokenUsage::default(),
++                        last_token_usage: TokenUsage::default(),
++                        model_context_window: settings.reported_context_window(),
++                    });
++                    info.total_token_usage.add_assign(token_usage);
++                    state.set_token_info(Some(info));
++                }
++                if update_context
++                    && matches!(
++                        turn_context.config.model_auto_compact_token_limit_scope,
++                        AutoCompactTokenLimitScope::BodyAfterPrefix
++                    )
++                {
+                     state.ensure_auto_compact_window_server_prefill_from_usage(token_usage);
+                 }
+                 state.token_info()
+@@ -4866,7 +4894,7 @@ impl Session {
+                 .await;
+             if let Some(turn_state) = turn_state {
+                 turn_state.lock().await.token_usage_by_model.record(
+-                    settings.selected_collaboration_mode().model(),
++                    model.unwrap_or_else(|| settings.selected_collaboration_mode().model()),
+                     settings.telemetry(&turn_context.session_telemetry),
+                     token_usage,
+                 );
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index ae76d4b30fd1a4782a4411ed0b95e0b7096fa327..04e285ad8d433aeacf985c14c20abf31081fed16 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -205,6 +205,7 @@ impl ResolvedStepSettings {
+ /// instructions are not mistaken for explicit overrides.
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+ pub(crate) struct ModelInfoOverrides {
++    pub(crate) force_standard_responses: bool,
+     pub(crate) context_window: Option<i64>,
+     pub(crate) auto_compact_token_limit: Option<i64>,
+     pub(crate) tool_output_token_limit: Option<usize>,
+@@ -214,6 +215,7 @@ pub(crate) struct ModelInfoOverrides {
+ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+     fn from(config: ModelsManagerConfig) -> Self {
+         Self {
++            force_standard_responses: config.force_standard_responses,
+             context_window: config.model_context_window,
+             auto_compact_token_limit: config.model_auto_compact_token_limit,
+             tool_output_token_limit: config.tool_output_token_limit,
+@@ -228,6 +230,7 @@ impl ModelInfoOverrides {
+         personality: Option<Personality>,
+     ) -> ModelsManagerConfig {
+         ModelsManagerConfig {
++            force_standard_responses: self.force_standard_responses,
+             model_context_window: self.context_window,
+             model_auto_compact_token_limit: self.auto_compact_token_limit,
+             tool_output_token_limit: self.tool_output_token_limit,
+diff --git a/codex-rs/core/src/session/step_settings_tests.rs b/codex-rs/core/src/session/step_settings_tests.rs
+index fb60f4ad0b048dbb37f5f5bf6a11e4d66cb3dc64..31bec69a308b799ecb7bfc594fe78fd41872eef9 100644
+--- a/codex-rs/core/src/session/step_settings_tests.rs
++++ b/codex-rs/core/src/session/step_settings_tests.rs
+@@ -570,3 +570,67 @@ pub(crate) fn refresh_reported_context_window_for_test(
+     )
+     .reported_context_window();
+ }
++
++#[tokio::test]
++async fn decisions_standard_output_survives_step_model_and_personality_updates() {
++    let mut config = test_config().await;
++    assert!(!config.to_models_manager_config().force_standard_responses);
++    config.model_provider.decision_model = Some(codex_model_provider_info::DecisionModelOptions {
++        model: "gpt-6-luna".to_string(),
++        fallback_model: Some("gpt-6-sol".to_string()),
++        min_route_probability: None,
++    });
++    let overrides = ModelInfoOverrides::from(config.to_models_manager_config());
++    assert!(overrides.force_standard_responses);
++    let mut primary = model_info_from_slug("gpt-6-luna");
++    primary.use_responses_lite = true;
++    let mut fallback = model_info_from_slug("gpt-6-sol");
++    fallback.use_responses_lite = true;
++    let manager = StaticModelsManager::new(
++        None,
++        ModelsResponse {
++            models: vec![primary, fallback],
++        },
++    );
++    let mut selected = configured_settings();
++    selected.collaboration_mode.settings.model = "gpt-6-luna".to_string();
++    let model = selected.resolve_model_info(&manager, &overrides).await;
++    assert!(!model.use_responses_lite);
++    let mut settings = ResolvedStepSettings::new(
++        Arc::new(selected),
++        Arc::new(model),
++        false,
++        overrides.context_window,
++    );
++    for update in [
++        StepSettingsUpdate {
++            model: Some("gpt-6-sol".to_string()),
++            ..Default::default()
++        },
++        StepSettingsUpdate {
++            personality: Some(Personality::None),
++            ..Default::default()
++        },
++    ] {
++        settings = settings
++            .apply_update(
++                &update,
++                &step_settings_constraints(&ConfigRequirements::default()),
++                &manager,
++                &overrides,
++                false,
++            )
++            .await
++            .unwrap();
++        assert_eq!(settings.model_info.slug, "gpt-6-sol");
++        assert!(!settings.model_info.use_responses_lite);
++    }
++    // Resetting the API profile restores the ordinary model catalog behavior.
++    config.model_provider.decision_model = None;
++    let responses_overrides = ModelInfoOverrides::from(config.to_models_manager_config());
++    let restored = settings
++        .selected()
++        .resolve_model_info(&manager, &responses_overrides)
++        .await;
++    assert!(restored.use_responses_lite);
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 965f2112fca580d7374d5d679d9a679f948c45e1..3c66815862242f86b258f492d33affaf7801c001 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2775,6 +2775,7 @@ async fn try_run_sampling_request(
+     let mut should_emit_turn_diff = false;
+     let mut should_emit_token_count = false;
+     let mut response_observation_id = None;
++    let mut accounted_responses = std::collections::HashSet::new();
+     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
+     let mut analytics_tool_call_ids = Vec::new();
+     let reasoning_effort = step_context
+@@ -2816,7 +2817,13 @@ async fn try_run_sampling_request(
+             .or_cancel(&preempt)
+             .or_cancel(&cancellation_token)
+             .await;
+-        if cancellation_token.is_cancelled() {
++        // Finish accounting for a physical response already delivered to this
++        // consumer before cancellation can end the model step.
++        let received_completion = matches!(
++            &event,
++            Ok(Ok(Some(Ok(ResponseEvent::IntermediateCompleted { .. }))))
++        );
++        if cancellation_token.is_cancelled() && !received_completion {
+             break Err(CodexErr::TurnAborted);
+         }
+         let event = match event {
+@@ -3144,6 +3151,14 @@ async fn try_run_sampling_request(
+                     .await;
+             }
+             ResponseEvent::ResponseObserved(observation) => {
++                let attempt_observation = observation.response_id.as_ref().and_then(|id| {
++                    stream
++                        .attempts
++                        .lock()
++                        .expect("response attempts poisoned")
++                        .get(id)
++                        .and_then(|attempt| attempt.observation.clone())
++                });
+                 let result = sess
+                     .record_response_observation(&turn_context, observation)
+                     .await;
+@@ -3152,7 +3167,12 @@ async fn try_run_sampling_request(
+                 }
+                 match result {
+                     Ok(id) => {
+-                        if let (Some(context), Some(id)) = (&request_observation, id.as_deref()) {
++                        if let (Some(context), Some(id)) = (
++                            attempt_observation
++                                .as_ref()
++                                .or(request_observation.as_ref()),
++                            id.as_deref(),
++                        ) {
+                             context.response_linked(id);
+                         }
+                         response_observation_id = id;
+@@ -3166,6 +3186,69 @@ async fn try_run_sampling_request(
+                     }
+                 }
+             }
++            ResponseEvent::IntermediateCompleted {
++                observation,
++                model,
++                final_response,
++                response_id,
++                token_usage,
++                usage_metadata,
++            } => {
++                let attempt_observation = stream
++                    .attempts
++                    .lock()
++                    .expect("response attempts poisoned")
++                    .get(&response_id)
++                    .and_then(|attempt| attempt.observation.clone());
++                let observed_id = match sess
++                    .record_response_observation(&turn_context, observation)
++                    .await
++                {
++                    Ok(id) => id,
++                    Err(error) => {
++                        tool_cancellation.cancel();
++                        drop(stream);
++                        break Err(error);
++                    }
++                };
++                if let (Some(context), Some(id)) =
++                    (attempt_observation.as_ref(), observed_id.as_deref())
++                {
++                    context.response_linked(id);
++                }
++                // Observation callbacks may cancel the turn. Retain this known
++                // response's usage before honoring that cancellation below.
++                sess.record_observed_response_completed(
++                    &turn_context,
++                    &response_id,
++                    observed_id,
++                    token_usage.as_ref(),
++                    usage_metadata.as_ref(),
++                )
++                .await;
++                let budget_result = sess
++                    .record_model_token_usage_info(
++                        &turn_context,
++                        &step_context.settings,
++                        token_usage.as_ref(),
++                        Some(&model),
++                        final_response,
++                    )
++                    .await;
++                stream
++                    .attempts
++                    .lock()
++                    .expect("response attempts poisoned")
++                    .remove(&response_id);
++                accounted_responses.insert(response_id);
++                should_emit_token_count = true;
++                if let Err(error) = budget_result {
++                    break Err(error);
++                }
++                if cancellation_token.is_cancelled() {
++                    break Err(CodexErr::TurnAborted);
++                }
++            }
+             ResponseEvent::Completed {
+                 response_id,
+                 token_usage,
+@@ -3189,21 +3272,34 @@ async fn try_run_sampling_request(
+                     &mut assistant_message_stream_parsers,
+                 )
+                 .await;
+-                sess.record_observed_response_completed(
+-                    &turn_context,
+-                    &response_id,
+-                    response_observation_id.take(),
+-                    token_usage.as_ref(),
+-                    usage_metadata.as_ref(),
+-                )
+-                .await;
+-                let budget_result = sess
+-                    .record_token_usage_info(
++                let already_accounted = accounted_responses.remove(&response_id);
++                if !already_accounted {
++                    sess.record_observed_response_completed(
+                         &turn_context,
+-                        &step_context.settings,
++                        &response_id,
++                        response_observation_id.take(),
+                         token_usage.as_ref(),
++                        usage_metadata.as_ref(),
+                     )
+                     .await;
++                }
++                let attempt = stream
++                    .attempts
++                    .lock()
++                    .expect("response attempts poisoned")
++                    .remove(&response_id);
++                let budget_result = if already_accounted {
++                    Ok(())
++                } else {
++                    sess.record_model_token_usage_info(
++                        &turn_context,
++                        &step_context.settings,
++                        token_usage.as_ref(),
++                        attempt.as_ref().map(|attempt| attempt.model.as_str()),
++                        true,
++                    )
++                    .await
++                };
+                 should_emit_token_count = true;
+                 should_emit_turn_diff = true;
+                 if let Err(err) = budget_result {
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index dcf3185c9c13709347cabfeb6a85f599fd9c9fb8..a6b50c93d894cca3b97d1abc8bc4b285ed360353 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -403,6 +403,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::ServerReasoningIncluded(_)
+         | ResponseEvent::ToolCallInputDelta { .. }
+         | ResponseEvent::Completed { .. }
++        | ResponseEvent::IntermediateCompleted { .. }
+         | ResponseEvent::ReasoningSummaryPartAdded { .. }
+         | ResponseEvent::RateLimits(_)
+         | ResponseEvent::ApiRateLimits(_)
+diff --git a/codex-rs/core/tests/responses_headers.rs b/codex-rs/core/tests/responses_headers.rs
+index 84bf461e78fb877b194fbe8961bbef487d7cf683..2c1ef16e2a5e573b7ae5940d15100612bd67aec6 100644
+--- a/codex-rs/core/tests/responses_headers.rs
++++ b/codex-rs/core/tests/responses_headers.rs
+@@ -72,6 +72,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
+     .await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+@@ -216,6 +217,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
+     .await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+@@ -341,6 +343,7 @@ async fn responses_respects_model_info_overrides_from_config() {
+     let request_recorder = responses::mount_sse_once(&server, response_body).await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "mock".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index fb2bc546b5094e7bc47297abd8474ff24faf6acc..cec4d2e430bd5cc7177f82172b86fd522830ea55 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -1624,6 +1624,7 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
+ /// reaches `Completed` without surfacing an auth or transport error to the client.
+ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "corp".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+@@ -3127,6 +3128,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+     let resp_mock = mount_sse_once(&server, sse_body.to_string()).await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "azure".into(),
+         base_url: Some(format!("{}/openai", server.uri())),
+         model_catalog_url: None,
+@@ -3758,6 +3760,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
+         .await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "custom".to_string(),
+         base_url: Some(format!("{}/openai", server.uri())),
+         model_catalog_url: None,
+@@ -3846,6 +3849,7 @@ async fn env_var_overrides_loaded_auth() {
+         .await;
+ 
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: ModelProviderInfo::create_openai_provider(/*base_url*/ None).name,
+         base_url: Some(format!("{}/openai", server.uri())),
+         model_catalog_url: None,
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 58abbda80726b658abf3e8998025c6b38a419566..edd210fbba39b5667b81a0cab328fb05410470c3 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -2647,6 +2647,7 @@ fn websocket_provider_with_connect_timeout(
+     websocket_connect_timeout_ms: Option<u64>,
+ ) -> ModelProviderInfo {
+     ModelProviderInfo {
++        decision_model: None,
+         name: "mock-ws".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+diff --git a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+index c381b78cda2ee1f0fdeea3b06e25b9fe1a502748..969b58e54410453bffbceab10615cfa905ac63f7 100644
+--- a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
++++ b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+@@ -64,6 +64,7 @@ async fn continue_after_stream_error() {
+     // server. Use an existing env var (PATH) to satisfy the auth plumbing
+     // without requiring a real secret.
+     let provider = ModelProviderInfo {
++        decision_model: None,
+         name: "mock-openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
+index 1823275ea4e8a690f6b233a934a044d839a5efb6..2b042599f169f6428be7ecb11aaf8dc1b1c19355 100644
+--- a/codex-rs/core/tests/suite/stream_no_completed.rs
++++ b/codex-rs/core/tests/suite/stream_no_completed.rs
+@@ -46,6 +46,7 @@ async fn retries_on_early_close() {
+     // environment variables.
+ 
+     let model_provider = ModelProviderInfo {
++        decision_model: None,
+         name: "openai".into(),
+         base_url: Some(format!("{}/v1", server.uri())),
+         model_catalog_url: None,
+diff --git a/codex-rs/ext/extension-api/Cargo.toml b/codex-rs/ext/extension-api/Cargo.toml
+index 3e19d0358c23532df40aca4dff37125b201c938c..d10ca35472f14152ceaf8e15733f49501fbca718 100644
+--- a/codex-rs/ext/extension-api/Cargo.toml
++++ b/codex-rs/ext/extension-api/Cargo.toml
+@@ -15,6 +15,7 @@ workspace = true
+ 
+ [dependencies]
+ codex-api = { workspace = true }
++codex-client = { workspace = true }
+ futures = { workspace = true }
+ codex-guardian-context = { workspace = true }
+ codex-history = { workspace = true }
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 6feb3832062f334a75f84063cf547cf156f5782d..5e06a15de91c81b564bc91c65c1f3df6e0b92b7c 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -120,6 +120,7 @@ pub use contributors::ToolDispatchInput;
+ mod model_request;
+ pub use model_request::CompactionInput;
+ pub use model_request::ModelContextInput;
++pub use model_request::ModelHttpStream;
+ pub use model_request::ModelRequestContributor;
+ pub use model_request::ModelRequestInput;
+ pub use model_request::ModelRequestKind;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 029325c141922401ace817474580c5740927c089..5573a793bd7b69fb80860973f14cc69380e55643 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -70,8 +70,24 @@ pub struct CompactionInput<'a> {
+     pub items: &'a [ResponseItem],
+ }
+ 
++/// A retained transport dispatcher for an exact private provider route.
++pub type ModelHttpStream = Arc<
++    dyn Fn(
++            codex_client::Request,
++        )
++            -> BoxFuture<'static, Result<codex_client::StreamResponse, codex_client::TransportError>>
++        + Send
++        + Sync,
++>;
++
+ /// Contributes request-scoped preparation, compaction, and response interception.
+ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
++    /// Claim an exact provider endpoint before physical-client creation.
++    /// The dispatcher must revalidate the authenticated request and may not fall back to I/O.
++    fn http_stream(&self, _url: &str) -> Option<ModelHttpStream> {
++        None
++    }
++
+     fn customizes_compaction(&self, _thread_id: &str) -> bool {
+         false
+     }
+@@ -101,6 +117,16 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+         Box::pin(async { Err("prepared-request contributor is not implemented".into()) })
+     }
+ 
++    /// Restore retained function and output schemas before compiling a Decisions request.
++    /// The host must validate the captured owner before changing this detached projection.
++    fn restore_decision_request<'a>(
++        &'a self,
++        _request: &'a mut Value,
++        _admission: Option<&'a Arc<dyn ModelToolAdmission>>,
++    ) -> BoxFuture<'a, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
++
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
+ 
+     /// Whether this thread requires an awaited context policy before sending input.
+diff --git a/codex-rs/ext/extension-api/src/model_request_observation.rs b/codex-rs/ext/extension-api/src/model_request_observation.rs
+index 266241e3b5452547600d748727256e66fbab43a6..dde3c84df865c2ab058a747a845ec14484defd31 100644
+--- a/codex-rs/ext/extension-api/src/model_request_observation.rs
++++ b/codex-rs/ext/extension-api/src/model_request_observation.rs
+@@ -23,12 +23,14 @@ impl ModelRequestEffort {
+ pub enum ModelRequestWire {
+     Responses,
+     ResponsesLite,
++    Decisions,
+ }
+ impl ModelRequestWire {
+     fn as_str(self) -> &'static str {
+         match self {
+             Self::Responses => "responses",
+             Self::ResponsesLite => "responses_lite",
++            Self::Decisions => "decisions",
+         }
+     }
+ }
+@@ -38,6 +40,7 @@ pub enum ModelRequestTransport {
+     HttpSse,
+     HttpJson,
+     Websocket,
++    HttpJson,
+ }
+ impl ModelRequestTransport {
+     fn as_str(self) -> &'static str {
+@@ -45,6 +48,7 @@ impl ModelRequestTransport {
+             Self::HttpSse => "http_sse",
+             Self::HttpJson => "http_json",
+             Self::Websocket => "websocket",
++            Self::HttpJson => "http_json",
+         }
+     }
+ }
+diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
+index 6ee0c439202d29d5f6a4b72f1bea52485e2125e4..4928387313d7a863710527555ea1cb7ae9362551 100644
+--- a/codex-rs/login/src/auth_env_telemetry.rs
++++ b/codex-rs/login/src/auth_env_telemetry.rs
+@@ -59,6 +59,7 @@ mod tests {
+     #[test]
+     fn collect_auth_env_telemetry_buckets_provider_env_key_name() {
+         let provider = ModelProviderInfo {
++            decision_model: None,
+             name: "Custom".to_string(),
+             base_url: None,
+             model_catalog_url: None,
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index f020d34c25413a7ac581dc5ed0a5187be17caa99..f29ce03191d97e4f300fbba8ffe91eadde767b67 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -167,6 +167,11 @@ pub struct ModelProviderInfo {
+     /// Optional API capability overrides for a custom Responses-compatible provider.
+     /// Unspecified capabilities retain their existing provider defaults.
+     pub capabilities: Option<ModelProviderCapabilities>,
++    /// Internal SDK inference configuration, transported through native config.
++    /// Omitted from the supported standalone Codex configuration schema.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(skip)]
++    pub decision_model: Option<DecisionModelOptions>,
+     /// Optional query parameters to append to the base URL.
+     pub query_params: Option<HashMap<String, RedactedString>>,
+     /// Additional HTTP headers to include in requests to this provider where
+@@ -207,6 +212,42 @@ pub struct ModelProviderInfo {
+     pub include_internal_metadata: bool,
+ }
+ 
++/// A Decisions model and its explicitly selected generative fallback.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++pub struct DecisionModelOptions {
++    pub model: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub fallback_model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub min_route_probability: Option<f64>,
++}
++
++impl DecisionModelOptions {
++    pub fn validate(&self, effective_model: &str) -> Result<(), String> {
++        if self.model.trim().is_empty()
++            || self
++                .fallback_model
++                .as_ref()
++                .is_some_and(|model| model.trim().is_empty())
++        {
++            return Err("Decisions inference requires nonempty model names".into());
++        }
++        if self
++            .min_route_probability
++            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
++        {
++            return Err("Decisions min_route_probability must be between zero and one".into());
++        }
++        if effective_model != self.fallback_model.as_deref().unwrap_or(&self.model) {
++            return Err(
++                "Decisions configuration does not match the effective session model".into(),
++            );
++        }
++        Ok(())
++    }
++}
++
+ /// AWS SigV4 auth configuration for a model provider.
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+@@ -525,6 +566,7 @@ other non-default provider fields are not supported"
+ 
+     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
+         ModelProviderInfo {
++            decision_model: None,
+             name: OPENAI_PROVIDER_NAME.into(),
+             base_url,
+             model_catalog_url: None,
+@@ -569,6 +611,7 @@ other non-default provider fields are not supported"
+         aws: Option<ModelProviderAwsAuthInfo>,
+     ) -> ModelProviderInfo {
+         ModelProviderInfo {
++            decision_model: None,
+             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
+             // The runtime provider derives the regional Mantle endpoint when
+             // this is unset. A configured value is therefore unambiguously an
+@@ -754,6 +797,7 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
+ 
+ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
+     ModelProviderInfo {
++        decision_model: None,
+         name: "gpt-oss".into(),
+         base_url: Some(base_url.into()),
+         model_catalog_url: None,
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index 9c15c54b70d1c500f07e2432aa1e7d9fada91740..bd6f1b6caab1a03260fe7388428ba8ae9adace5d 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -5,6 +5,34 @@ use pretty_assertions::assert_eq;
+ use std::num::NonZeroU64;
+ use tempfile::tempdir;
+ 
++#[test]
++fn sdk_decision_config_round_trips_without_extending_public_schema() {
++    let provider = ModelProviderInfo {
++        decision_model: Some(DecisionModelOptions {
++            model: "decision-test".into(),
++            fallback_model: Some("fallback-test".into()),
++            min_route_probability: Some(0.8),
++        }),
++        ..Default::default()
++    };
++    let encoded = toml::to_string(&provider).unwrap();
++    assert!(encoded.contains("decision_model"));
++    assert_eq!(
++        toml::from_str::<ModelProviderInfo>(&encoded).unwrap(),
++        provider
++    );
++    let schema = schemars::schema_for!(ModelProviderInfo);
++    assert!(
++        !schema
++            .schema
++            .object
++            .unwrap()
++            .properties
++            .contains_key("decision_model")
++    );
++    assert!(!schema.definitions.contains_key("DecisionModelOptions"));
++}
++
+ #[test]
+ fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
+     let trusted = ModelProviderInfo {
+@@ -86,6 +114,7 @@ base_url = "http://localhost:11434/v1"
+         gateway_oauth: None,
+         aws: None,
+         wire_api: WireApi::Responses,
++        decision_model: None,
+         query_params: None,
+         http_headers: None,
+         env_http_headers: None,
+@@ -123,6 +152,7 @@ query_params = { api-version = "2025-04-01-preview" }
+         gateway_oauth: None,
+         aws: None,
+         wire_api: WireApi::Responses,
++        decision_model: None,
+         query_params: Some(maplit::hashmap! {
+             "api-version".to_string() => "2025-04-01-preview".into(),
+         }),
+@@ -164,6 +194,7 @@ supports_standalone_web_search = true
+         gateway_oauth: None,
+         aws: None,
+         wire_api: WireApi::Responses,
++        decision_model: None,
+         query_params: None,
+         http_headers: Some(maplit::hashmap! {
+             "X-Example-Header".to_string() => "example-value".into(),
+@@ -355,6 +386,7 @@ fn test_create_amazon_bedrock_provider() {
+                 auth_refresh: None,
+             }),
+             wire_api: WireApi::Responses,
++            decision_model: None,
+             query_params: None,
+             http_headers: Some(maplit::hashmap! {
+                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string() =>
+diff --git a/codex-rs/model-provider/src/capabilities.rs b/codex-rs/model-provider/src/capabilities.rs
+index f8e8891fb048278e9d890cff7124910cb9be0e32..57057f47f0cb7eb5765561d6683ca8c0aea5a435 100644
+--- a/codex-rs/model-provider/src/capabilities.rs
++++ b/codex-rs/model-provider/src/capabilities.rs
+@@ -44,9 +44,15 @@ impl ProviderCapabilities {
+             external_web_access: overrides
+                 .external_web_access
+                 .unwrap_or(defaults.external_web_access),
+-            remote_compaction: overrides
+-                .remote_compaction
+-                .unwrap_or(defaults.remote_compaction),
++            // Decisions cannot consume encrypted remote compaction items. Keep
++            // the existing local compaction path, which retains a plain summary.
++            remote_compaction: if info.decision_model.is_some() {
++                RemoteCompactionSupport::Unsupported
++            } else {
++                overrides
++                    .remote_compaction
++                    .unwrap_or(defaults.remote_compaction)
++            },
+             ..defaults
+         }
+     }
+diff --git a/codex-rs/model-provider/src/capabilities_tests.rs b/codex-rs/model-provider/src/capabilities_tests.rs
+index c22c17f1c7276b84208af1e21d0fb3167a42e5c2..0c18cc6776b413af84d01f8f3bdd5c086cd4a8e9 100644
+--- a/codex-rs/model-provider/src/capabilities_tests.rs
++++ b/codex-rs/model-provider/src/capabilities_tests.rs
+@@ -1,5 +1,6 @@
+ use super::*;
+ use crate::create_model_provider;
++use codex_model_provider_info::DecisionModelOptions;
+ use codex_model_provider_info::ModelProviderCapabilities;
+ use pretty_assertions::assert_eq;
+ 
+@@ -33,3 +34,70 @@ fn capability_overrides_preserve_unspecified_provider_defaults() {
+         );
+     }
+ }
++
++#[test]
++fn decision_models_use_plain_summary_compaction_even_with_remote_overrides() {
++    for (info, ordinary_default) in [
++        (
++            ModelProviderInfo::default(),
++            RemoteCompactionSupport::Unsupported,
++        ),
++        (
++            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
++            RemoteCompactionSupport::V2,
++        ),
++        (
++            ModelProviderInfo {
++                name: "Azure".to_string(),
++                ..Default::default()
++            },
++            RemoteCompactionSupport::V2,
++        ),
++        (
++            ModelProviderInfo {
++                name: "Native agent provider".to_string(),
++                base_url: Some("https://example.openai.azure.com/openai/v1".to_string()),
++                ..Default::default()
++            },
++            RemoteCompactionSupport::V2,
++        ),
++    ] {
++        for remote_compaction in [
++            None,
++            Some(RemoteCompactionSupport::Unsupported),
++            Some(RemoteCompactionSupport::V2),
++        ] {
++            let ordinary = ModelProviderInfo {
++                capabilities: Some(ModelProviderCapabilities {
++                    external_web_access: Some(false),
++                    remote_compaction,
++                }),
++                ..info.clone()
++            };
++            let ordinary_capabilities =
++                create_model_provider(ordinary.clone(), /*auth_manager*/ None).capabilities();
++            assert_eq!(
++                ordinary_capabilities.remote_compaction,
++                remote_compaction.unwrap_or(ordinary_default),
++            );
++            let decision = create_model_provider(
++                ModelProviderInfo {
++                    decision_model: Some(DecisionModelOptions {
++                        model: "decision-test".to_string(),
++                        fallback_model: Some("responses-test".to_string()),
++                        min_route_probability: None,
++                    }),
++                    ..ordinary
++                },
++                /*auth_manager*/ None,
++            );
++            assert_eq!(
++                decision.capabilities(),
++                ProviderCapabilities {
++                    remote_compaction: RemoteCompactionSupport::Unsupported,
++                    ..ordinary_capabilities
++                },
++            );
++        }
++    }
++}
+diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
+index f8f0790dde816a26b9e10b38df5d3030d4fc2f95..5678815c753d90b7e6921be62a8e48340baf193b 100644
+--- a/codex-rs/model-provider/src/provider.rs
++++ b/codex-rs/model-provider/src/provider.rs
+@@ -634,6 +634,7 @@ mod tests {
+ 
+     fn provider_for(base_url: String) -> ModelProviderInfo {
+         ModelProviderInfo {
++            decision_model: None,
+             name: "mock".into(),
+             base_url: Some(base_url),
+             model_catalog_url: None,
+diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
+index 79ac9bcff10605c934b6daec640583776fad5bb0..a6466d86299d6c10d0a15340f2aee0ee0414b2ed 100644
+--- a/codex-rs/models-manager/src/config.rs
++++ b/codex-rs/models-manager/src/config.rs
+@@ -3,6 +3,8 @@ use codex_protocol::openai_models::ModelsResponse;
+ 
+ #[derive(Debug, Clone, Default)]
+ pub struct ModelsManagerConfig {
++    /// Derived from the provider API profile, never a user-configurable model override.
++    pub force_standard_responses: bool,
+     pub model_context_window: Option<i64>,
+     pub model_auto_compact_token_limit: Option<i64>,
+     pub tool_output_token_limit: Option<usize>,
+diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
+index b04cdcfca6ff4dfb871d92518aa17d5ec4360b32..726bc1dfb5a7be4069a3fff6db176d9b6099ffe5 100644
+--- a/codex-rs/models-manager/src/manager_tests.rs
++++ b/codex-rs/models-manager/src/manager_tests.rs
+@@ -1719,3 +1719,33 @@ fn bundled_models_json_roundtrips() {
+         "bundled models.json should contain at least one model"
+     );
+ }
++
++#[tokio::test]
++async fn decisions_force_standard_responses_preserves_bundled_model_metadata() {
++    let codex_home = tempdir().expect("temp dir");
++    let manager = openai_manager_for_tests(
++        codex_home.path().to_path_buf(),
++        TestModelsEndpoint::new(Vec::new()),
++    );
++    let responses_config = ModelsManagerConfig::default();
++    let decisions_config = ModelsManagerConfig {
++        force_standard_responses: true,
++        ..Default::default()
++    };
++    for slug in ["gpt-6-luna", "gpt-6-sol", "unknown-decisions-model"] {
++        let original = manager.get_model_info(slug, &responses_config).await;
++        if slug == "gpt-6-luna" {
++            assert!(original.use_responses_lite);
++            assert!(!original.used_fallback_model_metadata);
++        }
++        let mut expected = original.clone();
++        expected.use_responses_lite = false;
++        let decisions = manager.get_model_info(slug, &decisions_config).await;
++        assert_eq!(decisions, expected);
++        // The override changes the resolved copy, not the catalog or future Responses steps.
++        assert_eq!(
++            manager.get_model_info(slug, &responses_config).await,
++            original
++        );
++    }
++}
+diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
+index 88ade7cfcf0c6d5c94c35c167ca01dc150b974c5..fe4e26c30ba6ca1af796aecf5bd4f29daa481000 100644
+--- a/codex-rs/models-manager/src/model_info.rs
++++ b/codex-rs/models-manager/src/model_info.rs
+@@ -17,6 +17,10 @@ pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
+ const PERSONALITY_SECTION_HEADER: &str = "# Personality";
+ 
+ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
++    // Decisions and its explicit fallback share the standard Responses item/tool representation.
++    if config.force_standard_responses {
++        model.use_responses_lite = false;
++    }
+     if let Some(context_window) = config.model_context_window {
+         model.context_window = Some(
+             model
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index a349f439d4fb1290496c4f5f18bdc5612293831f..7ec6c658ff68d595ce249aa11ad5a609ffaab89a 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1378,6 +1378,7 @@ impl SessionTelemetry {
+                 SessionTelemetry::responses_item_type(item)
+             }
+             ResponseEvent::Completed { .. } => "completed".into(),
++            ResponseEvent::IntermediateCompleted { .. } => "intermediate_completed".into(),
+             ResponseEvent::OutputTextDelta(_) => "text_delta".into(),
+             ResponseEvent::ToolCallInputDelta { .. } => "tool_input_delta".into(),
+             ResponseEvent::ReasoningSummaryDelta { .. } => "reasoning_summary_delta".into(),
