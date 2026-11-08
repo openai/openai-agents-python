@@ -592,6 +592,61 @@ async def test_provider_failure_does_not_use_semantic_fallback():
         assert not server.responses.requests
 
 
+@pytest.mark.parametrize("status", [200, 500])
+async def test_oversized_physical_response_is_rejected_before_reading_body(status):
+    requests: list[str] = []
+    calls: list[bool] = []
+    release = asyncio.Event()
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        await request.read()
+        requests.append(request.path)
+        response = web.StreamResponse(
+            status=status,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(64 * 1024 * 1024 + 1),
+            },
+        )
+        await response.prepare(request)
+        # The request must fail from its headers while the body is unavailable.
+        await release.wait()
+        return response
+
+    @function_tool
+    def unused(enabled: bool) -> str:
+        calls.append(enabled)
+        return "unexpected tool call"
+
+    app = web.Application()
+    app.router.add_post("/v1/{api}", handle)
+    async with TestServer(app) as server:
+        async with NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-decisions-key",
+            supports_websockets=False,
+        ) as provider:
+            agent = Agent(
+                instructions="Classify.",
+                output_type=Verdict,
+                tools=[unused],
+                model="decision-test",
+                api="decisions",
+                fallback_model="responses-test",
+                provider=provider,
+            )
+            try:
+                async with timeout(20):
+                    with pytest.raises(
+                        NativeError, match="response body exceeds the 67108864 byte limit"
+                    ):
+                        await agent.run("Synthetic request.")
+                assert requests == ["/v1/decisions"]
+                assert calls == []
+            finally:
+                release.set()
+
+
 async def test_coordinator_delegates_to_string_model_specialist_then_resumes():
     selected = []
 

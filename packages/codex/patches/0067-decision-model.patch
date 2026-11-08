@@ -1551,10 +1551,10 @@ index 0000000000000000000000000000000000000000..de9497e7cf3d3bf0ee956de6f01789b1
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/decisions.rs b/codex-rs/codex-api/src/endpoint/decisions.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f429d92061b7fa26d086cf262ff06ea312f06734
+index 0000000000000000000000000000000000000000..36319fb4a98f6f918d8c55e4cb76323bcce64e2a
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/decisions.rs
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,55 @@
 +use crate::auth::SharedAuthProvider;
 +use crate::endpoint::session::EndpointSession;
 +use crate::error::ApiError;
@@ -1596,7 +1596,9 @@ index 0000000000000000000000000000000000000000..f429d92061b7fa26d086cf262ff06ea3
 +    ) -> Result<DecisionResponse, ApiError> {
 +        let response = self
 +            .session
-+            .execute(Method::POST, "/decisions", headers, Some(body))
++            .execute_with(Method::POST, "/decisions", headers, Some(body), |request| {
++                request.response_body_limit_bytes = Some(64 * 1024 * 1024);
++            })
 +            .await?;
 +        let request_id = response
 +            .headers

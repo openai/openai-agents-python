@@ -398,9 +398,12 @@ class Agent(Generic[ContextT, OutputT]):
     ``api`` selects the default inference API; session and run calls can override
     it. Decisions defaults to ``gpt-6-luna`` when no model is supplied.
     ``fallback_model`` explicitly permits generative Responses fallback when a
-    route cannot be filled or falls below ``min_route_probability``. Fallback
-    re-evaluates the prepared input and may select another tool or final output;
-    provider failures and refusals do not trigger it. These declaration-only
+    route cannot be filled or falls below ``min_route_probability``. Route
+    fallback re-evaluates the prepared input and may select another tool or final
+    output. Model-based context compaction, whether requested explicitly or
+    triggered automatically, also requires ``fallback_model``. Without it, a
+    Decisions session fails when model-based compaction is needed. Provider
+    failures and refusals do not trigger fallback. These declaration-only
     policies apply to effective Decisions openings; Responses ignores them.
 
     Declaration fields are immutable. Construct a new Agent to change defaults;

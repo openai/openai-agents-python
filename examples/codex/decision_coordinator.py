@@ -3,6 +3,7 @@
 Set OPENAI_API_KEY and OPENAI_SPECIALIST_MODEL.
 Optionally set OPENAI_DECISION_MODEL to override the default gpt-6-luna.
 Optionally set OPENAI_DECISION_FALLBACK_MODEL to permit semantic fallback.
+Model-based context compaction, explicit or automatic, requires that fallback.
 The ordinary function tool runs the specialist in its own Agent session.
 """
 

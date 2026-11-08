@@ -109,7 +109,7 @@ classic-docker = [
 ]
 classic-blaxel = [
     "openai-agents[classic]",
-    "blaxel>=0.2.50",
+    "blaxel>=0.2.51",
     "aiohttp>=3.14.3,<4",
 ]
 classic-daytona = [

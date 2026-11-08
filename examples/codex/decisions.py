@@ -1,8 +1,9 @@
-"""Classify a support request into a typed result with a Decisions model.
+"""Classify a support request into a typed result with the Decisions API.
 
 Set OPENAI_API_KEY before running this example.
 Optionally set OPENAI_DECISION_MODEL to override the default gpt-6-luna, or
 OPENAI_DECISION_FALLBACK_MODEL to permit semantic fallback.
+Model-based context compaction, explicit or automatic, requires that fallback.
 See decision_coordinator.py for a coordinator that calls a specialist and resumes with its result.
 """
 
