@@ -41,6 +41,7 @@ sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool, get_cleanup
 from agents import ModelContextSnapshot, ModelRequestContext
+from agents import DecisionProvider, DecisionRequest, DecisionResponse, OpenAIDecisions, decide
 from agents.model_context import ModelContextSnapshot as SnapshotFromModule
 from agents._events import URLCitation, WebSearchSource
 from agents.observation import ModelOutputItemCompleted

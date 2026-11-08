@@ -2120,7 +2120,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-channel",
- "async-stream",
  "base64 0.22.1",
  "bm25",
  "chrono",
@@ -2419,7 +2418,6 @@ name = "codex-extension-api"
 version = "0.0.0"
 dependencies = [
  "codex-api",
- "codex-client",
  "codex-config",
  "codex-context-fragments",
  "codex-exec-server-protocol",

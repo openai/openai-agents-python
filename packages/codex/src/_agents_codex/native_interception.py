@@ -715,7 +715,14 @@ class _NativeInterception:
                 collab_context = ToolContext(
                     session._context, state.handle, call.call_id, call=info
                 )
-                value = await _call_callback(approval, admitted, collab_context, call)
+                value = await session._call_decision_callback(
+                    state,
+                    {"type": "_sdk_native_interception", "nonce": nonce},
+                    approval,
+                    admitted,
+                    collab_context,
+                    call,
+                )
                 if admitted() and type(value) is bool and value:
                     reply = '{"action":"continue"}'
         except BaseException:

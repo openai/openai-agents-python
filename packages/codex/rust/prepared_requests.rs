@@ -117,6 +117,26 @@ impl PythonTools {
         state.pending.clear();
     }
 
+    pub(crate) fn check_prepared_authority(
+        &self,
+        thread: &str,
+        turn: &str,
+        generation: u64,
+        id: u64,
+    ) -> bool {
+        let state = self
+            .prepared_requests
+            .lock()
+            .expect("Prepared requests poisoned");
+        state.pending.get(&id).is_some_and(|pending| {
+            !pending.reply.is_closed()
+                && pending.ticket.valid(&state)
+                && pending.ticket.generation == generation
+                && pending.ticket.receipt.thread_id == thread
+                && pending.ticket.receipt.turn_id == turn
+        })
+    }
+
     pub(crate) fn check_prepared_request(&self, id: u64) -> bool {
         let state = self
             .prepared_requests

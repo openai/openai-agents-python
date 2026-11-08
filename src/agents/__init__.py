@@ -28,6 +28,15 @@ if TYPE_CHECKING:
     )
     from .compaction import CompactionContext as CompactionContext
     from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .decisions import (
+        DecisionError as DecisionError,
+        DecisionInput as DecisionInput,
+        DecisionProvider as DecisionProvider,
+        DecisionRequest as DecisionRequest,
+        DecisionResponse as DecisionResponse,
+        OpenAIDecisions as OpenAIDecisions,
+        decide as decide,
+    )
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -168,6 +177,13 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "DecisionError": ".decisions",
+    "DecisionInput": ".decisions",
+    "DecisionProvider": ".decisions",
+    "DecisionRequest": ".decisions",
+    "DecisionResponse": ".decisions",
+    "OpenAIDecisions": ".decisions",
+    "decide": ".decisions",
     "CompactionContext": ".compaction",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",

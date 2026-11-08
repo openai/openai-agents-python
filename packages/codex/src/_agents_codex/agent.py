@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio as asyncio
 import importlib as importlib
 import json as json
-import math
 from collections.abc import AsyncIterator as AsyncIterator, Mapping as Mapping, Sequence as Sequence
 from contextlib import (
     AbstractAsyncContextManager as AbstractAsyncContextManager,
@@ -43,6 +42,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
+from .decisions import DecisionInput, DecisionProvider, _check_provider, decide
 from .model_context import _ContextTransform
 from .usage import RunBudget
 
@@ -76,6 +76,7 @@ ContextT = TypeVar("ContextT", default=None)
 OutputT = TypeVar("OutputT", default=str)
 SessionContextT = TypeVar("SessionContextT")
 NewOutputT = TypeVar("NewOutputT")
+_DecisionT = TypeVar("_DecisionT")
 TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
 
@@ -142,7 +143,7 @@ class CodexAccount:
 
 @dataclass(frozen=True, kw_only=True)
 class NativeProvider:
-    """A native API connection. Construction performs no I/O.
+    """A native Responses connection. Construction performs no I/O.
 
     For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
     the Session opens. Credentials and connection URLs are excluded from the
@@ -364,47 +365,13 @@ class NativeProvider:
 _PROVIDER_LOCK = RLock()
 
 
-def _check_api(api: object) -> None:
-    if not isinstance(api, str) or api not in ("responses", "decisions"):
-        raise TypeError("api must be 'responses' or 'decisions'")
-
-
-def _check_decision_model(agent: Agent[Any, Any]) -> None:
-    _check_api(agent.api)
-    if agent.api != "decisions":
-        return
-    if agent.model is not None and not agent.model.strip():
-        raise ValueError("Decisions model must be a non-empty string")
-    from ._function_tools import FunctionTool
-    from .schema import PromptedOutput
-
-    if agent.provider is not None and agent.provider.auth is not None:
-        raise ValueError("Decisions requires API-key authentication")
-    if agent.programmatic_tool_calling:
-        raise ValueError("Decisions does not support programmatic tool calling")
-    if isinstance(agent.output_type, PromptedOutput):
-        raise ValueError("Decisions requires plain output or native structured output")
-    if any(
-        not isinstance(tool, FunctionTool) or tool.defer_loading or tool._bind is None
-        for tool in agent.tools
-    ):
-        raise ValueError("Decisions supports only eager bound FunctionTool tools")
-
-
 @dataclass(init=False, eq=False, repr=False)
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
 
-    ``api`` selects the default inference API; session and run calls can override
-    it. Decisions defaults to ``gpt-6-luna`` when no model is supplied.
-    ``fallback_model`` explicitly permits generative Responses fallback when a
-    route cannot be filled or falls below ``min_route_probability``. Route
-    fallback re-evaluates the prepared input and may select another tool or final
-    output. Model-based context compaction, whether requested explicitly or
-    triggered automatically, also requires ``fallback_model``. Without it, a
-    Decisions session fails when model-based compaction is needed. Provider
-    failures and refusals do not trigger fallback. These declaration-only
-    policies apply to effective Decisions openings; Responses ignores them.
+    ``decisions`` supplies an optional typed decision provider. Session/run
+    openings can override it; callback helpers inherit the captured provider
+    and accept per-call overrides. It never changes the Agent's model API.
 
     Declaration fields are immutable. Construct a new Agent to change defaults;
     tools and model settings are captured at construction. A session captures
@@ -445,9 +412,7 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
-    api: Literal["responses", "decisions"]
-    fallback_model: str | None
-    min_route_probability: float | None
+    decisions: DecisionProvider | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -504,16 +469,14 @@ class Agent(Generic[ContextT, OutputT]):
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] = "responses",
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        fallback_model: str | None = None,
-        min_route_probability: float | None = None,
     ) -> None: ...
 
     @overload
@@ -525,15 +488,13 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT],
         tools: Sequence[Tool[ContextT]] | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] = "responses",
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        fallback_model: str | None = None,
-        min_route_probability: float | None = None,
     ) -> None: ...
 
     def __init__(
@@ -543,16 +504,14 @@ class Agent(Generic[ContextT, OutputT]):
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] = "responses",
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        fallback_model: str | None = None,
-        min_route_probability: float | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")
@@ -568,27 +527,15 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("before_complete must be callable or None")
         if model is not None and not isinstance(model, str):
             raise TypeError("model must be a string or None")
-        _check_api(api)
-        if fallback_model is not None and (
-            not isinstance(fallback_model, str) or not fallback_model.strip()
-        ):
-            raise ValueError("fallback_model must be a non-empty string")
-        if min_route_probability is not None and (
-            isinstance(min_route_probability, bool)
-            or not isinstance(min_route_probability, (int, float))
-            or not 0 <= min_route_probability <= 1
-            or not math.isfinite(min_route_probability)
-        ):
-            raise ValueError("min_route_probability must be a finite number between 0 and 1")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "tools", tuple(tools or ()))
         object.__setattr__(self, "model", model)
-        object.__setattr__(self, "api", api)
-        object.__setattr__(self, "fallback_model", fallback_model)
-        object.__setattr__(self, "min_route_probability", min_route_probability)
+        if decisions is not None:
+            _check_provider(decisions)
+        object.__setattr__(self, "decisions", decisions)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(
             self, "model_settings", MappingProxyType(_copy_model_settings(model_settings))
@@ -598,6 +545,61 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a standalone typed question using this Agent's Decisions default.
+
+        This starts no Agent run and records no conversation or turn usage.
+        A per-call provider overrides the declaration's ``decisions`` default.
+        """
+        return await decide(
+            question,
+            input=input,
+            provider=_check_provider(provider if provider is not None else self.decisions),
+            choices=choices,
+            output_type=output_type,
+        )
 
     def validate(self) -> None:
         """Check the declaration without opening a Session.
@@ -612,7 +614,6 @@ class Agent(Generic[ContextT, OutputT]):
         from .schema import _prepare_spec
         from .session import _check_namespaced_tool_collisions, _split_tools
 
-        _check_decision_model(self)
         python_tools, mcp_tools, native_agents = _split_tools(
             self.tools, self.programmatic_tool_calling
         )
@@ -650,8 +651,8 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
@@ -672,8 +673,8 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
@@ -694,8 +695,8 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
@@ -716,8 +717,8 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
@@ -748,11 +749,7 @@ class Agent(Generic[ContextT, OutputT]):
         An explicit provider here overrides this Agent's provider. Both are
         borrowed; the application closes them. When neither is supplied, this
         Session creates and closes its own provider, including on opening failure.
-        `model=None` inherits the Agent model. `api=None` inherits the Agent API;
-        Changing API uses that API's default model unless ``model`` is explicit.
-        Selecting the same API preserves the Agent model. Model overrides keep
-        the selected API. The Decisions API defaults to ``gpt-6-luna``.
-        Present model_settings keys
+        `model=None` inherits the Agent model. Present model_settings keys
         override Agent defaults; only a present `service_tier=None` clears a
         value. Other omitted keys keep the Agent or native defaults.
 
@@ -833,8 +830,8 @@ class Agent(Generic[ContextT, OutputT]):
                 resume=resume,
                 environment=environment,
                 provider=provider,
+                decisions=decisions,
                 model=model,
-                api=api,
                 model_settings=model_settings,
                 tool_selection=tools,
                 instruction_files=instruction_files,
@@ -882,8 +879,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -906,8 +903,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -930,8 +927,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -953,8 +950,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -986,9 +983,8 @@ class Agent(Generic[ContextT, OutputT]):
 
         prepare_request(turn, request, *, preparation_index, recovery_attempt)
         edits a detached next-request sampling copy. Return its complete value
-        or None. The Responses API requires an explicitly HTTP provider. Decisions
-        selects HTTP. Use eager ordinary function/MCP tools without children,
-        Environment or code mode. The callback must
+        or None. Use an explicitly HTTP provider and eager ordinary function/MCP
+        tools without children, Environment or code mode. The callback must
         tolerate repeated preparation and avoid business effects. HTTP retries
         reuse its captured edit; native stream recovery calls it again. Separate
         output correction attempts are unsupported; set max_retries=0 or use
@@ -1025,10 +1021,6 @@ class Agent(Generic[ContextT, OutputT]):
             from .state import SessionState
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
-            effective_api = self.api if api is None else api
-            if effective_api == "decisions":
-                if return_state or state is not None:
-                    raise ValueError("Decisions does not support checkpoint capture or restoration")
             if budget is not None and not isinstance(budget, RunBudget):
                 raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
@@ -1043,9 +1035,7 @@ class Agent(Generic[ContextT, OutputT]):
                         raise TypeError("provider must be a NativeProvider or None")
                     _check_profile(
                         self,
-                        websockets=False
-                        if effective_api == "decisions"
-                        else True
+                        websockets=True
                         if effective_provider is None
                         else effective_provider._websockets_enabled,
                         environment=environment,
@@ -1140,10 +1130,10 @@ class Agent(Generic[ContextT, OutputT]):
                 options["state"] = state
             if provider is not None:
                 options["provider"] = provider
+            if decisions is not None:
+                options["decisions"] = decisions
             if model is not None:
                 options["model"] = model
-            if api is not None:
-                options["api"] = api
             if model_settings is not None:
                 options["model_settings"] = model_settings
             if max_function_concurrency is not None:
@@ -1248,8 +1238,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
@@ -1272,8 +1262,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
@@ -1296,8 +1286,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
@@ -1319,8 +1309,8 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
@@ -1369,10 +1359,10 @@ class Agent(Generic[ContextT, OutputT]):
                     options["on_interaction"] = on_interaction
                 if provider is not None:
                     options["provider"] = provider
+                if decisions is not None:
+                    options["decisions"] = decisions
                 if model is not None:
                     options["model"] = model
-                if api is not None:
-                    options["api"] = api
                 if model_settings is not None:
                     options["model_settings"] = model_settings
                 if max_function_concurrency is not None:

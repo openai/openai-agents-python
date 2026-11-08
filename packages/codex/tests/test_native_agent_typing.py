@@ -24,6 +24,9 @@ from agents import (
     Completed,
     CompletionContext,
     ContinueTurn,
+    DecisionProvider,
+    DecisionRequest,
+    DecisionResponse,
     Environment,
     EnvironmentSource,
     ExecutorContext,
@@ -39,6 +42,7 @@ from agents import (
     NativeOutput,
     NativeProvider,
     NativeRole,
+    OpenAIDecisions,
     PromptedOutput,
     ReplaceArguments,
     ResponseIntegrityReason,
@@ -54,6 +58,7 @@ from agents import (
     Turn,
     UserInput,
     WebSearch,
+    decide,
     function_tool,
 )
 from agents._events import OutputText, URLCitation, WebSearchSource
@@ -74,29 +79,6 @@ search = WebSearch(route="hosted", allowed_domains=["weather.example"], location
 search_settings: ModelSettings = {"tool_choice": "required"}
 search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
 assert_type(search_agent, Agent[None, str])
-
-# API choice and model identity remain separate through declaration and overrides.
-decisions_agent = Agent(
-    instructions="Classify.",
-    model="decision-model",
-    api="decisions",
-    fallback_model="generation-model",
-    min_route_probability=0.8,
-)
-assert_type(decisions_agent, Agent[None, str])
-assert_type(decisions_agent.model, str | None)
-assert_type(decisions_agent.api, Literal["responses", "decisions"])
-
-
-async def decisions_api_override_types() -> None:
-    assert_type(
-        await decisions_agent.run("Classify.", model="another-decision", api="decisions"),
-        Completed[str],
-    )
-    async with decisions_agent.session(model="generation-model", api="responses") as session:
-        assert_type(session, Session[None, str])
-    assert_type(decisions_agent.run_sync("Classify.", api="decisions"), Completed[str])
-
 
 code_interpreter = CodeInterpreter(container="cntr_existing", allowed_callers=["direct"])
 assert_type(code_interpreter.allowed_callers, Sequence[Literal["direct", "programmatic"]] | None)
@@ -408,12 +390,6 @@ async def typed_standard_environment_manager() -> None:
 
 class Answer(BaseModel):
     answer: str
-
-
-decisions_typed = Agent(instructions="Classify.", api="decisions", output_type=Answer)
-assert_type(decisions_typed, Agent[None, Answer])
-assert_type(decisions_typed.fallback_model, str | None)
-assert_type(decisions_typed.min_route_probability, float | None)
 
 
 class Choice(RootModel[int | str]):
@@ -1024,3 +1000,39 @@ mixed_approval_children = NativeAgents(before_step=neutral_child_step, approval=
 assert_type(
     Agent(instructions="Delegate.", tools=[mixed_approval_children]), Agent[Application, str]
 )
+
+
+class ExampleDecisionProvider:
+    async def get_decision(self, request: DecisionRequest) -> DecisionResponse:
+        return DecisionResponse(value={"response": True})
+
+
+decision_provider: DecisionProvider = ExampleDecisionProvider()
+deciding_agent = Agent(instructions="Answer.", decisions=decision_provider)
+
+
+async def typed_decision_helpers(
+    turn: Turn[str],
+    completion: CompletionContext[Application],
+    tool_context: ToolContext[Application],
+    child_step: ChildStepContext[Application],
+    builtin: OpenAIDecisions,
+) -> None:
+    assert_type(await decide("Allowed?", input="Evidence", provider=decision_provider), bool)
+    assert_type(
+        await decide("Select", input=[], choices=["a", "b"], provider=decision_provider), str
+    )
+    assert_type(
+        await decide("Assess", input="Evidence", output_type=Answer, provider=decision_provider),
+        Answer,
+    )
+    assert_type(await builtin.decide("Allowed?", input="Evidence"), bool)
+    assert_type(await builtin.decide("Select", input="Evidence", choices=["a", "b"]), str)
+    assert_type(await deciding_agent.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    assert_type(await turn.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    assert_type(await completion.decide("Allowed?", input=completion.text or ""), bool)
+    assert_type(await tool_context.decide("Select", input="Evidence", choices=["a", "b"]), str)
+    assert_type(await child_step.decide("Allowed?", input="Evidence"), bool)
+    async with deciding_agent.session(decisions=decision_provider):
+        pass
+    assert_type(await deciding_agent.run("Answer", decisions=decision_provider), Completed[str])

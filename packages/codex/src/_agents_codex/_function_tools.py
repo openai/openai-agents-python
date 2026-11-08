@@ -10,6 +10,7 @@ from collections.abc import (
     Callable as Callable,
     Coroutine as Coroutine,
     Mapping as Mapping,
+    Sequence as Sequence,
 )
 from dataclasses import dataclass as dataclass, field as field
 from functools import partial as partial
@@ -64,9 +65,11 @@ from .tools import (
 )
 
 if TYPE_CHECKING:
+    from .decisions import DecisionInput, DecisionProvider
     from .turn import Turn
 
 ToolContextT = TypeVar("ToolContextT")
+_DecisionT = TypeVar("_DecisionT")
 PolicyContextT = TypeVar("PolicyContextT")
 PolicyContextT_contra = TypeVar("PolicyContextT_contra", contravariant=True)
 ContextT_co = TypeVar("ContextT_co", covariant=True, default=None)
@@ -113,6 +116,60 @@ class ToolContext(Generic[ContextT_co]):
     effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
     call: ToolCallInfo = field(kw_only=True)
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a typed question during this exact admitted callback.
+
+        Input is explicit. The callback's captured provider is the default;
+        provider overrides it for this call. Completed usage is recorded before
+        local validation. Calls outside the callback or from detached tasks fail.
+        """
+        from .decisions import _bound_decide
+
+        return await _bound_decide(
+            self, question, input=input, provider=provider, choices=choices, output_type=output_type
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

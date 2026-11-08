@@ -5,11 +5,13 @@
 mod application_instructions;
 mod async_bridge;
 mod auth;
+mod auxiliary_decisions;
 mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
 mod config;
 mod context;
+mod decisions;
 mod engine;
 mod environment;
 mod extensions;
@@ -1000,6 +1002,16 @@ impl NativeThread {
             tools.enter(&inner.id.to_string(), &key).map_err(py_error)?;
         }
         Ok(())
+    }
+
+    fn _capture_decision<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let request = request_json.to_owned();
+        async_bridge::future_into_py(py, auxiliary_decisions::capture(inner, request))
     }
 
     // Cancellation from a child callback must target its still-live issuer,
@@ -3247,10 +3259,13 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
+    module.add_class::<auxiliary_decisions::NativeDecisionCall>()?;
     module.add_class::<live::NativeLiveSession>()?;
     module.add_class::<provider_owner::NativeProviderOwner>()?;
     module.add_class::<provider_owner::NativeProviderLease>()?;
     module.add_class::<provider_owner::NativeProviderHome>()?;
+    module.add_function(wrap_pyfunction!(decisions::_decision_questions, module)?)?;
+    module.add_function(wrap_pyfunction!(decisions::_decision_result, module)?)?;
     module.add_function(wrap_pyfunction!(create_engine, module)?)?;
     module.add_function(wrap_pyfunction!(reconcile_canonical_store, module)?)?;
     module.add_function(wrap_pyfunction!(create_checkpoint_engine, module)?)?;

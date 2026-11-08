@@ -1,10 +1,7 @@
-"""Classify a support request into a typed result with the Decisions API.
+"""Use typed decisions and check an Agent's proposed completion.
 
-Set OPENAI_API_KEY before running this example.
-Optionally set OPENAI_DECISION_MODEL to override the default gpt-6-luna, or
-OPENAI_DECISION_FALLBACK_MODEL to permit semantic fallback.
-Model-based context compaction, explicit or automatic, requires that fallback.
-See decision_coordinator.py for a coordinator that calls a specialist and resumes with its result.
+Set OPENAI_API_KEY and OPENAI_MODEL before running. Install
+the matching SDK build with its decisions extra for the optional OpenAI provider.
 """
 
 import asyncio
@@ -13,24 +10,41 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agents import Agent
+from agents import Agent, CompletionContext, ContinueTurn, OpenAIDecisions, StopTurn
 
 
-class Triage(BaseModel):
+class Assessment(BaseModel):
     priority: Literal["low", "normal", "urgent"]
     needs_reply: bool
 
 
-async def main() -> None:
-    agent = Agent(
-        instructions="Classify the support request's priority and whether it needs a reply.",
-        model=os.environ.get("OPENAI_DECISION_MODEL"),
-        api="decisions",
-        fallback_model=os.environ.get("OPENAI_DECISION_FALLBACK_MODEL"),
-        output_type=Triage,
+async def check_completion(ctx: CompletionContext[None]):
+    accepted = await ctx.decide(
+        "Does this proposed reply clearly identify the customer's next action?",
+        input=ctx.text or "",
     )
-    result = await agent.run("Our production checkout stopped working. Please help now.")
-    print(result.final_output.model_dump_json())
+    if accepted:
+        return None
+    if ctx.continuation_count >= 1:
+        return StopTurn("The reply still lacks a clear next action")
+    return ContinueTurn("State the customer's next action clearly.")
+
+
+async def main() -> None:
+    request = "Our production checkout stopped working. Please help now."
+    async with OpenAIDecisions() as decisions:
+        assessment = await decisions.decide(
+            "Classify this support request.", input=request, output_type=Assessment
+        )
+        print(assessment.model_dump_json())
+        agent = Agent(
+            instructions="Write a short support reply with one clear next action.",
+            model=os.environ["OPENAI_MODEL"],
+            decisions=decisions,
+            before_complete=check_completion,
+        )
+        result = await agent.run(request)
+        print(result.final_output)
 
 
 if __name__ == "__main__":

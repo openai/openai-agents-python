@@ -1,13 +1,26 @@
 """Application acceptance of a native turn's proposed completion."""
 
-from collections.abc import Awaitable as Awaitable, Callable as Callable
+from __future__ import annotations
+
+from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
 from dataclasses import dataclass as dataclass, field as field
-from typing import Generic as Generic, TypeAlias as TypeAlias, TypeVar as TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic as Generic,
+    TypeAlias as TypeAlias,
+    TypeVar as TypeVar,
+    overload,
+)
+
+if TYPE_CHECKING:
+    from .decisions import DecisionInput, DecisionProvider
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import StopTurn as StopTurn
 
 ContextT = TypeVar("ContextT")
+_DecisionT = TypeVar("_DecisionT")
 
 
 @dataclass(frozen=True)
@@ -54,6 +67,60 @@ class CompletionContext(Generic[ContextT]):
     subagent_id: str | None
     model: str
     continuation_count: int
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a typed question during this exact completion callback.
+
+        Input is explicit. The callback's captured provider is the default;
+        provider overrides it for this call. Completed usage is recorded before
+        local validation. Calls outside the callback or from detached tasks fail.
+        """
+        from .decisions import _bound_decide
+
+        return await _bound_decide(
+            self, question, input=input, provider=provider, choices=choices, output_type=output_type
+        )
 
 
 _BeforeComplete: TypeAlias = Callable[

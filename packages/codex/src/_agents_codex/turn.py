@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio as asyncio
-from collections.abc import Iterator as Iterator
+from collections.abc import Iterator as Iterator, Sequence as Sequence
 from dataclasses import dataclass as dataclass, field as field
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
@@ -11,6 +11,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     Protocol as Protocol,
+    overload as overload,
 )
 
 from typing_extensions import TypeVar as TypeVar
@@ -18,6 +19,7 @@ from typing_extensions import TypeVar as TypeVar
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
+    from .decisions import DecisionInput, DecisionProvider
     from .input import UserInput
     from .manual import Interaction
     from .observation import EventStream
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from .session import Completed, NativeError, Session, TurnStoppedError
 
 OutputT = TypeVar("OutputT")
+_DecisionT = TypeVar("_DecisionT")
 TurnT = TypeVar("TurnT", default="Turn[OutputT]")
 
 
@@ -86,6 +89,60 @@ class Turn(Generic[OutputT]):
 
     def __reduce__(self) -> Any:
         raise TypeError("Turn belongs to a live Session and cannot be serialized")
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a typed question during this exact Turn's admitted callback.
+
+        Input is explicit. The callback's captured provider is the default;
+        provider overrides it for this call. Completed usage is recorded before
+        local validation. Calls outside the callback or from detached tasks fail.
+        """
+        from .decisions import _bound_decide
+
+        return await _bound_decide(
+            self, question, input=input, provider=provider, choices=choices, output_type=output_type
+        )
 
     async def get_result(self) -> Completed[OutputT]:
         """Wait for all this root's work without cancelling it if a waiter stops."""

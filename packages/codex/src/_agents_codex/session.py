@@ -29,7 +29,7 @@ from contextlib import (
     suppress as suppress,
 )
 from contextvars import ContextVar as ContextVar, copy_context as copy_context
-from copy import copy as copy, deepcopy as deepcopy
+from copy import deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
 from importlib.resources import files as _package_files
 from os import PathLike as PathLike
@@ -94,7 +94,6 @@ from .agent import (
     ModelSettings as ModelSettings,
     NativeProvider as NativeProvider,
     OutputT as OutputT,
-    _check_decision_model,
     _copy_model_settings as _copy_model_settings,
 )
 from .canonical_storage import (
@@ -103,6 +102,7 @@ from .canonical_storage import (
 )
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
+from .decisions import DecisionProvider, DecisionResponse, _bind_decisions, _capture_decisions
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -1804,57 +1804,32 @@ def _configure_child_roles(
         }
 
 
-def _native_provider_config(
-    provider: NativeProvider, *, codex_login: bool, web_search: WebSearch | None
-) -> dict[str, Any]:
-    return {
-        "name": "OpenAI" if codex_login else "Native agent provider",
-        "base_url": (
-            _CODEX_RESPONSES_BASE_URL
-            if codex_login
-            else provider.base_url or "https://api.openai.com/v1"
-        ),
-        "wire_api": "responses",
-        "requires_openai_auth": True,
-        "supports_websockets": provider._websockets_enabled,
-        # Both native web protocols require a compatible Responses
-        # provider. The declaration admits that provider capability.
-        "supports_standalone_web_search": (
-            web_search is not None and web_search.route == "standalone"
-        ),
-    }
-
-
-def _prepare_session_model(
-    agent: Agent[Any, Any],
+def _capture_opening_agent(
+    agent: Agent[ContextT, OutputT],
     *,
-    state: SessionState | None,
-    storage: LocalStorage | CustomStorage | None,
-    resume: str | None,
-    environment: EnvironmentSource[Any] | None,
-) -> tuple[str | None, dict[str, Any]]:
-    _check_decision_model(agent)
-    model = agent.model
-    if agent.api == "decisions":
-        if (
-            state is not None
-            or storage is not None
-            or resume is not None
-            or environment is not None
-        ):
-            raise ValueError("Decisions does not support checkpoints, storage or environments")
-        model = model if model is not None else "gpt-6-luna"
-        decision_model: dict[str, Any] = {"model": model}
-        if agent.fallback_model is not None:
-            decision_model["fallback_model"] = agent.fallback_model
-        if agent.min_route_probability is not None:
-            decision_model["min_route_probability"] = agent.min_route_probability
-        return agent.fallback_model or model, {
-            "decision_model": decision_model,
-            "supports_websockets": False,
-            "stream_max_retries": 0,
-        }
-    return model, {}
+    provider: NativeProvider | None,
+    decisions: DecisionProvider | None,
+    model: str | None,
+    model_settings: ModelSettings | None,
+    tool_selection: Sequence[Tool[ContextT]] | None,
+) -> Agent[ContextT, OutputT]:
+    """Detach declaration defaults before native opening can suspend."""
+    return Agent[ContextT, OutputT](
+        instructions=agent.instructions,
+        name=agent.name,
+        tools=agent.tools if tool_selection is None else tool_selection,
+        model=agent.model if model is None else model,
+        model_settings=cast(
+            ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
+        ),
+        provider=agent.provider if provider is None else provider,
+        decisions=decisions,
+        output_type=cast(OutputSpec[OutputT], agent.output_type),
+        programmatic_tool_calling=agent.programmatic_tool_calling,
+        transform_context=agent.transform_context,
+        before_compact=agent.before_compact,
+        before_complete=agent.before_complete,
+    )
 
 
 class Session(Generic[ContextT, OutputT]):
@@ -1876,8 +1851,8 @@ class Session(Generic[ContextT, OutputT]):
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         model: str | None = None,
-        api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
@@ -1902,6 +1877,7 @@ class Session(Generic[ContextT, OutputT]):
                 "use update(model=...) after the restored Session is idle"
             )
         policy_agent = agent
+        decisions_provider = _capture_decisions(agent.decisions, decisions)
         selected = _restore_declaration.get()
         if (
             selected is not None
@@ -1911,11 +1887,6 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
-            if api is not None:
-                agent = copy(agent)
-                if api != agent.api:
-                    object.__setattr__(agent, "model", None)
-                object.__setattr__(agent, "api", api)
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -1925,33 +1896,14 @@ class Session(Generic[ContextT, OutputT]):
             selected = None
             # Capture the declaration before native opening can suspend. Keep
             # application hooks and executor policy bound to the original Agent.
-            agent = Agent[ContextT, OutputT](
-                instructions=agent.instructions,
-                name=agent.name,
-                tools=agent.tools if tool_selection is None else tool_selection,
-                model=(
-                    model
-                    if model is not None
-                    else None
-                    if api is not None and api != agent.api
-                    else agent.model
-                ),
-                api=agent.api if api is None else api,
-                fallback_model=agent.fallback_model,
-                min_route_probability=agent.min_route_probability,
-                model_settings=cast(
-                    ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
-                ),
-                provider=agent.provider if provider is None else provider,
-                output_type=cast(OutputSpec[OutputT], agent.output_type),
-                programmatic_tool_calling=agent.programmatic_tool_calling,
-                transform_context=agent.transform_context,
-                before_compact=agent.before_compact,
-                before_complete=agent.before_complete,
+            agent = _capture_opening_agent(
+                agent,
+                provider=provider,
+                decisions=decisions_provider,
+                model=model,
+                model_settings=model_settings,
+                tool_selection=tool_selection,
             )
-        model, decision_config = _prepare_session_model(
-            agent, state=state, storage=storage, resume=resume, environment=environment
-        )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
         instructions, instruction_receipts = _load_instruction_files(
@@ -2074,6 +2026,7 @@ class Session(Generic[ContextT, OutputT]):
             programmatic_tool_calling,
             native_agents=native_agents,
         )
+        model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
         native = importlib.import_module("agents._native")
@@ -2309,9 +2262,22 @@ class Session(Generic[ContextT, OutputT]):
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
                     "model_provider": provider_id,
-                    f"model_providers.{provider_id}": _native_provider_config(
-                        provider, codex_login=codex_login is not None, web_search=web_search
-                    ),
+                    f"model_providers.{provider_id}": {
+                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
+                        "base_url": (
+                            _CODEX_RESPONSES_BASE_URL
+                            if codex_login is not None
+                            else provider.base_url or "https://api.openai.com/v1"
+                        ),
+                        "wire_api": "responses",
+                        "requires_openai_auth": True,
+                        "supports_websockets": provider._websockets_enabled,
+                        # Both native web protocols require a compatible Responses
+                        # provider. The declaration admits that provider capability.
+                        "supports_standalone_web_search": (
+                            web_search is not None and web_search.route == "standalone"
+                        ),
+                    },
                     "agents.enabled": False,
                     "features.goals": goals,
                     "tools.update_plan.enabled": checklist,
@@ -2345,10 +2311,6 @@ class Session(Generic[ContextT, OutputT]):
                         "enabled": True,
                         "disable_in_process_fallback": True,
                     }
-                if decision_config:
-                    cast(dict[str, Any], config[f"model_providers.{provider_id}"]).update(
-                        decision_config
-                    )
                 if model is not None:
                     config["model"] = model
                 if native_agents is not None:
@@ -2633,6 +2595,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
+                session._decisions_provider = decisions_provider
                 session._bindings = agent.tools
                 session._executor = executor
                 if executor is not None and executor.writable_roots is not None:
@@ -2807,9 +2770,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
-                session._websockets_enabled = cast(
-                    bool, decision_config.get("supports_websockets", provider._websockets_enabled)
-                )
+                session._websockets_enabled = provider._websockets_enabled
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
                     session._manual_source_digest = hashlib.sha256(
@@ -3023,6 +2984,8 @@ class Session(Generic[ContextT, OutputT]):
         self._observations = _ObservationBuffer(self.id)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
+        self._decisions_provider: DecisionProvider | None = None
+        self._decision_completions: dict[str, Any] = {}
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
             weakref.WeakValueDictionary()
         )
@@ -4926,9 +4889,6 @@ class Session(Generic[ContextT, OutputT]):
                 raise SessionBusyError("Session already has an active submission or mutation")
             if self._checkpoint_task is not None:
                 raise RuntimeError("Session is saving a checkpoint")
-            if self._opening_agent is not None and self._opening_agent.api == "decisions":
-                if output.mode == "prompted":
-                    raise ValueError("Decisions requires plain output or native structured output")
             if prepare_request is not None:
                 _check_output(output)
             if output.max_retries and self._storage is not None:
@@ -5158,14 +5118,6 @@ class Session(Generic[ContextT, OutputT]):
         Cancellation joins publication; accepted changes stay applied.
         """
         self._check_idle_update()
-        if (
-            self._opening_agent is not None
-            and self._opening_agent.api == "decisions"
-            and (model is not None or model_settings is not None)
-        ):
-            raise ValueError(
-                "Model updates are unsupported with the Decisions API; open a new Session"
-            )
         settings = _native_model_settings(model, model_settings)
         if tools is not None:
             if instructions is not None or settings:
@@ -5199,10 +5151,6 @@ class Session(Generic[ContextT, OutputT]):
                 environment=self._executor,
                 native_agents=self._native_agents,
             )
-            if self._opening_agent.api == "decisions" and any(
-                tool.defer_loading or tool._bind is None for tool in python
-            ):
-                raise ValueError("Decisions supports only eager bound FunctionTool tools")
             for tool in python:
                 tool._check_context(self._context)
             for server in mcp:
@@ -7263,7 +7211,9 @@ class Session(Generic[ContextT, OutputT]):
             snapshot = cast(PreparedRequest, deepcopy(message["data"]))
             context = state.tracing.context if state.tracing is not None else None
             with _activate(context):
-                reply = await _call_callback(
+                reply = await self._call_decision_callback(
+                    state,
+                    message,
                     _capturing_callback(
                         state.prepare_request,
                         lambda: (
@@ -7294,6 +7244,33 @@ class Session(Generic[ContextT, OutputT]):
             except RuntimeError:
                 if not state.stopping and not state.failure.done():
                     state.failure.set_result(NativeError("Prepared request expired"))
+
+    async def _begin_decision_response(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> Callable[[DecisionResponse], Awaitable[None]]:
+        from ._decision_accounting import begin_decision_response
+
+        return await begin_decision_response(self, state, message)
+
+    async def _call_decision_callback(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
+            with _bind_decisions(
+                args[0],
+                active,
+                lambda: self._begin_decision_response(state, message),
+                getattr(self, "_decisions_provider", None),
+            ):
+                return await _call_callback(callback, active, *args, **kwargs)
+        return await _call_callback(callback, active, *args, **kwargs)
 
     async def _run_owned_context_callback(
         self,
@@ -7328,7 +7305,7 @@ class Session(Generic[ContextT, OutputT]):
             if not active():
                 return
             callback, request = prepare()
-            result = await _call_callback(callback, active, request)
+            result = await self._call_decision_callback(state, message, callback, active, request)
             if not active():
                 return
             reply(result)
@@ -7547,7 +7524,9 @@ class Session(Generic[ContextT, OutputT]):
             if callback is not None:
                 if child:
                     assert isinstance(state.handle, ChildInvocation)
-                    selection = await _call_callback(
+                    selection = await self._call_decision_callback(
+                        state,
+                        message,
                         callback,
                         active,
                         ChildStepContext(
@@ -7555,8 +7534,13 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     )
                 else:
-                    selection = await _call_callback(
-                        callback, active, self.active_turn or state.handle, step_index=index
+                    selection = await self._call_decision_callback(
+                        state,
+                        message,
+                        callback,
+                        active,
+                        self.active_turn or state.handle,
+                        step_index=index,
                     )
             if not active():
                 return
@@ -7671,6 +7655,10 @@ class Session(Generic[ContextT, OutputT]):
                 if event is None:
                     break
                 message = event.get("msg", {})
+                from ._decision_accounting import consume_decision_response
+
+                if consume_decision_response(self, event):
+                    continue
                 if message.get("type") == "token_count" and "api_rate_limits" in message:
                     snapshot = _api_rate_limits(message["api_rate_limits"])
                     if snapshot is not None:
@@ -8596,8 +8584,8 @@ class Session(Generic[ContextT, OutputT]):
                 )
             if entry.before is not None:
                 assert context is not None
-                decision = await _call_callback(
-                    entry.before, lambda: self._admit_tool(state, request), context
+                decision = await self._call_decision_callback(
+                    state, message, entry.before, lambda: self._admit_tool(state, request), context
                 )
                 if not self._admit_tool(state, request):
                     return
@@ -8634,7 +8622,9 @@ class Session(Generic[ContextT, OutputT]):
             timeout_output: ToolOutput | None = None
             duration = entry.callback_timeout
             if duration is None:
-                value = await _call_callback(
+                value = await self._call_decision_callback(
+                    state,
+                    message,
                     entry.callback,
                     lambda: self._admit_tool(state, request),
                     *args,
@@ -8666,8 +8656,8 @@ class Session(Generic[ContextT, OutputT]):
                     nonlocal value, body_error
                     try:
                         if admit_body():
-                            value = await _call_callback(
-                                entry.callback, admit_body, *args, **kwargs
+                            value = await self._call_decision_callback(
+                                state, message, entry.callback, admit_body, *args, **kwargs
                             )
                     except BaseException as error:
                         # Transport every exit to the owner without letting
@@ -8721,7 +8711,9 @@ class Session(Generic[ContextT, OutputT]):
                     text = str(timeout_error)
                     if entry.timeout_error_function is not None:
                         assert context is not None
-                        text = await _call_callback(
+                        text = await self._call_decision_callback(
+                            state,
+                            message,
                             entry.timeout_error_function,
                             lambda: self._admit_tool(state, request),
                             context,
@@ -8753,7 +8745,9 @@ class Session(Generic[ContextT, OutputT]):
 
                 timer = loop.call_at(cutoff, expire_callback)
                 try:
-                    value = await _call_callback(
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
                         entry.callback,
                         lambda: self._admit_tool(state, request),
                         *args,
@@ -8788,8 +8782,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Tool result failed validation")
             if entry.after is not None and timeout_output is None:
                 assert context is not None
-                output = await _call_callback(
-                    entry.after, lambda: self._admit_tool(state, request), context, output
+                output = await self._call_decision_callback(
+                    state,
+                    message,
+                    entry.after,
+                    lambda: self._admit_tool(state, request),
+                    context,
+                    output,
                 )
                 if not self._admit_tool(state, request):
                     return
@@ -9069,8 +9068,6 @@ class Session(Generic[ContextT, OutputT]):
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:
-        if self._opening_agent is not None and self._opening_agent.api == "decisions":
-            raise CapabilityError("Decisions does not support checkpoint capture or restoration")
         if self._active is not None and self._active.budget is not None:
             raise CapabilityError(
                 "Cannot checkpoint an active run with a budget. Reply in the live Session."
