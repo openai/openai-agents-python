@@ -104,6 +104,8 @@ class NativeAgents(Generic[ContextT]):
     """Enable native V2 children with the Session's three executor tools.
 
     Include this declaration in Agent tools. Supply the Environment at session opening.
+    NativeAgents reserves the collaboration namespace for native tools. Custom
+    functions may use that namespace only when NativeAgents is not enabled.
     Core's default, explorer, and worker roles are available without additional
     roles. Additional roles select instructions and optional model and
     reasoning effort.

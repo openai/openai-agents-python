@@ -42,6 +42,7 @@ from ..session import (
     _ManualBoundaryLost,
 )
 from ..state import SessionState
+from ..tools import ToolRef
 from ..turn import PendingRequests
 from ._client import _DEFAULT_LIMITS, A2ALimits, _limits
 from ._provider import _json
@@ -294,7 +295,7 @@ class NativeA2AExecutor(AgentExecutor):
                 tools = [
                     tool
                     for tool in configured.agent.tools
-                    if isinstance(tool, FunctionTool) and tool.name == pending.tool
+                    if isinstance(tool, FunctionTool) and tool.ref == ToolRef(pending.tool)
                 ]
                 if len(tools) == 1:
                     captured = tools[0]._capture(configured.context)

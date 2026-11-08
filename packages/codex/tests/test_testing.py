@@ -258,17 +258,18 @@ async def test_real_native_text_sessions_borrow_provider_until_peer_closes(monke
             pass
 
 
-async def test_real_function_runs_once_and_native_submits_result():
+@pytest.mark.parametrize("namespace", [None, "crm"])
+async def test_real_function_runs_once_and_native_submits_result(namespace):
     effects: list[tuple[str, str]] = []
 
-    @function_tool
+    @function_tool(namespace=namespace)
     async def lookup(context: ToolContext[str], key: str) -> str:
         """Read a test tenant record."""
         effects.append((context.context, key))
         return f"{context.context}:{key}"
 
     async with ScriptedResponses(
-        [tool_call("lookup", {"key": "a"}, call_id="lookup-1")],
+        [tool_call("lookup", {"key": "a"}, call_id="lookup-1", namespace=namespace)],
         [text("record found")],
         [text("later history")],
     ) as peer:
