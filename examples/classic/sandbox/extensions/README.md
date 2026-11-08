@@ -240,11 +240,7 @@ uv run python examples/classic/sandbox/extensions/daytona/daytona_runner.py --st
 
 ### Setup
 
-Install the repo extra:
-
-```bash
-uv sync --extra classic-blaxel
-```
+Create and activate the [separate Blaxel environment](../README.md#cloud-backend-examples). The locked MCP v2 environment is incompatible with Blaxel 0.3.5. Keep the Blaxel environment active for the command below; plain `uv run` would select the project's locked environment.
 
 Create a Blaxel account and get an API key. The official docs are:
 
@@ -262,7 +258,7 @@ export BL_WORKSPACE=...
 ### Run
 
 ```bash
-uv run python examples/classic/sandbox/extensions/blaxel_runner.py --stream
+python examples/classic/sandbox/extensions/blaxel_runner.py --stream
 ```
 
 Useful flags:

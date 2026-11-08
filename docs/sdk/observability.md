@@ -28,6 +28,26 @@ Both `total_token_usage` and `last_token_usage` expose the fields listed in [usa
 
 For a live display, replace the snapshot with `UsageUpdated.usage` from `agents.observation`, which can be `None`. Do not add event counts. Because observations can drop, read the final result after completion.
 
+## Limit a run's model requests and usage
+
+`RunBudget` requires a [development build newer than alpha.6](installation.md#examples-and-upgrades). Pass `budget=RunBudget(...)` to `agent.run()`, `agent.run_sync()`, or `session.submit()`. This async fragment assumes a configured `agent`:
+
+```python
+from agents import RunBudget
+
+result = await agent.run("Summarize the supplied text.", budget=RunBudget(max_requests=3))
+```
+
+Set at least one nonnegative integer limit: `max_requests`, `max_tokens`, or `max_estimated_cost_micros`. A zero limit blocks the first model request. Once a limit is reached, the SDK blocks the next sampling admission. An already admitted response can exceed token or cost limits and still complete successfully, so these limits do not cap actual charges.
+
+`max_requests` counts root sampling admissions, including prompted-output repairs. It excludes transport retries, compaction requests, and child requests. Token and cost limits use reported response completions on the active root, including reported internal requests. They exclude child responses and cumulative thread snapshots.
+
+For a cost limit, supply a synchronous `estimate_cost_micros(usage)` callback. It receives `TokenUsage` and returns a nonnegative integer estimate in millionths of a US dollar, or `None` for unknown cost. Estimates can differ from billed charges. With the default `missing_usage="stop"`, missing usage or an unknown cost estimate blocks the next admission. Use `missing_usage="continue"` only if continuing with known values meets your application's requirements. A request-only budget needs neither usage nor an estimator.
+
+A blocked admission raises `NativeError` with code `"run_budget_exceeded"` or `"run_budget_usage_unavailable"`. An invalid or failed estimator produces `"run_budget_invalid_estimate"`. Inspect earlier tool effects before starting another run. [`wait_for_attention()`](sessions.md#wait-for-a-decision-or-a-result) reports a budget stop as `reason="budget_exceeded"`.
+
+Each queued submission has its own budget. Steering and live manual replies keep the active run's budget. A budgeted active run cannot suspend or restore from a pending checkpoint; one-shot manual tools need `on_interaction`. After completion, an idle checkpoint can save the result and start a new run with a fresh budget.
+
 ## Configure telemetry
 
 Configure native telemetry through `agents.telemetry` before opening the first Session in the process. Call `await configure(...)` once. After all Sessions close, call `await shutdown()` to flush and shut down native telemetry. Your application still owns Session cleanup and any Python OpenTelemetry exporters it creates.

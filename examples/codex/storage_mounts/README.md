@@ -5,12 +5,10 @@ outside their writable workspace. On Linux, the native sandbox binds the source
 at the same path with read-only access. Shell commands and native file tools use
 that policy. The SDK does not copy the directory.
 
-Run this example with a build that includes storage mounts. Supply credentials
-through your normal SDK configuration. Create a workspace separate from your
-data directory, then run from the repository root:
+Follow the [development-branch setup](../../../docs/sdk/installation.md#examples-and-upgrades) for a build that includes storage mounts, and activate that build's Python environment. Supply credentials through your normal SDK configuration. Create a workspace separate from your data directory, then run from the repository root:
 
 ```sh
-uv run python examples/codex/storage_mounts/main.py /absolute/workspace /absolute/data
+python examples/codex/storage_mounts/main.py /absolute/workspace /absolute/data
 ```
 
 The example accepts existing directories and resolves their paths in trusted
@@ -158,7 +156,7 @@ host driver and an image that supports the native executor. Supply your trusted
 gateway connector as an importable async context manager:
 
 ```sh
-uv run python examples/codex/storage_mounts/provider.py \
+python examples/codex/storage_mounts/provider.py \
   --connect your_gateway:connect --image YOUR_PREPARED_IMAGE --bucket YOUR_BUCKET
 ```
 

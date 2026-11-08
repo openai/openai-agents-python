@@ -101,7 +101,7 @@ Before accepting a reply, verify that the authenticated caller can answer that e
 
 ### Rate limits and token budget
 
-Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [token usage](observability.md#read-usage-without-double-counting) to report consumption and [deadlines](troubleshooting.md#bound-a-wait-and-stop-owned-work) to stop work. Enforce strict token or cost limits in your application.
+Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [token usage](observability.md#read-usage-without-double-counting) to report consumption and [deadlines](troubleshooting.md#bound-a-wait-and-stop-owned-work) to stop work. Use [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage) to stop later sampling admissions. Enforce any stricter token or cost limits in your application.
 
 ### Keep each data store's lifetime explicit
 

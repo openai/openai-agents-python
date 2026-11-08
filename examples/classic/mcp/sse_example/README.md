@@ -12,4 +12,4 @@ uv run python examples/classic/mcp/sse_example/main.py
 
 ## Details
 
-The example uses the `MCPServerSse` class from `agents.classic.mcp`. The server runs in a sub-process at `https://localhost:8000/sse`.
+The example uses the `MCPServerSse` class from `agents.classic.mcp`. The script picks an open localhost port and starts the server at `http://127.0.0.1:<port>/sse`. Set `SSE_PORT` and `SSE_HOST` to override the port and bind address.
