@@ -18,6 +18,7 @@ from agents import (
     FunctionTool,
     HttpMCP,
     InteractionRequired,
+    NativeError,
     ToolContext,
     ToolOutput,
     ToolRef,
@@ -93,7 +94,9 @@ async def test_application_selects_one_project_before_opening_session(
             pytest.fail("An unselected namespace attempted authentication")
 
         projects = {
-            "a": MCPNamespace("project_a", chosen, authenticate=authorize_chosen),
+            "a": MCPNamespace(
+                "project_a", chosen, description="Project A records", authenticate=authorize_chosen
+            ),
             "b": MCPNamespace("project_b", other, authenticate=authorize_other),
         }
         assert not auth_attempts and not selected.requests and not unselected.requests
@@ -102,6 +105,9 @@ async def test_application_selects_one_project_before_opening_session(
         )
         assert auth_attempts == ["a"]
         assert [tool.ref for tool in tools] == [ToolRef("search", namespace="project_a")]
+        assert [(tool.namespace, tool.namespace_description) for tool in tools] == [
+            ("project_a", "Project A records")
+        ]
         assert selected.calls == []
         assert unselected.requests == []
 
@@ -113,7 +119,14 @@ async def test_application_selects_one_project_before_opening_session(
             instructions="Search for the record.", provider=provider(responses), tools=tools
         )
         async with agent.session(context=context) as session:
-            assert (await (await session.submit("Read record")).get_result()).final_output == "done"
+            assert (
+                await (
+                    await session.submit(
+                        "Read record",
+                        tools=[tool for tool in tools if tool.namespace == "project_a"],
+                    )
+                ).get_result()
+            ).final_output == "done"
 
         request, *_, continuation = responses.requests
         assert set(declarations(request)) == {("project_a", "search")}
@@ -371,12 +384,15 @@ async def test_classic_approval_mapping_is_scoped_to_selected_tools(
 
 @pytest.mark.parametrize("code_mode", [False, True], ids=["native", "code-mode"])
 async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions(
+    responses: ResponsesFixture,
     code_mode: bool,
 ) -> None:
     borrowed, native = Peer(), Peer()
+    effects: list[str] = []
 
     @function_tool(name="mcp__catalog__search")
     def flattened() -> str:
+        effects.append("ordinary")
         return "ordinary"
 
     async with (
@@ -392,14 +408,31 @@ async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions(
             flattened if code_mode else HttpMCP(name="catalog", url=native_url, tools=("search",))
         )
         agent = Agent(
-            instructions="Read.", tools=[*tools, other_tool], programmatic_tool_calling=code_mode
+            instructions="Read.",
+            tools=[*tools, other_tool],
+            provider=provider(responses),
+            programmatic_tool_calling=code_mode,
         )
-        message = "collides with another code-mode tool name" if code_mode else "shares a ToolRef"
-        with pytest.raises(ValueError, match=message):
+        if code_mode:
             agent.validate()
-        with pytest.raises(ValueError, match=message):
-            async with agent.session():
-                pytest.fail("A colliding identity opened a Session")
+            async with agent.session() as session:
+                with pytest.raises(NativeError, match="Code Mode.*collid"):
+                    await (await session.submit("Both tools are ambiguous.")).get_result()
+                assert responses.requests == [] and effects == []
+                responses.respond(
+                    code_call("text(await tools.mcp__catalog__search({}));", "selected")
+                )
+                responses.respond(assistant_output("selected"))
+                turn = await session.submit("Use one tool.", tools=[flattened.ref])
+                assert (await turn.get_result()).final_output == "selected"
+                assert effects == ["ordinary"]
+                assert "ordinary" in code_output(responses.requests[1], "selected")
+        else:
+            with pytest.raises(ValueError, match="shares a ToolRef"):
+                agent.validate()
+            with pytest.raises(ValueError, match="shares a ToolRef"):
+                async with agent.session():
+                    pytest.fail("A colliding identity opened a Session")
         assert not native.requests
         assert not borrowed.calls
 

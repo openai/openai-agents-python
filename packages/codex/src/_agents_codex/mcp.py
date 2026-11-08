@@ -293,6 +293,22 @@ class MCPCallContext(Generic[ContextT_co]):
     effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)
 
 
+@dataclass(frozen=True)
+class MCPMetadataContext(Generic[ContextT_co]):
+    """One approved call's effective arguments, before native file substitution.
+
+    Arguments are detached. The context grants no permission and contains no
+    fabricated original arguments or provider IDs for generated-code calls.
+    """
+
+    context: ContextT_co = field(repr=False)
+    submission: Turn[Any] | ChildInvocation
+    call: ToolCallInfo
+    server_name: str
+    tool_name: str
+    arguments: Mapping[str, Any] = field(repr=False)
+
+
 @dataclass(frozen=True, kw_only=True)
 class _MCP(Generic[ContextT_contra]):
     """Shared options; use StdioMCP or HttpMCP to declare a server.
@@ -327,6 +343,13 @@ class _MCP(Generic[ContextT_contra]):
         | None
     ) = field(default=None, repr=False)
     transform_result_timeout: float | None = None
+    request_metadata: (
+        Callable[
+            [MCPMetadataContext[ContextT_contra]],
+            Mapping[str, Any] | None | Awaitable[Mapping[str, Any] | None],
+        ]
+        | None
+    ) = field(default=None, repr=False)
     before: (
         Callable[
             [MCPCallContext[ContextT_contra], NativeToolCall],
@@ -344,6 +367,10 @@ class _MCP(Generic[ContextT_contra]):
     defer_loading: bool = False
 
     def __post_init__(self) -> None:
+        if self.request_metadata is not None and self.name == "codex_apps":
+            raise ValueError(
+                "MCP request_metadata requires an ordinary StdioMCP or HttpMCP declaration"
+            )
         if not isinstance(self.defer_loading, bool):
             raise TypeError("MCP defer_loading must be a bool")
         if not isinstance(self.approval_mode, str):
@@ -365,7 +392,7 @@ class _MCP(Generic[ContextT_contra]):
                 or not 0 < value <= sys.float_info.max
             ):
                 raise ValueError(f"{name} must be a positive finite number")
-        for name in ("before", "transform_result", "approval"):
+        for name in ("before", "transform_result", "approval", "request_metadata"):
             callback = getattr(self, name)
             if callback is not None and not callable(callback):
                 raise TypeError(f"MCP {name} must be callable")
@@ -402,6 +429,7 @@ class _MCP(Generic[ContextT_contra]):
 
         for name, context_type in (
             ("transform_result", MCPResultContext),
+            ("request_metadata", MCPMetadataContext),
             ("before", MCPCallContext),
             ("approval", MCPCallContext),
         ):
@@ -787,6 +815,11 @@ def _result_policies(servers: tuple[_MCP[Any], ...], generation: int) -> str:
     return json.dumps(
         {
             "generation": generation,
+            "metadata_servers": {
+                server.name: list(server.tools)
+                for server in servers
+                if server.request_metadata is not None
+            },
             "servers": {
                 server.name: dict.fromkeys(
                     server.tools,

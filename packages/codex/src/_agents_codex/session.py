@@ -89,6 +89,7 @@ from ._trace_context import (
     _trace_context as _trace_context,
 )
 from .agent import (
+    _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
     Agent as Agent,
     CodexAccount as CodexAccount,
     ContextT as ContextT,
@@ -122,6 +123,7 @@ from .manual import (
     UrlRequest as UrlRequest,
     VerificationRequest as VerificationRequest,
     _CapturedManual as _CapturedManual,
+    _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
     _PreparedManualResult as _PreparedManualResult,
     _question as _question,
@@ -134,6 +136,7 @@ from .mcp import (
     MCPGetPromptResult as MCPGetPromptResult,
     MCPListResourcesResult as MCPListResourcesResult,
     MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
+    MCPMetadataContext as MCPMetadataContext,
     MCPPrompt as MCPPrompt,
     MCPReadResourceResult as MCPReadResourceResult,
     MCPResultContext as MCPResultContext,
@@ -1014,6 +1017,7 @@ class _RestoreDeclaration:
     declaration: Agent[Any, Any]
     api_key: str | None
     output: _PreparedOutput
+    max_function_concurrency: int | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -1327,6 +1331,9 @@ def _split_tools(
     mcp_tools: dict[str, _MCP[Any]] = {}
     has_checklist = any(isinstance(item, Checklist) for item in opening)
     has_goals = any(isinstance(item, NativeGoals) for item in opening)
+    has_native_agents = native_agents is not None or any(
+        isinstance(item, NativeAgents) for item in opening
+    )
     if sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
     for hosted_type in _HOSTED_TOOLS:
@@ -1429,6 +1436,11 @@ def _split_tools(
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
+            if has_native_agents and tool.ref.namespace == "collaboration":
+                raise ValueError(
+                    f"NativeAgents reserves the collaboration namespace: {tool.name}; "
+                    "choose a custom function namespace"
+                )
             if tool.ref.namespace in (None, "functions") and tool.name in hosted_names:
                 raise ValueError(f"Hosted tools reserve the tool name {tool.name}")
             if has_checklist and tool.ref == ToolRef("update_plan"):
@@ -1644,9 +1656,7 @@ def _check_namespaced_tool_collisions(
     tools: Sequence[FunctionTool[Any, Any, Any]],
     mcp_names: Sequence[dict[str, str]],
     available: Sequence[Tool[Any]],
-    programmatic_tool_calling: bool,
     *,
-    environment: Environment[Any] | None = None,
     native_agents: NativeAgents[Any] | None = None,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
@@ -1654,29 +1664,10 @@ def _check_namespaced_tool_collisions(
     if not namespaced:
         return
     other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
-        available, False, environment, native_agents
+        available, False, None, native_agents
     )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
-    if not programmatic_tool_calling:
-        return
-
-    # Core exposes generated-code tools as JavaScript identifiers and keeps the
-    # first tool if two identities project to the same identifier.
-    by_name: dict[str, ToolRef] = {}
-    for ref in python_refs | other_refs:
-        if ref.namespace == "collaboration":
-            continue  # Core keeps this namespace direct-only.
-        name = ref.name
-        if ref.namespace not in (None, "functions"):
-            separator = "" if ref.namespace.endswith("_") or name.startswith("_") else "__"
-            name = ref.namespace + separator + name
-        name = re.sub(r"^[^A-Za-z_$]|[^A-Za-z0-9_$]", "_", name) or "_"
-        if name in {"exec", "wait"}:
-            continue
-        previous = by_name.setdefault(name, ref)
-        if ref != previous and (ref in namespaced or previous in namespaced):
-            raise ValueError("A selected MCP tool collides with another code-mode tool name")
 
 
 def _same_opening_tools(left: Sequence[Tool[Any]], right: Sequence[Tool[Any]]) -> bool:
@@ -1937,12 +1928,15 @@ class Session(Generic[ContextT, OutputT]):
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        max_function_concurrency: int | None = None,
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
+        function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
+        if function_concurrency_omitted:
+            max_function_concurrency = None
         _validate_function_concurrency(max_function_concurrency)
         parent_trace = _trace_context(parent_trace)
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
@@ -1961,6 +1955,8 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
+            if function_concurrency_omitted:
+                max_function_concurrency = selected.max_function_concurrency
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -2104,7 +2100,6 @@ class Session(Generic[ContextT, OutputT]):
             allowed_tools,
             mcp_names,
             available,
-            programmatic_tool_calling,
             native_agents=native_agents,
         )
         model = agent.model
@@ -2193,15 +2188,6 @@ class Session(Generic[ContextT, OutputT]):
                         raise ValueError(
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
-            if executor is not None and programmatic_tool_calling:
-                _check_namespaced_tool_collisions(
-                    allowed_tools,
-                    mcp_names,
-                    available,
-                    programmatic_tool_calling,
-                    environment=executor,
-                    native_agents=native_agents,
-                )
             if state is not None:
                 current_policy = executor._network_policy_digest() if executor is not None else None
                 if saved.network_policy_digest != current_policy:
@@ -3084,7 +3070,10 @@ class Session(Generic[ContextT, OutputT]):
 
     def _start_readers(self) -> None:
         self._start_interception()
-        if any(server.transform_result is not None for server in self._mcp_tools):
+        if any(
+            server.transform_result is not None or server.request_metadata is not None
+            for server in self._mcp_tools
+        ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
     def _start_interception(self) -> None:
@@ -5499,7 +5488,9 @@ class Session(Generic[ContextT, OutputT]):
         self._catalog = candidate
         self._mcp_tools = mcp_tools
         self._start_interception()
-        if self._mcp_reader is None and any(s.transform_result is not None for s in mcp_tools):
+        if self._mcp_reader is None and any(
+            s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
+        ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
@@ -7549,7 +7540,8 @@ class Session(Generic[ContextT, OutputT]):
             if (
                 message["turn_id"] != state.handle.turn_id
                 or message["thread"] != (state.handle.child_id if child else self.id)
-                or message["instance"] != (state.handle.instance_id if child else None)
+                or message["instance"]
+                != (state.handle.instance_id if isinstance(state, _ChildCallbacks) else None)
             ):
                 raise NativeError("Invalid terminal tool owner")
             text = message["text"]
@@ -8697,8 +8689,14 @@ class Session(Generic[ContextT, OutputT]):
                 ),
                 None,
             )
-            if server is None or server.transform_result is None:
-                raise NativeError("Native MCP result does not match its captured declaration")
+            metadata = notice.get("phase") == "metadata"
+            callback = (
+                None
+                if server is None
+                else (server.request_metadata if metadata else server.transform_result)
+            )
+            if server is None or callback is None:
+                raise NativeError("Native MCP callback does not match its captured declaration")
             assert state.handle is not None
 
             def admitted() -> bool:
@@ -8711,19 +8709,49 @@ class Session(Generic[ContextT, OutputT]):
 
             if not admitted():
                 return
-            context = MCPResultContext(
-                self._context,
-                state.handle,
-                notice["call_id"],
-                notice["server_name"],
-                notice["tool_name"],
-            )
-            value = await _call_callback(
-                server.transform_result, admitted, context, notice["result"]
-            )
+            if metadata:
+                context: Any = MCPMetadataContext(
+                    self._context,
+                    state.handle,
+                    ToolCallInfo(
+                        tool=ToolRef(notice["callable_name"], notice["callable_namespace"]),
+                        session_id=self.id,
+                        turn_id=notice["turn_id"],
+                        call_id=notice["call_id"] if notice.get("route") == "direct" else None,
+                        child_id=state.handle.child_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        child_incarnation=state.handle.instance_id
+                        if isinstance(state, _ChildCallbacks)
+                        else None,
+                        role=None,
+                        model=notice.get("model"),
+                        route=notice["route"],
+                        cell_id=notice.get("cell_id"),
+                        nested_call_id=notice.get("runtime_tool_call_id"),
+                    ),
+                    notice["server_name"],
+                    notice["tool_name"],
+                    MappingProxyType(deepcopy(notice["arguments"])),
+                )
+                value = await _call_callback(callback, admitted, context)
+                if value is not None and not isinstance(value, Mapping):
+                    raise TypeError("MCP request_metadata must return an object or None")
+                value = None if value is None else dict(value)
+                if not _is_json_value(value):
+                    raise TypeError("MCP request_metadata must contain JSON values and string keys")
+            else:
+                context = MCPResultContext(
+                    self._context,
+                    state.handle,
+                    notice["call_id"],
+                    notice["server_name"],
+                    notice["tool_name"],
+                )
+                value = await _call_callback(callback, admitted, context, notice["result"])
             if not admitted():
                 return
-            reply = json.dumps(value)
+            reply = json.dumps(value, allow_nan=False)
             accepted = self._native._resolve_native_mcp_result(
                 nonce, notice["turn_id"], notice["call_id"], reply
             )

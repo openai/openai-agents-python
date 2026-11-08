@@ -382,7 +382,7 @@ async def test_provider_retries_native_orphan_home_after_failed_core_open(monkey
         def __init__(self, engine):
             self.engine = engine
 
-        def _start_initial_replaceable_thread(self, *args):
+        def _start_initial_replaceable_thread(self, *args, initial_messages_json=None):
             raise RuntimeError("controlled thread publication failure")
 
     def create(config, runtime, **kwargs):

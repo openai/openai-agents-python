@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from pydantic import BaseModel
 
 from agents import Agent, FileSearch, HttpMCP, NativeProvider, ToolRef, function_tool
@@ -120,19 +119,28 @@ async def test_named_leaf_keeps_native_structured_output_validation(responses):
     assert all(request["text"]["format"]["type"] == "json_schema" for request in responses.requests)
 
 
-async def test_named_leaf_cannot_remove_required_code_mode_helpers(responses):
+async def test_named_leaf_selects_direct_function_in_mixed_code_mode(responses):
+    effects = []
+
     @function_tool
     def selected() -> str:
-        pytest.fail("A missing helper profile must not execute")
+        effects.append("selected")
+        return "selected result"
 
+    responses.respond(function_call("selected", {}, "mixed-selected"))
+    responses.respond(assistant_output("mixed completed"))
     async with timeout(30), provider_for(responses) as provider:
-        with pytest.raises((ValueError, RuntimeError), match="named tool choice"):
-            await Agent(
-                model="fixture-unlisted-named",
-                instructions="Select.",
-                tools=[selected],
-                provider=provider,
-                programmatic_tool_calling=True,
-                model_settings={"tool_choice": selected.ref},
-            ).run("missing framework helper")
-    assert responses.requests == []
+        result = await Agent(
+            model="fixture-unlisted-named",
+            instructions="Select.",
+            tools=[selected],
+            provider=provider,
+            programmatic_tool_calling=True,
+            model_settings={"tool_choice": selected.ref},
+        ).run("Select the direct function.")
+    assert result.final_output == "mixed completed"
+    assert effects == ["selected"]
+    assert len(responses.requests) == 2
+    for request in responses.requests:
+        assert request["tool_choice"] == "required"
+        assert [tool["name"] for tool in request["tools"]] == ["selected"]

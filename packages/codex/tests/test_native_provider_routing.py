@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, CodexLogin, NativeError, NativeProvider
+from agents import Agent, CodexLogin, NativeProvider
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output
 
@@ -148,10 +148,17 @@ async def test_native_redirect_policy_preserves_default_and_blocks_captured_rout
                 model="fixture-unlisted-routing", instructions="Answer.", provider=provider
             )
             if custom:
-                with pytest.raises(NativeError):
-                    await agent.run("must not follow")
-                assert source_paths == ["/v1/responses"] and foreign_paths == []
-                assert len(source.requests) == 1
+                result = await agent.run("must not follow")
+                assert result.final_output == "same-origin final"
+                assert source_paths == ["/v1/responses", "/v1/responses"]
+                assert foreign_paths == []
+                assert all("/redirected" not in path for path in source_paths)
+                assert len(source.requests) == 2
+                assert foreign.request_headers == []
+                assert all(
+                    headers["x-route"] == "redirect-header-canary"
+                    for headers in source.request_headers
+                )
             else:
                 result = await agent.run("preserve default redirects")
                 assert result.final_output == (

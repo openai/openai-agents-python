@@ -7,8 +7,10 @@ import pytest
 
 from agents import (
     Agent,
+    CustomStorage,
     NativeProvider,
     SessionState,
+    SQLiteSessionStore,
     ToolContext,
     ToolOutput,
     ToolOutputFile,
@@ -157,15 +159,16 @@ async def test_code_file_awaits_the_owned_callback_and_restores_without_replay(
                 await session.save_state()
             release.set()
             assert (await handle.get_result()).final_output == "cell complete"
-            assert (
-                next(
-                    item["output"]
-                    for item in responses.requests[1]["input"]
-                    if item.get("type") == "custom_tool_call_output"
-                    and item.get("call_id") == "file-cell"
-                )
-                == expected
+            accepted_output = next(
+                item["output"]
+                for item in responses.requests[1]["input"]
+                if item.get("type") == "custom_tool_call_output"
+                and item.get("call_id") == "file-cell"
             )
+            assert accepted_output[0]["type"] == "input_text"
+            assert accepted_output[0]["text"].startswith("Script completed\n")
+            assert accepted_output[0]["text"].endswith("Output:\n")
+            assert accepted_output[1:] == expected
             state = SessionState.from_json((await session.save_state()).to_json())
         finally:
             release.set()
@@ -180,7 +183,77 @@ async def test_code_file_awaits_the_owned_callback_and_restores_without_replay(
                 if item.get("type") == "custom_tool_call_output"
                 and item.get("call_id") == "file-cell"
             )
-            == expected
+            == accepted_output
         )
     assert routes == ["code"]
+    assert len(responses.requests) == 3
+
+
+async def test_persistent_media_reopens_as_data_without_replaying_the_tool(
+    responses: ResponsesFixture, tmp_path
+) -> None:
+    effects: list[str] = []
+
+    @function_tool
+    def reference() -> ToolOutput:
+        effects.append("once")
+        return ToolOutput(
+            [
+                ToolOutputImage(file_id="stored-image", detail="high"),
+                ToolOutputFile(file_url="https://files.invalid/stored.pdf", filename="stored.pdf"),
+            ]
+        )
+
+    responses.respond(function_call("reference", {}, "stored-media"))
+    responses.respond(assistant_output("stored"))
+    responses.respond(assistant_output("reopened"))
+    store = SQLiteSessionStore(tmp_path / "media.sqlite")
+    agent = Agent(
+        instructions="Use reference once.",
+        model="gpt-5.5",
+        tools=[reference],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-stored-media"),
+    )
+    user_content = [{"type": "input_file", "file_id": "stored-document", "filename": "user.pdf"}]
+    expected_output = [
+        {"type": "input_image", "file_id": "stored-image", "detail": "high"},
+        {
+            "type": "input_file",
+            "file_url": "https://files.invalid/stored.pdf",
+            "filename": "stored.pdf",
+        },
+    ]
+    async with timeout(30), agent.session(storage=CustomStorage(store)) as session:
+        result = await (
+            await session.submit({"role": "user", "content": user_content})
+        ).get_result()
+        assert result.final_output == "stored"
+        identity = session.id
+        assert media([item async for item in session.items()]) == user_content
+    async with (
+        timeout(30),
+        agent.session(storage=CustomStorage(store), resume=identity) as reopened,
+    ):
+        current = [item async for item in reopened.items()]
+        assert media(current) == user_content
+        assert (
+            next(
+                item["output"]
+                for item in current
+                if item.get("call_id") == "stored-media"
+                and item.get("type") == "function_call_output"
+            )
+            == expected_output
+        )
+        assert (await (await reopened.submit("Continue.")).get_result()).final_output == "reopened"
+        assert (
+            next(
+                item["output"]
+                for item in responses.requests[2]["input"]
+                if item.get("call_id") == "stored-media"
+                and item.get("type") == "function_call_output"
+            )
+            == expected_output
+        )
+    assert effects == ["once"]
     assert len(responses.requests) == 3

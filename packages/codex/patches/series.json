@@ -293,13 +293,17 @@
       "sha256": "f47339c54594aa98d4fd52e40eaed8f80325a50bb69a80693d14524594b68940"
     },
     {
+      "path": "0067-reject-ambiguous-code-mode-names.patch",
+      "sha256": "4e2bb732edab48888aa9bdca723f591caaf87465c86c0ce0a76ea5baa60c1081"
+    },
+    {
       "path": "0091-mcp-windows-env-precedence.patch",
       "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
     },
     {
       "path": "0090-native-session-media-history.patch",
-      "sha256": "ff4bf2f564f39434fbf514bdd08ac5cddc16b23641951765deebe609d3841a80"
+      "sha256": "a91209a1c6704ad038ec2505bef22cc8db479bfe19173a2e3ba330035d4115b0"
     }
   ],
-  "result_tree": "2fb819482f1853e5dc72b70b14e7383f0367877f"
+  "result_tree": "4c8d7974d26c5324fa5829f31eef80bd47730206"
 }

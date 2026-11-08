@@ -19,7 +19,6 @@ from _agents_codex.tools import (
     ToolOutput,
     ToolOutputImage,
     ToolOutputText,
-    ToolRef,
     _CapturedFunction,
 )
 
@@ -72,21 +71,13 @@ class MCPNamespace(Generic[ContextT]):
 
 @dataclass(frozen=True, kw_only=True)
 class _CapturedMCPTool(_CapturedFunction):
-    _namespace: str | None = field(repr=False)
-
     @property
     def _requires_live_manual_session(self) -> bool:
         return True
 
-    @property
-    def _ref(self) -> ToolRef:
-        return ToolRef(self.name, self._namespace)
-
 
 @dataclass(frozen=True, kw_only=True)
 class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
-    _namespace: str
-    _namespace_description: str
     _schema_json: str = field(repr=False)
     _selected_context: ContextT = field(repr=False)
 
@@ -94,16 +85,12 @@ class _SelectedMCPTool(FunctionTool[_Arguments, ToolOutput, _Binder[ContextT]]):
     def _requires_live_manual_session(self) -> bool:
         return True
 
-    @property
-    def ref(self) -> ToolRef:
-        return ToolRef(self.name, self._namespace)
-
     def _spec_json(self) -> str:
         return json.dumps(
             {
                 "type": "namespace",
-                "name": self._namespace,
-                "description": self._namespace_description,
+                "name": self.namespace,
+                "description": self.namespace_description or "",
                 "tools": [
                     {
                         "type": "function",
@@ -296,7 +283,7 @@ def _capture_tool(
             before=declaration.before,
             after=declaration.after,
             context=session_context,
-            _namespace=ref.namespace,
+            namespace=ref.namespace,
         )
 
     return _SelectedMCPTool(
@@ -304,8 +291,8 @@ def _capture_tool(
         description=description,
         input_type=_Arguments,
         output_type=ToolOutput,
-        _namespace=namespace.name,
-        _namespace_description=namespace.description,
+        namespace=namespace.name,
+        namespace_description=namespace.description,
         _schema_json=schema_json,
         _selected_context=context,
         _bind=bind,

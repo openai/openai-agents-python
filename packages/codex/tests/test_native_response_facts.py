@@ -338,6 +338,7 @@ async def test_native_cumulative_fact_budget_marks_a_whole_token_prefix() -> Non
             timeout(60),
             Agent(
                 instructions="Answer.",
+                model="gpt-5.2",
                 provider=NativeProvider(base_url=peer.url, api_key="synthetic-facts-key"),
                 model_settings={"top_logprobs": 1},
             ).session() as session,
