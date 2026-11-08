@@ -74,7 +74,7 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-Expect `0.24.0-alpha.7` or its equivalent Python packaging spelling, `0.24.0a7`. Continue with [the quickstart for that release](index.md) to set your API key and run your first agent.
+Expect `0.24.0-alpha.7` or its equivalent Python packaging spelling, `0.24.0a7`. Continue with [the quickstart for that release](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md) to set your API key and run your first agent.
 
 ## Examples and upgrades
 

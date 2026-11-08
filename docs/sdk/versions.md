@@ -4,7 +4,7 @@ Match the guides and example files to your installed SDK version. These guides f
 
 | Installed SDK | Documentation and examples |
 | --- | --- |
-| [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) wheel | Use [the alpha.7 setup and quickstart](index.md) and the alpha.7 source archive for examples. The original tag contains older installation guidance. |
+| [0.24.0-alpha.7](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7) wheel | Use [the alpha.7 setup and quickstart](https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md) and the alpha.7 source archive for examples. The original tag contains older installation guidance. |
 | A development build from `feat/codex-harness` | Use guides and example files from the same source commit as the build. |
 
 See [installation](installation.md) for platform requirements, wheel commands, and matching example files.
