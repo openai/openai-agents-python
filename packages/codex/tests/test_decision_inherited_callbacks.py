@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from agents import (
     Agent,
     DecisionResponse,
+    Environment,
     NativeAgents,
     NativeError,
     NativeProvider,
@@ -306,3 +308,47 @@ async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_o
     assert original.requests == []
     assert len(captured.requests) == (0 if explicit_restore_override else 2)
     assert len(override.requests) == (2 if explicit_restore_override else 0)
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"), reason="requires native Unix environment"
+)
+async def test_read_only_environment_keeps_bound_decision_and_host_authority(
+    responses: ResponsesFixture, tmp_path, monkeypatch
+):
+    decisions = Provider()
+    host_marker = tmp_path / "host-authority"
+
+    async def complete(ctx):
+        assert await ctx.decide("Is this complete?", input=ctx.text or "") is True
+        host_marker.write_text("approved")
+
+    responses.respond(assistant_output("read-only complete"))
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        environment = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            headers={"Authorization": "Bearer " + executor.token},
+            tools=["exec_command"],
+            read_only=True,
+        )
+        agent = Agent(
+            model="gpt-5.5",
+            instructions="Answer.",
+            decisions=decisions,
+            before_complete=complete,
+            provider=NativeProvider(
+                base_url=responses.url,
+                api_key="synthetic-native-agent-key",
+                supports_websockets=False,
+            ),
+        )
+        async with agent.session(environment=environment) as session:
+            result = await (await session.submit("Answer.")).get_result()
+            assert result.final_output == "read-only complete"
+            assert result.thread_usage.total_token_usage.total_tokens == 24
+            assert result.thread_usage.last_token_usage.total_tokens == 14
+            assert (await session.save_state()).executor_read_only is True
+    assert host_marker.read_text() == "approved"
+    assert len(decisions.requests) == 1 and len(responses.requests) == 1
