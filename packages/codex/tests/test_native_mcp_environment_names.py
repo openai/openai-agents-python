@@ -82,7 +82,9 @@ async def test_native_mcp_environment_names(
             provider=provider, environment=environment
         ) as session:
             if os.name == "nt" and case.endswith("duplicates"):
-                with pytest.raises((ValueError, RuntimeError), match="(?i)environment"):
+                with pytest.raises(
+                    RuntimeError, match="Native MCP server 'names': connection not ready"
+                ):
                     await session.list_mcp_resources("names")
                 assert not log.exists(), "ambiguous environment launched a process"
                 return
