@@ -468,6 +468,8 @@ def test_unreleased_policy_wrappers_are_not_exported(symbol):
 
 
 async def test_caught_graceful_stop_after_request_wait_has_no_background_error(responses):
+    from tests.test_review_ii_sessions import _GracefulReceiptObserver
+
     loop = asyncio.get_running_loop()
     previous = loop.get_exception_handler()
     errors = []
@@ -489,8 +491,11 @@ async def test_caught_graceful_stop_after_request_wait_has_no_background_error(r
             waiting.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await waiting
+            probe = _GracefulReceiptObserver(session._native)
+            session._native = probe
             stopping = asyncio.create_task(turn.cancel(mode="graceful"))
-            await asyncio.sleep(0)
+            await asyncio.wait_for(probe.prepared.wait(), 15)
+            assert probe.installed is True
             assert not stopping.done()
             await session.respond(request.reply("answer"))
             await stopping
@@ -499,5 +504,6 @@ async def test_caught_graceful_stop_after_request_wait_has_no_background_error(r
             await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert errors == []
+        assert len(responses.requests) == 1
     finally:
         loop.set_exception_handler(previous)

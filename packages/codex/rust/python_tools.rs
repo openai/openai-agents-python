@@ -5051,6 +5051,65 @@ pub(crate) mod managed_tests {
         }
     }
 
+    #[test]
+    fn checkpoint_catalog_validation_preserves_qualified_function_identity() {
+        let qualified = |namespace: &str| {
+            DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+                name: namespace.into(),
+                description: "Qualified callback".into(),
+                tools: vec![DynamicToolNamespaceTool::Function(function("lookup"))],
+            })
+        };
+        let specs = vec![
+            DynamicToolSpec::Function(function("lookup")),
+            qualified("billing"),
+            qualified("audit"),
+        ];
+        validate_declarations(&specs).unwrap();
+        assert_eq!(tool_names(&specs).len(), 3);
+        let saved = checkpoint_specs(&specs).unwrap();
+        let restored: Vec<DynamicToolSpec> = serde_json::from_value(saved.clone()).unwrap();
+        validate_declarations(&restored).unwrap();
+        assert_eq!(checkpoint_specs(&restored).unwrap(), saved);
+        for duplicate in [
+            vec![qualified("billing"), qualified("billing")],
+            vec![
+                DynamicToolSpec::Function(function("lookup")),
+                qualified("functions"),
+            ],
+        ] {
+            assert!(
+                validate_declarations(&duplicate)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Duplicate Python tool")
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_catalog_validation_rejects_non_slot_namespace_shapes() {
+        for tools in [
+            vec![],
+            vec![
+                DynamicToolNamespaceTool::Function(function("lookup")),
+                DynamicToolNamespaceTool::Function(function("record")),
+            ],
+        ] {
+            let malformed = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+                name: "billing".into(),
+                description: "Malformed slot".into(),
+                tools,
+            });
+            assert!(
+                validate_declarations(&[malformed])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid Python tool slot projection")
+            );
+        }
+    }
+
     fn sdk() -> Arc<PythonTools> {
         catalog(
             ToolPolicy {

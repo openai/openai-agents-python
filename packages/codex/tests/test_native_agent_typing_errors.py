@@ -33,6 +33,7 @@ from .test_native_agent_typing import (
     StructuredSpecialist,
     agent,
     lookup,
+    namespaced_policy_only,
     plain,
     typed_executor,
     typed_executor_agent,
@@ -94,6 +95,11 @@ if TYPE_CHECKING:
     # The context-free tool must not erase the contextual tool's requirement.
     mixed = Agent(instructions="Use the tool.", tools=[plain, lookup])
     mixed.session(context="wrong context")  # pyright: ignore[reportArgumentType]
+
+    namespaced_policy_agent = Agent(instructions="Read.", tools=[namespaced_policy_only])
+    namespaced_policy_agent.session()  # pyright: ignore[reportCallIssue]
+    namespaced_policy_agent.session(context="wrong")  # pyright: ignore[reportArgumentType]
+    Agent[str](instructions="Read.", tools=[namespaced_policy_only])  # pyright: ignore[reportArgumentType]
 
     async def mcp_policy(
         ctx: MCPResultContext[Application], value: dict[str, Any]
