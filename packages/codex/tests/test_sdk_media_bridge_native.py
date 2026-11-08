@@ -1,5 +1,6 @@
 """Public media behavior against the separately rebuilt Core image/file layers."""
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ from agents import (
     Agent,
     NativeProvider,
     SessionState,
+    ToolContext,
     ToolOutput,
     ToolOutputFile,
     ToolOutputImage,
@@ -100,4 +102,85 @@ async def test_public_user_tool_media_survive_current_and_portable_restore_witho
             if item.get("call_id") == "media-call" and item["type"] == "function_call_output"
         )
     assert effects == ["once"]
+    assert len(responses.requests) == 3
+
+
+async def test_code_file_awaits_the_owned_callback_and_restores_without_replay(
+    responses: ResponsesFixture,
+) -> None:
+    from tests.test_native_code_mode import code_call
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    routes: list[str] = []
+
+    @function_tool
+    async def reference(ctx: ToolContext[None]) -> ToolOutput:
+        routes.append(ctx.call.route)
+        entered.set()
+        await release.wait()
+        return ToolOutput(
+            [
+                ToolOutputText("before-file"),
+                ToolOutputFile(file_id="opaque-code-file", filename="code.pdf"),
+                ToolOutputText("after-file"),
+            ]
+        )
+
+    responses.respond(
+        code_call(
+            "for (const part of await tools.reference({})) { "
+            'if (part.type === "input_file") { const {type, ...source} = part; file(source); } '
+            'else if (part.type === "input_text") { text(part.text); } }',
+            "file-cell",
+        )
+    )
+    responses.respond(assistant_output("cell complete"))
+    responses.respond(assistant_output("cell restored"))
+    expected = [
+        {"type": "input_text", "text": "before-file"},
+        {"type": "input_file", "file_id": "opaque-code-file", "filename": "code.pdf"},
+        {"type": "input_text", "text": "after-file"},
+    ]
+    agent = Agent(
+        instructions="Use reference from code once.",
+        model="gpt-5.5",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-code-file"),
+        tools=[reference],
+        programmatic_tool_calling=True,
+    )
+    async with timeout(45), agent.session() as session:
+        try:
+            handle = await session.submit("Run the cell.")
+            await entered.wait()
+            assert len(responses.requests) == 1
+            with pytest.raises(RuntimeError, match="idle Session"):
+                await session.save_state()
+            release.set()
+            assert (await handle.get_result()).final_output == "cell complete"
+            assert (
+                next(
+                    item["output"]
+                    for item in responses.requests[1]["input"]
+                    if item.get("type") == "custom_tool_call_output"
+                    and item.get("call_id") == "file-cell"
+                )
+                == expected
+            )
+            state = SessionState.from_json((await session.save_state()).to_json())
+        finally:
+            release.set()
+    async with timeout(30), agent.session(state=state) as restored:
+        assert (await (await restored.submit("Continue.")).get_result()).final_output == (
+            "cell restored"
+        )
+        assert (
+            next(
+                item["output"]
+                for item in responses.requests[2]["input"]
+                if item.get("type") == "custom_tool_call_output"
+                and item.get("call_id") == "file-cell"
+            )
+            == expected
+        )
+    assert routes == ["code"]
     assert len(responses.requests) == 3
