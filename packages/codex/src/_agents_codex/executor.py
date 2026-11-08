@@ -26,6 +26,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     TypeAlias as TypeAlias,
+    cast as cast,
     get_origin as get_origin,
 )
 from urllib.parse import unquote as unquote, urlsplit as urlsplit
@@ -170,18 +171,21 @@ class ExecutorContext(Generic[ContextT_co]):
 class LocalStorageMount:
     """Read an existing canonical Linux directory through a native read-only bind.
 
-    Supply ``strategy="local_bind"`` explicitly. Source and destination must
-    name the same directory. The caller owns the directory and its contents.
+    Destination defaults to source and strategy defaults to ``"local_bind"``.
+    Source and destination must name the same directory. The caller owns the
+    directory and its contents.
     """
 
     source: str | PathLike[str]
-    destination: str | PathLike[str]
-    strategy: Literal["local_bind"]
-    read_only: bool = True
+    destination: str | PathLike[str] | None = None
+    strategy: Literal["local_bind"] = "local_bind"
+    read_only: Literal[True] = True
 
     def __post_init__(self) -> None:
         if self.strategy != "local_bind" or self.read_only is not True:
             raise ValueError("Storage mounts require strategy='local_bind' and read_only=True")
+        if self.destination is None:
+            object.__setattr__(self, "destination", self.source)
         for name in ("source", "destination"):
             raw = fspath(getattr(self, name))
             if not isinstance(raw, str) or not raw or "\0" in raw:
@@ -350,7 +354,8 @@ class Environment(Generic[ContextT_contra]):
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
         On Linux, ``mounts`` adds read-only access to canonical same-path
-        directories with an explicit ``local_bind`` strategy.
+        directories. Supply each source; destination and ``local_bind`` strategy
+        default to the supported same-path bind.
         Keep the SDK, its native helpers, and LocalStorage profiles outside
         the working directory and additional writable roots.
         """
@@ -568,7 +573,7 @@ class Environment(Generic[ContextT_contra]):
             native_mounts: list[RuntimeStorageMount] = [
                 {
                     "source": fspath(mount.source),
-                    "destination": fspath(mount.destination),
+                    "destination": fspath(cast(str, mount.destination)),
                     "strategy": mount.strategy,
                     "read_only": mount.read_only,
                 }

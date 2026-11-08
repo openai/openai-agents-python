@@ -35,18 +35,19 @@ from tests.test_native_executor_local import _command_is_running, _owned_command
 
 
 def mount_at(path: Path) -> LocalStorageMount:
-    return LocalStorageMount(path, path, strategy="local_bind")
+    return LocalStorageMount(source=path)
 
 
 def test_mount_export_and_frozen_declaration(tmp_path: Path) -> None:
     assert FacadeMount is LocalStorageMount
     mount = mount_at(tmp_path)
     assert mount.source == str(tmp_path)
+    assert mount.destination == str(tmp_path) and mount.strategy == "local_bind"
     assert mount.read_only is True
+    assert mount == LocalStorageMount(tmp_path, tmp_path, "local_bind", True)
+    assert mount == LocalStorageMount(tmp_path, tmp_path)
     with pytest.raises(FrozenInstanceError):
         mount.source = "/other"
-    with pytest.raises(TypeError, match="strategy"):
-        LocalStorageMount(tmp_path, tmp_path)  # type: ignore[call-arg]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux mount declaration")
@@ -55,6 +56,8 @@ def test_typed_and_dictionary_mounts_have_the_same_wire_shape(tmp_path: Path) ->
     typed = Environment.local(cwd=tmp_path.parent, mounts=[mount_at(tmp_path)])
     dictionary = Environment.local(cwd=tmp_path.parent, mounts=[config])
     assert dictionary.mounts == typed.mounts
+    minimal = Environment.local(cwd=tmp_path.parent, mounts=[{"source": str(tmp_path)}])
+    assert minimal.mounts == typed.mounts
     assert typed._to_native()["mounts"] == [{**config, "read_only": True}]
 
 
