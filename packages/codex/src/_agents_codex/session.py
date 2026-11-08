@@ -89,6 +89,7 @@ from ._trace_context import (
     _trace_context as _trace_context,
 )
 from .agent import (
+    _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
     Agent as Agent,
     CodexAccount as CodexAccount,
     ContextT as ContextT,
@@ -906,6 +907,7 @@ class _RestoreDeclaration:
     declaration: Agent[Any, Any]
     api_key: str | None
     output: _PreparedOutput
+    max_function_concurrency: int | None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -1219,6 +1221,9 @@ def _split_tools(
     mcp_tools: dict[str, _MCP[Any]] = {}
     has_checklist = any(isinstance(item, Checklist) for item in opening)
     has_goals = any(isinstance(item, NativeGoals) for item in opening)
+    has_native_agents = native_agents is not None or any(
+        isinstance(item, NativeAgents) for item in opening
+    )
     if sum(isinstance(item, WebSearch) for item in opening) > 1:
         raise ValueError("Declare WebSearch only once per Session")
     for hosted_type in _HOSTED_TOOLS:
@@ -1321,6 +1326,11 @@ def _split_tools(
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
+            if has_native_agents and tool.ref.namespace == "collaboration":
+                raise ValueError(
+                    f"NativeAgents reserves the collaboration namespace: {tool.name}; "
+                    "choose a custom function namespace"
+                )
             if tool.ref.namespace in (None, "functions") and tool.name in hosted_names:
                 raise ValueError(f"Hosted tools reserve the tool name {tool.name}")
             if has_checklist and tool.ref == ToolRef("update_plan"):
@@ -1549,9 +1559,7 @@ def _check_namespaced_tool_collisions(
     tools: Sequence[FunctionTool[Any, Any, Any]],
     mcp_names: Sequence[dict[str, str]],
     available: Sequence[Tool[Any]],
-    programmatic_tool_calling: bool,
     *,
-    environment: Environment[Any] | None = None,
     native_agents: NativeAgents[Any] | None = None,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
@@ -1559,29 +1567,10 @@ def _check_namespaced_tool_collisions(
     if not namespaced:
         return
     other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
-        available, False, environment, native_agents
+        available, False, None, native_agents
     )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
-    if not programmatic_tool_calling:
-        return
-
-    # Core exposes generated-code tools as JavaScript identifiers and keeps the
-    # first tool if two identities project to the same identifier.
-    by_name: dict[str, ToolRef] = {}
-    for ref in python_refs | other_refs:
-        if ref.namespace == "collaboration":
-            continue  # Core keeps this namespace direct-only.
-        name = ref.name
-        if ref.namespace not in (None, "functions"):
-            separator = "" if ref.namespace.endswith("_") or name.startswith("_") else "__"
-            name = ref.namespace + separator + name
-        name = re.sub(r"^[^A-Za-z_$]|[^A-Za-z0-9_$]", "_", name) or "_"
-        if name in {"exec", "wait"}:
-            continue
-        previous = by_name.setdefault(name, ref)
-        if ref != previous and (ref in namespaced or previous in namespaced):
-            raise ValueError("A selected MCP tool collides with another code-mode tool name")
 
 
 def _same_opening_tools(left: Sequence[Tool[Any]], right: Sequence[Tool[Any]]) -> bool:
@@ -1841,12 +1830,15 @@ class Session(Generic[ContextT, OutputT]):
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        max_function_concurrency: int | None = None,
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
+        function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
+        if function_concurrency_omitted:
+            max_function_concurrency = None
         if max_function_concurrency is not None and (
             isinstance(max_function_concurrency, bool)
             or not isinstance(max_function_concurrency, int)
@@ -1870,6 +1862,8 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
+            if function_concurrency_omitted:
+                max_function_concurrency = selected.max_function_concurrency
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -2014,7 +2008,6 @@ class Session(Generic[ContextT, OutputT]):
             allowed_tools,
             mcp_names,
             available,
-            programmatic_tool_calling,
             native_agents=native_agents,
         )
         model = agent.model
@@ -2101,15 +2094,6 @@ class Session(Generic[ContextT, OutputT]):
                         raise ValueError(
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
-            if executor is not None and programmatic_tool_calling:
-                _check_namespaced_tool_collisions(
-                    allowed_tools,
-                    mcp_names,
-                    available,
-                    programmatic_tool_calling,
-                    environment=executor,
-                    native_agents=native_agents,
-                )
             if state is not None:
                 if saved.executor_read_only != (executor is not None and executor.read_only):
                     raise ValueError("Checkpoint and Environment must agree on read-only execution")
