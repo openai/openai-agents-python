@@ -49,6 +49,8 @@ from typing import (
 )
 from uuid import uuid4 as uuid4
 
+from pydantic import BaseModel as BaseModel
+
 from ._compat import cancel_once as cancel_once
 from ._events import (
     CodeInterpreterCallItem,
@@ -89,7 +91,10 @@ from .agent import (
     OutputT as OutputT,
     _copy_model_settings as _copy_model_settings,
 )
-from .canonical_storage import CustomStorage as CustomStorage
+from .canonical_storage import (
+    CustomStorage as CustomStorage,
+    SessionStoreCleanup as SessionStoreCleanup,
+)
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
 from .executor import (
@@ -387,6 +392,12 @@ class Capabilities:
                 "New root Turns and their automatic successors",
             )
         if feature == "native_output_manual_restore":
+            if s._storage is not None:
+                return FeatureSupport(
+                    "unsupported",
+                    "Persistent Sessions cannot export SessionState",
+                    "Use an ephemeral Session for portable state",
+                )
             return FeatureSupport(
                 "supported",
                 "Settled manual restore preserves the captured native schema",
@@ -1405,6 +1416,39 @@ def _selected_tool_refs(
 
 def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
+
+
+def _snapshot_function_arguments(arguments: dict[str, Any]) -> Mapping[str, Any]:
+    # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
+    # Prepare only those copies; deepcopy still owns copying all other values.
+    memo: dict[int, Any] = {}
+    proxies: list[tuple[Mapping[Any, Any], dict[Any, Any]]] = []
+    seen: set[int] = set()
+    pending: list[Any] = [arguments]
+    while pending:
+        value = pending.pop()
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(value, MappingProxyType):
+            backing: dict[Any, Any] = {}
+            memo[identity] = MappingProxyType(backing)
+            proxies.append((value, backing))
+            pending.extend(value.values())
+        elif type(value) is dict:
+            pending.extend(value.values())
+        elif type(value) in (list, tuple, set, frozenset):
+            pending.extend(value)
+        elif isinstance(value, BaseModel):
+            pending.extend(
+                value.__dict__[name] for name in type(value).model_fields if name in value.__dict__
+            )
+            pending.append(value.__pydantic_extra__)
+    # Register every proxy first so shared and recursive values use one memo.
+    for original, backing in proxies:
+        backing.update(deepcopy(dict(original), memo))
+    return MappingProxyType(deepcopy(arguments, memo))
 
 
 def _capture_tools(
@@ -5463,7 +5507,6 @@ class Session(Generic[ContextT, OutputT]):
 
     async def _cancel_turn(self, turn: Turn[Any], mode: Literal["graceful", "force"]) -> None:
         self._check_owner(turn)
-        self._check_callback_operation("interrupt its own Session")
         if turn.child_id is not None:
             raise CapabilityError("Use Subagent.try_cancel for a child Turn")
         if mode not in ("graceful", "force"):
@@ -5471,6 +5514,7 @@ class Session(Generic[ContextT, OutputT]):
         for entry in self._pending:
             queued, _ = entry
             if queued.issued is turn:
+                self._check_callback_operation("interrupt its own Session")
                 self._pending.remove(entry)
                 error = TurnStoppedError("Queued work cancelled before admission")
                 if queued.tracing is not None:
@@ -5483,6 +5527,7 @@ class Session(Generic[ContextT, OutputT]):
         # A settled or superseded root owns neither the new turn nor its cells.
         if state is None:
             return
+        self._check_callback_operation("interrupt its own Session")
         self._check_open()
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
@@ -8367,7 +8412,7 @@ class Session(Generic[ContextT, OutputT]):
                 state.handle,
                 message["callId"],
                 MappingProxyType(deepcopy(raw_arguments)),
-                MappingProxyType(deepcopy(kwargs)),
+                _snapshot_function_arguments(kwargs),
                 trace_context=_native_trace_context(message.get("_sdk_trace")),
                 call=ToolCallInfo(
                     tool=ref,
@@ -8409,7 +8454,7 @@ class Session(Generic[ContextT, OutputT]):
                     parsed = entry._parse_arguments(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
-                        context, effective_arguments=MappingProxyType(deepcopy(kwargs))
+                        context, effective_arguments=_snapshot_function_arguments(kwargs)
                     )
                 elif not isinstance(decision, Allow):
                     raise TypeError("Function before must return Allow, Deny or ReplaceArguments")
@@ -9394,8 +9439,10 @@ class Session(Generic[ContextT, OutputT]):
             raise first
 
 
-def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:
-    """Return the retained Session or provider after failed cleanup, if any.
+def get_cleanup(
+    error: BaseException,
+) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None:
+    """Return the retained Session, provider, or storage cleanup owner, if any.
 
     Await the owner's ``aclose()`` to retry retirement. This also works after
     Python 3.10 Tasks replace cancellation exceptions: their contexts retain
@@ -9405,7 +9452,7 @@ def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | No
     """
     for current in _error_contexts(error):
         owner = getattr(current, "cleanup", None)
-        if isinstance(owner, (Session, NativeProvider)):
+        if isinstance(owner, (Session, NativeProvider, SessionStoreCleanup)):
             return owner
     return None
 

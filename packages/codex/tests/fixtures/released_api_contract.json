@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "75b537d8a23d01bb76d34f8abc0ab3830525c1fe",
+  "baseline_commit": "75e8f71ef4136d7879e511406166303bdc4c467c",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -85,18 +85,20 @@
       "agents.canonical_storage": {
         "declarations": [
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
           "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
         ],
         "exports": {
           "CustomStorage": "agents.canonical_storage.CustomStorage",
           "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
-          "SessionStore": "agents.canonical_storage.SessionStore"
+          "SessionStore": "agents.canonical_storage.SessionStore",
+          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup"
         },
         "imports": [
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
-          "from typing import Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
           "from .tools import ToolOutput as ToolOutput"
         ],
         "references": {
@@ -685,7 +687,7 @@
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
           "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn]:\n        pass",
           "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def respond(self, reply: ActionReply[Any]) -> None:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None, budget: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[Any]:\n        pass\n\n    async def list_mcp_resources(self, server: str, cursor: str | None=None) -> MCPListResourcesResult:\n        pass\n\n    async def list_mcp_resource_templates(self, server: str, cursor: str | None=None) -> MCPListResourceTemplatesResult:\n        pass\n\n    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:\n        pass\n\n    async def model_context(self) -> ModelContextSnapshot:\n        pass\n\n    async def compact(self, *, summary: str | None=None, snapshot: ModelContextSnapshot | None=None, retain: Sequence[int] | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def set_paused_goal(self, objective: str, *, token_budget: int | None=None) -> NativeGoal:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
-          "def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:\n    pass"
+          "def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None:\n    pass"
         ],
         "exports": {
           "Capabilities": "agents.session.Capabilities",
@@ -713,6 +715,7 @@
           "from ._function_tools import Tool as Tool",
           "from ._trace_context import TraceContext as TraceContext",
           "from .agent import CodexAccount as CodexAccount, ContextT as ContextT, ModelSettings as ModelSettings, NativeProvider as NativeProvider, OutputT as OutputT",
+          "from .canonical_storage import SessionStoreCleanup as SessionStoreCleanup",
           "from .executor import Environment as Environment",
           "from .history import RecordedTurn as RecordedTurn",
           "from .input import UserInput as UserInput",
@@ -756,6 +759,7 @@
           "RunBudget": "agents.usage.RunBudget",
           "SessionItem": "agents._events.SessionItem",
           "SessionState": "agents.state.SessionState",
+          "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
           "StopTurn": "agents.native_interception.StopTurn",
           "Subagent": "agents.subagents.Subagent",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
@@ -1179,6 +1183,7 @@
       "SessionBusyError": "agents.session.SessionBusyError",
       "SessionState": "agents.state.SessionState",
       "SessionStore": "agents.canonical_storage.SessionStore",
+      "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
       "StaleTurnError": "agents.session.StaleTurnError",
       "StdioMCP": "agents.mcp.StdioMCP",
       "SteeringReceipt": "agents.turn.SteeringReceipt",
@@ -3301,6 +3306,7 @@
       "SessionBusyError",
       "SessionState",
       "SessionStore",
+      "SessionStoreCleanup",
       "StaleTurnError",
       "StdioMCP",
       "SteeringReceipt",
@@ -3332,7 +3338,7 @@
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, function_tool as function_tool",
       "from ._trace_context import TraceContext as TraceContext",
       "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider",
-      "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SQLiteSessionStore as SQLiteSessionStore",
+      "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",

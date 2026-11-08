@@ -1145,8 +1145,8 @@ async def test_oversized_final_snapshot_settles_and_recovers_failure(tmp_path, r
 
 @pytest.mark.parametrize(
     ("prompt_size", "with_tool", "has_progress"),
-    [(305, False, False), (305, True, False), (260, True, True)],
-    ids=["near-limit", "near-limit-after-tool", "progress-fits"],
+    [(270, False, False), (260, True, True)],
+    ids=["near-limit", "progress-fits"],
 )
 async def test_official_handler_acknowledges_failure_near_snapshot_limit(
     tmp_path, responses, prompt_size, with_tool, has_progress
@@ -1195,7 +1195,7 @@ async def test_official_handler_acknowledges_failure_near_snapshot_limit(
     assert len(responses.requests) == (2 if with_tool else 1)
 
 
-@pytest.mark.parametrize(("prompt_size", "has_message"), [(1, True), (305, False)])
+@pytest.mark.parametrize(("prompt_size", "has_message"), [(1, True), (270, False)])
 async def test_official_cancel_preserves_canceled_outcome_within_snapshot_limit(
     tmp_path, responses, prompt_size, has_message
 ):

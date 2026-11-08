@@ -51,6 +51,14 @@ def _bytes(task: p.Task) -> bytes:
     return task.SerializeToString(deterministic=True)
 
 
+def _unknown_task(task: p.Task) -> p.Task:
+    unknown = p.Task()
+    unknown.CopyFrom(task)
+    unknown.status.CopyFrom(p.TaskStatus(state=p.TASK_STATE_FAILED))
+    unknown.metadata.update({"agents.a2a.outcome": "unknown"})
+    return unknown
+
+
 def _part(value: dict[str, Any]) -> p.Part:
     data = ParseDict(value, Value())
     if MessageToDict(data) != value:
@@ -329,7 +337,11 @@ class NativeA2AExecutor(AgentExecutor):
         ):
             events[-1].status.ClearField("message")
             candidate, snapshot = await projection.preview(events)
-        if len(snapshot) > self.limits.checkpoint_bytes:
+        if len(snapshot) > self.limits.checkpoint_bytes or (
+            changes.get("status") == "running"
+            and len(_bytes(_unknown_task(p.Task.FromString(snapshot))))
+            > self.limits.checkpoint_bytes
+        ):
             raise ValueError("A2A snapshot exceeds configured byte limit")
         next_record = (
             NativeA2ATask(
@@ -765,6 +777,10 @@ class NativeA2AExecutor(AgentExecutor):
         """Republish a saved boundary after the old worker and handler have stopped.
 
         Running work remains unknown: this never calls the Agent factory.
+        Normalizing a running or legacy unknown snapshot may omit optional history,
+        artifacts and metadata to fit the terminal task. If identity and outcome
+        alone exceed checkpoint_bytes, recovery raises ValueError before updating
+        the record. Increase the limit and retry.
         A save with a lost acknowledgment may be repeated under the same desired
         generation. The host's inherited save owns exact snapshot acknowledgment.
         """
@@ -778,10 +794,34 @@ class NativeA2AExecutor(AgentExecutor):
             record = await self._load(lease, binding)
             if record is None:
                 return None
-            if record.status == "running":
-                record = replace(record, generation=record.generation + 1, status="unknown")
+            task = record.task()
+            if record.status == "running" or (
+                record.status == "unknown"
+                and (
+                    task.status.state != p.TASK_STATE_FAILED
+                    or "agents.a2a.outcome" not in task.metadata
+                    or task.metadata["agents.a2a.outcome"] != "unknown"
+                )
+            ):
+                task = _unknown_task(task)
+                snapshot = _bytes(task)
+                if len(snapshot) > self.limits.checkpoint_bytes:
+                    task = _unknown_task(p.Task(id=task.id, context_id=task.context_id))
+                    snapshot = _bytes(task)
+                if len(snapshot) > self.limits.checkpoint_bytes:
+                    raise ValueError(
+                        "A2A recovery identity and outcome exceed configured byte limit; "
+                        "increase checkpoint_bytes to recover this task"
+                    )
+                record = replace(
+                    record,
+                    generation=record.generation + 1,
+                    status="unknown",
+                    snapshot=snapshot,
+                    checkpoint=None,
+                    challenge=None,
+                )
                 await lease.commit(record, expected_generation=record.generation - 1)
-                return record
             current = await self.store.get(binding.task_id, context)
             from a2a.server.cluster.version import TaskVersion
 

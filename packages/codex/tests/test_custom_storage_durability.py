@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -23,12 +24,14 @@ from agents import (
     NativeAgents,
     NativeGoals,
     NativeProvider,
+    SessionStoreCleanup,
     SQLiteSessionStore,
     ToolContext,
     ToolOutput,
     ToolOutputImage,
     ToolOutputText,
     function_tool,
+    get_cleanup,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -505,6 +508,157 @@ async def test_custom_store_inspects_durable_intent_before_callback_journal(resp
     assert len(responses.requests) == 2
     assert "Application verified" in json.dumps(responses.requests[-1]["input"])
     assert not (tmp_path / "effects").exists()
+
+
+@pytest.mark.parametrize("receipt_fails", [False, True])
+async def test_reconciliation_retains_release_without_repeating_receipt(
+    responses, tmp_path, receipt_fails
+):
+    responses.respond(function_call("record", {"key": "undispatched"}, "cleanup-call"))
+    code, rows, err = await _collect(await _start(responses, tmp_path, "intent-crash"))
+    assert code == 68, (rows, err)
+    identity = _row(rows, "opened")
+    code, rows, err = await _collect(await _start(responses, tmp_path, "hold", identity))
+    assert code != 0, (rows, err)
+    [call] = _row(rows, "recovery_calls")
+
+    class HeldReleaseStore(SQLiteSessionStore):
+        blocked = True
+        writes = 0
+        releases = 0
+
+        def commit(self, *args):
+            self.writes += 1
+            if receipt_fails:
+                raise OSError("private-backend-receipt")
+            return super().commit(*args)
+
+        def release(self, *args):
+            self.releases += 1
+            if self.blocked:
+                raise OSError("private-backend-release")
+            return super().release(*args)
+
+    backend = HeldReleaseStore(tmp_path / "canonical.sqlite")
+    storage = CustomStorage(backend)
+    with pytest.raises(RuntimeError) as caught:
+        await storage.reconcile(
+            identity, turn_id=call["turn_id"], call_id=call["call_id"], output="Verified no effect."
+        )
+    assert "private-backend" not in str(caught.value)
+    if receipt_fails:
+        assert "Reconciliation failed:" in str(caught.value)
+        assert "writer cleanup failed:" in str(caught.value)
+    cleanup = get_cleanup(caught.value)
+    assert isinstance(cleanup, SessionStoreCleanup)
+    writes = backend.writes
+    with pytest.raises(RuntimeError) as repeated:
+        await cleanup.aclose()
+    assert get_cleanup(repeated.value) is cleanup
+    competitor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+    with pytest.raises(BlockingIOError):
+        competitor.acquire(identity)
+    backend.blocked = False
+    await asyncio.gather(cleanup.aclose(), cleanup.aclose())
+    await cleanup.aclose()
+    assert backend.writes == writes
+    assert backend.releases == 3
+    token = competitor.acquire(identity)
+    competitor.release(identity, token)
+    if receipt_fails:
+        await CustomStorage(competitor).reconcile(
+            identity, turn_id=call["turn_id"], call_id=call["call_id"], output="Verified no effect."
+        )
+    responses.respond(assistant_output("continued without replay"))
+    provider = NativeProvider(
+        base_url=responses.url, api_key="synthetic-cleanup", supports_websockets=False
+    )
+    async with (
+        provider,
+        Agent(instructions="Continue.", provider=provider).session(
+            storage=CustomStorage(competitor), resume=identity
+        ) as session,
+    ):
+        assert session.capabilities.get("native_output_manual_restore").status == "unsupported"
+        result = await (await session.submit("Continue.")).get_result()
+        assert result.final_output == "continued without replay"
+    assert not (tmp_path / "effects").exists()
+
+
+async def test_cancelled_reconciliation_and_cleanup_keep_the_original_writer(responses, tmp_path):
+    responses.respond(function_call("record", {"key": "undispatched"}, "cancelled-cleanup"))
+    code, rows, err = await _collect(await _start(responses, tmp_path, "intent-crash"))
+    assert code == 68, (rows, err)
+    identity = _row(rows, "opened")
+    code, rows, err = await _collect(await _start(responses, tmp_path, "hold", identity))
+    assert code != 0, (rows, err)
+    [call] = _row(rows, "recovery_calls")
+    entered = threading.Event()
+    proceed = threading.Event()
+    release_entered = threading.Event()
+    release_proceed = threading.Event()
+
+    class HeldStore(SQLiteSessionStore):
+        blocked = True
+        writes = 0
+        releases = 0
+
+        def acquire(self, session_id):
+            token = super().acquire(session_id)
+            entered.set()
+            assert proceed.wait(15)
+            return token
+
+        def commit(self, *args):
+            self.writes += 1
+            return super().commit(*args)
+
+        def release(self, *args):
+            self.releases += 1
+            if self.blocked:
+                raise OSError("private-release-unavailable")
+            release_entered.set()
+            assert release_proceed.wait(15)
+            return super().release(*args)
+
+    backend = HeldStore(tmp_path / "canonical.sqlite")
+    task = asyncio.create_task(
+        CustomStorage(backend).reconcile(
+            identity, turn_id=call["turn_id"], call_id=call["call_id"], output="Verified no effect."
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 15)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        proceed.set()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    cleanup = get_cleanup(caught.value)
+    assert isinstance(cleanup, SessionStoreCleanup)
+    assert backend.writes == 1
+    backend.blocked = False
+    closing = asyncio.create_task(cleanup.aclose())
+    try:
+        assert await asyncio.to_thread(release_entered.wait, 15)
+        closing.cancel()
+        another = asyncio.create_task(cleanup.aclose())
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert not another.done()
+    finally:
+        release_proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    await another
+    await cleanup.aclose()
+    assert backend.writes == 1
+    assert backend.releases == 2
+    competitor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+    token = competitor.acquire(identity)
+    competitor.release(identity, token)
 
 
 async def test_custom_recovery_retains_facts_and_public_provider_cleanup(responses, tmp_path):
