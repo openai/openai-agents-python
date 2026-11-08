@@ -1,0 +1,125 @@
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index 1e4844535b15e0978ff71c5f2a3109ae317a19f1..741aa74211c85d1828d0e2bb554d4c86917d413e 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -1569,11 +1569,17 @@ fn close_fd_or_panic(fd: libc::c_int, context: &str) {
+ }
+ 
+ fn is_proc_mount_failure(stderr: &str) -> bool {
+-    stderr.contains("Can't mount proc")
+-        && stderr.contains("/newroot/proc")
+-        && (stderr.contains("Invalid argument")
+-            || stderr.contains("Operation not permitted")
+-            || stderr.contains("Permission denied"))
++    stderr.lines().any(|line| {
++        matches!(
++            line,
++            "bwrap: Can't mount proc on /newroot/proc: Invalid argument"
++                | "bwrap: Can't mount proc on /newroot/proc: Operation not permitted"
++                | "bwrap: Can't mount proc on /newroot/proc: Permission denied"
++                | "bwrap: Can't mount proc on /proc: Invalid argument"
++                | "bwrap: Can't mount proc on /proc: Operation not permitted"
++                | "bwrap: Can't mount proc on /proc: Permission denied"
++        )
++    })
+ }
+ 
+ struct InnerSeccompCommandArgs<'a> {
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main_tests.rs b/codex-rs/linux-sandbox/src/linux_run_main_tests.rs
+index 79a0dca0408068103dd67e52d71ff5c3261e8a9e..eb5be8601da8db13ae56e18ce661673fa632e5a7 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main_tests.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main_tests.rs
+@@ -45,6 +45,38 @@ fn detects_proc_mount_permission_denied_failure() {
+     assert!(is_proc_mount_failure(stderr));
+ }
+ 
++#[test]
++fn detects_proc_mount_failures_at_proc_root() {
++    for reason in [
++        "Invalid argument",
++        "Operation not permitted",
++        "Permission denied",
++    ] {
++        let stderr = format!("bwrap: Can't mount proc on /proc: {reason}");
++        assert!(is_proc_mount_failure(&stderr), "{stderr}");
++    }
++}
++
++#[test]
++fn detects_proc_mount_failure_among_diagnostic_lines() {
++    let stderr = "earlier diagnostic\nbwrap: Can't mount proc on /proc: Operation not permitted\r\nlater diagnostic\n";
++    assert!(is_proc_mount_failure(stderr));
++}
++
++#[test]
++fn ignores_misleading_proc_mount_diagnostics() {
++    for stderr in [
++        "bwrap: Can't mount proc on /proc-other: Operation not permitted",
++        "bwrap: Can't mount proc on /newroot/proc-other: Operation not permitted",
++        "bwrap: Can't mount proc on /proc: No such file or directory",
++        "bwrap: Can't bind mount /proc: Operation not permitted",
++        "bwrap: Can't mount proc\n/newroot/proc\nOperation not permitted",
++        "bwrap: Can't mount proc on /proc: Operation not permitted by another operation",
++    ] {
++        assert!(!is_proc_mount_failure(stderr), "{stderr}");
++    }
++}
++
+ #[test]
+ fn ignores_non_proc_mount_errors() {
+     let stderr = "bwrap: Can't bind mount /dev/null: Operation not permitted";
+diff --git a/codex-rs/linux-sandbox/tests/suite/managed_proxy.rs b/codex-rs/linux-sandbox/tests/suite/managed_proxy.rs
+index 02b5d0cad8a9e3d8e77f9dd7c7641ae187437d52..ef3428937074a59a5823d535c3593b94a2a66edf 100644
+--- a/codex-rs/linux-sandbox/tests/suite/managed_proxy.rs
++++ b/codex-rs/linux-sandbox/tests/suite/managed_proxy.rs
+@@ -308,8 +308,10 @@ async fn namespace_reaper_collects_orphaned_descendants() {
+     assert_eq!(output.stdout, b"orphan reaped\n");
+ }
+ 
++#[test_case::test_case("/newroot/proc"; "legacy_proc_path")]
++#[test_case::test_case("/proc"; "current_proc_path")]
+ #[tokio::test]
+-async fn proc_mount_denial_preserves_legacy_fallback_and_explicit_pid_inheritance() {
++async fn proc_mount_denial_preserves_legacy_fallback_and_explicit_pid_inheritance(proc_path: &str) {
+     if should_skip_bwrap_tests().await {
+         eprintln!("skipping bwrap test: bubblewrap is unavailable");
+         return;
+@@ -327,7 +329,7 @@ async fn proc_mount_denial_preserves_legacy_fallback_and_explicit_pid_inheritanc
+ for arg in "$@"; do
+     [ "$arg" = "--" ] && break
+     if [ "$arg" = "--proc" ]; then
+-        printf '%s\n' "bwrap: Can't mount proc on /newroot/proc: Operation not permitted" >&2
++        printf "bwrap: Can't mount proc on %s: Operation not permitted\n" "$CODEX_TEST_PROC_MOUNT_PATH" >&2
+         exit 1
+     fi
+ done
+@@ -368,6 +370,18 @@ set -eu
+ printf 'command started\n'
+ IFS=' ' read -r proc_pid rest < /proc/self/stat
+ test "$$" != "$proc_pid"
++test "$(readlink /proc/self/ns/pid)" != "$CODEX_TEST_PID_NAMESPACE"
++if (printf changed > "$CODEX_TEST_PROTECTED_FILE") 2>/dev/null; then exit 1; fi
++test "$(readlink /proc/self/ns/user)" != "$CODEX_TEST_USER_NAMESPACE"
++test "$(readlink /proc/self/ns/ipc)" != "$CODEX_TEST_IPC_NAMESPACE"
++test "$(readlink /proc/self/ns/net)" != "$CODEX_TEST_NET_NAMESPACE"
++while read -r key value rest; do
++    case "$key" in
++        CapEff:) test "$value" = 0000000000000000 ;;
++        NoNewPrivs:) test "$value" = 1 ;;
++        Seccomp:) test "$value" = 2 ;;
++    esac
++done < /proc/self/status
+ printf 'legacy proc fallback\n'
+ "#;
+ 
+@@ -385,6 +399,10 @@ printf 'legacy proc fallback\n'
+             "CODEX_TEST_REAL_BWRAP".to_string(),
+             system_bwrap.display().to_string(),
+         );
++        env.insert(
++            "CODEX_TEST_PROC_MOUNT_PATH".to_string(),
++            proc_path.to_string(),
++        );
+         env.insert(
+             "CODEX_TEST_PID_NAMESPACE".to_string(),
+             pid_namespace.display().to_string(),
