@@ -26,6 +26,7 @@ from agents import (
     StdioMCP,
     TurnNeedsAttention,
     TurnStoppedError,
+    get_cleanup,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, responses as responses
@@ -324,6 +325,62 @@ async def test_mcp_error_boundary_preserves_application_error_and_cause(
         traceback = traceback.tb_next
     assert __file__ in frames
     assert_private_frames(original, allow_chain=True, require_traceback=False)
+
+
+@pytest.mark.parametrize("kind", ["http", "stdio"])
+@pytest.mark.parametrize("tool_source", ["agent", "override", "cleared_override"])
+async def test_mcp_cleanup_error_keeps_captured_overrides_private(
+    responses: ResponsesFixture,
+    kind: str,
+    tool_source: str,
+) -> None:
+    server = (
+        HttpMCP(
+            name="remote",
+            url="https://example.invalid",
+            tools=["search"],
+            headers={"X-Token": _SECRET},
+        )
+        if kind == "http"
+        else StdioMCP(name="local", command="unused-peer", tools=["search"], env={"TOKEN": _SECRET})
+    )
+    declarations = [server]
+    agent = Agent(instructions="test", tools=declarations if tool_source == "agent" else [])
+    overrides = {} if tool_source == "agent" else {"tools": declarations}
+    original = OSError("retryable Core home cleanup")
+    cause = ValueError("application cause")
+    attempts = 0
+    session = None
+    async with provider(responses) as client:
+        try:
+            with pytest.raises(OSError) as captured:
+                async with agent.session(provider=client, **overrides) as session:
+                    assert session._home is not None
+                    cleanup = session._home.cleanup
+                    home_name = session._home.name
+
+                    class FailingHome:
+                        name = home_name
+
+                        def cleanup(self) -> None:
+                            nonlocal attempts
+                            attempts += 1
+                            if attempts == 1:
+                                raise original from cause
+                            cleanup()
+
+                    session._home = FailingHome()
+                    if tool_source == "cleared_override":
+                        declarations.clear()
+            assert captured.value is original and original.__cause__ is cause
+            assert get_cleanup(original) is session
+            assert attempts == 1
+            assert_private_frames(original, allow_chain=True)
+        finally:
+            if session is not None:
+                await session.aclose()
+        assert attempts == 2 and session is not None and session._closed
+    assert not responses.requests
 
 
 @pytest.mark.parametrize("method", ["items", "turns", "subagents"])
