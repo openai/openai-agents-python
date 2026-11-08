@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from examples.codex.migration import classic, native
+from agents.classic import RunConfig, Runner
+from agents.classic.testing import ScriptedModel, assistant_message, function_call
+from agents.testing import ScriptedResponses, text, tool_call
+from examples.codex.migration import classic as lookup_classic, native as lookup_native
+from examples.codex.migration.advanced import classic, native
+from examples.codex.migration.business import PROMPT, Application, Invoice
 
 
 async def test_classic_application_preserves_business_contract_and_history(tmp_path):
@@ -87,7 +92,7 @@ async def test_released_v0_to_native_with_explicit_state_boundary(tmp_path, via_
         timeout=30,
     )
     subprocess.run(
-        [interpreter, "-m", "examples.codex.migration.v0", str(tmp_path / "v0")],
+        [interpreter, "-m", "examples.codex.migration.advanced.v0", str(tmp_path / "v0")],
         cwd=tmp_path,
         env=env,
         check=True,
@@ -102,3 +107,90 @@ async def test_released_v0_to_native_with_explicit_state_boundary(tmp_path, via_
     )
     assert app.case_writes == []
     assert answer.label == "atlas"
+
+
+async def test_read_only_native_walkthrough_uses_application_context_and_typed_output():
+    invoice = Invoice(invoice_id="INV-42", amount_cents=9900, status="pending")
+    app = Application(invoice=invoice)
+    async with ScriptedResponses(
+        [tool_call("lookup_invoice", {"invoice_id": "INV-42"}, call_id="lookup")],
+        [text(invoice.model_dump_json())],
+    ) as peer:
+        result = await lookup_native.build_agent(peer.provider).run(PROMPT, context=app)
+    assert isinstance(result.final_output, Invoice)
+    assert result.final_output == invoice
+    assert json.loads(peer.tool_output("lookup")) == invoice.model_dump()
+    assert "9900" in json.dumps(peer.requests[-1]["input"])
+    assert app.invoice == invoice
+
+
+async def test_read_only_classic_staging_keeps_the_same_tool_and_output_contract():
+    invoice = Invoice(invoice_id="INV-42", amount_cents=9900, status="pending")
+    model = ScriptedModel(
+        [
+            [function_call("lookup_invoice", {"invoice_id": "INV-42"}, call_id="lookup")],
+            [assistant_message(invoice.model_dump_json())],
+        ]
+    )
+    result = await Runner.run(
+        lookup_classic.build_agent(model),
+        PROMPT,
+        context=Application(invoice=invoice),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    assert isinstance(result.final_output, Invoice)
+    assert result.final_output == invoice
+    assert "9900" in json.dumps(model.calls[-1].input)
+    model.assert_complete()
+
+
+def test_read_only_lookup_rejects_an_invoice_outside_application_context():
+    from examples.codex.migration.business import read_invoice
+
+    with pytest.raises(PermissionError, match="outside"):
+        read_invoice(Application(), "INV-private")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MIGRATION_V0_PYTHON"), reason="Separate released-v0 environment required"
+)
+def test_read_only_walkthrough_runs_on_actual_released_v0(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
+    env["PYTHONPATH"] = str(root)
+    subprocess.run(
+        [os.environ["MIGRATION_V0_PYTHON"], "-c", RELEASED_LOOKUP_CHECK],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        timeout=60,
+    )
+
+
+RELEASED_LOOKUP_CHECK = """
+import asyncio
+import json
+from importlib.metadata import version
+from agents import RunConfig, Runner
+from agents.testing import ScriptedModel, assistant_message, function_call
+from examples.codex.migration import v0
+from examples.codex.migration.business import PROMPT, Application, Invoice
+
+async def check():
+    assert version("openai-agents") == "0.24.0"
+    invoice = Invoice(invoice_id="INV-42", amount_cents=9900, status="pending")
+    model = ScriptedModel([
+        [function_call("lookup_invoice", {"invoice_id": "INV-42"}, call_id="lookup")],
+        [assistant_message(invoice.model_dump_json())],
+    ])
+    result = await Runner.run(
+        v0.build_agent(model), PROMPT, context=Application(invoice=invoice),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    assert isinstance(result.final_output, Invoice)
+    assert result.final_output == invoice
+    assert "9900" in json.dumps(model.calls[-1].input)
+    model.assert_complete()
+
+asyncio.run(check())
+"""

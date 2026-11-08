@@ -57,7 +57,7 @@ Use the same prefix for other retained public v0 submodules. Keep each workflow'
 
 Check optional integrations against the matching source before upgrading. For example, this classic tree does not include v0.24.0's `agents.extensions.sandbox.runloop` integration. Keep a workflow that requires it on v0 until you can port that integration.
 
-For a realistic staged port, follow the [invoice-support tutorial](examples/codex/migration/README.md#stage-through-classic-when-needed). It continues an actual released-v0 SQLite store in classic before starting a fresh native conversation from reviewed business facts.
+For a realistic staged port, follow the [optional advanced invoice-support example](examples/codex/migration/advanced/README.md#stage-through-classic-when-needed). It continues an actual released-v0 SQLite store in classic before starting a fresh native conversation from reviewed business facts.
 
 Run `python examples/codex/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
 
@@ -72,7 +72,7 @@ from agents.classic import Agent as ClassicAgent, Runner
 
 Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions, or RunState objects into native APIs. Keep existing conversations in classic; start a fresh native conversation when porting a workflow. This package provides no automatic conversion to native checkpoints.
 
-When the workflow can adopt native execution, follow the [native migration guide](MIGRATION.md#port-the-execution-and-tool-declarations). Port its declarations, provider settings, policies, event consumers, and state handling together. Classic does not automatically translate these contracts into native behavior.
+When the workflow can adopt native execution, follow the [native migration guide](MIGRATION.md#port-one-workflow). Port its declarations, provider settings, policies, event consumers, and state handling together. Classic does not automatically translate these contracts into native behavior.
 
 Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings, and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
 

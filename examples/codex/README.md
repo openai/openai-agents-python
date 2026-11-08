@@ -22,7 +22,7 @@ To start without model credentials, choose a [scripted recipe](../../docs/sdk/re
 
 ## Migrate a v0 workflow
 
-Follow the [migration guide](../../MIGRATION.md) to move directly from v0 to native v1. It maps the APIs, explains conversation cutover, and includes a brief for a frontier coding agent. The [invoice-support tutorial](migration/README.md) tests both migration paths with typed context/output, an authorized effect, a denied effect, a separately configured specialist, v0/classic history, and native checkpoints. It includes matching-source installation commands and a separate released-v0 environment. The [basic native example](basic.py) shows the target execution pattern.
+Follow the [migration guide](../../MIGRATION.md) to move directly from v0 to native v1. It maps the APIs, explains conversation cutover, and includes a brief for a frontier coding agent. Start with the [read-only invoice walkthrough](migration/README.md): one agent, one tool, typed context, and typed output. It includes matching-source installation and an optional classic import change. Its optional advanced application keeps the specialist, effect, and conversation-recovery checks.
 
 If a staged package upgrade is necessary, the [classic example](classic.py) demonstrates the retained Python runner without model credentials. Read [classic setup](../../CLASSIC.md) for its source-build and dependency requirements. Moving a workflow to classic is optional and does not move its execution to Codex.
 
