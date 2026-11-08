@@ -317,6 +317,7 @@ class Environment(Generic[ContextT_contra]):
     writable_roots: Sequence[str | PathLike[str]] | None = None
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
     write_policy: Literal["strict", "legacy"] = "strict"
+    read_only: bool = False
 
     @classmethod
     def local(
@@ -343,6 +344,7 @@ class Environment(Generic[ContextT_contra]):
         policy_timeout: float = 30,
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
         write_policy: Literal["strict"] = "strict",
+        read_only: bool = False,
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -356,6 +358,10 @@ class Environment(Generic[ContextT_contra]):
         On Linux, ``mounts`` adds read-only access to canonical same-path
         directories. Supply each source; destination and ``local_bind`` strategy
         default to the supported same-path bind.
+        ``read_only=True`` caps the workspace at read access without expanding
+        its readable paths or network policy. It excludes additional writable
+        roots, native apply_patch and NativeAgents. Empty root replacement stays read-only.
+        Application callbacks keep their host authority outside this native ceiling.
         Keep the SDK, its native helpers, and LocalStorage profiles outside
         the working directory and additional writable roots.
         """
@@ -373,9 +379,16 @@ class Environment(Generic[ContextT_contra]):
             policy_timeout=policy_timeout,
             mounts=mounts,
             write_policy=write_policy,
+            read_only=read_only,
         )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.read_only, bool):
+            raise TypeError("read_only must be a bool")
+        if self.read_only and self.write_policy != "strict":
+            raise ValueError("Read-only execution requires strict write policy")
+        if self.read_only and self._is_local and sys.platform not in ("linux", "darwin"):
+            raise ValueError("Read-only local execution requires Linux or macOS")
         if self.write_policy not in ("strict", "legacy"):
             raise ValueError("write_policy must be strict or legacy")
         if self.write_policy == "legacy":
@@ -451,6 +464,10 @@ class Environment(Generic[ContextT_contra]):
         if isinstance(self.tools, str) or not isinstance(self.tools, Sequence):
             raise TypeError("Executor tools must be a sequence of native tool names")
         selected = tuple(self.tools)
+        if self.read_only and self.writable_roots:
+            raise ValueError("Read-only execution does not accept writable_roots")
+        if self.read_only and "apply_patch" in selected:
+            raise ValueError("Read-only execution does not support apply_patch")
         if any(
             name
             not in ("exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep")
@@ -563,6 +580,8 @@ class Environment(Generic[ContextT_contra]):
             "headers": dict(self.headers),
             "connect_timeout": self.connect_timeout,
         }
+        if self.read_only:
+            result["read_only"] = True
         if self._is_local:
             result["local"] = True
         else:
