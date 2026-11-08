@@ -22,6 +22,8 @@ from agents import (
     NativeProvider,
     PreparedRequest,
     StopTurn,
+    ToolContext,
+    ToolRef,
     TurnStoppedError,
     function_tool,
 )
@@ -263,6 +265,60 @@ async def test_tool_route_arguments_effect_and_continued_final_decision():
             assert result.thread_usage.total_token_usage.total_tokens == 40
             recorded = [item async for item in session.turns()]
             assert_decision_receipts(recorded[0]["responses"], 4)
+        assert not server.responses.requests
+
+
+async def test_namespaced_decisions_tools_with_equal_short_names_dispatch_the_selected_callback():
+    calls = []
+
+    def lookup_for(namespace):
+        @function_tool(name="lookup", namespace=namespace)
+        def lookup(ctx: ToolContext[None], category: Literal["billing", "technical"]) -> str:
+            """Look up the selected category."""
+            assert ctx.call.tool == ToolRef("lookup", namespace)
+            calls.append(f"{namespace}:{category}")
+            return "NAMESPACED_LOOKUP_RESULT"
+
+        return lookup
+
+    def categories(body):
+        assert len(body["questions"]) == 1
+        question = body["questions"][0]
+        assert "support" in json.dumps(question)
+        assert "lookup" in json.dumps(question)
+        selected = next(
+            item["value"] for item in question["choices"] if item["description"] == '"technical"'
+        )
+        return [choice(question, selected)]
+
+    async with timeout(20), peer() as server, server.provider() as provider:
+        server.expected_model = "gpt-6-luna"
+        server.replies.extend([route(2), categories, route(0), predicates()])
+        agent = Agent(
+            instructions="Use the selected lookup and return approval.",
+            api="decisions",
+            provider=provider,
+            tools=[lookup_for("sales"), lookup_for("support")],
+            output_type=Verdict,
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Look up the technical category.")
+            result = await turn.get_result()
+            assert result.final_output == Verdict(approved=True)
+            assert calls == ["support:technical"]
+            assert "NAMESPACED_LOOKUP_RESULT" in json.dumps(server.requests[2]["input"])
+            assert result.thread_usage is not None
+            assert result.thread_usage.total_token_usage.total_tokens == 40
+            recorded = [item async for item in session.turns()]
+            assert_decision_receipts(recorded[0]["responses"], 4)
+            dispatches = [
+                event async for event in turn.events() if isinstance(event, ModelRequestDispatching)
+            ]
+            assert len(dispatches) == 4
+            assert all(event.wire == "decisions" for event in dispatches)
+            assert all(event.transport == "http_json" for event in dispatches)
+        assert len(server.requests) == 4
+        assert not server.replies
         assert not server.responses.requests
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect as inspect
 import json as json
 from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
+from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, cast
 
@@ -358,15 +359,22 @@ class _CapturedFunction:
     )
     after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None
     context: Any = field(repr=False)
-    namespace: None = field(default=None, init=False)
+    namespace: str | None = None
+
+    @property
+    def _requires_live_manual_session(self) -> bool:
+        return False
 
     @property
     def _ref(self) -> ToolRef:
-        return ToolRef(self.name)
+        return ToolRef(self.name, self.namespace)
 
     def _parse_arguments(self, arguments: Any) -> BaseModel:
         if isinstance(arguments, str):
             arguments = json.loads(arguments)
+        else:
+            # Validators may mutate nested JSON values in place.
+            arguments = deepcopy(arguments)
         return self.model.model_validate(arguments)
 
     def _arguments(self, parsed: BaseModel) -> dict[str, Any]:

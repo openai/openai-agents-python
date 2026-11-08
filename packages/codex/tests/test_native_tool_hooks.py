@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, HttpMCP, StdioMCP, function_tool
+from agents import Agent, Allow, HttpMCP, StdioMCP, ToolContext, ToolTimeoutError, function_tool
 from agents.observation import ToolFinished, ToolStarted
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -69,3 +69,90 @@ async def test_observation_failure_does_not_fail_tool_execution(
         assert [type(event) for event in observed] == [ToolStarted, ToolFinished]
         assert all(event.turn_id == handle.turn_id for event in observed)
         assert "private-key" not in repr(observed)
+
+
+@pytest.mark.parametrize("inactive_formatter", [False, True])
+async def test_context_free_tool_does_not_copy_private_argument_state(
+    responses: ResponsesFixture, inactive_formatter: bool
+) -> None:
+    import threading
+
+    from pydantic import BaseModel, PrivateAttr
+
+    class Payload(BaseModel):
+        value: str
+        _lock: Any = PrivateAttr(default_factory=threading.Lock)
+
+    entered: list[str] = []
+
+    def formatter(context: ToolContext[None], error: ToolTimeoutError) -> str:
+        raise AssertionError("A formatter without an active deadline must not run")
+
+    async def read(payload: Payload) -> str:
+        entered.append(payload.value)
+        return payload.value
+
+    # Local annotations must resolve before the decorator captures the schema.
+    read.__annotations__["payload"] = Payload
+    tool = function_tool(
+        timeout_error_function=formatter if inactive_formatter else None,
+        timeout_behavior="error_as_result",
+    )(read)
+    responses.respond(function_call("read", {"payload": {"value": "accepted"}}, "private"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Read.", tools=[tool], provider=provider(responses)
+        ).session() as session,
+    ):
+        assert (await (await session.submit("read")).get_result()).final_output == "done"
+    assert entered == ["accepted"]
+
+
+async def test_tool_context_preserves_received_arguments_before_mutating_validation(
+    responses: ResponsesFixture,
+) -> None:
+    from pydantic import BaseModel, field_validator
+
+    validated: list[list[str]] = []
+
+    class Payload(BaseModel):
+        tags: list[str]
+
+        @field_validator("tags", mode="before")
+        @classmethod
+        def sort_tags(cls, value: list[str]) -> list[str]:
+            validated.append(list(value))
+            value.sort()
+            return value
+
+    seen: list[tuple[list[str], list[str]]] = []
+
+    def before(context: ToolContext[None]) -> Allow:
+        seen.append(
+            (
+                list(context.original_arguments["payload"]["tags"]),
+                list(context.effective_arguments["payload"].tags),
+            )
+        )
+        return Allow()
+
+    async def read(payload: Payload) -> str:
+        # A callback owns its validated values independently of the policy snapshot.
+        payload.tags.append("body")
+        return ",".join(payload.tags)
+
+    read.__annotations__["payload"] = Payload
+    tool = function_tool(before=before)(read)
+    responses.respond(function_call("read", {"payload": {"tags": ["z", "a"]}}, "sorted"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Read.", tools=[tool], provider=provider(responses)
+        ).session() as session,
+    ):
+        assert (await (await session.submit("read")).get_result()).final_output == "done"
+    assert validated == [["z", "a"]]
+    assert seen == [(["z", "a"], ["a", "z"])]

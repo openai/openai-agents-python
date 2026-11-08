@@ -729,3 +729,42 @@ async def test_pipeline_preserves_workflow_cancellation():
             async for _ in events:
                 pass
     assert tts.calls == ()
+
+
+async def test_cancelled_voice_cleanup_wait_does_not_log_owned_failure():
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors = []
+
+    class FailingCleanup(ControlledTurn):
+        async def cancel(self):
+            self.cancelled.set()
+            await self.release_cleanup.wait()
+            raise RuntimeError("owned voice cleanup failed")
+
+    turn = FailingCleanup()
+    turn.result_ready.clear()
+    turn.release_cleanup.clear()
+    workflow = workflow_for(ControlledSession(turn))
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    reading = asyncio.create_task(collect(workflow))
+    try:
+        await turn.result_entered.wait()
+        cancelling = asyncio.create_task(workflow.cancel())
+        await turn.cancelled.wait()
+        cancelling.cancel()
+        await asyncio.sleep(0)
+        assert not cancelling.done()
+        turn.release_cleanup.set()
+        with pytest.raises(RuntimeError, match="owned voice cleanup failed"):
+            await cancelling
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        await asyncio.sleep(0)
+        assert errors == []
+    finally:
+        turn.release_cleanup.set()
+        reading.cancel()
+        await asyncio.gather(reading, return_exceptions=True)
+        loop.set_exception_handler(previous)

@@ -313,12 +313,11 @@ async def test_failed_commits_stop_effects_and_dependent_model(responses, tmp_pa
     assert code != 0, (rows, err)
     assert _row(rows, "turn_error")
     assert _row(rows, "sticky_error")
-    assert not any("close_succeeded" in row for row in rows), rows
+    assert _row(rows, "close_succeeded") is True
     assert _row(rows, "error")
     if mode == "intent-fail":
-        retries = [row["cleanup_retry_error"] for row in rows if "cleanup_retry_error" in row]
-        assert len(retries) == 2 and all(retries), rows
-        assert not any("cleanup_retry_succeeded" in row for row in rows), rows
+        assert sum("cleanup_retry_succeeded" in row for row in rows) == 2, rows
+        assert not any("cleanup_retry_error" in row for row in rows), rows
     assert "secret-do-not-expose" not in json.dumps(rows)
     assert len(responses.requests) == 1
     path = tmp_path / "effects"
@@ -383,7 +382,7 @@ async def test_readable_lost_ack_without_confirmation_keeps_session_failed(respo
     code, rows, err = await _collect(await _start(responses, tmp_path, "ack-confirm-fail"))
     assert code != 0, (rows, err)
     assert _row(rows, "turn_error") and _row(rows, "sticky_error")
-    assert not any("close_succeeded" in row for row in rows), rows
+    assert _row(rows, "close_succeeded") is True
     assert len(responses.requests) == 1
     assert "secret-do-not-expose" not in json.dumps(rows)
     assert (tmp_path / "effects").read_text() == "ack-confirm-fail:once\n"
@@ -412,6 +411,9 @@ async def test_lifecycle_failure_surfaces_and_releases_writer(responses, tmp_pat
     code, rows, err = await _collect(await _start(responses, tmp_path, mode, identity))
     assert code != 0 and _row(rows, "error"), (rows, err)
     assert _row(rows, "released") is True, (rows, err)
+    if mode in {"release-fail", "release-before-fail"}:
+        assert sum("cleanup_retry_succeeded" in row for row in rows) == 2, rows
+        assert not any("cleanup_retry_error" in row for row in rows), rows
     assert "secret-do-not-expose" not in json.dumps(rows)
     assert not (tmp_path / "effects").exists()
     if mode == "read-fail":
@@ -983,21 +985,20 @@ async def test_failed_initialization_retries_release_before_another_owner_opens(
     store = FailedInitializationStore(tmp_path / "canonical.sqlite")
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-initialization")
     agent = Agent(instructions="Opening must fail before work starts.", provider=provider)
-    with pytest.raises(RuntimeError, match="Canonical storage failed"):
-        async with timeout(15), provider:
-            with pytest.raises(RuntimeError, match="Canonical storage failed"):
-                async with agent.session(storage=CustomStorage(store)):
-                    pytest.fail("Failed canonical initialization unexpectedly succeeded")
-            assert store.identity is not None
-            # Keep the failed backend alive in this process: process death and
-            # destruction of its lock descriptors cannot rescue the successor.
-            successor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
-            token = successor.acquire(store.identity)
-            try:
-                assert successor.read(store.identity, token) is None
-            finally:
-                successor.release(store.identity, token)
-            assert store.release_attempts >= 2
+    async with timeout(15), provider:
+        with pytest.raises(RuntimeError, match="Canonical storage failed"):
+            async with agent.session(storage=CustomStorage(store)):
+                pytest.fail("Failed canonical initialization unexpectedly succeeded")
+        assert store.identity is not None
+        # Keep the failed backend alive in this process: process death and
+        # destruction of its lock descriptors cannot rescue the successor.
+        successor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+        token = successor.acquire(store.identity)
+        try:
+            assert successor.read(store.identity, token) is None
+        finally:
+            successor.release(store.identity, token)
+        assert store.release_attempts >= 2
     assert responses.requests == []
     assert not (tmp_path / "effects").exists()
 
@@ -1102,3 +1103,59 @@ async def test_typed_reconciliation_preserves_normal_callback_receipt_and_model_
 
 if __name__ == "__main__":
     asyncio.run(_worker())
+
+
+@pytest.mark.parametrize("fault", ["release-lock", "shutdown-flush"])
+async def test_session_cleanup_retries_sqlite_release_without_replaying_flush(
+    responses, tmp_path, fault
+):
+    import sqlite3
+
+    class CloseFailureStore(SQLiteSessionStore):
+        releases = 0
+        flushes = 0
+        armed = False
+
+        def flush(self, session_id, token):
+            self.flushes += 1
+            if self.armed and fault == "shutdown-flush":
+                self.armed = False
+                raise OSError("injected shutdown flush failure")
+            return super().flush(session_id, token)
+
+        def release(self, session_id, token):
+            self.releases += 1
+            if self.releases != 1 or fault != "release-lock":
+                return super().release(session_id, token)
+            with sqlite3.connect(self.path) as blocker:
+                blocker.execute("BEGIN EXCLUSIVE")
+                try:
+                    return super().release(session_id, token)
+                finally:
+                    blocker.rollback()
+
+    store = CloseFailureStore(tmp_path / "canonical.sqlite")
+    responses.respond(assistant_output("saved"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-release-retry")
+    async with provider:
+        agent = Agent(instructions="Answer.", provider=provider)
+        async with agent.session(storage=CustomStorage(store)) as session:
+            assert (await (await session.submit("Save.")).get_result()).final_output == "saved"
+            store.armed = True
+            with pytest.raises(RuntimeError, match="Canonical storage failed") as caught:
+                await session.aclose()
+            cleanup = get_cleanup(caught.value)
+            assert cleanup is not None
+            flushes = store.flushes
+            await cleanup.aclose()
+            await cleanup.aclose()
+            await session.aclose()
+            assert store.flushes == flushes
+            assert store.releases == (2 if fault == "release-lock" else 1)
+            token = store.acquire(session.id)
+            try:
+                assert store.read(session.id, token) is not None
+            finally:
+                store.release(session.id, token)
+    # Leaving the provider scope proves engine and provider cleanup completed.
+    assert len(responses.requests) == 1

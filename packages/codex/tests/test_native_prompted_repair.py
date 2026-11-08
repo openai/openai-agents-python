@@ -909,7 +909,7 @@ async def test_zero_or_valid_output_can_restore_but_local_retry_admission_is_rej
                 local.capabilities.require("prompted_output")
             local.capabilities.require("prompted_output", allow_limited=True)
             assert len(responses.requests) == 1
-            with pytest.raises(CapabilityError, match="LocalStorage"):
+            with pytest.raises(CapabilityError, match="Persistent storage"):
                 await local.submit("must not execute an unrestorable task")
             assert len(responses.requests) == 1
             responses.respond(assistant_output('{"label":"explicit zero"}'))

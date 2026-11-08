@@ -3544,6 +3544,68 @@ pub(crate) mod managed_tests {
         thread
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_request_rechecks_admission_after_no_edit_reply() {
+        use codex_protocol::user_input::UserInput;
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let provider = crate::engine::settlement_tests::Provider::start().await;
+            let directory = tempfile::tempdir().unwrap();
+            let engine = real_engine(&directory, &provider.url).await;
+            let native = engine
+                .start_with_tools(Default::default(), None, Some(vec![]), false)
+                .await
+                .unwrap();
+            let state = native.current().unwrap();
+            let tools = state
+                .thread
+                .thread_extension_data()
+                .get::<PythonTools>()
+                .unwrap();
+            tools.prepare_requests(true).unwrap();
+            let started = crate::ops::submit_replaceable(
+                &state,
+                json!({
+                    "input": [UserInput::Text { text: "Try".into(), text_elements: vec![] }],
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(started["status"], "started");
+            let request = tools.next_request().await;
+            assert_eq!(request["msg"]["type"], "_sdk_prepare_request");
+            assert_eq!(request["msg"]["turn_id"], started["turn_id"]);
+            let request_id = request["msg"]["request_id"].as_u64().unwrap();
+            // Keep these synchronous: Core cannot consume the accepted reply
+            // until this task yields on the current-thread executor.
+            assert!(tools.reply_prepared_request(request_id, None, false));
+            tools.prepare_requests(false).unwrap();
+
+            let failure = "Fatal error: Native request preparation failed or was cancelled";
+            let mut errors = Vec::new();
+            loop {
+                let event = state.next_event().await.unwrap();
+                if event["msg"]["type"] == "error" {
+                    errors.push(event["msg"]["message"].as_str().unwrap().to_owned());
+                }
+                if matches!(
+                    event["msg"]["type"].as_str(),
+                    Some("task_complete" | "turn_complete")
+                ) {
+                    assert_eq!(event["id"], started["turn_id"]);
+                    assert_eq!(event["msg"]["error"]["message"], failure);
+                    break;
+                }
+            }
+            assert_eq!(errors, vec![failure]);
+            assert!(provider.requests.lock().unwrap().is_empty());
+            state.close().await.unwrap();
+            engine.close().await.unwrap();
+        })
+        .await
+        .expect("revoked prepared request did not settle");
+    }
+
     #[tokio::test]
     async fn prepared_request_marker_survives_operation_and_thread_retirement() {
         use codex_extension_api::ModelRequestContributor;
@@ -5048,6 +5110,65 @@ pub(crate) mod managed_tests {
             description: "test tool".into(),
             input_schema: json!({"type":"object","properties":{}}),
             defer_loading: false,
+        }
+    }
+
+    #[test]
+    fn checkpoint_catalog_validation_preserves_qualified_function_identity() {
+        let qualified = |namespace: &str| {
+            DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+                name: namespace.into(),
+                description: "Qualified callback".into(),
+                tools: vec![DynamicToolNamespaceTool::Function(function("lookup"))],
+            })
+        };
+        let specs = vec![
+            DynamicToolSpec::Function(function("lookup")),
+            qualified("billing"),
+            qualified("audit"),
+        ];
+        validate_declarations(&specs).unwrap();
+        assert_eq!(tool_names(&specs).len(), 3);
+        let saved = checkpoint_specs(&specs).unwrap();
+        let restored: Vec<DynamicToolSpec> = serde_json::from_value(saved.clone()).unwrap();
+        validate_declarations(&restored).unwrap();
+        assert_eq!(checkpoint_specs(&restored).unwrap(), saved);
+        for duplicate in [
+            vec![qualified("billing"), qualified("billing")],
+            vec![
+                DynamicToolSpec::Function(function("lookup")),
+                qualified("functions"),
+            ],
+        ] {
+            assert!(
+                validate_declarations(&duplicate)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Duplicate Python tool")
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_catalog_validation_rejects_non_slot_namespace_shapes() {
+        for tools in [
+            vec![],
+            vec![
+                DynamicToolNamespaceTool::Function(function("lookup")),
+                DynamicToolNamespaceTool::Function(function("record")),
+            ],
+        ] {
+            let malformed = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+                name: "billing".into(),
+                description: "Malformed slot".into(),
+                tools,
+            });
+            assert!(
+                validate_declarations(&[malformed])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid Python tool slot projection")
+            );
         }
     }
 

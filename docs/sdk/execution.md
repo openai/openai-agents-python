@@ -117,6 +117,10 @@ Set `cwd` to an absolute executor path or `file:` URI. The selected native model
 - `exec_command` starts commands.
 - `write_stdin` polls commands or writes to a TTY. It requires `exec_command`; ordinary pipe-mode stdin is unsupported.
 - `apply_patch` edits files.
+- `project_glob` finds project files by glob pattern.
+- `project_grep` searches project text with a Rust regular expression.
+
+For search-only execution, select `project_glob` and `project_grep` without shell tools. The [project search example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/project_search.py) explains result limits, incomplete searches, path restrictions, and local or remote runtime requirements.
 
 There is no separate Python process or file client.
 

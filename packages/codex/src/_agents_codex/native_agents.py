@@ -18,6 +18,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     Protocol as Protocol,
+    TypeAlias as TypeAlias,
 )
 
 from typing_extensions import TypeVar as TypeVar
@@ -31,7 +32,8 @@ if TYPE_CHECKING:
     from .executor import Environment
     from .tools import ToolRef
 
-ContextT = TypeVar("ContextT", default=Any)
+ContextT = TypeVar("ContextT", contravariant=True, default=object)
+_ContextT_co = TypeVar("_ContextT_co", covariant=True, default=object)
 
 _BUILTIN_ROLES = frozenset({"default", "explorer", "worker"})
 _COLLABORATION_TOOLS = (
@@ -85,17 +87,16 @@ class NativeRole:
             object.__setattr__(self, "model_settings", MappingProxyType(settings))
 
 
-class _ChildBeforeStep(Protocol[ContextT]):
-    def __call__(
-        self, step: ChildStepContext[ContextT], /
-    ) -> (
-        Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents]
-        | None
-        | StopTurn
-        | Awaitable[
-            Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn
-        ]
-    ): ...
+_ChildStepResult: TypeAlias = (
+    Sequence["ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]"]
+    | None
+    | StopTurn
+    | Awaitable[
+        Sequence["ToolRef | Tool[Any] | Environment[Any] | NativeAgents[Any]"] | None | StopTurn
+    ]
+)
+
+_ChildBeforeStep: TypeAlias = Callable[["ChildStepContext[ContextT]"], _ChildStepResult]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -145,11 +146,15 @@ class NativeAgents(Generic[ContextT]):
 
     additional_roles: Sequence[NativeRole] = ()
     max_children: int | None = None
-    approval: Callable[[ToolContext[Any], NativeToolCall], bool | Awaitable[bool]] | None = field(
-        default=None, repr=False
-    )
+    approval: (
+        Callable[[ToolContext[object], NativeToolCall], bool | Awaitable[bool]]
+        | Callable[[ToolContext[ContextT], NativeToolCall], bool | Awaitable[bool]]
+        | None
+    ) = field(default=None, repr=False)
     max_depth: int = 1
-    before_step: _ChildBeforeStep[ContextT] | None = field(default=None, repr=False)
+    before_step: (
+        Callable[[ChildStepContext[object]], _ChildStepResult] | _ChildBeforeStep[ContextT] | None
+    ) = field(default=None, repr=False)
     interactions: bool = False
 
     def __post_init__(self) -> None:
@@ -197,10 +202,10 @@ class ChildInvocation:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ChildStepContext(Generic[ContextT]):
+class ChildStepContext(Generic[_ContextT_co]):
     """Current application context and exact child preparation identity."""
 
-    context: ContextT = field(repr=False)
+    context: _ContextT_co = field(repr=False)
     child: ChildInvocation
     step_index: int
 

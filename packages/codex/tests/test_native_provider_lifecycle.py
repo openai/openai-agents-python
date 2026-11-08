@@ -481,3 +481,35 @@ async def test_reader_arm_failure_joins_unpublished_session_before_provider_clos
             for reader in readers:
                 reader.cancel()
             await asyncio.gather(*readers, return_exceptions=True)
+
+
+async def test_cancelled_open_consumes_late_acquisition_error_without_background_error(monkeypatch):
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def failing_acquisition(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        raise RuntimeError("late acquisition failed")
+
+    monkeypatch.setattr(_native, "create_engine", failing_acquisition)
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    owner = NativeProvider()
+    try:
+        scope = Agent(instructions="Answer.", provider=owner).session()
+        opening = asyncio.create_task(scope.__aenter__())
+        await entered.wait()
+        opening.cancel()
+        await asyncio.sleep(0)
+        assert not opening.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        await owner.aclose()
+        await asyncio.sleep(0)
+        assert errors == []
+    finally:
+        release.set()
+        loop.set_exception_handler(previous)

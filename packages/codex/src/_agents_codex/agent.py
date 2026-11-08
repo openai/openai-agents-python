@@ -657,6 +657,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -678,6 +679,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -699,6 +701,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -720,8 +723,14 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        max_function_concurrency bounds automatic Python callbacks per turn owner,
+        including validation and hooks through reply settlement. None adds no
+        limit. Manual requests and native tools do not consume slots. Each child
+        owner has an independent limit. Callback deadlines exclude this wait.
 
         on_interaction handles supported live requests for this Session's entire
         lifetime, including requests without Turn IDs. Return the exact request's
@@ -827,6 +836,7 @@ class Agent(Generic[ContextT, OutputT]):
                 tool_selection=tools,
                 instruction_files=instruction_files,
                 reconciled_calls=reconciled_calls,
+                max_function_concurrency=max_function_concurrency,
                 parent_trace=parent_trace,
                 **cast(
                     "_TracingOpeningOptions",
@@ -873,7 +883,8 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
-        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
+        | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -881,6 +892,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -895,7 +907,8 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
-        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
+        | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -903,6 +916,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -917,7 +931,7 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
@@ -926,6 +940,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -940,7 +955,10 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
-            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+            ToolRef
+            | Tool[SessionContextT]
+            | Environment[SessionContextT]
+            | NativeAgents[SessionContextT]
         ]
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
@@ -950,11 +968,14 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
         parent_trace sets the W3C parent for native work, including a restored
         manual continuation. trace_options controls captured SDK workflow policy.
+
+        max_function_concurrency follows session() and bounds automatic callbacks.
 
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
@@ -999,7 +1020,7 @@ class Agent(Generic[ContextT, OutputT]):
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
             from .state import SessionState
-            from .tools import _HOSTED_TOOLS, WebSearch
+            from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
             effective_api = self.api if api is None else api
             if effective_api == "decisions":
@@ -1085,7 +1106,7 @@ class Agent(Generic[ContextT, OutputT]):
                     or environment is not None
                     or native_agents is not None
                     or before_step is not None
-                    or any(tool.ref.namespace is not None for tool in declared)
+                    or any(tool._requires_live_manual_session for tool in declared)
                     or (
                         mcp_tools
                         and (
@@ -1096,9 +1117,11 @@ class Agent(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionRequired(
-                    "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                    "Pausing for manual replies requires ordinary Python callbacks "
+                    "and bare manual tools, "
                     "plain output or native strict output, "
                     "no environment, children or before_step. "
+                    "Selected MCP bindings and native MCP work require live replies. "
                     "Pass on_interaction or use Agent.session() for live replies."
                 )
             # Capture before opening. An override may expose the Session and its
@@ -1120,6 +1143,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["api"] = api
             if model_settings is not None:
                 options["model_settings"] = model_settings
+            if max_function_concurrency is not None:
+                options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
             async with session_factory(
@@ -1162,15 +1187,21 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._native_agents is not None
                         or session._storage is not None
                         or selected_mcp
-                        or any(tool._ref.namespace is not None for tool in session._bound_tools)
+                        or any(
+                            isinstance(tool, _CapturedFunction)
+                            and tool._requires_live_manual_session
+                            for tool in session._bound_tools
+                        )
                         or any(
                             isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in opening.tools
                         )
                     ):
                         raise InteractionRequired(
-                            "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                            "Pausing for manual replies requires ordinary Python callbacks "
+                            "and bare manual tools, "
                             "plain output or native strict output, "
                             "no local storage, environment, children or before_step. "
+                            "Selected MCP bindings and native MCP work require live replies. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
                 session._fail_unhandled_questions = (
@@ -1218,7 +1249,8 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
-        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]]
+        | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -1226,6 +1258,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1240,7 +1273,8 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
-        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]]
+        | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
@@ -1248,6 +1282,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1262,7 +1297,7 @@ class Agent(Generic[ContextT, OutputT]):
         api: Literal["responses", "decisions"] | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
-        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]]
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
@@ -1271,6 +1306,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1285,7 +1321,10 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[
-            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+            ToolRef
+            | Tool[SessionContextT]
+            | Environment[SessionContextT]
+            | NativeAgents[SessionContextT]
         ]
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
@@ -1295,6 +1334,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
+        max_function_concurrency: int | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1332,6 +1372,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["api"] = api
                 if model_settings is not None:
                     options["model_settings"] = model_settings
+                if max_function_concurrency is not None:
+                    options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:
                     options["environment"] = environment
                 if prepare_request is not None:

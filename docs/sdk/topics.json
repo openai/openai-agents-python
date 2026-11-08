@@ -6,7 +6,7 @@
   "release": "v0.24.0-alpha.7",
   "source_ref": "feat/codex-harness",
   "published_release": "https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.7",
-  "published_guide": "https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.7/docs/sdk/index.md",
+  "published_guide": "https://github.com/openai/openai-agents-python/blob/247c22dfbadb7e9c07345f9831a06729faa403aa/docs/sdk/index.md",
   "topics": [
     {
       "id": "installation",

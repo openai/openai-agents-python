@@ -465,3 +465,45 @@ def test_unreleased_policy_wrappers_are_not_exported(symbol):
     assert symbol not in agents.__all__
     with pytest.raises(AttributeError):
         getattr(agents, symbol)
+
+
+async def test_caught_graceful_stop_after_request_wait_has_no_background_error(responses):
+    from tests.test_review_ii_sessions import _GracefulReceiptObserver
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    errors = []
+    loop.set_exception_handler(lambda _loop, context: errors.append(context))
+    lookup = FunctionTool(
+        name="lookup", description="Read a key", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "A"}, "call-stop"))
+    try:
+        async with Agent(
+            instructions="Read.", tools=[lookup], provider=provider(responses)
+        ).session() as session:
+            turn = await session.submit("Read A.")
+            pending = await turn.wait_for_request_or_result()
+            request = pending.requests[0]
+            # Also discard an explicit passive result waiter before failure.
+            waiting = asyncio.create_task(turn.get_result())
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            probe = _GracefulReceiptObserver(session._native)
+            session._native = probe
+            stopping = asyncio.create_task(turn.cancel(mode="graceful"))
+            await asyncio.wait_for(probe.prepared.wait(), 15)
+            assert probe.installed is True
+            assert not stopping.done()
+            await session.respond(request.reply("answer"))
+            await stopping
+            with pytest.raises(TurnStoppedError):
+                await turn.get_result()
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert errors == []
+        assert len(responses.requests) == 1
+    finally:
+        loop.set_exception_handler(previous)

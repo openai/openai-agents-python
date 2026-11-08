@@ -154,10 +154,12 @@ def tls_files(tmp_path: Path) -> dict[str, Path]:
 
 
 @asynccontextmanager
-async def https_peer(files: dict[str, Path], issuer: str = "A") -> AsyncIterator[HTTPSPeer]:
+async def https_peer(
+    files: dict[str, Path], issuer: str = "A", *, finite_http_response: bool = False
+) -> AsyncIterator[HTTPSPeer]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(files[f"server-{issuer}.pem"], files[f"server-{issuer}.key"])
-    peer = HTTPSPeer(tls_context=context)
+    peer = HTTPSPeer(tls_context=context, finite_http_response=finite_http_response)
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
     server = TestServer(app, scheme="https")
@@ -658,7 +660,7 @@ async def test_provider_http_pool_reuses_socket_with_fresh_auth_and_independent_
     monkeypatch.delenv("CODEX_SANDBOX", raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-pooled-first-key")
-    async with timeout(40), https_peer(tls_files) as peer:
+    async with timeout(40), https_peer(tls_files, finite_http_response=True) as peer:
         provider = NativeProvider(base_url=peer.url, supports_websockets=False)
         agent = Agent(model="gpt-5.2", instructions="Fixed pooled instructions.", provider=provider)
         try:
@@ -695,7 +697,7 @@ async def test_provider_http_pool_reloads_same_path_ca_and_rejects_stale_trust(
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
     monkeypatch.delenv("CODEX_SANDBOX", raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", str(trust))
-    async with timeout(65), https_peer(tls_files) as peer:
+    async with timeout(65), https_peer(tls_files, finite_http_response=True) as peer:
         provider = NativeProvider(
             base_url=peer.url, api_key="synthetic-pooled-rotation-key", supports_websockets=False
         )
@@ -744,7 +746,7 @@ async def test_provider_http_pool_close_and_duplicate_ownership(
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
     monkeypatch.delenv("CODEX_SANDBOX", raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
-    async with timeout(45), https_peer(tls_files) as peer:
+    async with timeout(45), https_peer(tls_files, finite_http_response=True) as peer:
         first = NativeProvider(
             base_url=peer.url, api_key="synthetic-independent-pool-key", supports_websockets=False
         )
@@ -799,7 +801,7 @@ async def test_provider_http_pool_invalid_ca_retires_warm_socket(
     trust = tmp_path / "invalidated-pooled-roots.pem"
     trust.write_bytes(tls_files["ca-A.pem"].read_bytes())
     monkeypatch.setenv("SSL_CERT_FILE", str(trust))
-    async with timeout(50), https_peer(tls_files) as peer:
+    async with timeout(50), https_peer(tls_files, finite_http_response=True) as peer:
         provider = NativeProvider(
             base_url=peer.url, api_key="synthetic-invalid-ca-key", supports_websockets=False
         )
@@ -848,6 +850,7 @@ async def test_provider_http_pool_no_ca_http_reuses_and_closes(
     monkeypatch.delenv("CODEX_SANDBOX", raising=False)
     # The module's isolated environment leaves all CA overrides absent.
     async with timeout(40), http_peer() as peer:
+        peer.finite_http_response = True
         provider = NativeProvider(
             base_url=peer.url, api_key="synthetic-no-ca-http-key", supports_websockets=False
         )
@@ -872,7 +875,7 @@ async def test_provider_http_pool_redirect_strips_auth_and_evicts_before_close(
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
     monkeypatch.delenv("CODEX_SANDBOX", raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", str(tls_files["ca-A.pem"]))
-    async with timeout(55), https_peer(tls_files) as target:
+    async with timeout(55), https_peer(tls_files, finite_http_response=True) as target:
         source_requests = []
         source_sockets = []
         source_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

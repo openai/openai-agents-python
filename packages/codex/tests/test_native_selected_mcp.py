@@ -787,3 +787,40 @@ async def test_direct_and_deferred_selected_leaves_share_a_namespace(
         assert "omitted_record" not in json.dumps(responses.requests)
         assert peer.label in tool_output(responses.requests[-1], "deferred-call")
         assert peer.calls == [{"name": "deferred_record", "arguments": {"key": "43"}}]
+
+
+@pytest.mark.parametrize("manual_only", [False, True])
+async def test_selected_mcp_manual_run_rejects_before_session_factory_or_provider_lease(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, manual_only: bool
+) -> None:
+    peer = Peer()
+    manual = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    native_provider = provider(responses)
+    entries: list[str] = []
+    async with (
+        timeout(20),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        tools = await select_mcp_tools(
+            MCPNamespace("catalog", client), context=None, tool_names=["search"]
+        )
+        agent = Agent(instructions="Read.", provider=native_provider, tools=[manual, *tools])
+
+        def forbidden_factory(*args, **kwargs):
+            entries.append("factory")
+            pytest.fail("Rejected selected MCP manual run entered the Session factory")
+
+        def forbidden_lease(*args, **kwargs):
+            entries.append("lease")
+            pytest.fail("Rejected selected MCP manual run acquired a provider lease")
+
+        monkeypatch.setattr(Agent, "session", forbidden_factory)
+        monkeypatch.setattr(type(native_provider), "_acquire_lease", forbidden_lease)
+        with pytest.raises(InteractionRequired, match="on_interaction") as stopped:
+            await agent.run("Read", tools=[manual.ref] if manual_only else None)
+        assert stopped.value.state is None
+        assert entries == [] and not responses.requests and not peer.calls
+        assert {tool.name for tool in await client.list_tools()} == {"search", "excluded"}

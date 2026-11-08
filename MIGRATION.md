@@ -26,69 +26,27 @@ There are two execution APIs in v1: native and classic. `SDKRunner` and its run 
 
 You can port and deploy workflows independently. Direct migration means each port goes from the v0 API to native v1 without first rewriting it to classic.
 
-## Port the execution and tool declarations
+## Check compatibility before porting
 
-In v0, the Python `Runner` owns the loop. This complete script shows a simple workflow:
+Classify each required contract before editing imports. Port a whole workflow only when its replacement preserves the behavior your application needs.
 
-```python
-import asyncio
+| Required contract | Decision before native cutover |
+| --- | --- |
+| Business functions, typed application context, structured output | **Port** declarations and validation, then test actual tool inputs, outputs, and effects. |
+| Custom Python models/clients or non-Responses endpoints | **Port** provider settings only after checking Responses compatibility. Otherwise **stay on v0 or classic** for that workflow. |
+| Handoffs, guardrails, hooks, or specialized agent settings | **Redesign and test** routing, policy timing, context transfer, and next-turn ownership. A specialist that returns a result is not a handoff. Keep the original engine until those contracts are verified. |
+| Existing sessions, serialized runs, or pending approvals | **Keep existing work on its owning engine.** Start native conversations separately from reviewed business facts; do not convert execution state. |
+| Streaming, cancellation, tracing, and effect recovery | **Port and verify** consumers and resource cleanup. A completed effect is not rolled back by a later failure or cancellation. |
+| MCP, sandbox, voice, or other useful integrations | **Retain or adapt** the existing integration where its API and resource ownership fit. Do not discard working business services just because the loop changes. |
+| Unsupported native platform or a contract with no adequate replacement | **Stay on v0**, or use classic where its package/platform requirements fit. An upgrade is optional. |
 
-from agents import Agent, Runner, function_tool
+## Port one workflow
 
+Follow the [read-only invoice walkthrough](examples/codex/migration/README.md) for a direct released-v0-to-native port. It uses one agent, one useful tool, typed application context, and typed output. Its matching-source setup keeps the SDK and example code on the same source commit; the published alpha.6 wheel cannot run the current migration APIs.
 
-@function_tool
-def greet(name: str) -> str:
-    """Return a greeting for the named person."""
-    return f"Hello, {name}!"
+The port keeps the business function and data models. Change `RunContextWrapper[Application]` to `ToolContext[Application]`, declare the tool with the native `function_tool`, and replace `Runner.run(agent, ...)` with `agent.run(...)`. The walkthrough includes complete source files, live run commands, and tests without model credentials. Its optional classic step changes imports before applying the same native port.
 
-
-async def main() -> None:
-    agent = Agent(
-        name="Greeter",
-        instructions="Use greet, then return its greeting.",
-        tools=[greet],
-    )
-    result = await Runner.run(agent, "Greet Ada.")
-    print(result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-For a workflow already on v1 classic, the imports in that script come from `agents.classic`. Its execution contract is still the Python runner's contract.
-
-The native version uses the native tool decorator and `Agent.run()`:
-
-```python
-import asyncio
-
-from agents import Agent, function_tool
-
-
-@function_tool
-def greet(name: str) -> str:
-    """Return a greeting for the named person."""
-    return f"Hello, {name}!"
-
-
-async def main() -> None:
-    agent = Agent(
-        name="Greeter",
-        instructions="Use greet, then return its greeting.",
-        tools=[greet],
-    )
-    result = await agent.run("Greet Ada.")
-    print(result.final_output)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Configure your model credentials before running either script; both make live model requests. The output should greet Ada, although model wording can vary. For checks without model credentials, use the native [scripted testing guide](docs/sdk/testing.md).
-
-The similar names do not make native and classic objects interchangeable. Reuse the business function's implementation, but declare its native tool and policies with native APIs. Keep an entire workflow's Agent, tools, execution, and state in the same API.
+Native and classic objects are not interchangeable. Keep each workflow's Agent, tools, execution, and state in the same API.
 
 ## Map the remaining contracts
 
@@ -122,7 +80,7 @@ async with agent.session() as session:
     result = await second.get_result()
 ```
 
-This fragment belongs inside an async function and uses the native `agent` above. The context manager closes the Session and its owned resources.
+This fragment belongs inside an async function and uses a configured native `agent`. The context manager closes the Session and its owned resources.
 
 There is no automatic conversion from v0/classic session history or `RunState` to native checkpoints. Finish in-flight runs and pending approvals with the engine that created them. You can drain existing conversations on v0 or, after validating the namespace change, on v1 classic while routing new conversations to native.
 
