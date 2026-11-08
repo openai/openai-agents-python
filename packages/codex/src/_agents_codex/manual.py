@@ -33,6 +33,7 @@ from pydantic import (
 )
 
 from ._lifecycle import _join
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
@@ -966,6 +967,25 @@ class _CapturedManual:
         }.items():
             object.__setattr__(request, key, value)
         return request
+
+
+def _request_mcp(request: Any) -> Any:
+    session = request._session()
+    registration = getattr(request, "_registration", None)
+    if session is None:
+        return (registration,)
+    return (session._opening_agent, *session._opening_agent.tools, registration)
+
+
+for _request_type in (
+    ActionRequested,
+    ApprovalRequest,
+    _ElicitationRequest,
+    FormRequest,
+    UrlRequest,
+    VerificationRequest,
+):
+    _protect_mcp_methods(_request_type, _request_mcp)
 
 
 _preserve_module_identity(globals(), "agents.manual")

@@ -35,6 +35,7 @@ from ._events import (
     MessageItem,
     WebSearchCallItem,
 )
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .rate_limits import ApiRateLimits as ApiRateLimits
 from .usage import TokenUsageInfo as TokenUsageInfo
@@ -629,4 +630,15 @@ def _request_observation(
     )
 
 
+def _event_stream_mcp(stream: Any) -> Any:
+    if stream._turn is not None:
+        agent = stream._turn._session._opening_agent
+        return (agent, *agent.tools)
+    reference = stream._buffer._callback_check
+    callback = None if reference is None else reference()
+    session = getattr(callback, "__self__", None)
+    return () if session is None else (session._opening_agent, *session._opening_agent.tools)
+
+
+_protect_mcp_methods(EventStream, _event_stream_mcp)
 _preserve_module_identity(globals(), "agents.observation")

@@ -297,6 +297,10 @@
       "sha256": "4e2bb732edab48888aa9bdca723f591caaf87465c86c0ce0a76ea5baa60c1081"
     },
     {
+      "path": "0091-mcp-windows-env-precedence.patch",
+      "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
+    },
+    {
       "path": "0068-sdk-realtime-owner.patch",
       "sha256": "4b027115e15069146a8b9e09f39fbc63373da48d9ceff69be662b53d9044d504"
     },
@@ -313,5 +317,5 @@
       "sha256": "845798744768be6c820005d103f98d75b3baa9d8c4c84d0b2ff5bb1e531afdab"
     }
   ],
-  "result_tree": "289e6ea6b90953a7fccba55d021dae24a2b831a5"
+  "result_tree": "5d6016a0953d864fad214c667a51e46936434ee7"
 }

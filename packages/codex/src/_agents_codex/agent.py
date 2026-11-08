@@ -43,6 +43,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
@@ -1351,4 +1352,5 @@ class Agent(Generic[ContextT, OutputT]):
             del trace_options
 
 
+_protect_mcp_methods(Agent, lambda owner: (owner, *owner.tools))
 _preserve_module_identity(globals(), "agents.agent")

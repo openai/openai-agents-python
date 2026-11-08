@@ -9,6 +9,7 @@ import pytest
 
 from _agents_codex.realtime import RealtimeConfig, RealtimeSession
 from agents import Session
+from tests._asyncio import timeout
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,7 +38,7 @@ async def test_cancelled_commit_joins_all_chunks_before_releasing_input(
             await release.wait()
 
     monkeypatch.setattr(voice, "_call", call)
-    async with asyncio.timeout(5):
+    async with timeout(5):
         sending = asyncio.create_task(voice.send_audio(source, commit=True))
         following: asyncio.Task[None] | None = None
         try:
@@ -86,7 +87,7 @@ async def test_append_only_audio_retains_cancellation(monkeypatch: pytest.Monkey
             await asyncio.Event().wait()
 
     monkeypatch.setattr(voice, "_call", call)
-    async with asyncio.timeout(5):
+    async with timeout(5):
         sending = asyncio.create_task(voice.send_audio(b"\x01\x02" * 32769))
         await entered.wait()
         sending.cancel()
@@ -109,7 +110,7 @@ async def test_cancelled_update_joins_native_acceptance(monkeypatch: pytest.Monk
         accepted.append(kwargs["update"])
 
     monkeypatch.setattr(voice, "_call", call)
-    async with asyncio.timeout(5):
+    async with timeout(5):
         updating = asyncio.create_task(voice.update({"instructions": "new instructions"}))
         try:
             await entered.wait()
@@ -141,7 +142,7 @@ async def test_cancelled_queued_commit_retains_input_reservation(
         kinds.append(kind)
 
     monkeypatch.setattr(voice, "_call", call)
-    async with asyncio.timeout(5):
+    async with timeout(5):
         await voice._input_lock.acquire()
         sending = asyncio.create_task(voice.send_audio(b"\x01\x02", commit=True))
         try:

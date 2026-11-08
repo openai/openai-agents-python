@@ -265,9 +265,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
-          mkdir -p "$stage/packages/codex/tests/qualification"
-          cp packages/codex/tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/packages/codex/tests"
-          cp packages/codex/tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/packages/codex/tests/qualification"
+          mkdir -p "$stage/packages/codex"
+          cp -R packages/codex/tests "$stage/packages/codex/tests"
           uv venv --seed --python 3.12 "$stage/venv"
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
@@ -288,6 +287,15 @@ jobs:
               SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
           """.split())
           env = {key: value for key, value in os.environ.items() if key.upper() in keep}
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+               "import os, sys; import pytest; "
+               "sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
+               "sys.exit(pytest.main(['-q', '-o', 'asyncio_mode=auto', "
+               "'packages/codex/tests/test_native_mcp_environment_names.py']))"],
+              cwd=stage, env={**env, "CODEX_EXEC_SERVER_TEST_BINARY": str(fixture)},
+              check=True, timeout=180,
+          )
           subprocess.run(
               [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
                "import faulthandler, os, sys; faulthandler.dump_traceback_later(45); "

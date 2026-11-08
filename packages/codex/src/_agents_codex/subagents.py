@@ -31,6 +31,7 @@ from agents.config import (
     Verbosity as Verbosity,
 )
 
+from ._mcp_errors import _protect_mcp_methods
 from ._public import (
     preserve_module_identity as _preserve_module_identity,
     type_alias_constructor as _type_alias_constructor,
@@ -176,4 +177,7 @@ class SubagentConfig(TypedDict, total=False, closed=True):
     ]
 
 
+_protect_mcp_methods(
+    Subagent, lambda owner: (owner._session._opening_agent, *owner._session._opening_agent.tools)
+)
 _preserve_module_identity(globals(), "agents.subagents")

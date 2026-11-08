@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, Environment, NativeProvider, ToolContext, function_tool
+from agents import Agent, Environment, HttpMCP, NativeProvider, ToolContext, function_tool
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -81,15 +81,30 @@ def test_remote_roots_omission_empty_and_snapshot_are_distinct():
 
 
 @pytest.mark.parametrize("during_exit", ["finish", "cancel", "exit-fails"])
+@pytest.mark.parametrize("mcp_credentials", [False, True])
 async def test_failed_native_open_reserves_borrowed_provider_through_manager_exit(
-    responses, during_exit
+    responses, during_exit, mcp_credentials
 ):
     async with timeout(25):
         releasing, release = asyncio.Event(), asyncio.Event()
         exited = []
         cleanup_error = OSError("synthetic manager exit failure")
         shared = provider(responses)
-        agent = Agent(instructions="Inspect.", model="gpt-5.5", provider=shared)
+        agent = Agent(
+            instructions="Inspect.",
+            model="gpt-5.5",
+            provider=shared,
+            tools=[
+                HttpMCP(
+                    name="remote",
+                    url="https://example.invalid",
+                    tools=[],
+                    headers={"X-Token": "synthetic-opening-credential"},
+                )
+            ]
+            if mcp_credentials
+            else [],
+        )
 
         @asynccontextmanager
         async def refused_environment():
@@ -137,6 +152,17 @@ async def test_failed_native_open_reserves_borrowed_provider_through_manager_exi
         assert exited == [True]
         if during_exit == "exit-fails":
             assert failed_open.value.__context__ is cleanup_error
+            current = cleanup_error.__traceback__
+            while current is not None and current.tb_frame.f_code.co_name != "refused_environment":
+                current = current.tb_next
+            assert current is not None
+            assert isinstance(current.tb_frame.f_locals["owner"], asyncio.Task)
+        if mcp_credentials:
+            current = failed_open.value.__traceback__
+            while current is not None:
+                if current.tb_frame.f_globals.get("__name__", "").startswith("_agents_codex."):
+                    assert "synthetic-opening-credential" not in repr(current.tb_frame.f_locals)
+                current = current.tb_next
         # No ghost reservation after the failed entry or the completed sibling.
         await shared.aclose()
         assert not responses.replies

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import json
 import os
 import sys
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +18,7 @@ import pytest
 
 from agents import (
     Agent,
+    Environment,
     FunctionTool,
     HttpMCP,
     MCPResultContext,
@@ -37,6 +40,12 @@ from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import Peer, declarations, mcp_call
 
 SERVER = Path(__file__).parent / "fixtures/native_stdio_mcp.py"
+
+
+def test_stdio_new_fields_preserve_existing_constructor_order() -> None:
+    expected = ["command", "args", "env_vars", "cwd", "location", "env"]
+    assert [item.name for item in fields(StdioMCP)][-6:] == expected
+    assert list(inspect.signature(StdioMCP).parameters)[-6:] == expected
 
 
 def stdio(log: Path, *args: str, **kwargs: Any) -> StdioMCP[Any]:
@@ -179,9 +188,26 @@ async def test_native_stdio_selection_policy_and_http_python_composition(
 async def test_stdio_launch_resources_are_pinned_until_current_authority_restores(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-parent-api-key")
     first_log, current_log = tmp_path / "first.jsonl", tmp_path / "current.jsonl"
-    first = stdio(first_log, env_vars=["N19_STDIO_CURRENT"])
-    current = stdio(current_log, "--field", "revision", env_vars=["N19_STDIO_CURRENT"])
+    first = stdio(
+        first_log,
+        "--observe-env",
+        "B04_LITERAL",
+        env_vars=["N19_STDIO_CURRENT"],
+        env={"B04_LITERAL": "old-captured"},
+    )
+    current_values = {"B04_LITERAL": "current-captured"}
+    current = stdio(
+        current_log,
+        "--field",
+        "revision",
+        "--observe-env",
+        "B04_LITERAL",
+        env_vars=["N19_STDIO_CURRENT"],
+        env=current_values,
+    )
+    current_values["B04_LITERAL"] = "mutated-after-capture"
     monkeypatch.setenv("N19_STDIO_CURRENT", "before-open")
     async with timeout(30):
         async with Agent(
@@ -204,11 +230,23 @@ async def test_stdio_launch_resources_are_pinned_until_current_authority_restore
             await (await session.submit("original")).get_result()
             state = await session.save_state()
             assert state.agent_options == {}
+            assert "old-captured" not in json.dumps(state.model_dump(mode="json"))
         await assert_stopped(first_log)
         assert not current_log.exists()
         monkeypatch.setenv("N19_STDIO_CURRENT", "at-restore")
         poisoned = state.model_copy(
-            update={"agent_options": {"config": {"mcp_servers": {"old": first._config()}}}}
+            update={
+                "agent_options": {
+                    "config": {
+                        "mcp_servers": {
+                            "old": {
+                                **first._config(),
+                                "env": {"B04_LITERAL": "poisoned-saved-config"},
+                            }
+                        }
+                    }
+                }
+            }
         )
         async with Agent(
             instructions="Read.", tools=[current], provider=provider(responses)
@@ -223,6 +261,7 @@ async def test_stdio_launch_resources_are_pinned_until_current_authority_restore
             schema = declarations(responses.requests[-2])[("mcp__local", "search")]["parameters"]
             assert "revision" in schema["properties"] and "key" not in schema["properties"]
             assert (await restored.save_state()).agent_options == {}
+            assert "current-captured" not in (await restored.save_state()).to_json()
         await assert_stopped(current_log)
     assert [item["selected_env"] for item in records(first_log) if item["event"] == "start"] == [
         "before-open"
@@ -230,6 +269,19 @@ async def test_stdio_launch_resources_are_pinned_until_current_authority_restore
     assert sorted(
         item["selected_env"] for item in records(current_log) if item["event"] == "start"
     ) == ["at-restore"]
+    assert {
+        item["observed_env"]["B04_LITERAL"]
+        for item in records(first_log)
+        if item["event"] == "start"
+    } == {"old-captured"}
+    assert {
+        item["observed_env"]["B04_LITERAL"]
+        for item in records(current_log)
+        if item["event"] == "start"
+    } == {"current-captured"}
+    assert all("poisoned-saved-config" not in json.dumps(item) for item in records(current_log))
+    for secret in ("old-captured", "current-captured", "poisoned-saved-config"):
+        assert secret not in json.dumps(responses.requests)
 
 
 async def test_native_stdio_reconnect_does_not_replay_uncertain_call(
@@ -569,6 +621,16 @@ async def test_http_ignores_unrelated_partial_noise_environment(
         {"env_vars": "SECRET"},
         {"env_vars": ["BAD=NAME"]},
         {"env_vars": [3]},
+        {"env": "PRIVATE_ENV"},
+        {"env": []},
+        {"env": {3: "private-literal"}},
+        {"env": {"": "private-literal"}},
+        {"env": {"BAD=NAME": "private-literal"}},
+        {"env": {"bad\x00name": "private-literal"}},
+        {"env": {"bad\ud800name": "private-literal"}},
+        {"env": {"PRIVATE_ENV": 3}},
+        {"env": {"PRIVATE_ENV": "private\x00literal"}},
+        {"env": {"PRIVATE_ENV": "private\ud800literal"}},
         {"cwd": ""},
         {"cwd": 3},
         {"cwd": "bad\x00path"},
@@ -583,18 +645,205 @@ def test_invalid_stdio_declarations_fail_before_launch(changes: dict[str, Any]) 
 
 
 def test_stdio_launch_declaration_captures_sequences_and_hides_launch_details() -> None:
+    assert inspect.get_annotations(StdioMCP, eval_str=True)["env"] == Mapping[str, str] | None
     args, env_vars = ["private-argument", ""], ["PRIVATE_ENV"]
+    env = {
+        "PRIVATE_ENV": "private-literal",
+        "EMPTY": "",
+        "UNICODE": "café 🚀",
+        "service.é": "literal-name",
+    }
     descriptor = StdioMCP(
         name="local",
         command="private-command",
         args=args,
         env_vars=env_vars,
+        env=env,
         cwd="private-cwd",
         tools=["search"],
     )
     args.append("later")
     env_vars.append("LATER")
+    env["PRIVATE_ENV"] = "later-literal"
     assert descriptor.args == ("private-argument", "")
     assert descriptor.env_vars == ("PRIVATE_ENV",)
-    for private in ("private-command", "private-argument", "PRIVATE_ENV", "private-cwd"):
+    expected = {
+        "PRIVATE_ENV": "private-literal",
+        "EMPTY": "",
+        "UNICODE": "café 🚀",
+        "service.é": "literal-name",
+    }
+    assert descriptor.env == expected
+    captured: Any = descriptor.env
+    with pytest.raises(TypeError):
+        captured["PRIVATE_ENV"] = "mutated"
+    config_env = descriptor._config()["env"]
+    assert isinstance(config_env, dict)
+    config_env["PRIVATE_ENV"] = "changed-config"
+    assert replace(descriptor, tools=())._config()["env"] == expected
+    for private in (
+        "private-command",
+        "private-argument",
+        "PRIVATE_ENV",
+        "private-literal",
+        "private-cwd",
+    ):
         assert private not in repr(descriptor)
+
+
+B04_ENV_NAMES = (
+    "B04_LITERAL",
+    "B04_EMPTY",
+    "B04_UNICODE",
+    "service.é",
+    "OPENAI_API_KEY",
+    "NODE_REPL_AUTH_TOKEN",
+    "B04_UNREQUESTED_SECRET",
+)
+
+
+def env_observation_args() -> tuple[str, ...]:
+    return tuple(part for name in B04_ENV_NAMES for part in ("--observe-env", name))
+
+
+def assert_literal_observation(log: Path, expected: str) -> None:
+    starts = [item for item in records(log) if item["event"] == "start"]
+    assert starts
+    for item in starts:
+        assert item["observed_env"] == {
+            "B04_LITERAL": expected,
+            "B04_EMPTY": "",
+            "B04_UNICODE": "東京 café",
+            "service.é": "non-identifier",
+            "OPENAI_API_KEY": "synthetic-child-grant",
+            "NODE_REPL_AUTH_TOKEN": None,
+            "B04_UNREQUESTED_SECRET": None,
+        }
+
+
+def literal_values(label: str) -> dict[str, str]:
+    return {
+        "B04_LITERAL": label,
+        "B04_EMPTY": "",
+        "B04_UNICODE": "東京 café",
+        "service.é": "non-identifier",
+        "OPENAI_API_KEY": "synthetic-child-grant",
+        "NODE_REPL_AUTH_TOKEN": "synthetic-protected-literal",
+    }
+
+
+async def test_stdio_literal_env_is_captured_per_concurrent_child(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-parent-api-key")
+    monkeypatch.setenv("B04_LITERAL", "parent-literal")
+    monkeypatch.setenv("B04_UNREQUESTED_SECRET", "synthetic-unrequested-host-secret")
+    monkeypatch.setenv("NODE_REPL_AUTH_TOKEN", "synthetic-protected-parent")
+    parent = {name: os.environ.get(name) for name in B04_ENV_NAMES}
+
+    async def run(label: str) -> None:
+        log = tmp_path / label
+        marker = "captured-" + label + "-private"
+        supplied = literal_values(marker)
+        descriptor = stdio(
+            log,
+            *env_observation_args(),
+            env_vars=["B04_LITERAL", "NODE_REPL_AUTH_TOKEN"],
+            env=supplied,
+        )
+        supplied["B04_LITERAL"] = "mutated"
+        responses.respond(assistant_output("done"))
+        async with Agent(
+            instructions="Read.", tools=[descriptor], provider=provider(responses)
+        ).session() as session:
+            assert (await (await session.submit(label)).get_result()).final_output == "done"
+            assert "synthetic-child-grant" not in json.dumps(
+                (await session.save_state()).model_dump(mode="json")
+            )
+            assert marker not in json.dumps((await session.save_state()).model_dump(mode="json"))
+        await assert_stopped(log)
+        assert_literal_observation(log, marker)
+        for secret in (marker, "synthetic-child-grant", "synthetic-unrequested-host-secret"):
+            assert secret not in json.dumps(responses.requests)
+
+    async with timeout(40):
+        await asyncio.gather(run("first-child"), run("second-child"))
+    assert {name: os.environ.get(name) for name in B04_ENV_NAMES} == parent
+    for secret in (
+        "captured-first-child-private",
+        "captured-second-child-private",
+        "synthetic-child-grant",
+        "synthetic-unrequested-host-secret",
+    ):
+        assert secret not in json.dumps(responses.requests)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+async def test_stdio_literal_env_reaches_local_environment_child(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-parent-api-key")
+    monkeypatch.setenv("NODE_REPL_AUTH_TOKEN", "synthetic-protected-parent")
+    monkeypatch.setenv("B04_LITERAL", "parent-local")
+    monkeypatch.setenv("B04_UNREQUESTED_SECRET", "synthetic-unrequested-host-secret")
+    local_peer = tmp_path / "peer.py"
+    shutil.copyfile(SERVER, local_peer)
+    log = tmp_path / "local-child"
+    descriptor = replace(
+        stdio(
+            log,
+            *env_observation_args(),
+            env_vars=["B04_LITERAL", "OPENAI_API_KEY", "NODE_REPL_AUTH_TOKEN"],
+            env=literal_values("local-literal"),
+            location="environment",
+        ),
+        args=("-I", "-B", str(local_peer), "--log", str(log), *env_observation_args()),
+    )
+    parent = {name: os.environ.get(name) for name in B04_ENV_NAMES}
+    responses.respond(assistant_output("done"))
+    async with timeout(40):
+        async with Agent(
+            instructions="Read.", tools=[descriptor], provider=provider(responses)
+        ).session(environment=Environment.local(cwd=tmp_path, tools=[])) as session:
+            assert (await (await session.submit("read")).get_result()).final_output == "done"
+            for secret in ("local-literal", "synthetic-child-grant"):
+                assert secret not in (await session.save_state()).to_json()
+        await assert_stopped(log)
+    assert_literal_observation(log, "local-literal")
+    for secret in ("local-literal", "synthetic-child-grant", "synthetic-unrequested-host-secret"):
+        assert secret not in json.dumps(responses.requests)
+    assert {name: os.environ.get(name) for name in B04_ENV_NAMES} == parent
+
+
+async def test_resource_only_stdio_captures_literal_env_without_model_insertion(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-parent-api-key")
+    log = tmp_path / "resource-only"
+    descriptor = replace(
+        stdio(log, "--resources", *env_observation_args(), env=literal_values("resource-literal")),
+        tools=(),
+    )
+    async with timeout(30):
+        async with Agent(
+            instructions="Read.", tools=[descriptor], provider=provider(responses)
+        ).session() as session:
+            assert (await session.list_mcp_resources("local"))["resources"][0][
+                "uri"
+            ] == "fixture://environment"
+            assert (await session.read_mcp_resource("local", "fixture://environment"))["contents"][
+                0
+            ]["text"] == "resource-only"
+            assert (await session.save_state()).agent_options == {}
+            for secret in ("resource-literal", "synthetic-child-grant"):
+                assert secret not in (await session.save_state()).to_json()
+        await assert_stopped(log)
+    assert_literal_observation(log, "resource-literal")
+    assert responses.requests == []
