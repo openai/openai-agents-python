@@ -335,7 +335,11 @@
     {
       "path": "0068-sdk-managed-execution-lifecycle.patch",
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
+    },
+    {
+      "path": "0101-native-request-extensions.patch",
+      "sha256": "fc28e524a2b71b3501d232cad8a2a3e420f8463f719c2415b89ab853b9beaa68"
     }
   ],
-  "result_tree": "c885d57cc6e4c78292ca6f40132fee6bf1ae5b50"
+  "result_tree": "46c0f21dab8ec75f9967056d92db179aa1474c8a"
 }

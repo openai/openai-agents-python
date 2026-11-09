@@ -137,6 +137,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
     invocation_timeout_ms: int | None
+    truncation: Literal["auto", "disabled"] | None
+    include: list[str] | None
+    context_management: list[dict[str, Any]] | None
+    extra_body: Mapping[str, Any] | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
@@ -176,6 +180,57 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
+        elif key == "truncation":
+            if value not in ("auto", "disabled"):
+                raise ValueError("truncation must be auto or disabled")
+        elif key == "include":
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise TypeError("include must be a list of strings")
+            captured[key] = list(value)
+        elif key in ("context_management", "extra_body"):
+            if key == "context_management":
+                if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                    raise TypeError("context_management must be a list of JSON objects")
+            elif not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+                raise TypeError("extra_body must be a JSON object")
+            if key == "extra_body" and set(value) & {
+                "tool_choice",
+                "client_metadata",
+                "service_tier",
+                "tools",
+                "access_programs",
+                "metadata",
+                "previous_response_id",
+                "stream",
+                "parallel_tool_calls",
+                "prompt_cache_retention",
+                "model",
+                "prompt_cache_key",
+                "stream_options",
+                "conversation",
+                "temperature",
+                "prompt_cache_options",
+                "truncation",
+                "top_p",
+                "generate",
+                "store",
+                "context_management",
+                "instructions",
+                "type",
+                "reasoning",
+                "include",
+                "input",
+                "top_logprobs",
+                "text",
+                "max_output_tokens",
+            }:
+                raise ValueError(
+                    "extra_body cannot replace native request fields; "
+                    "use the corresponding model setting"
+                )
+            captured[key] = json.loads(
+                json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
+            )
         elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
             allowed = {
                 "verbosity": ("low", "medium", "high"),

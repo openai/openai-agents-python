@@ -284,6 +284,10 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "store",
         "prompt_cache_retention",
         "prompt_cache_ttl",
+        "truncation",
+        "include",
+        "context_management",
+        "extra_body",
     }
     for key, value in copied.items():
         if key == "tool_choice":
@@ -363,6 +367,10 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "store",
             "prompt_cache_retention",
             "prompt_cache_ttl",
+            "truncation",
+            "include",
+            "context_management",
+            "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (ordinary | {"named_tool_choice"}):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
