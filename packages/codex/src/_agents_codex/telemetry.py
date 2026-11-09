@@ -683,7 +683,10 @@ class TraceScope:
                 native.release_trace_span(self._span_handle)
                 self._span_handle = None
         if failed:
-            del self
+            if exc is not None:
+                _retain_cleanup_error(exc, RuntimeError("Native trace span end failed"), ())
+                return
+            del self, exc_type, exc, traceback
             raise RuntimeError("Native trace span end failed") from None
 
 

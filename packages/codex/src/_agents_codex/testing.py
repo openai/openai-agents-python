@@ -34,14 +34,18 @@ from http.server import (
     ThreadingHTTPServer as ThreadingHTTPServer,
 )
 from socketserver import TCPServer as TCPServer
-from threading import Lock as Lock, Thread as Thread
+from threading import Condition as _Condition, Lock as Lock, Thread as Thread
 from types import TracebackType as TracebackType
 from typing import cast as cast
 from uuid import uuid4 as uuid4
 
 from agents.config import JsonValue as JsonValue
 
-from ._lifecycle import _close_after_error as _close_after_error, _join as _join
+from ._lifecycle import (
+    _close_after_error as _close_after_error,
+    _join as _join,
+    _retain_cleanup_error as _retain_cleanup_error,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .agent import NativeProvider as NativeProvider
 
@@ -150,6 +154,9 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
         self._unexpected = 0
         self._callback_error: Exception | None = None
         self._lock = Lock()
+        self._condition = _Condition(self._lock)
+        self._callback_running = False
+        self._next_admission = 1
         self._server: ThreadingHTTPServer | None = None
         self._provider: NativeProvider | None = None
 
@@ -244,7 +251,7 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
         if exc is not None:
             await _close_after_error(exc, close)
             if self._callback_error is not None:
-                raise self._callback_error from None
+                _retain_cleanup_error(exc, self._callback_error, ())
         else:
             await _join(asyncio.create_task(close()))
             self.assert_exhausted()
@@ -338,9 +345,12 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             self.send_error(400)
             return
-        with self.peer._lock:
+        with self.peer._condition:
             self.peer._requests.append(body)
-            response_id = f"resp_{len(self.peer._requests)}"
+            ticket = len(self.peer._requests)
+            response_id = f"resp_{ticket}"
+            while self.peer._callback_running or ticket != self.peer._next_admission:
+                self.peer._condition.wait()
             items = (
                 self.peer._responses.popleft()
                 if self.path == "/v1/responses"
@@ -348,21 +358,35 @@ class _Handler(BaseHTTPRequestHandler):
                 and self.peer._callback_error is None
                 else None
             )
+            callback_running = callable(items)
+            if callback_running:
+                self.peer._callback_running = True
+            self.peer._next_admission += 1
+            self.peer._condition.notify_all()
         if items is None:
             # A 400 is terminal in the ordinary native retry policy.
             self.send_error(400)
             return
+        failed = False
         try:
             if callable(items):
                 items = self.peer._capture_script(items(deepcopy(body)))
             assert isinstance(items, ScriptedResponse)
         except Exception as error:
-            with self.peer._lock:
+            with self.peer._condition:
                 if self.peer._callback_error is None:
                     self.peer._callback_error = error
+            failed = True
+        finally:
+            if callback_running:
+                with self.peer._condition:
+                    self.peer._callback_running = False
+                    self.peer._condition.notify_all()
+        if failed:
             # Callback assertions are terminal fixture failures, never transient provider errors.
             self.send_error(400)
             return
+        items = cast(ScriptedResponse, items)
         if items.status != 200:
             payload = json.dumps(
                 dict(

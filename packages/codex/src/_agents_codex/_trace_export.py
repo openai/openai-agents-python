@@ -168,7 +168,7 @@ class OpenAITraceExporter:
                 {**self._credentials[1], "Authorization": "Bearer " + api_key},
             )
         finally:
-            del api_key
+            del self, api_key
 
     def _prepare_events(
         self, events: Sequence[Mapping[str, Any]], revision: object
