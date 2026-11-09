@@ -6,6 +6,7 @@ import asyncio
 import json
 from copy import deepcopy
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -37,6 +38,41 @@ def _ui_resource(result: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return candidates[0]
 
 
+def _declared_uri(metadata: Any) -> str | None:
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise ValueError("MCP app tool metadata must be an object")
+    ui = metadata.get("ui", {})
+    if not isinstance(ui, dict):
+        raise ValueError("MCP app tool UI metadata must be an object")
+    # ext-apps 2.0.4 normalizes the preferred key and its deprecated alias.
+    declared = ui.get("resourceUri")
+    legacy = metadata.get("ui/resourceUri")
+    if (
+        ("resourceUri" in ui and not isinstance(declared, str))
+        or ("ui/resourceUri" in metadata and not isinstance(legacy, str))
+        or ("resourceUri" in ui and "ui/resourceUri" in metadata and declared != legacy)
+    ):
+        raise ValueError("MCP app tool resource URI metadata is invalid")
+    uri = declared if "resourceUri" in ui else legacy
+    if uri is not None:
+        try:
+            parsed = urlsplit(uri)
+            valid = (
+                uri.startswith("ui://")
+                and parsed.scheme == "ui"
+                and bool(parsed.hostname)
+                and not parsed.username
+                and not parsed.password
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("MCP app tool resource URI must be a valid ui:// URI")
+    return cast(str | None, uri)
+
+
 def _checked_resource(resource: dict[str, Any]) -> dict[str, Any]:
     text = resource.get("text")
     if not isinstance(text, str) or len(text.encode("utf-8")) > _MAX_HTML_BYTES:
@@ -50,9 +86,13 @@ class MCPApp:
     """A borrowed view of an MCP tool result, for an authenticated browser host.
 
     Use ``await MCPApp.open(session, turn, call_id)`` after the latest root Turn
-    succeeds. Its result must embed or link one ``ui://`` HTML resource with
-    MIME type ``text/html;profile=mcp-app``. Serve ``view`` to an official MCP
-    Apps AppBridge; forward its tools/call handler to ``call_tool``.
+    succeeds. Its current negotiated tool declaration may advertise
+    ``_meta.ui.resourceUri`` (or the pinned ``ui/resourceUri`` alias). Otherwise
+    its result must embed or link one ``ui://`` HTML resource with MIME type
+    ``text/html;profile=mcp-app``. Opening captures the current resource rather
+    than historical tool metadata; later remote metadata changes do not retarget it.
+    Serve ``view`` to an official MCP Apps AppBridge; forward its tools/call handler
+    to ``call_tool``.
 
     This host supports fixed, preapproved ``HttpMCP`` declarations and host
     ``StdioMCP`` declarations. Callbacks, agent graphs, remote-environment
@@ -134,7 +174,17 @@ class MCPApp:
                 raise ValueError(
                     "MCP apps require a selected, preapproved local server without callbacks"
                 )
-            resource, embedded = _ui_resource(result)
+            metadata = json.loads(
+                await session._publish_startup(
+                    session._native._mcp_app_tool_metadata(server.name, call["name"])
+                )
+            )
+            declared_uri = _declared_uri(metadata)
+            resource, embedded = (
+                _ui_resource(result)
+                if declared_uri is None
+                else ({"uri": declared_uri, "mimeType": _MIME}, False)
+            )
             if not embedded:
                 raw = await session._publish_startup(
                     session._native.call(

@@ -431,3 +431,130 @@ async def test_app_rejects_native_approval_or_application_policy(
             with pytest.raises(ValueError, match="without callbacks"):
                 await MCPApp.open(session, turn, "counter-call")
             assert len(peer.calls) == 1
+
+
+class MetadataAppPeer(LinkedAppPeer):
+    metadata: dict[str, Any] = {}
+
+    async def handle(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        response = await super().handle(request)
+        if body.get("method") == "tools/list":
+            import json
+
+            result = json.loads(response.body)
+            for tool in result["result"]["tools"]:
+                tool["_meta"] = (
+                    self.metadata
+                    if tool["name"] == "search"
+                    else {"ui": {"resourceUri": "ui://other/app"}}
+                )
+            return web.json_response(result)
+        return response
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"ui": {"resourceUri": RESOURCE["uri"]}},
+        {"ui/resourceUri": RESOURCE["uri"]},
+    ],
+)
+async def test_metadata_only_app_reads_exact_resource_and_calls_originating_tool(
+    responses: ResponsesFixture,
+    metadata: dict[str, Any],
+):
+    peer = MetadataAppPeer(
+        call_result={
+            "content": [{"type": "text", "text": "Counter data"}],
+            "structuredContent": {"count": 1},
+        }
+    )
+    peer.metadata = metadata
+    responses.respond(mcp_call("search", "mcp__counter", "metadata-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter", url=url, tools=["search"], approval_mode="preapproved"
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            app = await MCPApp.open(session, turn, "metadata-call")
+            assert app.view["resource"] == RESOURCE
+            assert app.view["result"]["content"] == [{"type": "text", "text": "Counter data"}]
+            peer.call_result = {"content": [], "structuredContent": {"count": 2}}
+            assert (await app.call_tool("search", {"key": "action"}))["structuredContent"] == {
+                "count": 2
+            }
+            assert [
+                rpc["params"]["uri"]
+                for rpc in peer.requests
+                if rpc.get("method") == "resources/read"
+            ] == [RESOURCE["uri"]]
+            assert sum(rpc.get("method") == "initialize" for rpc in peer.requests) == 1
+            assert [rpc["name"] for rpc in peer.calls] == ["search", "search"]
+            assert peer.calls[-1]["arguments"] == {"key": "action"}
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"ui": {"resourceUri": "https://untrusted.invalid/app"}},
+        {"ui": {"resourceUri": None}},
+        {"ui": {"resourceUri": ""}},
+        {"ui": {"resourceUri": RESOURCE["uri"]}, "ui/resourceUri": "ui://other/app"},
+        {"ui": "invalid"},
+    ],
+)
+async def test_malformed_declared_metadata_never_falls_back_to_embedded_result(
+    responses: ResponsesFixture,
+    metadata: dict[str, Any],
+):
+    peer = MetadataAppPeer(call_result=app_result())
+    peer.metadata = metadata
+    responses.respond(mcp_call("search", "mcp__counter", "metadata-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter", url=url, tools=["search"], approval_mode="preapproved"
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            with pytest.raises(ValueError, match="metadata|URI"):
+                await MCPApp.open(session, turn, "metadata-call")
+            assert not any(rpc.get("method") == "resources/read" for rpc in peer.requests)
+
+
+async def test_declared_resource_overrides_conflicting_result_and_keeps_captured_view(
+    responses: ResponsesFixture,
+):
+    result = app_result()
+    result["content"][0]["resource"]["uri"] = "ui://other/app"
+    peer = MetadataAppPeer(call_result=result)
+    peer.metadata = {"ui": {"resourceUri": RESOURCE["uri"]}}
+    responses.respond(mcp_call("search", "mcp__counter", "metadata-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter", url=url, tools=["search"], approval_mode="preapproved"
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            app = await MCPApp.open(session, turn, "metadata-call")
+            assert app.view["resource"] == RESOURCE
+            peer.metadata = {"ui": {"resourceUri": "ui://later/app"}}
+            assert app.view["resource"]["uri"] == RESOURCE["uri"]
+            with pytest.raises(ValueError, match="originating"):
+                await app.call_tool("other", {})
+            app.close()
+            with pytest.raises(ValueError, match="closed|stale"):
+                await app.call_tool("search", {"key": "action"})

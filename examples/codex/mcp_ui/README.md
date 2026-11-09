@@ -43,3 +43,5 @@ The server sets `include_tool_data=True` so the browser receives full tool argum
 The iframe has `sandbox="allow-scripts"` without same-origin access. Its CSP permits only the local app script and denies network connections. The public script allows CORS so that the opaque iframe can load it. The official postMessage transport checks the sending window; only the host makes authenticated HTTP actions. Keep this example private. Replace its synthetic identity and fixed permissions before building a shared application.
 
 Frontend dependencies are pinned in `package-lock.json`. `ai` consumes the UI stream; `@modelcontextprotocol/ext-apps` owns the iframe protocol. The SDK owns native tool execution. The example adds no competing client protocol.
+
+The peer advertises `_meta.ui.resourceUri` in `tools/list` and returns ordinary text and structured tool data. `MCPApp.open` reads that exact HTML resource through the selected native connection. It captures current negotiated metadata when opened, rather than historical tool metadata; later remote metadata changes do not retarget the captured view. Without a declared URI, embedded or linked HTML results remain supported.

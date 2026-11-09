@@ -53,7 +53,7 @@ def create_app() -> web.Application:
         response.headers["Access-Control-Allow-Origin"] = "*"
         return response
 
-    def result():
+    def resource():
         html = (
             '<!doctype html><html lang="en"><meta charset="utf-8">'
             '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
@@ -62,17 +62,11 @@ def create_app() -> web.Application:
             '<button id="increment">Increment</button><pre id="error"></pre>'
             f'<script type="module" src="{state["origin"]}/app.js"></script></html>'
         )
+        return {"uri": "ui://counter/app", "mimeType": "text/html;profile=mcp-app", "text": html}
+
+    def result():
         return {
-            "content": [
-                {
-                    "type": "resource",
-                    "resource": {
-                        "uri": "ui://counter/app",
-                        "mimeType": "text/html;profile=mcp-app",
-                        "text": html,
-                    },
-                }
-            ],
+            "content": [{"type": "text", "text": "Counter data"}],
             "structuredContent": {"count": state["count"]},
             "isError": False,
         }
@@ -88,7 +82,7 @@ def create_app() -> web.Application:
         if method == "initialize":
             value = {
                 "protocolVersion": rpc["params"]["protocolVersion"],
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, "resources": {}},
                 "serverInfo": {"name": "synthetic-counter", "version": "1"},
             }
         elif method == "tools/list":
@@ -96,6 +90,7 @@ def create_app() -> web.Application:
                 "tools": [
                     {
                         "name": "increment",
+                        "_meta": {"ui": {"resourceUri": "ui://counter/app"}},
                         "description": "Increment synthetic counter",
                         "inputSchema": {
                             "type": "object",
@@ -106,6 +101,10 @@ def create_app() -> web.Application:
                     }
                 ]
             }
+        elif method == "resources/read":
+            if rpc["params"].get("uri") != "ui://counter/app":
+                raise web.HTTPBadRequest(text="Unknown app resource")
+            value = {"contents": [resource()]}
         elif method == "tools/call":
             params = rpc["params"]
             if params.get("name") != "increment" or params.get("arguments") != {"amount": 1}:
