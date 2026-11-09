@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .canonical_storage import (
         CustomStorage as CustomStorage,
         EncryptedSessionStore as EncryptedSessionStore,
+        RedisSessionStore as RedisSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
         SQLAlchemySessionStore as SQLAlchemySessionStore,
@@ -233,6 +234,7 @@ _MODULES = {
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
+    "RedisSessionStore": ".canonical_storage",
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",
