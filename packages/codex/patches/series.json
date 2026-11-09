@@ -305,6 +305,10 @@
       "sha256": "17c3e90f5903457e5b4b377186640c92b5c2152a4c4286ee6670157d124d06fa"
     },
     {
+      "path": "0095-host-mcp-lazy-launcher.patch",
+      "sha256": "39b5e2b9736fa31ef3ced7da637bd443ed1878263976da1c8a4b2c17c5f4ca9d"
+    },
+    {
       "path": "0068-sdk-realtime-owner.patch",
       "sha256": "711c811ad949859e7b909f670d7e8652fc850ab957a69f346fe04f2b892cdfbe"
     },
@@ -325,5 +329,5 @@
       "sha256": "dfeefbabe843edd1bee2c2fc93fb771d955daf5b1a500eff7565c737bf1c42eb"
     }
   ],
-  "result_tree": "ac4b12dfc13d5bddccf60d1dc5e27fcae5971252"
+  "result_tree": "f872e1737be0a9cd97c45ea51a322c3ca9b209ba"
 }

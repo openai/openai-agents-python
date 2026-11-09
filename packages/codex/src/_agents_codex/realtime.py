@@ -499,6 +499,7 @@ class _FunctionCall:
 @dataclass
 class _GuardrailItem:
     snapshot: RealtimeGuardrailInput
+    text_work: int = 0
     retired: bool = False
     threshold_count: int = 0
     pending: RealtimeGuardrailInput | None = None
@@ -527,6 +528,10 @@ class RealtimeSession:
     _HANDOFF_LIMIT = 1024
     _PENDING_LIMIT = 16
     _GUARDRAIL_TEXT_LIMIT = 1_048_576
+    # Bound cumulative prefix copies, not only the final retained transcript.
+    _GUARDRAIL_TEXT_WORK_LIMIT = 64 * 1024 * 1024
+    # Canonical history survives completed items for the owner's lifetime.
+    _HISTORY_TEXT_WORK_LIMIT = 256 * 1024 * 1024
     _BUFFER_BYTES_LIMIT = 8 * 1024 * 1024
     _KINDS = frozenset(
         {
@@ -555,9 +560,11 @@ class RealtimeSession:
         self._guardrail_completed: dict[bytes, bytes | None] = {}
         self._guardrail_trips: dict[str, None] = {}
         self._guardrail_text_size = 0
+        self._guardrail_text_work = 0
         self._identity_bytes = 0
         self._queue_bytes = 0
         self._history_bytes = 0
+        self._history_text_work = 0
         self._audio_samples: dict[tuple[str, str, int], _ReceivedAudio] = {}
         self._playback: dict[tuple[str, str, int], RealtimePlaybackPosition] = {}
         if type(config.automatically_trigger_response_for_mcp_tool_calls) is not bool:
@@ -1593,15 +1600,24 @@ class RealtimeSession:
         if owned.retired:
             return
         previous = owned.snapshot
-        text = value.get("text", "") if final else previous.text + value.get("delta", "")
+        incoming = value.get("text", "") if final else value.get("delta", "")
         if previous.final:
-            if final and previous.text == text:
+            if final and previous.text == incoming:
                 return
             raise RuntimeError("Realtime output changed after its final transcript")
-        text_size = self._guardrail_text_size + len(text) - len(previous.text)
+        length = len(incoming) if final else len(previous.text) + len(incoming)
+        text_size = self._guardrail_text_size + length - len(previous.text)
         if text_size > self._GUARDRAIL_TEXT_LIMIT:
             raise RuntimeError("Realtime guardrail text capacity exceeded")
+        # Empty operands reuse a string. Other deltas copy the entire prefix,
+        # even below a callback threshold or while an earlier check is pending.
+        work = length if not final and previous.text and incoming else 0
+        if self._guardrail_text_work + work > self._GUARDRAIL_TEXT_WORK_LIMIT:
+            raise RuntimeError("Realtime guardrail text work capacity exceeded")
+        text = incoming if final else previous.text + incoming
         self._guardrail_text_size = text_size
+        self._guardrail_text_work += work
+        owned.text_work += work
         owned.snapshot = replace(previous, text=text, final=final)
         threshold = self._config.guardrail_text_threshold
         crossed = len(text) // threshold if threshold is not None else 0
@@ -1630,6 +1646,7 @@ class RealtimeSession:
             return
         del self._guardrail_items[key]
         self._guardrail_text_size -= len(owned.snapshot.text)
+        self._guardrail_text_work -= owned.text_work
         self._identity_bytes -= 4 * (len(key[0]) + len(key[1]) + len(key[3]))
         if len(self._guardrail_completed) >= self._HANDOFF_LIMIT:
             del self._guardrail_completed[next(iter(self._guardrail_completed))]
@@ -2389,10 +2406,19 @@ class RealtimeSession:
             previous_transcript = self._history.get(value["item_id"])
             if previous_transcript is None:
                 raise RuntimeError("Realtime history delta has no canonical item")
-            updated_transcript = replace(
-                previous_transcript, text=previous_transcript.text + value["delta"]
+            delta = value["delta"]
+            if self._history_bytes + 4 * len(delta) > self._BUFFER_BYTES_LIMIT:
+                raise RuntimeError("Realtime history byte capacity exceeded")
+            work = (
+                len(previous_transcript.text) + len(delta)
+                if previous_transcript.text and delta
+                else 0
             )
+            if self._history_text_work + work > self._HISTORY_TEXT_WORK_LIMIT:
+                raise RuntimeError("Realtime history text work capacity exceeded")
+            updated_transcript = replace(previous_transcript, text=previous_transcript.text + delta)
             self._record_history(updated_transcript)
+            self._history_text_work += work
             self._emit(RealtimeHistory(updated_transcript, False))
 
     def _record_history(self, item: RealtimeHistoryItem) -> None:

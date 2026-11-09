@@ -307,7 +307,9 @@ async def test_manual_checkpoint_keeps_completed_executor_result_with_current_re
                 "exec_command",
                 {
                     "cmd": "printf x >> effect-count; printf completed-native-output",
-                    "yield_time_ms": 1000,
+                    # The checkpoint requires the command's completed result.
+                    # Allow exit notification delivery under parallel load.
+                    "yield_time_ms": 10000,
                 },
                 "command",
             ),

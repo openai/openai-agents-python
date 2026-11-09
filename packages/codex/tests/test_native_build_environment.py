@@ -211,6 +211,160 @@ def test_native_download_discards_partial_attempt_and_reuses_verified_cache(monk
     assert len(calls) == 2 and delays == [1]
 
 
+@pytest.fixture
+def native_downloader(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import native_env
+
+    return native_env
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_download_retries_transient_http_errors(native_downloader, monkeypatch, tmp_path, status):
+    destination = tmp_path / "archive.gz"
+    content = b"verified archive"
+    url = "https://example.invalid/archive.gz"
+    partials = []
+    delays = []
+
+    def urlopen(actual_url, *, timeout):
+        assert actual_url == url
+        assert timeout == 60
+        current = list(tmp_path.glob("*.part"))
+        assert len(current) == 1
+        assert all(not previous.exists() for previous in partials)
+        partials.append(current[0])
+        if len(partials) < 3:
+            raise urllib.error.HTTPError(url, status, "temporary failure", {}, None)
+        return io.BytesIO(content)
+
+    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(native_downloader.time, "sleep", delays.append)
+
+    assert (
+        native_downloader._download(url, destination, hashlib.sha256(content).hexdigest())
+        == destination
+    )
+    assert destination.read_bytes() == content
+    assert len(set(partials)) == 3
+    assert delays == [1, 2]
+    assert not list(tmp_path.glob("*.part"))
+
+
+@pytest.mark.parametrize("status, attempts", [(504, 3), (404, 1)])
+def test_download_preserves_final_http_failure(
+    native_downloader, monkeypatch, tmp_path, status, attempts
+):
+    destination = tmp_path / "archive.gz"
+    url = "https://example.invalid/archive.gz"
+    failures = []
+    delays = []
+
+    def urlopen(*args, **kwargs):
+        failure = urllib.error.HTTPError(url, status, "download failed", {}, None)
+        failures.append(failure)
+        raise failure
+
+    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(native_downloader.time, "sleep", delays.append)
+
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        native_downloader._download(url, destination, "unused checksum")
+
+    assert len(failures) == attempts
+    assert raised.value is failures[-1]
+    assert raised.value.code == status
+    assert delays == list(range(1, attempts))
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_download_closes_partial_output_before_cleanup(native_downloader, monkeypatch, tmp_path):
+    output_files = []
+    create_temporary = native_downloader.tempfile.NamedTemporaryFile
+    unlink = Path.unlink
+    failure = OSError("response interrupted")
+
+    def temporary_file(*args, **kwargs):
+        output = create_temporary(*args, **kwargs)
+        output_files.append(output)
+        return output
+
+    def checked_unlink(path, *args, **kwargs):
+        if path.suffix == ".part":
+            assert output_files[-1].closed
+        return unlink(path, *args, **kwargs)
+
+    class InterruptedResponse(io.BytesIO):
+        def read(self, size):
+            if self.tell():
+                raise failure
+            return super().read(size)
+
+    calls = []
+
+    def urlopen(*args, **kwargs):
+        calls.append(args)
+        return InterruptedResponse(b"partial archive")
+
+    monkeypatch.setattr(native_downloader.tempfile, "NamedTemporaryFile", temporary_file)
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(OSError) as raised:
+        native_downloader._download(
+            "https://example.invalid/archive.gz", tmp_path / "archive.gz", "unused"
+        )
+
+    assert raised.value is failure
+    assert len(calls) == 1
+    assert not (tmp_path / "archive.gz").exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_download_reuses_verified_cache(native_downloader, monkeypatch, tmp_path):
+    destination = tmp_path / "archive.gz"
+    content = b"verified cache"
+    destination.write_bytes(content)
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("a verified cache entry must not trigger a download")
+
+    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", unexpected_request)
+
+    assert (
+        native_downloader._download(
+            "https://example.invalid/archive.gz", destination, hashlib.sha256(content).hexdigest()
+        )
+        == destination
+    )
+    assert destination.read_bytes() == content
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_download_does_not_retry_checksum_failure(native_downloader, monkeypatch, tmp_path):
+    destination = tmp_path / "archive.gz"
+    destination.write_bytes(b"old cache")
+    calls = []
+
+    def urlopen(*args, **kwargs):
+        calls.append(args)
+        return io.BytesIO(b"wrong content")
+
+    monkeypatch.setattr(native_downloader.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(ValueError, match="SHA256 mismatch for archive.gz"):
+        native_downloader._download(
+            "https://example.invalid/archive.gz",
+            destination,
+            hashlib.sha256(b"expected").hexdigest(),
+        )
+
+    assert len(calls) == 1
+    assert destination.read_bytes() == b"old cache"
+    assert not list(tmp_path.glob("*.part"))
+
+
 @pytest.mark.parametrize(
     ("platform", "override"),
     [
