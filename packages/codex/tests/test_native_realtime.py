@@ -1510,8 +1510,10 @@ async def test_interrupt_retires_pending_function_intake_before_response_done(
         assert peer.responses.requests == []
 
 
+@pytest.mark.parametrize("notify_new_response", [False, True])
 async def test_guardrail_joins_only_its_old_delegation_and_keeps_new_voice_open(
     realtime_peer: RealtimePeer,
+    notify_new_response: bool,
 ) -> None:
     from agents.realtime import (
         RealtimeGuardrailInput,
@@ -1573,13 +1575,39 @@ async def test_guardrail_joins_only_its_old_delegation_and_keeps_new_voice_open(
             }
         )
         await check_entered.wait()
-        await peer.socket.send_json({"type": "response.done", "response": {"id": "A"}})
-        await peer.socket.send_json({"type": "response.created", "response": {"id": "B"}})
+        if notify_new_response:
+            await peer.socket.send_json({"type": "response.done", "response": {"id": "A"}})
+            await peer.socket.send_json({"type": "response.created", "response": {"id": "B"}})
         release_check.set()
         await tool_joined.wait()
+        new_response_seen = False
         async for event in events:
+            if (
+                isinstance(event, RealtimeResponse)
+                and event.status == "created"
+                and event.response_id == "B"
+            ):
+                new_response_seen = True
             if isinstance(event, RealtimePlaybackInterrupted) and event.response_id == "A":
+                if not notify_new_response:
+                    assert event.cancelled_response_id == "A"
                 break
+        if not notify_new_response:
+            # The provider can already be on B while its notifications are in flight.
+            # Force the client's old-A view and inspect the actual wire target.
+            cancel = await peer.frame(lambda frame: frame.get("type") == "response.cancel")
+            provider_current_response = "B"
+            assert cancel.get("response_id", provider_current_response) == "A"
+            await peer.socket.send_json({"type": "response.done", "response": {"id": "A"}})
+            await peer.socket.send_json({"type": "response.created", "response": {"id": "B"}})
+        if not new_response_seen:
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.status == "created"
+                    and event.response_id == "B"
+                ):
+                    break
         await voice.send_text("The newer voice connection is still usable.")
         await peer.socket.send_json(
             {
@@ -1594,7 +1622,11 @@ async def test_guardrail_joins_only_its_old_delegation_and_keeps_new_voice_open(
         async for event in events:
             if isinstance(event, RealtimeText) and event.text == "B survived":
                 break
-        assert not any(frame.get("type") == "response.cancel" for frame in peer.frames)
+        assert all(
+            frame.get("response_id") == "A"
+            for frame in peer.frames
+            if frame.get("type") == "response.cancel"
+        )
         assert "unreachable" not in json.dumps(peer.frames)
 
 
