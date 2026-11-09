@@ -15,12 +15,7 @@ from pydantic import RootModel, TypeAdapter
 from _agents_codex._function_tools import FunctionTool, ToolContext
 from _agents_codex.mcp import _launch_text
 from _agents_codex.native_interception import Allow, Deny
-from _agents_codex.tools import (
-    ToolOutput,
-    ToolOutputImage,
-    ToolOutputText,
-    _CapturedFunction,
-)
+from _agents_codex.tools import _CapturedFunction
 
 from ..classic.agent import AgentBase
 from ..classic.mcp._compat import (
@@ -31,6 +26,7 @@ from ..classic.mcp._compat import (
 )
 from ..classic.mcp.server import _UNSET, MCPServer
 from ..classic.run_context import RunContextWrapper
+from ..tools import ToolOutput, ToolOutputImage, ToolOutputText
 
 __all__ = ("MCPNamespace", "select_mcp_tools")
 
