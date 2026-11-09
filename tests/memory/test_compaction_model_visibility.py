@@ -751,7 +751,7 @@ async def test_manual_compaction_refreshes_expired_encrypted_history(
         clock[0] += 11
         assert await session.get_items() == []
         await session.run_compaction({"force": True})
-        client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=[])
+        client.responses.compact.assert_awaited_once_with(model="gpt-6-luna", input=[])
         assert await session.get_items() == []
 
         live: TResponseInputItem = {"role": "user", "content": "synthetic live item"}

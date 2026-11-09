@@ -964,7 +964,7 @@ class TestOpenAIResponsesCompactionSession:
 
         mock_client.responses.compact.assert_called_once()
         call_kwargs = mock_client.responses.compact.call_args.kwargs
-        assert call_kwargs.get("model") == "gpt-4.1"
+        assert call_kwargs.get("model") == "gpt-6-luna"
         assert "previous_response_id" not in call_kwargs
         assert call_kwargs.get("input") == items
 
@@ -1866,7 +1866,7 @@ class TestOpenAIResponsesCompactionSession:
         assert warning_model.received_warnings_arg is False
         mock_client.responses.compact.assert_called_once_with(
             previous_response_id="resp-123",
-            model="gpt-4.1",
+            model="gpt-6-luna",
         )
 
     @pytest.mark.asyncio

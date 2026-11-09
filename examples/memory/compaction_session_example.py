@@ -19,7 +19,6 @@ async def main():
     session = OpenAIResponsesCompactionSession(
         session_id="demo-session",
         underlying_session=underlying,
-        model="gpt-4.1",
         # Custom compaction trigger (default is 10 candidates)
         should_trigger_compaction=lambda ctx: len(ctx["compaction_candidate_items"]) >= 4,
     )

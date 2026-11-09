@@ -116,7 +116,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         underlying_session: Session,
         *,
         client: AsyncOpenAI | None = None,
-        model: str = "gpt-4.1",
+        model: str = "gpt-6-luna",
         compaction_mode: OpenAIResponsesCompactionMode = "auto",
         should_trigger_compaction: Callable[[dict[str, Any]], bool] | None = None,
         max_rollback_items: int | None = None,
@@ -129,7 +129,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 OpenAIConversationsSession.
             client: OpenAI client for responses.compact API calls. Defaults to
                 get_default_openai_client() or new AsyncOpenAI().
-            model: Model to use for responses.compact. Defaults to "gpt-4.1". Must be an
+            model: Model to use for responses.compact. Defaults to "gpt-6-luna". Must be an
                 OpenAI model name (gpt-*, o*, or ft:gpt-*).
             compaction_mode: Controls how the compaction request provides conversation
                 history. "auto" (default) uses input when the last response was not
