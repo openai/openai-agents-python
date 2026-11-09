@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+
+import pytest
 
 from agents import Agent, CustomStorage, SQLiteSessionStore, function_tool
 from agents.observation import TurnFinished
@@ -58,6 +61,7 @@ def stored_terminal_rows(document):
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 async def test_durable_terminal_success_survives_the_late_model_clock(deadline_peer, tmp_path):
     """Model-final disarm precedes terminal policy; durable terminal data stays final."""
     effects = []

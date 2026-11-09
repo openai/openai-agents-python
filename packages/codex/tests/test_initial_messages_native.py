@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 
 import pytest
@@ -43,6 +44,21 @@ async def test_initial_messages_portable_round_trip_has_no_turn_or_request(respo
         assert responses.requests == []
 
 
+class UnopenedStore:
+    """Portable spy: these validation paths must never acquire any storage."""
+
+    acquisitions = 0
+
+    def acquire(self, thread_id):
+        self.acquisitions += 1
+        raise AssertionError("invalid seed opening acquired storage")
+
+    def unexpected(self, *args):
+        raise AssertionError("invalid seed opening touched storage")
+
+    read = commit = flush = release = unexpected
+
+
 class SeedFenceStore(SQLiteSessionStore):
     def __init__(self, path, *, fail=False):
         super().__init__(path)
@@ -78,6 +94,7 @@ class SeedFenceStore(SQLiteSessionStore):
             self.released.set()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_initial_messages_opening_waits_for_real_flush_and_cancel_joins(
     tmp_path, responses, cancel
@@ -95,7 +112,7 @@ async def test_initial_messages_opening_waits_for_real_flush_and_cancel_joins(
             assert not opening.done()
             if cancel:
                 opening.cancel()
-                with pytest.raises(TimeoutError):
+                with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(opening), 0.05)
                 assert not store.released.is_set()
             store.allow.set()
@@ -118,6 +135,7 @@ async def test_initial_messages_opening_waits_for_real_flush_and_cancel_joins(
         assert responses.requests == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 async def test_initial_messages_failed_flush_does_not_publish_or_replay(tmp_path, responses):
     store = SeedFenceStore(tmp_path / "seed.sqlite", fail=True)
     store.allow.set()
@@ -174,16 +192,9 @@ async def test_initial_messages_inline_image_uses_canonical_preparation(response
 
 @pytest.mark.parametrize("opening", [{"resume": "existing"}, {"state": {}}])
 async def test_initial_messages_public_open_rejects_empty_with_restore_before_storage(
-    tmp_path, responses, opening
+    responses, opening
 ):
-    class CountStore(SQLiteSessionStore):
-        acquisitions = 0
-
-        def acquire(self, thread_id):
-            self.acquisitions += 1
-            return super().acquire(thread_id)
-
-    store = CountStore(tmp_path / "unused.sqlite")
+    store = UnopenedStore()
     async with NativeProvider(base_url=responses.url, api_key="synthetic-seeds") as provider:
         with pytest.raises(ValueError, match="fresh"):
             async with Agent(instructions="Keep the conversation.", provider=provider).session(
@@ -215,15 +226,8 @@ async def test_initial_messages_file_sources_round_trip_as_opaque_data(responses
         assert responses.requests == []
 
 
-async def test_initial_messages_file_rejects_lite_before_thread_acquisition(tmp_path, responses):
-    class CountStore(SQLiteSessionStore):
-        acquisitions = 0
-
-        def acquire(self, thread_id):
-            self.acquisitions += 1
-            return super().acquire(thread_id)
-
-    store = CountStore(tmp_path / "unused.sqlite")
+async def test_initial_messages_file_rejects_lite_before_thread_acquisition(responses):
+    store = UnopenedStore()
     async with NativeProvider(base_url=responses.url, api_key="synthetic-seeds") as provider:
         agent = Agent(instructions="Keep the conversation.", model="gpt-6.1-sol", provider=provider)
         with pytest.raises(Exception, match="qualified standard Responses"):

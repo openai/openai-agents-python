@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -300,7 +301,7 @@ async def test_continuous_chunks_do_not_extend_the_allowance(deadline_peer):
         if event["type"] == "response.output_text.delta" and not stopped.is_set():
             try:
                 await asyncio.wait_for(stopped.wait(), timeout=0.02)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
 
     deadline_peer.before_event = pace
@@ -549,6 +550,7 @@ class HeldStore(SQLiteSessionStore):
         return result
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 @pytest.mark.parametrize(
     "boundary,expires",
     [("response_observation_record", True), ("token_usage_record", False)],
@@ -617,6 +619,7 @@ def error_text(error: BaseException) -> str:
     return "\n".join(parts)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 @pytest.mark.parametrize("fail_writer", [False, True])
 async def test_entered_reply_writer_settles_after_expiry_without_replay(
     deadline_peer, tmp_path, fail_writer
@@ -834,6 +837,7 @@ async def test_update_capture_historical_omission_and_corrupt_restore(deadline_p
     assert deadline_peer.requests == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 async def test_initial_user_history_flush_does_not_spend_model_allowance(deadline_peer, tmp_path):
     # START: real user-history commit precedes the model factory; transport wait follows it.
     store = HeldStore(tmp_path / "before-invocation.sqlite", "user_input")

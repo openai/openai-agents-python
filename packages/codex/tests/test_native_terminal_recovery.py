@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -49,6 +50,7 @@ class TerminalFailureStore(SQLiteSessionStore):
         return super().flush(thread_id, token)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 @pytest.mark.parametrize("mode", ["append", "flush"])
 async def test_root_terminal_persistence_failure_settles_without_completed(
     responses, tmp_path, mode

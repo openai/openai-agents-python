@@ -1,6 +1,7 @@
 """Public media behavior against the separately rebuilt Core image/file layers."""
 
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -189,6 +190,7 @@ async def test_code_file_awaits_the_owned_callback_and_restores_without_replay(
     assert len(responses.requests) == 3
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Reference adapter requires POSIX locks")
 async def test_persistent_media_reopens_as_data_without_replaying_the_tool(
     responses: ResponsesFixture, tmp_path
 ) -> None:
