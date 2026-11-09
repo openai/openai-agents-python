@@ -55,7 +55,7 @@ If the command reports no receipt, check the exporter endpoint and loopback prox
 
 ## Continue a parent trace into another worker
 
-The [`trace_context.py`](trace_context.py) example requires APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](../../../docs/sdk/installation.md#examples-and-upgrades), then run:
+The [`trace_context.py`](trace_context.py) example requires `0.24.0-alpha.7` or later. Install a [matching preview wheel and example files](../../../docs/sdk/installation.md#examples-and-upgrades), then run:
 
 ```sh
 PYTHONPATH=. python -m examples.codex.observability.trace_context
