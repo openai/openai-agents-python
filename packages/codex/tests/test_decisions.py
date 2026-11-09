@@ -631,18 +631,65 @@ def test_direct_decision_schema_keeps_generation_scalar_wrapper():
     assert adapter.validate_json('{"response":true}').response is True
 
 
-async def test_completed_error_remains_primary_if_usage_tracing_fails(monkeypatch):
+def fail_usage_span(monkeypatch, error, phase):
     from _agents_codex import decisions as implementation
 
+    class FailingScope:
+        def __init__(self, name, kind, options):
+            assert name == "decision.usage" and kind == "operation"
+            if phase == "construct":
+                raise error
+
+        def __enter__(self):
+            if phase == "enter":
+                raise error
+            return self
+
+        def __exit__(self, *args):
+            if phase == "exit":
+                raise error
+
+    monkeypatch.setattr(implementation, "current_context", lambda: SimpleNamespace(disabled=False))
+    monkeypatch.setattr(implementation, "TraceScope", FailingScope)
+
+
+@pytest.mark.parametrize("phase", ["construct", "enter", "exit"])
+async def test_optional_usage_span_failure_preserves_success(monkeypatch, phase):
+    fail_usage_span(monkeypatch, RuntimeError("Synthetic tracing failure"), phase)
+    result = await Agent(instructions="Assess.", decisions=Provider(True)).decide(
+        "Allowed?", input="Evidence"
+    )
+    assert result is True
+
+
+@pytest.mark.parametrize("phase", ["construct", "enter", "exit"])
+async def test_optional_usage_span_failure_preserves_completed_error(monkeypatch, phase):
     primary = DecisionError("refusal", usage=USAGE, request_id="req-refused")
-    tracing = RuntimeError("Synthetic tracing failure")
-
-    def fail(*args, **kwargs):
-        raise tracing
-
-    monkeypatch.setattr(implementation, "_record_decision_usage", fail)
+    original_context = ValueError("Earlier safe context")
+    primary.__context__ = original_context
+    fail_usage_span(monkeypatch, RuntimeError("Synthetic tracing failure"), phase)
     with pytest.raises(DecisionError) as caught:
         await Agent(instructions="Assess.", decisions=Provider(primary)).decide(
             "Allowed?", input="Evidence"
         )
-    assert caught.value is primary and caught.value.__context__ is tracing
+    assert caught.value is primary and caught.value.__context__ is original_context
+
+
+@pytest.mark.parametrize("phase", ["construct", "enter", "exit"])
+async def test_optional_usage_span_failure_keeps_output_validation(monkeypatch, phase):
+    fail_usage_span(monkeypatch, RuntimeError("Synthetic tracing failure"), phase)
+    with pytest.raises(OutputValidationError):
+        await Agent(instructions="Assess.", decisions=Provider("yes")).decide(
+            "Allowed?", input="Evidence"
+        )
+
+
+@pytest.mark.parametrize("phase", ["construct", "enter", "exit"])
+@pytest.mark.parametrize("refused", [False, True])
+async def test_optional_usage_span_cancellation_propagates(monkeypatch, phase, refused):
+    cancellation = asyncio.CancelledError("Synthetic tracing cancellation")
+    fail_usage_span(monkeypatch, cancellation, phase)
+    provider = Provider(DecisionError("refusal") if refused else True)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await Agent(instructions="Assess.", decisions=provider).decide("Allowed?", input="Evidence")
+    assert caught.value is cancellation

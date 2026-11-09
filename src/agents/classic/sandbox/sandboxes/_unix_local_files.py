@@ -41,6 +41,10 @@ class _UnixLocalFiles(_FileOps):
         # Reauthorize resolved paths against captured roots without following new symlinks.
         return self._policy.normalize_path(path, for_write=for_write)
 
+    def workspace_root(self, manifest: Manifest) -> Path:
+        """Use the root captured from trusted configuration, not a live symlink target."""
+        return self._roots[manifest.root]
+
     def rm(self, path: Path, *, recursive: bool) -> None:
         if recursive:
             self._policy.validate_recursive_remove(path)

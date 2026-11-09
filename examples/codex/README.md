@@ -1,12 +1,12 @@
 # Run an SDK example
 
-Read the [native voice guide](native_voice.md) for Session-owned Realtime, per-connection credentials, custom adapters, and speech pipelines. Run [native_realtime_voice.py](native_realtime_voice.py) to record a reply.
-
 Use these examples with the SDK preview wheel and source files from the same release. Start with one Python tool, or choose a workflow below for scripted tests, browser applications, and background jobs.
 
 ## Set up your environment
 
 Follow the [installation guide](../../docs/sdk/installation.md), activate your Python environment, and open the root of the matching release's source archive. Install any extra dependencies listed in the example's README.
+
+Entries marked development-only require a [matching source build](../../CONTRIBUTING.md#build-the-sdk-from-source) and example files from that checkout.
 
 For a live model example, supply `OPENAI_API_KEY` through your usual credential setup. These examples make model requests and can incur charges. The scripted recipes identify when no API key is needed.
 
@@ -52,15 +52,16 @@ These programs use the current SDK and model credentials:
 | Test application behavior | [Task recipe chooser](../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
 | Read or revise selected text files | [Selected documents](selected_documents.md) | Bounded pages and search, application-selected writable aliases, and serialized revision checks. The application extracts PDF text. |
 | Discover and read selected collection sources | [Selective collection](selective_collection.md) | Application-authorized metadata search and on-demand UTF-8 staging; includes a local 10,000-file fixture and scripted benchmark. |
-| Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires a development build newer than alpha.6. Follow [matching-source setup](../../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../../docs/sdk/configuration.md#edit-the-next-sampling-request). |
+| Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires alpha.7 or later. Follow [matching-release setup](../../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../../docs/sdk/configuration.md#edit-the-next-sampling-request). |
 | Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
 | Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
 | Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |
+| Record voice or run a speech pipeline | [Native voice](native_voice.md) | Development-only examples, model credentials, and the `voice` extra where noted. Covers Session-owned Realtime, connection credentials, and custom adapters. |
 | Resume an external job | [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. Requires private POSIX storage and a local Responses endpoint. |
 | Serve an agent or call an A2A peer | [A2A adapter](a2a/README.md) | Install the A2A extra. The host supplies caller identity and task storage for cancellation and recovery. |
 | Supervise local coding workers | [Supervised workers](supervised_worker/README.md) | Separate workspaces, native histories, artifact checks, and publication records. Requires matching native helpers and model credentials. |
 | Debug tool and provider failures | [Trace walkthrough](observability/README.md) | A local collector, viewer, and history reader. Uses synthetic data without provider credentials. |
-| Continue a trace across workers | [Explicit trace context](observability/README.md#continue-a-parent-trace-into-another-worker) | A synthetic parent trace and a second Agent. Requires the development APIs identified in the guide. |
+| Continue a trace across workers | [Explicit trace context](observability/README.md#continue-a-parent-trace-into-another-worker) | A synthetic parent trace and a second Agent. Requires alpha.7 or later. |
 | Compare model configurations | [Evaluation runner](evaluation/README.md) | Repeated cases, baseline comparisons, and failure artifacts. Scripted mode checks the runner; live mode needs model credentials. |
 
 ## Connect an executor

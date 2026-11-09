@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, cast
 
-from ._lifecycle import _close_after_error, _error_contexts, _retain_cleanup_error
+from ._lifecycle import _close_after_error
 from ._public import preserve_module_identity as _preserve_module_identity
 from .schema import OutputValidationError, _prepare_output, _PreparedOutput
 from .telemetry import TraceOptions, TraceScope, _owned_span, current_context
@@ -219,11 +219,7 @@ async def _decide(
         try:
             response = await provider.get_decision(request)
         except DecisionError as error:
-            previous = _error_contexts(error.__context__)
-            try:
-                _record_decision_usage(error._response(), outcome=error.reason)
-            except BaseException as usage_error:
-                _retain_cleanup_error(error, usage_error, previous)
+            _record_decision_usage(error._response(), outcome=error.reason)
             if scope is not None:
                 scope.check(scope.owner, after_await=True)
             raise
@@ -337,7 +333,12 @@ def _record_decision_usage(response: DecisionResponse, *, outcome: str = "comple
         value = getattr(response, name)
         if isinstance(value, str) and len(value) <= 256 and value.isprintable():
             metadata[name] = value
-    with TraceScope("decision.usage", "operation", TraceOptions(metadata=metadata)):
+    options = TraceOptions(metadata=metadata)
+    try:
+        with TraceScope("decision.usage", "operation", options):
+            pass
+    except Exception:
+        # Optional usage tracing must not change the decision outcome.
         pass
 
 
