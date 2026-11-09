@@ -26,6 +26,9 @@ from _agents_codex.testing import (
     Lock as Lock,
     Mapping as Mapping,
     NativeProvider as NativeProvider,
+    RealtimeConnectCall as RealtimeConnectCall,
+    RealtimeStep as RealtimeStep,
+    ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
     ScriptedResponse as ScriptedResponse,
     ScriptedResponses as ScriptedResponses,
     Sequence as Sequence,
@@ -51,12 +54,12 @@ from _agents_codex.testing import (
     uuid4 as uuid4,
 )
 
-__all__ = ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
-
-from _agents_codex.testing_realtime import (
-    RealtimeConnectCall as RealtimeConnectCall,
-    RealtimeStep as RealtimeStep,
-    ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
-)
-
-__all__ += ["RealtimeConnectCall", "RealtimeStep", "ScriptedRealtimeAdapter"]
+__all__ = [
+    "ScriptedResponse",
+    "ScriptedResponses",
+    "text",
+    "tool_call",
+    "RealtimeConnectCall",
+    "RealtimeStep",
+    "ScriptedRealtimeAdapter",
+]
