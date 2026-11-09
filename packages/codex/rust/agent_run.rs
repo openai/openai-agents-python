@@ -339,3 +339,6 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
     }
     Ok(output)
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_retirement_tests;
