@@ -1450,6 +1450,19 @@ def _check_buffered_native_agents(
         raise CapabilityError("Buffered Responses do not support native child agents")
 
 
+def _check_native_agents_environment(
+    native_agents: NativeAgents[Any] | None, executor: Environment[Any] | None
+) -> None:
+    if native_agents is None:
+        return
+    if executor is not None and executor.read_only:
+        raise ValueError("Read-only execution does not support NativeAgents")
+    if executor is None or not {"exec_command", "write_stdin", "apply_patch"}.issubset(
+        executor.tools
+    ):
+        raise ValueError("NativeAgents requires an Environment with all three execution tools")
+
+
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
@@ -2258,6 +2271,7 @@ class Session(Generic[ContextT, OutputT]):
                 restored_override = True
                 payload["agent_options"].pop("_sdk_output_override")
             payload.pop("codex_login_binding", None)
+            payload.pop("executor_read_only", None)
             if saved.format_version in (4, 5, 6, 7):
                 payload["format_version"] = saved.format_version - 2
             payload.pop("operation_tools", None)
@@ -2448,6 +2462,8 @@ class Session(Generic[ContextT, OutputT]):
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
             if state is not None:
+                if saved.executor_read_only != (executor is not None and executor.read_only):
+                    raise ValueError("Checkpoint and Environment must agree on read-only execution")
                 current_policy = executor._network_policy_digest() if executor is not None else None
                 if saved.network_policy_digest != current_policy:
                     raise ValueError(
@@ -2461,13 +2477,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )
-            if native_agents is not None and (
-                executor is None
-                or not {"exec_command", "write_stdin", "apply_patch"}.issubset(executor.tools)
-            ):
-                raise ValueError(
-                    "NativeAgents requires an Environment with all three execution tools"
-                )
+            _check_native_agents_environment(native_agents, executor)
             if restored_defaults is not None:
                 # Resolve only against destination declarations, without acquiring
                 # MCP connections or replacing the active manual roster.
@@ -4363,6 +4373,8 @@ class Session(Generic[ContextT, OutputT]):
                 if self._native_agents is not None:
                     raise CapabilityError("Writable roots cannot change with NativeAgents")
                 roots = _writable_roots(writable_roots)
+                if self._executor.read_only and roots:
+                    raise CapabilityError("Read-only execution does not accept writable roots")
             if output.mode == "prompted":
                 parts.append(
                     {
@@ -10453,6 +10465,8 @@ class Session(Generic[ContextT, OutputT]):
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
             payload["executor_policy_digest"] = executor_policy_digest
+            if self._executor is not None and self._executor.read_only:
+                payload["executor_read_only"] = True
             _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions, graph=bool(self._profiles))

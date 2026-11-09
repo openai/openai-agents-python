@@ -185,7 +185,9 @@ async def test_factory_error_stays_local_while_native_receives_only_status() -> 
     assert str(failure) not in json.dumps(handle.events)
 
 
-@pytest.mark.parametrize("frame", [42, "x" * (8 * 1024 * 1024 + 1)])
+@pytest.mark.parametrize(
+    "frame", [42, "x" * (8 * 1024 * 1024 + 1)], ids=["non-text", "oversized-text"]
+)
 async def test_invalid_ingress_is_rejected_before_native_copy(frame: Any) -> None:
     handle, connection, errors = Handle(), Connection(), []
     owner = driver(Adapter(connection), handle, errors)
