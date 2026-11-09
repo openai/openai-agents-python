@@ -227,7 +227,7 @@ async def test_encrypted_compaction_skips_unencrypted_stored_history(
 
         assert model.calls[0].input == [before, after, turn[0]]
         assert decisions[0]["session_items"] == [before, after, *turn]
-        client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=[after, *turn])
+        client.responses.compact.assert_awaited_once_with(model="gpt-6-luna", input=[after, *turn])
         stored = await backend.get_items()
         assert stored[:-1] == retained_prefix
         assert _decrypt_stored_items(session, stored[-1:]) == [compacted]
@@ -328,10 +328,10 @@ async def test_encrypted_compaction_replaces_complete_logical_history_after_expi
             output.model_dump(exclude_unset=True),
         ]
         if mode == "input":
-            client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=expected)
+            client.responses.compact.assert_awaited_once_with(model="gpt-6-luna", input=expected)
         else:
             client.responses.compact.assert_awaited_once_with(
-                model="gpt-4.1", previous_response_id="resp-1"
+                model="gpt-6-luna", previous_response_id="resp-1"
             )
         assert decisions[0]["session_items"] == expected
         assert decisions[0]["compaction_candidate_items"] == [expected[-1]]
@@ -353,7 +353,7 @@ async def test_encrypted_compaction_replaces_complete_logical_history_after_expi
         # Expiration changes the logical snapshot without changing the mutation generation.
         set_fernet_time(1_040)
         await session.run_compaction({"compaction_mode": "input", "force": True})
-        client.responses.compact.assert_awaited_with(model="gpt-4.1", input=[])
+        client.responses.compact.assert_awaited_with(model="gpt-6-luna", input=[])
     finally:
         backend.close()
 
@@ -444,7 +444,7 @@ async def test_runner_defers_compaction_using_decrypted_candidates(
         ]
         assert any(context["compaction_candidate_items"] == expected[1:] for context in decisions)
         client.responses.compact.assert_awaited_once_with(
-            model="gpt-4.1", input=expected + [output.model_dump(exclude_unset=True)]
+            model="gpt-6-luna", input=expected + [output.model_dump(exclude_unset=True)]
         )
         assert await backend.get_items() == []
     finally:
@@ -521,7 +521,7 @@ async def test_encrypted_compaction_restores_original_tokens_before_concurrent_a
         assert _decrypt_stored_items(session, stored[-1:]) == [survivor]
         assert await session.get_items() == [valid, survivor]
         await session.run_compaction({"force": True})
-        client.responses.compact.assert_awaited_with(model="gpt-4.1", input=[valid, survivor])
+        client.responses.compact.assert_awaited_with(model="gpt-6-luna", input=[valid, survivor])
         assert _decrypt_stored_items(session, await backend.get_items()) == [compacted]
     finally:
         release_replacement.set()
@@ -692,7 +692,7 @@ async def test_compaction_wrapping_encrypted_storage(encryption_key: str, tmp_pa
         await session.add_items([{"role": "user", "content": "private history"}])
         await session.run_compaction({"force": True})
         client.responses.compact.assert_awaited_once_with(
-            model="gpt-4.1", input=[{"role": "user", "content": "private history"}]
+            model="gpt-6-luna", input=[{"role": "user", "content": "private history"}]
         )
         assert _decrypt_stored_items(encrypted, await backend.get_items()) == [compacted]
     finally:
