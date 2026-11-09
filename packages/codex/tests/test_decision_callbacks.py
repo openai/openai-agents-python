@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
@@ -556,3 +560,58 @@ async def test_terminal_decision_cancellation_keeps_late_usage_and_cancellation(
         assert [record["usage"]["total_tokens"] for record in history] == [24, 14]
     assert requests == ["value=7"] and not resumed
     assert len(responses.requests) == 2
+
+
+def test_bound_decisions_with_native_tracing() -> None:
+    """Run the actual process-owned native tracer around completion Decisions."""
+    env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
+    root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(root), env.get("PYTHONPATH"))))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio; from tests.test_decision_callbacks import "
+            "_bound_decisions_with_native_tracing; "
+            "asyncio.run(asyncio.wait_for(_bound_decisions_with_native_tracing(), 30))",
+        ],
+        env=env,
+        cwd=root,
+        text=True,
+        capture_output=True,
+        timeout=40,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _bound_decisions_with_native_tracing() -> None:
+    from agents import telemetry
+    from tests.native_fixtures import ResponsesFixture
+
+    fixture = ResponsesFixture()
+    app = web.Application()
+    app.router.add_post("/responses", fixture.handle)
+    decisions = RecordingProvider()
+
+    async def complete(candidate):
+        assert await candidate.decide("Complete?", input=candidate.text)
+
+    await telemetry.configure()
+    try:
+        async with TestServer(app) as server:
+            fixture.url = str(server.make_url(""))
+            agent = Agent(
+                instructions="Answer.",
+                decisions=decisions,
+                provider=generative_provider(fixture),
+                before_complete=complete,
+            )
+            for disabled in (False, True):
+                fixture.respond(assistant_output("Final."))
+                async with agent.session(trace_options={"disabled": disabled}) as session:
+                    result = await (await session.submit("Answer.")).get_result()
+                    assert result.final_output == "Final."
+                    assert result.thread_usage.total_token_usage.total_tokens == 24
+        assert len(decisions.requests) == len(fixture.requests) == 2
+    finally:
+        await telemetry.shutdown()

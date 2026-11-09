@@ -219,7 +219,7 @@ async def _decide(
         scope.check(scope.owner)
         record = await scope.begin()
         scope.check(scope.owner, after_await=True)
-    with _owned_span("decision", "model"):
+    with _owned_span("decision", "operation"):
         try:
             response = await provider.get_decision(request)
         except DecisionError as error:
