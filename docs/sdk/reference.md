@@ -119,7 +119,7 @@ These types require `0.24.0-alpha.7` or later. `Agent.before_complete` receives 
 
 The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, a sequence of selectors for that preparation, or `StopTurn(...)` to stop the root before the next model request.
 
-`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). With programmatic tool calling, the SDK includes `exec` and `wait` helpers for nonempty selections; an empty selection disables all tools. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
+`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). With programmatic tool calling, the SDK includes `exec` and `wait` helpers for nonempty selections; an empty selection disables all tools. See the [per-step example](sessions.md#select-tools-before-each-model-step).
 
 ### Turn
 
@@ -271,7 +271,11 @@ Use `Tool[Application]` to annotate collections that mix supported tool declarat
 
 ### ToolOutput
 
-`ToolOutput.text(value)`, `ToolOutput.image(image_url)` and `ToolOutput.error(message)` construct native tool results. For mixed content, pass a list of `ToolOutputText` and `ToolOutputImage` items to `ToolOutput`. Images must be inline base64 image data URLs; remote URLs, file IDs and local paths are unsupported. `ToolOutput.error(...)` returns an explicit failed tool result (`success=False`), which differs from raising a Python exception. See [tool values](tools.md#inspect-or-change-tool-values).
+`ToolOutput.text(value)`, `ToolOutput.image(image_url)` and `ToolOutput.error(message)` construct native tool results. For mixed content, pass a list of `ToolOutputText` and `ToolOutputImage` items to `ToolOutput`. In `0.24.0-alpha.7`, images must be inline base64 image data URLs; remote URLs, file IDs, and local paths are unsupported. `ToolOutput.error(...)` returns an explicit failed tool result (`success=False`), which differs from raising a Python exception. See [tool values](tools.md#inspect-or-change-tool-values).
+
+Matching development builds also support HTTP(S) image URLs, provider image IDs, and optional image `detail` through `ToolOutput.image(...)` or `ToolOutputImage`. Supply exactly one of `image_url` and `file_id`. Optional `detail` accepts `None`, `"low"`, `"high"`, `"auto"`, or `"original"`. HTTP(S) URLs and image file IDs require API-key authentication and a compatible standard Responses model; `CodexLogin` and Responses Lite do not support these references. The helpers do not fetch URLs or upload files. Local filesystem paths are unsupported.
+
+`ToolOutput.file(...)` and `ToolOutputFile` accept exactly one of `file_id`, base64 `file_data`, or HTTPS `file_url`, with optional `filename`. Mixed results can include `ToolOutputFile` items. See [tool-result media](tools.md#return-text-images-and-tool-errors) for source validation, model limits, and examples. These additions are absent from the alpha.7 wheel.
 
 ### ToolContext
 
@@ -322,6 +326,8 @@ HttpMCP(*, name: str, tools: Sequence[str], url: str,
         before=None, approval=None, defer_loading=False, bearer_token=None)
 ```
 
+`headers=None` is an additional option in the forthcoming preview and is absent from the `0.24.0-alpha.7` wheel. It captures custom HTTP fields for this MCP connection. Use either an `Authorization` header or `bearer_token`. See [custom MCP headers](mcp.md#connect-an-http-server).
+
 ### StdioMCP
 
 Declares selected tools on a server process:
@@ -334,7 +340,9 @@ StdioMCP(*, name: str, tools: Sequence[str], command: str,
          before=None, approval=None, defer_loading=False)
 ```
 
-`location="environment"` runs stdio on the Session's Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](mcp.md#connect-an-http-server) and [result policies](mcp.md#mcp-result-policies).
+`env=None` is an additional option in the forthcoming preview and is absent from the `0.24.0-alpha.7` wheel. It captures explicit process variables, which override names selected by `env_vars`. See [stdio process configuration](mcp.md#start-a-stdio-server).
+
+`location="environment"` runs stdio on the Session's local or remote Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](mcp.md#connect-an-http-server) and [result policies](mcp.md#mcp-result-policies).
 
 For both descriptors, `transform_result_timeout=None` uses a 30-second deadline; it does not disable the deadline. An explicit value must be in `(0, 3600]` seconds and requires `transform_result`. This deadline is separate from tool execution and approval. Where supported, `defer_loading=True` controls when the model sees selected schemas. It does not delay connection startup.
 
@@ -370,6 +378,8 @@ Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
                   transform_result=None, policy_timeout=30, mounts=(),
                   write_policy="strict") -> Environment
 ```
+
+`read_only=False` is an additional option on both constructors in the forthcoming preview and is absent from the `0.24.0-alpha.7` wheel. Set it to `True` for a strict read-only workspace, with no `apply_patch`, `NativeAgents`, or additional write roots. Python callbacks and MCP services keep their own permissions. See [read-only execution](execution.md#inspect-a-read-only-workspace).
 
 Environment options have these limits:
 
@@ -435,6 +445,8 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 ### ModelSettings
 
 Supports `reasoning_effort`, `reasoning_summary`, `service_tier`, and, in `0.24.0-alpha.7` or later, `tool_choice`. Omitted settings keep native defaults. `service_tier=None` clears that override. `tool_choice` accepts `"auto"`, `"none"`, or `"required"`; see [model settings](configuration.md#model-and-session-settings).
+
+Matching development builds also accept a `ToolRef` to require one selected tool with `defer_loading=False`. They add sampling, cache, storage, and model invocation controls. `None` clears these SDK overrides. See [development model controls](configuration.md#additional-controls-in-development-builds) for supported values and provider restrictions. These additions do not establish alpha.7 wheel availability.
 
 ## Tracing
 
@@ -520,7 +532,9 @@ A dictionary with `type="input_text"` and `text`.
 
 ### InputImage
 
-A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`.
+A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`, for the original preview profile.
+
+Matching development builds also accept absolute HTTP(S) image URLs and `detail` values of `None`, `"low"`, `"high"`, or `"original"`, subject to native model support. HTTP(S) URLs have the same [route and model limits as image results](tools.md#return-text-images-and-tool-errors). The distinct `InputImageFile` type uses a provider-owned image `file_id`. `InputFile` uses exactly one of `file_id`, `file_data`, or HTTPS `file_url`. These types can appear in `UserMessage.content`; see [development image and file input](sessions.md#images-and-files-in-development-builds) for validation and provider limits. These additions do not establish alpha.7 wheel availability.
 
 ## Existing MCP clients
 

@@ -495,6 +495,8 @@ async def test_open_preserves_primary_error_and_all_cleanup_failures(
 async def test_cancelled_open_joins_late_cleanup_and_preserves_cancellation(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Gate the atomic Engine/Thread acquisition that this test inspects.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     native = importlib.import_module("agents._native")
     open_conversation = native._open_conversation
     creation_started = asyncio.Event()
@@ -1133,6 +1135,8 @@ async def test_callback_child_cannot_close_until_invocation_scope_has_ended(
 async def test_session_captures_instructions_before_native_creation_suspends(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Keep the gate on atomic acquisition, before publication to the Session.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     native = importlib.import_module("agents._native")
     open_conversation = native._open_conversation
     creating = asyncio.Event()

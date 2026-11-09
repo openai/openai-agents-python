@@ -51,13 +51,13 @@ server = StdioMCP(
 )
 ```
 
-Include `server` in the Agent's `tools` list. By default, `location="host"` starts the server on the application host. Set `location="environment"` to start it on the remote executor passed to `agent.session(environment=...)`. A connected Environment can host stdio MCP servers even when `Environment.tools` is empty.
+Include `server` in the Agent's `tools` list. By default, `location="host"` starts the server on the application host. Set `location="environment"` to start it through the Session's selected executor, either `Environment.local()` or a remote `Environment`. A connected Environment can host stdio MCP servers even when `Environment.tools` is empty.
 
 Codex manages the process and its standard input and output connection until the Session closes. Supply a trusted command because the process uses the selected machine's permissions. Tool selection and approval do not sandbox server startup.
 
 Configure the server's process environment as follows:
 
-- Use an absolute `cwd`. If omitted, host servers use Codex's runtime directory and remote servers use the Environment's working directory.
+- Use an absolute `cwd`. If omitted, `location="host"` uses Codex's runtime directory and `location="environment"` uses the Environment's working directory.
 - Use `env_vars` to select variables from the machine that runs the server. Codex reads their values at startup.
 - Use `env` to supply string values directly, for example `env={"REGION": "eu"}`. Explicit values override names selected by `env_vars`, and empty strings are preserved. The declaration copies the map without changing the application's environment.
 - Windows targets treat environment names as case-insensitive. They reject duplicate explicit aliases before starting the server; a single explicit value still overrides an inherited alias.
@@ -186,7 +186,7 @@ Restore uses the opening `tools=` override, or otherwise the current `Agent.tool
 
 To use host stdio after replacement, open with at least one `StdioMCP(location="host")` declaration. A Session opened with only HTTP or environment stdio cannot later start a host process. Environment stdio requires the Session's current Environment. Both locations remain limited to opening server and tool-name pairs.
 
-With the pinned native revision, host stdio initialization rejects incompatible `CODEX_EXEC_SERVER_NOISE_*` settings from the environment. It does not silently select the remote executor those settings describe. HTTP-only Sessions do not require a local executor.
+In `0.24.0-alpha.7`, host stdio initialization rejects incompatible ambient `CODEX_EXEC_SERVER_NOISE_*` settings. Matching development builds ignore those settings. Select command execution separately with the Session's `environment` argument. HTTP-only Sessions do not require a local executor. Use a [build and guide from the same source revision](versions.md).
 
 ## MCP result policies
 

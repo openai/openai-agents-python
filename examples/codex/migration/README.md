@@ -4,7 +4,7 @@ Port one agent and one read-only tool from released v0 to native v1. Both versio
 
 ## Install the matching SDKs
 
-These files require the current `feat/codex-harness` source. The published `v0.24.0-alpha.6` wheel predates classic and APIs used here. It cannot run this tutorial. Keep one checkout for the current SDK, these examples, and their documentation.
+This tutorial is maintained and tested with the current `feat/codex-harness` source. The published `v0.24.0-alpha.7` release includes native and classic APIs, but its source archive does not contain these tutorial files. Use the source-build procedure below to reproduce the maintained checks. Keep one checkout for the SDK, these examples, and their documentation.
 
 Follow [Build the SDK from source](../../../CONTRIBUTING.md#build-the-sdk-from-source) in that checkout, including its platform and toolchain prerequisites. Record `git rev-parse HEAD` and retain the exact wheel produced in `dist/`. A package version alone does not identify a development build. Source builds require native tools; the old PyPI package is not a substitute for this build.
 

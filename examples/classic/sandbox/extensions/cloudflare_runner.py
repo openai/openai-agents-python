@@ -6,6 +6,9 @@ This example mirrors the Modal and E2B extension runners. It supports:
 - Snapshot stop/resume round-trip verification.
 - PTY interactive session demo.
 - Cloud bucket mount demo (R2/S3/GCS via CloudflareBucketMountStrategy).
+
+The CLI configures its selected API key for this process so resume can authenticate.
+Imported helpers require CLOUDFLARE_SANDBOX_API_KEY for resume.
 """
 
 from __future__ import annotations
@@ -429,6 +432,10 @@ if __name__ == "__main__":
         raise SystemExit(
             "A Cloudflare Worker URL is required. Pass --worker-url or set CLOUDFLARE_SANDBOX_WORKER_URL."
         )
+
+    # Resume reads current credentials from the environment, never from saved state.
+    if args.api_key:
+        os.environ["CLOUDFLARE_SANDBOX_API_KEY"] = args.api_key
 
     asyncio.run(
         main(

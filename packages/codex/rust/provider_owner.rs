@@ -99,7 +99,7 @@ impl Lease {
         self.record.lock().map_err(py_error)?.threads.push(owner);
         Ok(())
     }
-    fn release(&self) -> PyResult<()> {
+    pub(crate) fn release(&self) -> PyResult<()> {
         // Normal Session retirement has already joined every registered owner.
         let resource = self
             .resource

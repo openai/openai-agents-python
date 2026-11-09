@@ -10,10 +10,10 @@ description: Choose supported scope and compatibility boundaries for SDK behavio
 1. Identify the surface you are changing or reviewing: released public API, unreleased branch-local API, internal helper, persisted schema, wire protocol, CLI/config/env surface, or docs/examples only.
 2. When released compatibility is relevant, determine the latest release tag from `origin` first, falling back to local tags only when remote tags are unavailable. Reuse an already verified baseline within the task unless new release evidence or changed scope makes it stale:
    ```bash
-   BASE_TAG="$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*' 2>/dev/null || git tag -l 'v*' --sort=-v:refname | head -n1)"
+   BASE_TAG="$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*-alpha.*' HEAD 2>/dev/null || git tag -l 'v*-alpha.*' --merged HEAD --sort=-v:refname | head -n1)"
    echo "$BASE_TAG"
    ```
-   Report a local-tag fallback as potentially stale.
+   Report a local-tag fallback as potentially stale. The commands select alpha tags reachable from `HEAD`; separately verify that the selected tag has a published release in the same channel. A local tag does not establish remote identity or publication.
 3. Record the implementation scope contract below before coding.
 4. Identify the nearest existing implementation pipeline and the functions, types, or modules that are the source of truth for each affected concern. Prefer adapting the required input into that pipeline over creating parallel schema, metadata, validation, naming, or execution machinery.
 5. Choose the smallest coherent change using the core decision rules. Add compatibility machinery only for a required supported boundary.

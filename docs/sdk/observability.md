@@ -38,7 +38,7 @@ from agents import RunBudget
 result = await agent.run("Summarize the supplied text.", budget=RunBudget(max_requests=3))
 ```
 
-Set at least one nonnegative integer limit: `max_requests`, `max_tokens`, or `max_estimated_cost_micros`. A zero limit blocks the first model request. Once a limit is reached, the SDK blocks the next sampling admission. An already admitted response can exceed token or cost limits and still complete successfully, so these limits do not cap actual charges.
+Set at least one integer limit from `0` through `2**53 - 1`: `max_requests`, `max_tokens`, or `max_estimated_cost_micros`. A zero limit blocks the first model request. Once a limit is reached, the SDK blocks the next sampling admission. An already admitted response can exceed token or cost limits and still complete successfully, so these limits do not cap actual charges.
 
 `max_requests` counts root sampling admissions, including prompted-output repairs. It excludes transport retries, compaction requests, and child requests. Token and cost limits use reported response completions on the active root, including reported internal requests. They exclude child responses and cumulative thread snapshots.
 
