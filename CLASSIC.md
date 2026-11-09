@@ -2,7 +2,7 @@
 
 Prefer [migrating directly from v0 to native v1](MIGRATION.md). Use classic only when you need to upgrade the package before a workflow can adopt native execution. You can also keep that workflow on v0; upgrading is optional.
 
-Starting with alpha.7, preview wheels include `agents.classic`. It retains the v0 Python runner and its integrations. The root `agents` API uses native Codex.
+Starting with alpha.7, preview wheels include `agents.classic`. It retains the v0 Python runner. The root `agents` API uses native Codex.
 
 The classic source comes from v0 `main` commit `814de8b1cfdaf6c70212dca9ca23563dd0b789ac`, with v0.24.0 as the released compatibility baseline. It includes later fixes from that pinned commit. Its namespace changes do not move execution onto Codex.
 
