@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import pickle
 from contextlib import asynccontextmanager
@@ -15,7 +16,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, NativeProvider, _native
+from _agents_codex._completed_turn_owner import _CompletedTurnOwner
+from agents import Agent, NativeProvider, Session, _native
 from tests._asyncio import timeout
 
 TEXT = "PROVIDER_RESOURCE_OK"
@@ -294,11 +296,17 @@ async def test_failed_session_close_retains_lease_for_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_provider_across_threads_and_fresh_event_loops(monkeypatch):
+@pytest.mark.parametrize("completed_route", [False, True], ids=["atomic", "completed"])
+async def test_provider_across_threads_and_fresh_event_loops(monkeypatch, completed_route):
+    if not completed_route:
+        module = importlib.import_module("_agents_codex.agent")
+        monkeypatch.setattr(module, "_completed_run_eligible", lambda *args: False)
     original = _native.create_engine
     original_atomic = _native._open_conversation
     owners = []
     threads = []
+    session_ids = []
+    completed_owners = []
 
     async def capture(*args, **kwargs):
         owner = await original(*args, **kwargs)
@@ -318,18 +326,25 @@ async def test_provider_across_threads_and_fresh_event_loops(monkeypatch):
         def run_one(index):
             agent = Agent(instructions=f"thread-{index}", model="gpt-5.1-codex", provider=provider)
             completed = agent.run_sync(f"input-{index}")
-            threads.append(completed.turn._session._native)
+            session = completed.turn._session
+            session_ids.append(completed.turn.session_id)
+            if isinstance(session, Session):
+                threads.append(session._native)
+            else:
+                assert isinstance(session, _CompletedTurnOwner) and completed_route
+                completed_owners.append(session)
             return completed.final_output
 
         assert await asyncio.gather(*(asyncio.to_thread(run_one, i) for i in range(2))) == [
             TEXT,
             TEXT,
         ]
-        assert len(owners) == 2
+        assert len(owners) == (0 if completed_route else 2)
         for owner in owners:
             with pytest.raises(RuntimeError, match="closed"):
                 await owner.start_thread()
-        assert len(threads) == 2 and len({thread.id for thread in threads}) == 2
+        assert len(threads) + len(completed_owners) == 2
+        assert len(session_ids) == len(set(session_ids)) == 2
         for thread in threads:
             with pytest.raises(RuntimeError, match="closed"):
                 await thread.read_goal()

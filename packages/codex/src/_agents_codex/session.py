@@ -31,6 +31,7 @@ from contextlib import (
 from contextvars import ContextVar as ContextVar, copy_context as copy_context
 from copy import deepcopy as deepcopy
 from dataclasses import asdict as asdict, dataclass as dataclass, field as field, replace as replace
+from functools import partial as partial
 from importlib.resources import files as _package_files
 from os import PathLike as PathLike
 from pathlib import Path as Path
@@ -1100,6 +1101,266 @@ def _private_task(
             work.close()
 
 
+def _project_progress(
+    buffer: _ObservationBuffer,
+    event: dict[str, Any],
+    *,
+    turn_id: str,
+    submission_id: str,
+    thread_id: str,
+) -> None:
+    message = event["msg"]
+    kind = message["type"]
+    if kind == "hosted_tool_call_progress" and event["id"] == turn_id:
+        buffer.append(
+            HostedToolCallProgress(
+                session_id=buffer.session_id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                item_id=message["event"]["item_id"],
+                event=message["event"],
+            )
+        )
+    elif kind == "token_count" and event["id"] == turn_id:
+        if "api_rate_limits" in message:
+            snapshot = _api_rate_limits(message["api_rate_limits"])
+            if snapshot is not None:
+                buffer.append(
+                    ApiRateLimitsUpdated(
+                        session_id=buffer.session_id,
+                        turn_id=turn_id,
+                        submission_id=submission_id,
+                        snapshot=snapshot,
+                    )
+                )
+            if message.get("info") is None and message.get("rate_limits") is None:
+                return
+        buffer.append(
+            UsageUpdated(
+                session_id=buffer.session_id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                usage=_token_usage_info(message.get("info")),
+            )
+        )
+    elif message.get("thread_id") == thread_id and message.get("turn_id") == turn_id:
+        if kind == "item_completed" and _project_execution(
+            buffer,
+            message,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            submission_id=submission_id,
+        ):
+            return
+        elif kind == "response_fact":
+            record = _response_fact_record(message)
+            if record is not None:
+                buffer.append(
+                    ResponseFactReceived(
+                        session_id=buffer.session_id,
+                        turn_id=turn_id,
+                        submission_id=submission_id,
+                        record=record,
+                    )
+                )
+        elif kind == "agent_message_content_delta":
+            buffer.append(
+                OutputTextDelta(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=message["item_id"],
+                    delta=message["delta"],
+                )
+            )
+        elif kind == "item_completed" and message["item"]["type"] == "ContextCompaction":
+            buffer.append(
+                ContextCompacted(
+                    session_id=buffer.session_id,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    item_id=message["item"]["id"],
+                )
+            )
+        elif kind == "item_completed":
+            item = project_model_output_item(message["item"], True, turn_id)
+            if item is not None and (
+                item["type"]
+                in {
+                    "web_search_call",
+                    "file_search_call",
+                    "code_interpreter_call",
+                    "image_generation_call",
+                }
+                or any(part.get("annotations") for part in item["content"])
+            ):
+                buffer.append(
+                    ModelOutputItemCompleted(
+                        session_id=buffer.session_id,
+                        turn_id=turn_id,
+                        submission_id=submission_id,
+                        item=cast(
+                            MessageItem
+                            | WebSearchCallItem
+                            | FileSearchCallItem
+                            | CodeInterpreterCallItem
+                            | ImageGenerationCallItem,
+                            item,
+                        ),
+                    )
+                )
+
+
+def _project_execution(
+    buffer: _ObservationBuffer,
+    message: dict[str, Any],
+    *,
+    thread_id: str,
+    turn_id: str,
+    submission_id: str | None,
+) -> bool:
+    item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
+    if item is None:
+        return False
+    if submission_id is None:
+        # Canonical history still has the completion after the stream loses its owner.
+        buffer._mark_gap()
+        return True
+    buffer.append(
+        ExecutionItemCompleted(
+            session_id=buffer.session_id,
+            turn_id=turn_id,
+            submission_id=submission_id,
+            item=item,
+        )
+    )
+    return True
+
+
+def _project_request(
+    buffer: _ObservationBuffer,
+    event: dict[str, Any],
+    submission_id: str,
+    turn_id: str | None,
+) -> None:
+    observation = _request_observation(
+        event["msg"].get("observation"),
+        session_id=buffer.session_id,
+        submission_id=submission_id,
+    )
+    if (
+        observation is not None
+        and observation.thread_id == buffer.session_id
+        and observation.turn_id == event.get("id")
+        and turn_id in (None, observation.turn_id)
+    ):
+        buffer.append(observation)
+
+
+def _project_run_prefix(
+    buffer: _ObservationBuffer,
+    events: list[dict[str, Any] | None],
+    turn_id: str,
+    submission_id: str,
+) -> list[tuple[dict[str, Any] | None, bool]]:
+    prefix: list[tuple[dict[str, Any] | None, bool]] = []
+    for event in events:
+        if event is None:
+            prefix.append((None, False))
+            continue
+        message = event.get("msg", {})
+        kind = message.get("type")
+        projected = (
+            event.get("subagent_id") is None
+            and not any(
+                key in message
+                for key in (
+                    "_sdk_callback",
+                    "_sdk_python_tool",
+                    "_sdk_manual",
+                    "_sdk_policy_failure",
+                )
+            )
+            and "_sdk_policy_failure" not in event
+            and event.get("sdk_unsampled_steering") in (None, False)
+            and kind
+            in {
+                "_sdk_request_metadata",
+                "token_count",
+                "hosted_tool_call_progress",
+                "agent_message_content_delta",
+                "item_completed",
+                "response_fact",
+            }
+        )
+        if projected:
+            if kind == "_sdk_request_metadata":
+                if event["msg"].get("submission_id") == submission_id:
+                    _project_request(buffer, event, submission_id, turn_id)
+            else:
+                _project_progress(
+                    buffer,
+                    event,
+                    turn_id=turn_id,
+                    submission_id=submission_id,
+                    thread_id=buffer.session_id,
+                )
+        prefix.append((event, projected))
+    return prefix
+
+
+def _closed_run_observations(
+    archive: Any,
+    session_id: str,
+    turn_id: str,
+    submission_id: str,
+) -> _ObservationBuffer:
+    buffer = _ObservationBuffer(session_id)
+    buffer.append(TurnStarted(session_id=session_id, turn_id=turn_id, submission_id=submission_id))
+    _project_run_prefix(buffer, json.loads(archive.json()), turn_id, submission_id)
+    buffer.append(
+        TurnFinished(
+            session_id=session_id, turn_id=turn_id, submission_id=submission_id, status="completed"
+        )
+    )
+    buffer.finish("closed")
+    return buffer
+
+
+def _validate_output(output: _PreparedOutput, text: str, context: str | None) -> Any:
+    with _owned_span("output validation", "validation", context):
+        return output.validate(text)
+
+
+async def _join_run_owner(owner: Any) -> tuple[Any, asyncio.CancelledError | None]:
+    pending = asyncio.ensure_future(owner.run())
+    cancelled = None
+    while not pending.done():
+        try:
+            await asyncio.wait((pending,))
+        except asyncio.CancelledError as error:
+            if cancelled is None:
+                cancelled = error
+            owner.cancel()
+    try:
+        return pending.result(), cancelled
+    except BaseException as error:
+        if cancelled is not None:
+            _retain_cleanup_error(cancelled, error, _error_contexts(cancelled.__context__))
+            raise cancelled  # noqa: B904 - preserve explicit causes and owned cleanup contexts
+        raise
+
+
+@dataclass(frozen=True)
+class _RunHandoff:
+    scope: tuple[Any, Any, Any]
+    info: dict[str, Any]
+    archive: Any
+    failures: list[tuple[str, BaseException]]
+    cancelled: asyncio.CancelledError | None
+    submission_id: str
+
+
 class _OpeningOwner:
     """Join Python publication; exact native slots remain registered by the lease."""
 
@@ -1118,6 +1379,42 @@ class _OpeningOwner:
             with suppress(BaseException):
                 await _join(pending)
             raise
+
+    async def run(
+        self,
+        owner: Any,
+        agent: Agent[Any, Any],
+        output: _PreparedOutput,
+        submission_id: str,
+    ) -> Completed[Any] | _RunHandoff:
+        (scope, info_json, archive, failures), cancelled = await _join_run_owner(owner)
+        info = json.loads(info_json)
+        if scope is not None:
+            return _RunHandoff(scope, info, archive, failures, cancelled, submission_id)
+        from ._completed_turn_owner import _CompletedTurnOwner
+
+        # Native success has joined and released the Opening lease.
+        self.lease = None
+        self.api_key = None
+        value = _validate_output(output, info["output"], None)
+        result = _CompletedTurnOwner(
+            opening_agent=agent,
+            session_id=info["thread_id"],
+            turn_id=info["receipt"]["turn_id"],
+            submission_id=submission_id,
+            output=value,
+            usage=_token_usage_info(info.get("usage")),
+            observations=partial(
+                _closed_run_observations,
+                archive,
+                info["thread_id"],
+                info["receipt"]["turn_id"],
+                submission_id,
+            ),
+        )._completed
+        if cancelled is not None:
+            raise cancelled
+        return result
 
     def disown(self, session: Session[Any, Any]) -> None:
         self.lease.adopt()
@@ -1165,7 +1462,8 @@ class _OpeningOwner:
                 candidates.append(state.task)
             workers = [worker for worker in candidates if worker is not None]
             for worker in workers:
-                cancel_once(worker)
+                if not worker.done():
+                    cancel_once(worker)
             interception = getattr(session, "_interception", None)
             closing = [interception.close()] if interception is not None else []
             # Retire every armed worker before releasing this unpublished owner.
@@ -2319,7 +2617,8 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
-    ) -> Session[ContextT, OutputT]:
+        _completed_input: str | None = None,
+    ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
         if retention_omitted:
             observation_retention = "bounded"
@@ -3066,19 +3365,64 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
 
-                if _atomic_first_turn:
-                    engine, thread, home = await opening.acquire(
-                        native._open_conversation(
+                async def initialize_atomic() -> (
+                    tuple[Any, Any, Any] | Completed[Any] | _RunHandoff
+                ):
+                    if (
+                        _completed_input is not None
+                        and observation_retention == "bounded"
+                        and context is None
+                        and not owned_provider
+                        and not available
+                        and not agent.handoffs
+                        and _tracing_context is None
+                        and (agent.output_type is None or agent.output_type is str)
+                        and not output.max_retries
+                    ):
+                        submission_id = uuid4().hex
+                        owner = native._prepare_run_conversation(
                             json.dumps(config),
                             json.dumps(runtime),
                             json.dumps(options),
                             native_specs,
                             json.dumps(settings),
+                            json.dumps(
+                                {
+                                    "mode": "start_if_idle",
+                                    "input": _native_input(_completed_input),
+                                    "observation_submission_id": submission_id,
+                                }
+                            ),
                             api_key=opening.api_key or "",
                             provider_lease=provider_lease,
                             _share_model_http=True,
                         )
+                        return await opening.run(owner, agent, output, submission_id)
+                    return cast(
+                        tuple[Any, Any, Any],
+                        await opening.acquire(
+                            native._open_conversation(
+                                json.dumps(config),
+                                json.dumps(runtime),
+                                json.dumps(options),
+                                native_specs,
+                                json.dumps(settings),
+                                api_key=opening.api_key or "",
+                                provider_lease=provider_lease,
+                                _share_model_http=True,
+                            )
+                        ),
                     )
+
+                handoff: _RunHandoff | None = None
+                if _atomic_first_turn:
+                    acquired = await initialize_atomic()
+                    if isinstance(acquired, Completed):
+                        return cast("Completed[OutputT]", acquired)
+                    if isinstance(acquired, _RunHandoff):
+                        handoff = acquired
+                        acquired = handoff.scope
+                    engine, thread, home = acquired
                 else:
                     engine = await initialize_engine()
 
@@ -3122,6 +3466,7 @@ class Session(Generic[ContextT, OutputT]):
                     output,
                     instructions,
                     _start_readers=False,
+                    _start_event_reader=handoff is None,
                     max_function_concurrency=max_function_concurrency,
                     observation_retention=observation_retention,
                 )
@@ -3286,6 +3631,13 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
                     active.task = _create_task(session._execute(active, [], admitted=True))
+                if handoff is not None:
+                    await session._finish_run_opening(
+                        opening,
+                        handoff,
+                        cast(str, _completed_input),
+                    )
+                    return session
                 session._start_readers()
                 opening.disown(session)
                 session._environment_lease = lease
@@ -3414,6 +3766,7 @@ class Session(Generic[ContextT, OutputT]):
         instructions: str,
         *,
         _start_readers: bool = True,
+        _start_event_reader: bool = True,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> None:
@@ -3509,6 +3862,7 @@ class Session(Generic[ContextT, OutputT]):
         self._closing = False
         self._closed = False
         self._resources_retired = False
+        self._native_scope_failure: BaseException | None = None
         self._broken = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
@@ -3527,7 +3881,12 @@ class Session(Generic[ContextT, OutputT]):
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         self._realtime: RealtimeSession | None = None
         # The sole native reader owns questions during opening publication.
-        self._reader = _create_task(self._read_events())
+        self._reader: asyncio.Future[None]
+        if _start_event_reader:
+            self._reader = _create_task(self._read_events())
+        else:
+            self._reader = _future()
+            self._reader.set_result(None)
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
@@ -5367,7 +5726,9 @@ class Session(Generic[ContextT, OutputT]):
         invalid item batch or non-idle owner before committing. ``keep=0`` replaces
         the effective conversation; append with ``keep=snapshot.total``. The
         acknowledged replacement survives restore through canonical storage.
-        Raw rollout audit records remain. Child graphs, goals and pending work
+        An uncertain persistence outcome retires this Session; close it and
+        restore from storage before continuing. Raw rollout audit records remain.
+        Child graphs, goals and pending work
         must settle or use their dedicated APIs before editing history.
         """
         self._check_callback_operation("edit canonical history from its own Session")
@@ -5382,6 +5743,12 @@ class Session(Generic[ContextT, OutputT]):
             value = json.loads(
                 await self._native._transact_history(expected_revision, keep, captured)
             )
+            if value.get("outcome") == "uncertain":
+                self._broken = True
+                self._model_context_snapshots.clear()
+                raise NativeError(
+                    "Canonical history commit outcome is uncertain; close and restore the Session"
+                )
             self._model_context_snapshots.clear()
             return str(value["revision"])
 
@@ -6121,10 +6488,17 @@ class Session(Generic[ContextT, OutputT]):
             del trace_options
 
     def _start_execution(
-        self, state: _Submission, input: list[dict[str, Any]] | None
+        self,
+        state: _Submission,
+        input: list[dict[str, Any]] | None,
+        *,
+        admitted: bool = False,
+        native_admission: dict[str, Any] | BaseException | None = None,
     ) -> BaseException | None:
         try:
-            state.task = _create_task(self._execute(state, input))
+            state.task = _create_task(
+                self._execute(state, input, admitted=admitted, native_admission=native_admission)
+            )
         except BaseException as error:
             tracing, state.tracing = state.tracing, None
             if tracing is not None:
@@ -7320,8 +7694,150 @@ class Session(Generic[ContextT, OutputT]):
 
         await _join(asyncio.create_task(finish_cancellation()))
 
+    async def _finish_run_opening(
+        self,
+        opening: _OpeningOwner,
+        handoff: _RunHandoff,
+        input: str,
+    ) -> None:
+        opening.disown(self)
+        opening.lease = None
+        try:
+            if handoff.info["status"] != "unsubmitted":
+                adopted = self._adopt_run(
+                    handoff.info,
+                    handoff.archive,
+                    handoff.failures,
+                    _native_input(input),
+                    handoff.submission_id,
+                )
+                if handoff.cancelled is not None:
+                    raise handoff.cancelled
+                await asyncio.wait((adopted.accepted,))
+                adopted.accepted.result()
+            else:
+                self._reader = _create_task(self._read_events())
+                self._start_readers()
+                if handoff.cancelled is not None:
+                    raise handoff.cancelled
+        except BaseException as error:
+            await _close_after_error(error, self.aclose)
+            raise
+
+    def _adopt_run(
+        self,
+        info: dict[str, Any],
+        archive: Any,
+        failures: list[tuple[str, BaseException]],
+        input: list[dict[str, Any]],
+        submission_id: str,
+    ) -> _Submission:
+        state = _Submission(self._default_output)
+        state.issued = _root_turn(self, None, submission_id, state.completion)
+        self._register_request_observation(state, state.issued)
+        self._active = state
+        receipt = info.get("receipt")
+        if receipt is not None and receipt["status"] == "started":
+            handle = self._accept_submission(state, receipt, input)
+            assert handle.turn_id is not None
+            prefix = _project_run_prefix(
+                self._observations, json.loads(archive.json()), handle.turn_id, submission_id
+            )
+            for event, _ in prefix:
+                if event is None:
+                    continue
+                snapshot = _api_rate_limits(event["msg"].get("api_rate_limits"))
+                if snapshot is not None:
+                    self._api_rate_limit_snapshot = snapshot
+            if info["status"] == "retirement_failed":
+                # No live reader/turn remains. Settlement must not touch native handles.
+                self._active = None
+                self._closing = True
+                self._resources_retired = all(info["retired"].values())
+                outcome = Completed(
+                    handle,
+                    self._validate_traced_output(state, info["output"]),
+                    _token_usage_info(info.get("usage")),
+                )
+                self._settle_submission(state, True, None, outcome)
+                self._observations.finish("closed")
+                for phase, failure in failures:
+                    if phase not in {"thread", "engine", "lease"}:
+                        raise RuntimeError("Unexpected failure after native retirement")
+                    if self._native_scope_failure is not None:
+                        _retain_cleanup_error(
+                            failure,
+                            self._native_scope_failure,
+                            _error_contexts(failure.__context__),
+                        )
+                    self._native_scope_failure = failure
+                return state
+            reader_error = next((error for phase, error in failures if phase == "reader"), None)
+            problem = self._start_execution(state, input, admitted=True)
+            if problem is not None:
+                raise problem
+            self._reader = _create_task(self._read_events(prefix, reader_error))
+        else:
+            admission = next((error for phase, error in failures if phase == "admission"), receipt)
+            if admission is None:
+                raise RuntimeError("Native admitted fallback has no receipt or failure")
+            problem = self._start_execution(state, input, native_admission=admission)
+            if problem is not None:
+                raise problem
+            self._reader = _create_task(self._read_events())
+        return state
+
+    def _accept_submission(
+        self, state: _Submission, receipt: dict[str, Any], input: list[dict[str, Any]] | None
+    ) -> Turn[Any]:
+        if receipt["status"] != "started":
+            confirmed_rejection = receipt["status"] == "not_submitted"
+            reason = receipt["reason"]
+            problem = NativeError(
+                reason.get("message") or f"Native input was not submitted: {reason['type']}"
+            )
+            if confirmed_rejection:
+                problem._effects = "not_started"
+            raise problem
+        if state.writable_roots is not None:
+            self._writable_roots = state.writable_roots
+        if (
+            input is not None
+            and self._environment_lease is not None
+            and self._environment_lease.interrupted
+        ):
+            # Input was admitted, so retire native ownership as uncertain.
+            # Do not publish acceptance to readers which dispatch callbacks.
+            raise NativeError("Session ended during native admission")
+        handle = state.issued
+        if handle is None:
+            handle = _root_turn(
+                self, receipt["turn_id"], uuid4().hex, state.completion, state.observation_after
+            )
+        else:
+            assert handle.turn_id is None
+            object.__setattr__(handle, "turn_id", receipt["turn_id"])
+        if input is not None and state.continued_from is None:
+            self._last_turn = handle
+        state.handle = handle
+        assert handle.turn_id is not None
+        self._observations.append(
+            TurnStarted(
+                session_id=self.id,
+                turn_id=handle.turn_id,
+                submission_id=handle.submission_id,
+            )
+        )
+        state.accepted.set_result(handle)
+        return handle
+
     async def _execute(
-        self, state: _Submission, input: list[dict[str, Any]] | None, *, admitted: bool = False
+        self,
+        state: _Submission,
+        input: list[dict[str, Any]] | None,
+        *,
+        admitted: bool = False,
+        native_admission: dict[str, Any] | BaseException | None = None,
     ) -> None:
         outcome = None
         error = None
@@ -7356,166 +7872,143 @@ class Session(Generic[ContextT, OutputT]):
                 handle = state.handle
                 assert handle is not None
             else:
-                if (
-                    input is not None
-                    and state.continued_from is None
-                    and state.realtime_tool is None
-                ):
-                    assert self._opening_agent is not None
-                    opening = self._effective_agent().tools
-                    available = opening
-                    _, allowed_mcp, _ = _split_tools(available)
-                    selected = self._bound_tools
-                    if self._native_agents is not None and state.operation_slots is not None:
-                        selected = tuple(self._bound_tools[slot] for slot in state.operation_slots)
-                    if state.operation_mcp is not None and (
-                        bool(allowed_mcp)
-                        and state.operation_mcp != self._mcp_tools
-                        or selected != self._catalog.tools
+                if native_admission is not None:
+                    if isinstance(native_admission, BaseException):
+                        raise native_admission
+                    receipt = native_admission
+                else:
+                    if (
+                        input is not None
+                        and state.continued_from is None
+                        and state.realtime_tool is None
                     ):
-                        # Children inherit the confirmed generation. Root-only
-                        # step slots cannot restrict an independently owned child.
-                        candidate = _ToolCatalog(
-                            max(self._catalog.generation, self._profile_generation_high_water) + 1,
-                            selected,
-                        )
-                        publication = asyncio.create_task(
-                            self._replace_tools(
-                                candidate,
-                                state.operation_mcp,
-                                allowed_mcp,
-                                candidate.native_specs(),
+                        assert self._opening_agent is not None
+                        opening = self._effective_agent().tools
+                        available = opening
+                        _, allowed_mcp, _ = _split_tools(available)
+                        selected = self._bound_tools
+                        if self._native_agents is not None and state.operation_slots is not None:
+                            selected = tuple(
+                                self._bound_tools[slot] for slot in state.operation_slots
                             )
-                        )
-                        try:
-                            await _join(publication)
-                        except asyncio.CancelledError:
-                            # No input was submitted: finish this catalog receipt
-                            # before releasing the root or retiring its resources.
-                            confirmed_rejection = not self._broken
-                            if not publication.cancelled():
-                                publication.result()
-                            raise
-                        except (ValueError, RuntimeError):
-                            # Publication fences every uncertain receipt. Its
-                            # unfenced rejection happened before any mutation;
-                            # do not retire unrelated live children for it.
-                            confirmed_rejection = not self._broken
-                            raise
-                    if self._native_agents is not None and state.operation_slots is not None:
-                        state.operation_slots = tuple(range(len(selected)))
-                if state.prepare_request is not None:
-                    self._native._prepare_requests(True)
-                self._native._select_steps(
-                    input is not None
-                    and (
-                        bool(self._profiles)
-                        or state.budget is not None
-                        or state.before_step is not None
-                        or state.operation_slots is not None
-                    ),
-                    _native_tool_refs(state.operation_refs)
-                    if state.operation_refs is not None
-                    else None,
-                    self._native_agents is not None and self._native_agents.before_step is not None,
-                )
-                if input is None:
-                    tracing_args = {}
-                    if state.parent_trace is not None:
-                        tracing_args["trace_json"] = json.dumps(state.parent_trace.to_headers())
-                    receipt = json.loads(
-                        await self._native._compact(state.tracing.context, **tracing_args)
-                        if state.tracing is not None and state.tracing.context is not None
-                        else await self._native._compact(**tracing_args)
+                        if state.operation_mcp is not None and (
+                            bool(allowed_mcp)
+                            and state.operation_mcp != self._mcp_tools
+                            or selected != self._catalog.tools
+                        ):
+                            # Children inherit the confirmed generation. Root-only
+                            # step slots cannot restrict an independently owned child.
+                            candidate = _ToolCatalog(
+                                max(self._catalog.generation, self._profile_generation_high_water)
+                                + 1,
+                                selected,
+                            )
+                            publication = asyncio.create_task(
+                                self._replace_tools(
+                                    candidate,
+                                    state.operation_mcp,
+                                    allowed_mcp,
+                                    candidate.native_specs(),
+                                )
+                            )
+                            try:
+                                await _join(publication)
+                            except asyncio.CancelledError:
+                                # No input was submitted: finish this catalog receipt
+                                # before releasing the root or retiring its resources.
+                                confirmed_rejection = not self._broken
+                                if not publication.cancelled():
+                                    publication.result()
+                                raise
+                            except (ValueError, RuntimeError):
+                                # Publication fences every uncertain receipt. Its
+                                # unfenced rejection happened before any mutation;
+                                # do not retire unrelated live children for it.
+                                confirmed_rejection = not self._broken
+                                raise
+                        if self._native_agents is not None and state.operation_slots is not None:
+                            state.operation_slots = tuple(range(len(selected)))
+                    if state.prepare_request is not None:
+                        self._native._prepare_requests(True)
+                    self._native._select_steps(
+                        input is not None
+                        and (
+                            bool(self._profiles)
+                            or state.budget is not None
+                            or state.before_step is not None
+                            or state.operation_slots is not None
+                        ),
+                        _native_tool_refs(state.operation_refs)
+                        if state.operation_refs is not None
+                        else None,
+                        self._native_agents is not None
+                        and self._native_agents.before_step is not None,
                     )
-                else:
-                    if self._environment_lease is not None and self._environment_lease.interrupted:
-                        # Publication has settled; neither root nor continuation issued input.
-                        confirmed_rejection = True
-                        raise NativeError("Session ended before queued work was admitted")
-                    request: dict[str, Any]
-                    if state.realtime_tool is not None:
-                        generation, response_id, call_ids = state.realtime_tool
-                        request = {
-                            "generation": generation,
-                            "response_id": response_id,
-                            "call_ids": call_ids,
-                        }
-                    else:
-                        request = {
-                            "mode": "continue_if_idle" if state.continued_from else "start_if_idle",
-                            "input": input,
-                        }
-                    if state.operation_declaration_source is not None:
-                        request["operation_declaration_source"] = state.operation_declaration_source
-                    if state.parent_trace is not None:
-                        request["trace"] = state.parent_trace.to_headers()
-                    if state.issued is None:
-                        state.issued = _root_turn(
-                            self, None, uuid4().hex, state.completion, state.observation_after
-                        )
-                    route_id = self._register_request_observation(state, state.issued)
-                    request["observation_submission_id"] = route_id
-                    if state.tracing is not None and state.tracing.context is not None:
-                        request["tracing_context"] = state.tracing.context
-                    if state.continued_from is not None:
-                        request["expected_previous_turn_id"] = state.continued_from
-                    if state.output.mode == "native" and state.realtime_tool is None:
-                        request["start"] = {"final_output_json_schema": state.output.schema}
-                    if state.writable_roots is not None:
-                        request["writable_roots"] = state.writable_roots
-                    state.observation_after = self._observations.sequence
-                    object.__setattr__(state.issued, "_observation_after", state.observation_after)
-                    self._observations.notify()
-                    if state.realtime_tool is not None:
+                    if input is None:
+                        tracing_args = {}
+                        if state.parent_trace is not None:
+                            tracing_args["trace_json"] = json.dumps(state.parent_trace.to_headers())
                         receipt = json.loads(
-                            await self._native._submit_realtime_tools(json.dumps(request))
+                            await self._native._compact(state.tracing.context, **tracing_args)
+                            if state.tracing is not None and state.tracing.context is not None
+                            else await self._native._compact(**tracing_args)
                         )
                     else:
-                        receipt = json.loads(await self._native._submit(json.dumps(request)))
-                if receipt["status"] != "started":
-                    confirmed_rejection = receipt["status"] == "not_submitted"
-                    reason = receipt["reason"]
-                    problem = NativeError(
-                        reason.get("message") or f"Native input was not submitted: {reason['type']}"
-                    )
-                    if confirmed_rejection:
-                        problem._effects = "not_started"
-                    raise problem
-                if state.writable_roots is not None:
-                    self._writable_roots = state.writable_roots
-                if (
-                    input is not None
-                    and self._environment_lease is not None
-                    and self._environment_lease.interrupted
-                ):
-                    # Input was admitted, so retire native ownership as uncertain.
-                    # Do not publish acceptance to readers which dispatch callbacks.
-                    raise NativeError("Session ended during native admission")
-                handle = state.issued
-                if handle is None:
-                    handle = _root_turn(
-                        self,
-                        receipt["turn_id"],
-                        uuid4().hex,
-                        state.completion,
-                        state.observation_after,
-                    )
-                else:
-                    assert handle.turn_id is None
-                    object.__setattr__(handle, "turn_id", receipt["turn_id"])
-                if input is not None and state.continued_from is None:
-                    self._last_turn = handle
-                state.handle = handle
-                assert handle.turn_id is not None
-                self._observations.append(
-                    TurnStarted(
-                        session_id=self.id,
-                        turn_id=handle.turn_id,
-                        submission_id=handle.submission_id,
-                    )
-                )
-                state.accepted.set_result(handle)
+                        if (
+                            self._environment_lease is not None
+                            and self._environment_lease.interrupted
+                        ):
+                            # Publication has settled; neither root nor continuation issued input.
+                            confirmed_rejection = True
+                            raise NativeError("Session ended before queued work was admitted")
+                        request: dict[str, Any]
+                        if state.realtime_tool is not None:
+                            generation, response_id, call_ids = state.realtime_tool
+                            request = {
+                                "generation": generation,
+                                "response_id": response_id,
+                                "call_ids": call_ids,
+                            }
+                        else:
+                            request = {
+                                "mode": "continue_if_idle"
+                                if state.continued_from
+                                else "start_if_idle",
+                                "input": input,
+                            }
+                        if state.operation_declaration_source is not None:
+                            request["operation_declaration_source"] = (
+                                state.operation_declaration_source
+                            )
+                        if state.parent_trace is not None:
+                            request["trace"] = state.parent_trace.to_headers()
+                        if state.issued is None:
+                            state.issued = _root_turn(
+                                self, None, uuid4().hex, state.completion, state.observation_after
+                            )
+                        route_id = self._register_request_observation(state, state.issued)
+                        request["observation_submission_id"] = route_id
+                        if state.tracing is not None and state.tracing.context is not None:
+                            request["tracing_context"] = state.tracing.context
+                        if state.continued_from is not None:
+                            request["expected_previous_turn_id"] = state.continued_from
+                        if state.output.mode == "native" and state.realtime_tool is None:
+                            request["start"] = {"final_output_json_schema": state.output.schema}
+                        if state.writable_roots is not None:
+                            request["writable_roots"] = state.writable_roots
+                        state.observation_after = self._observations.sequence
+                        object.__setattr__(
+                            state.issued, "_observation_after", state.observation_after
+                        )
+                        self._observations.notify()
+                        if state.realtime_tool is not None:
+                            receipt = json.loads(
+                                await self._native._submit_realtime_tools(json.dumps(request))
+                            )
+                        else:
+                            receipt = json.loads(await self._native._submit(json.dumps(request)))
+                confirmed_rejection = receipt["status"] == "not_submitted"
+                handle = self._accept_submission(state, receipt, input)
             await asyncio.wait((state.terminal, state.failure), return_when=asyncio.FIRST_COMPLETED)
             if state.failure.done():
                 raise state.failure.result()
@@ -7864,8 +8357,7 @@ class Session(Generic[ContextT, OutputT]):
 
     def _validate_traced_output(self, state: _Submission, text: str) -> Any:
         context = state.tracing.context if state.tracing is not None else None
-        with _owned_span("output validation", "validation", context):
-            return state.output.validate(text)
+        return _validate_output(state.output, text, context)
 
     async def _repair_output(self, state: _Submission, text: str) -> Any:
         """Correct only invalid final text under the still-active root owner."""
@@ -7926,6 +8418,7 @@ class Session(Generic[ContextT, OutputT]):
                 _expected_codex_login_binding=self._codex_login_binding,
                 parent_trace=state.parent_trace,
             )
+            assert isinstance(repair, Session)
             self._repair_session = repair
             repair._trace_context = state.tracing.context if state.tracing is not None else None
             repair._context_transform_purpose = "output_repair"
@@ -8032,142 +8525,32 @@ class Session(Generic[ContextT, OutputT]):
             self._request_observation_routes.get(route_id) if isinstance(route_id, str) else None
         )
         if route is not None and not route.completion.done() and not route.stopping:
-            observation = _request_observation(
-                message.get("observation"), session_id=self.id, submission_id=route_id
-            )
             captured = route.handle or route.issued
-            if (
-                observation is not None
-                and captured is not None
-                and observation.thread_id == self.id
-                and observation.turn_id == event.get("id")
-                and captured.turn_id in (None, observation.turn_id)
-            ):
-                self._observations.append(observation)
+            if captured is not None:
+                _project_request(self._observations, event, route_id, captured.turn_id)
 
     def _observe_progress(
         self, event: dict[str, Any], handle: Turn[Any] | ChildInvocation, thread_id: str
     ) -> None:
         assert handle.turn_id is not None
-        message = event["msg"]
-        kind = message["type"]
-        if kind == "hosted_tool_call_progress" and event["id"] == handle.turn_id:
-            self._observations.append(
-                HostedToolCallProgress(
-                    session_id=self.id,
-                    turn_id=handle.turn_id,
-                    submission_id=handle.submission_id,
-                    item_id=message["event"]["item_id"],
-                    event=message["event"],
-                )
-            )
-        elif kind == "token_count" and event["id"] == handle.turn_id:
-            if "api_rate_limits" in message:
-                snapshot = _api_rate_limits(message["api_rate_limits"])
-                if snapshot is not None:
-                    self._observations.append(
-                        ApiRateLimitsUpdated(
-                            session_id=self.id,
-                            turn_id=handle.turn_id,
-                            submission_id=handle.submission_id,
-                            snapshot=snapshot,
-                        )
-                    )
-                if message.get("info") is None and message.get("rate_limits") is None:
-                    return
-            self._observations.append(
-                UsageUpdated(
-                    session_id=self.id,
-                    turn_id=handle.turn_id,
-                    submission_id=handle.submission_id,
-                    usage=_token_usage_info(message.get("info")),
-                )
-            )
-        elif message.get("thread_id") == thread_id and message.get("turn_id") == handle.turn_id:
-            if kind == "item_completed" and self._observe_execution(
-                message,
-                thread_id=thread_id,
-                turn_id=handle.turn_id,
-                submission_id=handle.submission_id,
-            ):
-                return
-            elif kind == "response_fact":
-                record = _response_fact_record(message)
-                if record is not None:
-                    self._observations.append(
-                        ResponseFactReceived(
-                            session_id=self.id,
-                            turn_id=handle.turn_id,
-                            submission_id=handle.submission_id,
-                            record=record,
-                        )
-                    )
-            elif kind == "agent_message_content_delta":
-                self._observations.append(
-                    OutputTextDelta(
-                        session_id=self.id,
-                        turn_id=handle.turn_id,
-                        submission_id=handle.submission_id,
-                        item_id=message["item_id"],
-                        delta=message["delta"],
-                    )
-                )
-            elif kind == "item_completed" and message["item"]["type"] == "ContextCompaction":
-                self._observations.append(
-                    ContextCompacted(
-                        session_id=self.id,
-                        turn_id=handle.turn_id,
-                        submission_id=handle.submission_id,
-                        item_id=message["item"]["id"],
-                    )
-                )
-            elif kind == "item_completed":
-                item = project_model_output_item(message["item"], True, handle.turn_id)
-                if item is not None and (
-                    item["type"]
-                    in {
-                        "web_search_call",
-                        "file_search_call",
-                        "code_interpreter_call",
-                        "image_generation_call",
-                    }
-                    or any(part.get("annotations") for part in item["content"])
-                ):
-                    self._observations.append(
-                        ModelOutputItemCompleted(
-                            session_id=self.id,
-                            turn_id=handle.turn_id,
-                            submission_id=handle.submission_id,
-                            item=cast(
-                                MessageItem
-                                | WebSearchCallItem
-                                | FileSearchCallItem
-                                | CodeInterpreterCallItem
-                                | ImageGenerationCallItem,
-                                item,
-                            ),
-                        )
-                    )
+        _project_progress(
+            self._observations,
+            event,
+            turn_id=handle.turn_id,
+            submission_id=handle.submission_id,
+            thread_id=thread_id,
+        )
 
     def _observe_execution(
         self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str | None
     ) -> bool:
-        item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
-        if item is None:
-            return False
-        if submission_id is None:
-            # Canonical history still has the completion after the stream loses its owner.
-            self._observations._mark_gap()
-            return True
-        self._observations.append(
-            ExecutionItemCompleted(
-                session_id=self.id,
-                turn_id=turn_id,
-                submission_id=submission_id,
-                item=item,
-            )
+        return _project_execution(
+            self._observations,
+            message,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            submission_id=submission_id,
         )
-        return True
 
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
@@ -9197,7 +9580,13 @@ class Session(Generic[ContextT, OutputT]):
         issuing_native = self._native if native is None else native
         issuing_native._release_python_callback(json.dumps(receipt))
 
-    async def _read_events(self) -> None:
+    async def _read_events(
+        self,
+        prefix: Sequence[tuple[dict[str, Any] | None, bool]] = (),
+        prefix_error: BaseException | None = None,
+    ) -> None:
+        pending_prefix = iter(prefix)
+        prefix = ()
         preparation_callbacks = {
             "_sdk_select_step": self._select_step,
             "_sdk_transform_context": self._transform_context,
@@ -9214,8 +9603,15 @@ class Session(Generic[ContextT, OutputT]):
                     cast(Any, event_native)._release_python_callback(json.dumps(pending_callback))
                     pending_callback = None
                 event_native = self._native
-                raw_event = await event_native._next_session_event()
-                event = json.loads(raw_event)
+                buffered = next(pending_prefix, None)
+                projected = buffered is not None and buffered[1]
+                if buffered is not None:
+                    event = buffered[0]
+                else:
+                    if prefix_error is not None:
+                        raise prefix_error
+                    raw_event = await event_native._next_session_event()
+                    event = json.loads(raw_event)
                 if event is None:
                     break
                 if self._realtime is not None and self._realtime._ingest(event):
@@ -9242,7 +9638,8 @@ class Session(Generic[ContextT, OutputT]):
                         # Sampling has reached dispatch; reuse the same admission
                         # wait as ordinary output without consulting _active.
                         await asyncio.wait((route.accepted,))
-                    self._observe_request_metadata(event)
+                    if not projected:
+                        self._observe_request_metadata(event)
                     continue
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
@@ -9391,6 +9788,8 @@ class Session(Generic[ContextT, OutputT]):
                         or state.handle.turn_id != late_turn_id
                     )
                 ):
+                    if projected:
+                        continue
                     started = self._observations.turn_started(late_turn_id)
                     if self._observe_execution(
                         message,
@@ -9549,7 +9948,8 @@ class Session(Generic[ContextT, OutputT]):
                     kind in {"token_count", "hosted_tool_call_progress"}
                     and event["id"] == handle.turn_id
                 ):
-                    self._observe_progress(event, handle, self.id)
+                    if not projected:
+                        self._observe_progress(event, handle, self.id)
                 elif (
                     self._mcp_reader is not None
                     and cast(Any, self._native)._has_settled_native_mcp_result_failure(
@@ -9576,7 +9976,8 @@ class Session(Generic[ContextT, OutputT]):
                         if not blank or item.get("phase") == "final_answer":
                             state.last_assistant_had_blank_final = blank
                 elif kind in {"agent_message_content_delta", "item_completed", "response_fact"}:
-                    self._observe_progress(event, handle, self.id)
+                    if not projected:
+                        self._observe_progress(event, handle, self.id)
                 elif kind == "dynamic_tool_call_request" and not state.stopping:
                     if message.get("_sdk_manual") is True:
                         # Input validation cannot depend on a consumer. A
@@ -11145,8 +11546,26 @@ class Session(Generic[ContextT, OutputT]):
             await _join(asyncio.create_task(asyncio.to_thread(owner.recover, self.aclose)))
             return
         self._check_callback_operation("close its own Session")
+        report_native_failure = self._native_scope_failure is not None
+        if report_native_failure:
+            failure, self._native_scope_failure = self._native_scope_failure, None
+            assert failure is not None
+
+            async def report_native_close() -> None:
+                if self._resources_retired:
+                    await _close_after_error(failure, self._release_provider_lease)
+                raise failure
+
+            # Reuse the ordinary scope-close error/cleanup owner wrapper. This
+            # reports the completed native attempt rather than silently retrying
+            # it during the same context exit.
+            self._scope_close_task = _create_task(report_native_close())
         task = self._scope_close_task
-        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+        if task is None or (
+            not report_native_failure
+            and task.done()
+            and (task.cancelled() or task.exception() is not None)
+        ):
             task = _create_task(self._exit_scope())
             self._scope_close_task = task
         try:
@@ -11400,6 +11819,7 @@ class Session(Generic[ContextT, OutputT]):
                         # A failed shutdown leaves the native event source live.
                         # Retire its existing read without waiting for a new event.
                         if not engine_closed and not self._reader.done():
+                            assert isinstance(self._reader, asyncio.Task)
                             cancel_once(self._reader)
                         try:
                             await self._reader

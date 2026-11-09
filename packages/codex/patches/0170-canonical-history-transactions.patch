@@ -31,10 +31,10 @@ index fe4eb5e8c742696428d3d0786c31d33107d5c637..191732b6725ce85f1479afc2fdb5c2a8
          self.rollout_path.clone()
      }
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index d3b2369f567add514a70cc5427fd8736d47dbdd3..e0d80a227d8aa007feb63df98d4a615924a95ab6 100644
+index d3b2369f567add514a70cc5427fd8736d47dbdd3..b90892458fd53b52398116905247e0205b410874 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -268,3 +268,123 @@ impl Session {
+@@ -268,3 +268,125 @@ impl Session {
  #[cfg(test)]
  #[path = "inject_tests.rs"]
  mod tests;
@@ -149,11 +149,13 @@ index d3b2369f567add514a70cc5427fd8736d47dbdd3..e0d80a227d8aa007feb63df98d4a6159
 +            .persist_rollout_items(&[codex_history::RolloutItem::Compacted(checkpoint)])
 +            .await
 +        {
-+            return Err(invalid("canonical history persistence failed"));
++            return Err(CodexErr::Fatal(
++                "Canonical history commit outcome is uncertain".into(),
++            ));
 +        }
 +        self.flush_rollout()
 +            .await
-+            .map_err(|_| invalid("canonical history flush failed"))?;
++            .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
 +        state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
 +        Ok(revision)
 +    }

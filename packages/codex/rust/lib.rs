@@ -3,6 +3,7 @@
 //! Python ownership and asyncio boundaries for the unchanged Codex runtime.
 
 mod agent_profiles;
+mod agent_run;
 mod application_instructions;
 mod async_bridge;
 mod auth;
@@ -3293,6 +3294,38 @@ fn _open_conversation<'py>(
     provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    let opening = conversation_opening(
+        config_json,
+        runtime_json,
+        options_json,
+        specs_json,
+        settings_json,
+        api_key,
+        provider_lease.inner.clone(),
+        _share_model_http,
+    )?;
+    async_bridge::future_factory_into_py(py, move || opening)
+}
+
+fn conversation_opening(
+    config_json: String,
+    runtime_json: String,
+    options_json: &str,
+    specs_json: &str,
+    settings_json: &str,
+    api_key: String,
+    lease: Arc<provider_owner::Lease>,
+    share_model_http: bool,
+) -> PyResult<
+    impl std::future::Future<
+        Output = PyResult<(
+            Engine,
+            NativeThread,
+            Option<provider_owner::NativeProviderHome>,
+        )>,
+    > + Send
+    + use<>,
+> {
     let options: options::ThreadOptions =
         config::decode(serde_json::from_str(options_json).map_err(py_error)?).map_err(py_error)?;
     if !options.permits_initial_config()
@@ -3316,10 +3349,9 @@ fn _open_conversation<'py>(
         .is_some_and(|fields| !fields.is_empty());
     let settings = ops::model_settings(settings_value)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let lease = provider_lease.inner.clone();
-    async_bridge::future_factory_into_py(py, move || async move {
+    Ok(async move {
         let (state, generated_home) = lease
-            .conversation_engine(config_json, runtime_json, api_key, _share_model_http)
+            .conversation_engine(config_json, runtime_json, api_key, share_model_http)
             .await?;
         let mut engine = Engine::new(state);
         lease.register_engine(engine.inner.clone())?;
@@ -3376,6 +3408,42 @@ fn _open_conversation<'py>(
         }
         Ok((engine, thread, generated_home))
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false))]
+fn _prepare_run_conversation(
+    config_json: String,
+    runtime_json: String,
+    options_json: &str,
+    specs_json: &str,
+    settings_json: &str,
+    input_json: String,
+    api_key: String,
+    provider_lease: PyRef<'_, provider_owner::NativeProviderLease>,
+    _share_model_http: bool,
+) -> PyResult<agent_run::NativeRun> {
+    provider_lease.inner.check_live()?;
+    if !provider_lease.inner.keeps_unpublished_owner() {
+        return Err(py_error(
+            "Native run requires an unpublished Provider lease",
+        ));
+    }
+    let opening = conversation_opening(
+        config_json,
+        runtime_json,
+        options_json,
+        specs_json,
+        settings_json,
+        api_key,
+        provider_lease.inner.clone(),
+        _share_model_http,
+    )?;
+    Ok(agent_run::NativeRun::new(
+        opening,
+        provider_lease,
+        input_json,
+    ))
 }
 
 #[pyfunction]
@@ -3794,6 +3862,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<provider_owner::NativeProviderHome>()?;
     module.add_function(wrap_pyfunction!(create_engine, module)?)?;
     module.add_function(wrap_pyfunction!(_open_conversation, module)?)?;
+    module.add_function(wrap_pyfunction!(_prepare_run_conversation, module)?)?;
+    module.add_class::<agent_run::NativeRun>()?;
+    module.add_class::<agent_run::NativeRunArchive>()?;
     module.add_function(wrap_pyfunction!(reconcile_canonical_store, module)?)?;
     module.add_function(wrap_pyfunction!(create_checkpoint_engine, module)?)?;
     module.add_function(wrap_pyfunction!(config_schema, module)?)?;

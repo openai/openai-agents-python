@@ -4,8 +4,72 @@ import json
 
 import pytest
 
-from agents import Agent, NativeProvider
+from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore
 from tests.native_fixtures import assistant_output, responses as responses
+
+
+async def test_committed_history_flush_failure_retires_live_session(responses, tmp_path):
+    class FailCheckpointFlush(SQLiteSessionStore):
+        armed = False
+        accepted_checkpoint = False
+
+        def commit(self, session_id, token, expected_revision, write_id, payload):
+            super().commit(session_id, token, expected_revision, write_id, payload)
+            if self.armed and any(
+                item.get("type") == "compacted" and "committed replacement" in json.dumps(item)
+                for item in json.loads(payload)["items"]
+            ):
+                self.accepted_checkpoint = True
+
+        def flush(self, session_id, token):
+            if self.armed and self.accepted_checkpoint:
+                self.armed = False
+                raise OSError("synthetic flush failure after committed checkpoint")
+            return super().flush(session_id, token)
+
+    responses.respond(assistant_output("restored replacement"))
+    backend = FailCheckpointFlush(tmp_path / "uncertain.sqlite")
+    storage = CustomStorage(backend)
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-uncertain") as provider:
+        agent = Agent(instructions="Answer.", provider=provider)
+        async with agent.session(
+            storage=storage, initial_messages=[{"role": "user", "content": "original history"}]
+        ) as session:
+            identity = session.id
+            before = await session.history_snapshot()
+            backend.armed = True
+            with pytest.raises(RuntimeError, match="flush|persistence|commit"):
+                await session.transact_history(
+                    expected_revision=before.revision,
+                    keep=0,
+                    items=[
+                        {
+                            "type": "message",
+                            "id": "replacement",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "committed replacement"}],
+                        }
+                    ],
+                )
+            assert backend.accepted_checkpoint
+            try:
+                stale = await session.history_snapshot()
+            except RuntimeError:
+                stale = None
+            if stale is None:
+                with pytest.raises(RuntimeError):
+                    await session.submit("must not execute")
+            assert responses.requests == []
+        async with agent.session(storage=storage, resume=identity) as restored:
+            current = await restored.history_snapshot()
+            assert "committed replacement" in json.dumps(current.items)
+            assert "original history" not in json.dumps(current.items)
+            assert current.revision != before.revision
+            assert (
+                await (await restored.submit("continue")).get_result()
+            ).final_output == "restored replacement"
+        assert stale is None, "durable replacement failed but the old live history remained usable"
+    backend.close()
 
 
 async def test_atomic_canonical_history_replacement_and_restore(responses):

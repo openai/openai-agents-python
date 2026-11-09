@@ -1539,6 +1539,8 @@ async def test_checkpoint_restores_after_source_session_home_is_deleted() -> Non
 async def test_cancelled_open_retires_late_core_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Inspect the atomic Engine/Thread tuple before Session publication.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     native = importlib.import_module("agents._native")
     create = native._open_conversation
     entered = asyncio.Event()

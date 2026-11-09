@@ -338,8 +338,8 @@
     },
     {
       "path": "0170-canonical-history-transactions.patch",
-      "sha256": "09cbf1fb14cf94c476a53f30e6c7061ca329f6b13e686f4981cd2864405ca78d"
+      "sha256": "e88a2db32ae35587399c2eeae49284f96ef83383399b26f60961f9748d74e779"
     }
   ],
-  "result_tree": "d97e9ef025e37c6db39b30c84178332e142f1863"
+  "result_tree": "6e265aa5f9096b8ce2e6836d7262cd79d0ec8d56"
 }

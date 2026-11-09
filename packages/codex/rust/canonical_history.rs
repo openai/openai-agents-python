@@ -55,7 +55,11 @@ pub async fn replace(
         !state
             .engine
             .closed
-            .load(std::sync::atomic::Ordering::Acquire),
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !state
+                .engine
+                .context_retired
+                .load(std::sync::atomic::Ordering::Acquire),
         "Codex engine is closed"
     );
     let _mutation = state
@@ -96,9 +100,27 @@ pub async fn replace(
         .context("canonical history requires complete tool call/result pairs")?;
     crate::context::check_pairs(&items, &(0..items.len()).collect::<Vec<_>>())
         .context("canonical history requires complete tool call/result pairs")?;
-    let revision = state
+    match state
         .thread
         .sdk_replace_history(&expected, keep, items)
-        .await?;
-    Ok(json!({"revision": revision}))
+        .await
+    {
+        Ok(revision) => Ok(json!({"revision": revision})),
+        Err(error)
+            if matches!(
+                error.details(),
+                codex_protocol::error::CodexErrorDetails::Fatal(_)
+            ) =>
+        {
+            // Core entered persistence but cannot prove the final durable/live outcome.
+            // Fence admission before releasing the exclusive mutation permit. Cleanup
+            // remains retryable through the existing context retirement mechanism.
+            state
+                .engine
+                .context_retired
+                .store(true, std::sync::atomic::Ordering::Release);
+            Ok(json!({"outcome": "uncertain"}))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
