@@ -1092,14 +1092,15 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..97cb28ea2bd3deeae323d533d9dd520d
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a89708ed934d
+index 0000000000000000000000000000000000000000..44998634da52145deeb6beb50ef088cbbc32530a
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1366 @@
+@@ -0,0 +1,1384 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
 +use base64::Engine as _;
++use image::ImageDecoder as _;
 +use serde_json::Value;
 +use std::collections::VecDeque;
 +const LIMIT: usize = 4096;
@@ -1171,7 +1172,7 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +        Request::Update { items, .. } => items.iter().any(|item| {
 +            item["id"].as_str().is_some_and(|id| {
 +                deletion.is_deleted(id)
-+                    && (!deletion.can_recreate_message(id) || validate_creation(item).is_err())
++                    && (!deletion.can_recreate_message(id) || !mutable_message(item))
 +            })
 +        }),
 +        Request::List { .. } => false,
@@ -1188,31 +1189,31 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +        .decode(value)
 +        .is_ok_and(|bytes| !bytes.is_empty())
 +}
-+fn valid_image_data_uri(value: &str) -> bool {
++fn valid_image_data_uri(value: &str, remaining: &mut u64) -> CodexResult<bool> {
 +    let Some((header, data)) = value.split_once(',') else {
-+        return false;
++        return Ok(false);
 +    };
 +    let Some(header) = header.strip_prefix("data:") else {
-+        return false;
++        return Ok(false);
 +    };
 +    let Some((mime, encoding)) = header.split_once(';') else {
-+        return false;
++        return Ok(false);
 +    };
 +    let format = if mime.eq_ignore_ascii_case("image/png") {
 +        image::ImageFormat::Png
 +    } else if mime.eq_ignore_ascii_case("image/jpeg") {
 +        image::ImageFormat::Jpeg
 +    } else {
-+        return false;
++        return Ok(false);
 +    };
 +    if !encoding.eq_ignore_ascii_case("base64") {
-+        return false;
++        return Ok(false);
 +    }
 +    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-+        return false;
++        return Ok(false);
 +    };
 +    if bytes.is_empty() {
-+        return false;
++        return Ok(false);
 +    }
 +    let mut limits = image::Limits::default();
 +    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -1221,12 +1222,16 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +    let mut header =
 +        image::ImageReader::with_format(std::io::Cursor::new(bytes.as_slice()), format);
 +    header.limits(limits.clone());
-+    if header.into_dimensions().is_err() {
-+        return false;
-+    }
++    let Ok(decoder) = header.into_decoder() else {
++        return Ok(false);
++    };
++    *remaining = remaining
++        .checked_sub(decoder.total_bytes())
++        .ok_or_else(|| invalid("Provider history image decoding exceeds its 64 MiB work budget"))?;
++    drop(decoder);
 +    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
 +    reader.limits(limits);
-+    reader.decode().is_ok()
++    Ok(reader.decode().is_ok())
 +}
 +
 +fn mutable_message(item: &Value) -> bool {
@@ -1243,50 +1248,52 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +        && a.keys().filter(|key| key.as_str() != "status").count()
 +            == b.keys().filter(|key| key.as_str() != "status").count()
 +}
-+fn validate_creation(item: &Value) -> CodexResult<()> {
++fn validate_creation(item: &Value, remaining: &mut u64) -> CodexResult<bool> {
 +    if !mutable_message(item) {
-+        return Err(invalid(
-+            "Only system, user, and assistant messages may be created or corrected",
-+        ));
++        return Ok(false);
 +    }
 +    let role = item["role"].as_str().unwrap();
-+    let content = item["content"]
-+        .as_array()
-+        .ok_or_else(|| invalid("Provider message content must be an array"))?;
-+    if content.is_empty()
-+        || content
-+            .iter()
-+            .any(|part| match (role, part["type"].as_str()) {
-+                ("system" | "user", Some("input_text")) | ("assistant", Some("output_text")) => {
-+                    part["text"].as_str().is_none()
-+                }
-+                ("user", Some("input_image")) => {
-+                    part["image_url"]
-+                        .as_str()
-+                        .is_none_or(|image| !valid_image_data_uri(image))
-+                        || part.get("detail").is_some_and(|detail| {
-+                            !matches!(detail.as_str(), Some("auto" | "low" | "high"))
-+                        })
-+                }
-+                ("user", Some("input_audio")) => {
-+                    part["audio"]
-+                        .as_str()
-+                        .is_none_or(|audio| !valid_base64(audio))
-+                        || part
-+                            .get("transcript")
-+                            .is_some_and(|text| text.as_str().is_none())
-+                }
-+                _ => true,
-+            })
-+    {
++    let Some(content) = item["content"].as_array() else {
++        return Ok(false);
++    };
++    if content.is_empty() {
++        return Ok(false);
++    }
++    for part in content {
++        let valid = match (role, part["type"].as_str()) {
++            ("system" | "user", Some("input_text")) | ("assistant", Some("output_text")) => {
++                part["text"].as_str().is_some()
++            }
++            ("user", Some("input_image")) => {
++                let Some(image) = part["image_url"].as_str() else {
++                    return Ok(false);
++                };
++                valid_image_data_uri(image, remaining)?
++                    && !part.get("detail").is_some_and(|detail| {
++                        !matches!(detail.as_str(), Some("auto" | "low" | "high"))
++                    })
++            }
++            ("user", Some("input_audio")) => {
++                part["audio"].as_str().is_some_and(valid_base64)
++                    && !part
++                        .get("transcript")
++                        .is_some_and(|text| text.as_str().is_none())
++            }
++            _ => false,
++        };
++        if !valid {
++            return Ok(false);
++        }
++    }
++    Ok(true)
++}
++
++fn creation_item(item: &Value, remaining: &mut u64) -> CodexResult<Value> {
++    if !validate_creation(item, remaining)? {
 +        return Err(invalid(
 +            "Unsupported provider message role/content combination",
 +        ));
 +    }
-+    Ok(())
-+}
-+fn creation_item(item: &Value) -> CodexResult<Value> {
-+    validate_creation(item)?;
 +    let parts = item["content"]
 +        .as_array()
 +        .unwrap()
@@ -1352,6 +1359,7 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +    desired: &[Value],
 +    boundary: Option<&str>,
 +) -> CodexResult<VecDeque<Action>> {
++    let mut remaining_image_work = MAX_IMAGE_DECODE_BYTES;
 +    let mut ids = HashSet::new();
 +    for item in desired {
 +        if !ids.insert(item_id(item)?.to_owned()) {
@@ -1427,7 +1435,8 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +        let mut mandatory = Vec::new();
 +        for (new_index, item) in new.iter().enumerate() {
 +            if let Some(&(old_index, known)) = by_id.get(item_id(item)?) {
-+                if same_message(known, item) && validate_creation(item).is_err() {
++                if same_message(known, item) && !validate_creation(item, &mut remaining_image_work)?
++                {
 +                    if mandatory
 +                        .last()
 +                        .is_some_and(|&(_, previous)| previous >= old_index)
@@ -1479,7 +1488,7 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +                    ));
 +                }
 +                creates.push_back(Action::Create {
-+                    item: creation_item(item)?,
++                    item: creation_item(item, &mut remaining_image_work)?,
 +                    previous: previous.clone(),
 +                });
 +            }
@@ -1927,6 +1936,15 @@ index 0000000000000000000000000000000000000000..d48e56352f1c441420cd81878ea0a897
 +
 +#[cfg(test)]
 +mod tests {
++    fn creation_item(item: &Value) -> CodexResult<Value> {
++        let mut remaining = MAX_IMAGE_DECODE_BYTES;
++        super::creation_item(item, &mut remaining)
++    }
++    fn valid_image_data_uri(value: &str) -> bool {
++        let mut remaining = MAX_IMAGE_DECODE_BYTES;
++        super::valid_image_data_uri(value, &mut remaining).unwrap_or(false)
++    }
++
 +    #[test]
 +    fn external_boundary_deletion_invalidates_order_without_inventing_root() {
 +        let mut state = super::State::default();

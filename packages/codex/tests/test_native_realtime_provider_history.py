@@ -2193,12 +2193,23 @@ async def test_native_create_ack_allows_unreported_media_fields(
 
 
 @pytest.mark.parametrize(
-    ("width", "height", "rgba", "accepted"),
-    [(20000, 20000, False, False), (3840, 2160, True, True)],
-    ids=["compressed-decoder-bomb", "ordinary-4k-rgba"],
+    ("width", "height", "rgba", "rows", "parts", "accepted"),
+    [
+        (20000, 20000, False, 1, 1, False),
+        (3840, 2160, True, 1, 1, True),
+        (4096, 4096, False, 8, 1, False),
+        (4096, 4096, False, 1, 8, False),
+    ],
+    ids=["compressed-decoder-bomb", "ordinary-4k-rgba", "cumulative-rows", "cumulative-parts"],
 )
 async def test_native_history_image_decoder_limits_precede_mutation_and_allow_4k(
-    realtime_peer: RealtimePeer, width: int, height: int, rgba: bool, accepted: bool
+    realtime_peer: RealtimePeer,
+    width: int,
+    height: int,
+    rgba: bool,
+    rows: int,
+    parts: int,
+    accepted: bool,
 ) -> None:
     peer = realtime_peer
     original = {
@@ -2208,14 +2219,17 @@ async def test_native_history_image_decoder_limits_precede_mutation_and_allow_4k
         "status": "completed",
         "content": [{"type": "input_text", "text": "Keep unless image validation succeeds"}],
     }
-    replacement = {
-        "id": "image-decoder-replacement",
-        "type": "message",
-        "role": "user",
-        "content": [
-            {"type": "input_image", "image_url": _streamed_png_data_uri(width, height, rgba=rgba)}
-        ],
-    }
+    image = _streamed_png_data_uri(width, height, rgba=rgba)
+    replacements = [
+        {
+            "id": f"image-decoder-replacement-{index}",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": image} for _ in range(parts)],
+        }
+        for index in range(rows)
+    ]
+    replacement = replacements[0]
     async with (
         timeout(30),
         NativeProvider(
@@ -2232,7 +2246,7 @@ async def test_native_history_image_decoder_limits_precede_mutation_and_allow_4k
         await observe_item(peer, events, original)
         start = len(peer.frames)
         cursor = start
-        updating = asyncio.create_task(voice.update_history([replacement]))
+        updating = asyncio.create_task(voice.update_history(replacements))
         try:
             request = await peer.frame(
                 lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
@@ -2372,3 +2386,175 @@ async def test_native_malformed_retrieval_keeps_read_receipt_until_matching_late
             if not retrieving.done():
                 await voice.aclose()
             await asyncio.gather(retrieving, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("retained_rows", "added_rows"),
+    [(8, 0), (3, 2)],
+    ids=["mandatory-scan-overflow", "shared-scan-and-materialization"],
+)
+async def test_native_mandatory_image_scan_propagates_cumulative_budget_failure(
+    realtime_peer: RealtimePeer,
+    retained_rows: int,
+    added_rows: int,
+) -> None:
+    peer = realtime_peer
+    image = _streamed_png_data_uri(4096, 4096, rgba=False)
+    rows = [
+        {
+            "id": f"mandatory-scan-image-{index}",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": image}],
+        }
+        for index in range(retained_rows)
+    ]
+    desired = rows + [
+        {**rows[0], "id": f"mandatory-scan-added-{index}"} for index in range(added_rows)
+    ]
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-mandatory-image-scan-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Propagate hard image work limits.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        predecessor = None
+        for item in rows:
+            await observe_item(peer, events, item, previous_item_id=predecessor)
+            predecessor = item["id"]
+        start = len(peer.frames)
+        cursor = start
+        updating = asyncio.create_task(voice.update_history(desired))
+        try:
+            for item in rows:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == item["id"]
+                assert peer.socket is not None
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": item})
+            with pytest.raises(RuntimeError, match="budget|limit|capacity"):
+                await updating
+            assert not any(
+                frame["type"] in ("conversation.item.delete", "conversation.item.create")
+                for frame in peer.frames[start:]
+            )
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                for item in rows:
+                    request = await peer.frame(
+                        lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                    )
+                    cursor = peer.frames.index(request, cursor) + 1
+                    assert request["item_id"] == item["id"]
+                    await peer.socket.send_json(
+                        {"type": "conversation.item.retrieved", "item": item}
+                    )
+                assert await retrieving == rows
+                assert not peer.disconnected.is_set()
+                assert peer.connections == 1
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
+
+
+async def test_native_reordering_retains_invalid_embedded_image_and_moves_only_text(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    image = {
+        "id": "provider-only-invalid-image",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_image", "image_url": "data:image/png;base64,AQID"}],
+    }
+    text = {
+        "id": "text-around-provider-only-image",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Move this text before the retained image"}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-provider-only-image-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Retain provider-only image rows unchanged.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, image)
+        await observe_item(peer, events, text, previous_item_id=image["id"])
+        start = len(peer.frames)
+        cursor = start
+        updating = asyncio.create_task(voice.update_history([text, image]))
+        try:
+            for item in (image, text):
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == item["id"]
+                assert peer.socket is not None
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": item})
+            deletion = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+            )
+            cursor = peer.frames.index(deletion, cursor) + 1
+            assert deletion["item_id"] == text["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {"type": "conversation.item.deleted", "item_id": text["id"]}
+            )
+            creation = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.create", after=cursor
+            )
+            cursor = peer.frames.index(creation, cursor) + 1
+            assert creation["item"] == text
+            assert creation["previous_item_id"] == "root"
+            await observe_item(peer, events, text)
+            await updating
+            assert [
+                frame
+                for frame in peer.frames[start:]
+                if frame["type"] in ("conversation.item.delete", "conversation.item.create")
+            ] == [deletion, creation]
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                for item in (text, image):
+                    request = await peer.frame(
+                        lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                    )
+                    cursor = peer.frames.index(request, cursor) + 1
+                    assert request["item_id"] == item["id"]
+                    await peer.socket.send_json(
+                        {"type": "conversation.item.retrieved", "item": item}
+                    )
+                assert await retrieving == [text, image]
+                assert not peer.disconnected.is_set()
+                assert peer.connections == 1
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
