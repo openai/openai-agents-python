@@ -10,7 +10,7 @@ import weakref
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -515,6 +515,38 @@ async def test_slow_session_readers_report_evicted_observations(
 
 
 @pytest.mark.parametrize(
+    "chunk,count",
+    [("x", 350), ("y" * 70_000, 1)],
+    ids=["many-small-deltas", "single-large-delta"],
+)
+async def test_all_retention_preserves_late_and_slow_native_readers(
+    responses: ResponsesFixture, chunk: str, count: int
+) -> None:
+    responses.respond(*text_response("retained-message", *[chunk for _ in range(count)]))
+    async with (
+        timeout(30),
+        Agent(instructions="Answer briefly.", provider=provider(responses)).session(
+            observation_retention="all"
+        ) as session,
+    ):
+        slow = session.events()
+        cancelled = session.events()
+        await cancelled.aclose()
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == chunk * count
+        await session._aclose()
+        late_events = await collect(session.events())
+        slow_events = await collect(slow)
+        assert late_events == slow_events
+        assert not any(isinstance(event, EventGap) for event in late_events)
+        assert (
+            "".join(event.delta for event in late_events if isinstance(event, OutputTextDelta))
+            == chunk * count
+        )
+        assert [event.sequence for event in late_events] == list(range(1, len(late_events) + 1))
+
+
+@pytest.mark.parametrize(
     ("chunk", "count", "successor"),
     [("x", 350, False), ("y" * 1000, 100, True)],
     ids=["idle-count", "successor-characters"],
@@ -911,3 +943,228 @@ async def test_native_reader_exit_ends_observation_after_submission_cleanup(
             assert events[-2].status == "failed"
         with pytest.raises(RuntimeError, match="cannot continue"):
             await session.submit("must not run")
+
+
+async def test_invalid_observation_retention_rejected_before_opening() -> None:
+    agent = Agent(instructions="Answer.")
+    with pytest.raises(ValueError, match="observation_retention"):
+        async with agent.session(observation_retention="invalid"):  # type: ignore[arg-type]
+            pytest.fail("invalid retention opened a Session")
+
+
+async def test_all_retention_preserves_observations_before_source_gap() -> None:
+    from _agents_codex.observation import _ObservationBuffer
+
+    buffer = _ObservationBuffer("session", retention="all")
+    buffer.append(TurnStarted(session_id="session", submission_id="submission", turn_id="turn"))
+    buffer._mark_gap()
+    buffer.finish("closed")
+    events = await collect(EventStream(buffer, after=0))
+    assert [event.type for event in events] == ["turn_started", "gap", "session_ended"]
+    assert isinstance(events[1], EventGap)
+    assert events[1].first_sequence == events[1].sequence == 2
+
+
+@pytest.mark.parametrize("child_id", [None, "child"])
+async def test_all_retention_exposes_source_gaps_to_scoped_turn_readers(child_id) -> None:
+    from types import SimpleNamespace
+
+    from _agents_codex.observation import _ObservationBuffer
+
+    buffer = _ObservationBuffer("session", retention="all")
+    buffer._mark_gap()
+    buffer.finish("closed")
+    turn = SimpleNamespace(child_id=child_id, _steps=lambda: [])
+    events = await collect(EventStream(buffer, after=0, _turn=cast(Any, turn)))
+    assert len(events) == 1
+    assert isinstance(events[0], EventGap)
+    assert events[0].first_sequence == events[0].sequence == 1
+
+
+async def test_native_turn_replays_retained_source_gap(responses) -> None:
+    responses.respond(*text_response("gap-output", "done"))
+    async with Agent(instructions="Answer.", provider=provider(responses)).session(
+        observation_retention="all"
+    ) as session:
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == "done"
+        session._observations._mark_gap()
+        events = [event async for event in turn.events()]
+        assert any(isinstance(event, EventGap) for event in events)
+
+
+async def test_repair_source_gap_reaches_public_parent_turn_events(responses, monkeypatch) -> None:
+    from pydantic import Field
+
+    from _agents_codex.observation import _ObservationBuffer
+    from agents import PromptedOutput
+
+    class Report(BaseModel):
+        label: str = Field(min_length=2)
+
+    append = _ObservationBuffer.append
+
+    def append_with_source_loss(buffer, event):
+        retained = append(buffer, event)
+        if isinstance(event, TurnStarted) and buffer.repair_parent is not None:
+            # Inject source loss after the real correction publishes its start.
+            buffer._mark_gap()
+        return retained
+
+    monkeypatch.setattr(_ObservationBuffer, "append", append_with_source_loss)
+    responses.respond(*text_response("invalid", '{"label":"x"}'))
+    responses.respond(*text_response("corrected", '{"label":"corrected"}'))
+    async with Agent(
+        instructions="Answer.", provider=provider(responses), output_type=PromptedOutput(Report, 1)
+    ).session(observation_retention="all") as session:
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == Report(label="corrected")
+        events = [event async for event in turn.events()]
+        gaps = [event for event in events if isinstance(event, EventGap)]
+        assert len(gaps) == 1
+        assert gaps[0].session_id == session.id and gaps[0].sequence > 1
+        assert len([event for event in events if isinstance(event, TurnStarted)]) == 2
+        assert [event async for event in turn.events()] == events
+
+
+async def test_repair_local_eviction_does_not_report_loss_in_parent_log() -> None:
+    from _agents_codex.observation import _ObservationBuffer
+
+    parent = _ObservationBuffer("parent", retention="all")
+    repair = _ObservationBuffer("repair")
+    repair.repair_parent = (parent, "root")
+    repair.append(
+        OutputTextDelta(
+            session_id="repair",
+            submission_id="correction",
+            turn_id="repair-turn",
+            item_id="text",
+            delta="x" * 70_000,
+        )
+    )
+    parent.finish("closed")
+    events = await collect(EventStream(parent, after=0))
+    assert [event.type for event in events] == ["output_text_delta", "session_ended"]
+    assert isinstance(events[0], OutputTextDelta) and events[0].delta == "x" * 70_000
+
+
+@pytest.mark.parametrize("retention", ["bounded", "all"])
+async def test_turn_gap_window_preserves_each_retention_contract(responses, retention) -> None:
+    responses.respond(*text_response("first", "first"))
+    responses.respond(*text_response("second", "second"))
+    async with Agent(instructions="Answer.", provider=provider(responses)).session(
+        observation_retention=retention
+    ) as session:
+        first = await session.submit("first")
+        await first.get_result()
+        session._observations._mark_gap()
+        second = await session.submit("second")
+        await second.get_result()
+        # Bounded raw observations keep their existing Session-global gap.
+        # Complete retention scopes stored gaps to this Turn's admission.
+        assert any(isinstance(event, EventGap) for event in [e async for e in second.events()]) == (
+            retention == "bounded"
+        )
+        assert any(isinstance(event, EventGap) for event in [e async for e in first.events()])
+        # A loss published after completion remains observable by a fresh cursor.
+        session._observations._mark_gap()
+        events = [event async for event in second.events()]
+        gaps = [event for event in events if isinstance(event, EventGap)]
+        assert gaps
+        assert not [event async for event in second.events(after=gaps[-1].sequence)]
+
+
+@pytest.mark.parametrize("retention", ["bounded", "all"])
+async def test_queued_turn_gap_floor_follows_dispatch_for_an_open_reader(
+    responses, retention
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        """Hold the first root until its queued sibling is observed."""
+        entered.set()
+        await release.wait()
+        return "released"
+
+    responses.respond(function_call("hold", {}, "held-call"))
+    responses.respond(*text_response("first", "first"))
+    responses.respond(*text_response("second", "second"))
+    async with (
+        timeout(30),
+        Agent(instructions="Answer.", tools=[hold], provider=provider(responses)).session(
+            observation_retention=retention
+        ) as session,
+    ):
+        try:
+            first = await session.submit("first")
+            await entered.wait()
+            second = await session.submit("second", if_busy="queue")
+            reader = second.events()
+            reading = asyncio.create_task(anext(reader))
+            await asyncio.sleep(0)
+            session._observations._mark_gap()
+            earlier_gap = session._observations.sequence
+            await asyncio.sleep(0)
+            if retention == "all":
+                assert not reading.done(), "a queued reader emitted another root's source gap"
+            release.set()
+            await first.get_result()
+            await second.get_result()
+            session._observations._mark_gap()
+            later_gap = session._observations.sequence
+            events = [await reading, *[event async for event in reader]]
+            assert any(
+                isinstance(event, EventGap) and event.sequence == later_gap for event in events
+            )
+            assert any(
+                isinstance(event, EventGap) and event.sequence == earlier_gap for event in events
+            ) == (retention == "bounded")
+            assert not [event async for event in second.events(after=later_gap)]
+        finally:
+            release.set()
+
+
+@pytest.mark.parametrize("mode", ["cancel", "close"])
+async def test_not_admitted_all_retention_reader_ends_on_withdrawal(responses, mode) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        """Hold the active root while a queued observation reader waits."""
+        entered.set()
+        await release.wait()
+        return "released"
+
+    responses.respond(function_call("hold", {}, "held-call"))
+    if mode == "cancel":
+        responses.respond(*text_response("first", "first"))
+    async with (
+        timeout(30),
+        Agent(instructions="Answer.", tools=[hold], provider=provider(responses)).session(
+            observation_retention="all"
+        ) as session,
+    ):
+        try:
+            first = await session.submit("first")
+            await entered.wait()
+            queued = await session.submit("never admitted", if_busy="queue")
+            reading = asyncio.create_task(anext(queued.events()))
+            await asyncio.sleep(0)
+            session._observations._mark_gap()
+            await asyncio.sleep(0)
+            assert not reading.done()
+            if mode == "cancel":
+                await queued.cancel()
+            else:
+                await session.aclose()
+            with pytest.raises(StopAsyncIteration):
+                await reading
+            assert queued.turn_id is None
+            if mode == "cancel":
+                release.set()
+                await first.get_result()
+        finally:
+            release.set()

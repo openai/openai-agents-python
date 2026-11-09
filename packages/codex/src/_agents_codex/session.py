@@ -92,6 +92,7 @@ from ._trace_context import (
 )
 from .agent import (
     _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
+    _OBSERVATION_RETENTION_UNSET as _OBSERVATION_RETENTION_UNSET,
     Agent as Agent,
     CodexAccount as CodexAccount,
     ContextT as ContextT,
@@ -879,6 +880,7 @@ class _NativeCallback:
 @dataclass
 class _Submission:
     output: _PreparedOutput
+    observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
@@ -958,6 +960,7 @@ class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
     handle: ChildInvocation
+    observation_after: int = 0
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
@@ -1070,6 +1073,7 @@ class _RestoreDeclaration:
     api_key: str | None
     output: _PreparedOutput
     max_function_concurrency: int | None
+    observation_retention: Literal["bounded", "all"]
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -2317,12 +2321,16 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
     ) -> Session[ContextT, OutputT]:
+        retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
+        if retention_omitted:
+            observation_retention = "bounded"
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
             max_function_concurrency = None
@@ -2350,6 +2358,8 @@ class Session(Generic[ContextT, OutputT]):
             agent = selected.declaration
             if function_concurrency_omitted:
                 max_function_concurrency = selected.max_function_concurrency
+            if retention_omitted:
+                observation_retention = selected.observation_retention
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -2375,6 +2385,8 @@ class Session(Generic[ContextT, OutputT]):
                 before_compact=agent.before_compact,
                 before_complete=agent.before_complete,
             )
+        if observation_retention not in ("bounded", "all"):
+            raise ValueError('observation_retention must be "bounded" or "all"')
         profiles = (
             _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
         )
@@ -3133,6 +3145,7 @@ class Session(Generic[ContextT, OutputT]):
                     instructions,
                     _start_readers=False,
                     max_function_concurrency=max_function_concurrency,
+                    observation_retention=observation_retention,
                 )
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
@@ -3254,6 +3267,7 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         restored_pending=True,
+                        observation_after=session._observations.sequence,
                         parent_trace=parent_trace,
                         operation_slots=operation_slots,
                         operation_mcp=mcp_tools,
@@ -3265,7 +3279,11 @@ class Session(Generic[ContextT, OutputT]):
                         operation_declaration_source=operation_source,
                     )
                     handle = _root_turn(
-                        session, continuation.turn_id, uuid4().hex, active.completion
+                        session,
+                        continuation.turn_id,
+                        uuid4().hex,
+                        active.completion,
+                        active.observation_after,
                     )
                     session._last_turn = handle
                     session._restored_turn = handle
@@ -3422,6 +3440,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         _start_readers: bool = True,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -3525,7 +3544,7 @@ class Session(Generic[ContextT, OutputT]):
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
-        self._observations = _ObservationBuffer(self.id)
+        self._observations = _ObservationBuffer(self.id, retention=observation_retention)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
@@ -4050,8 +4069,10 @@ class Session(Generic[ContextT, OutputT]):
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
-        suffix. Gaps report unavailable observations. Use items() to recover
-        recorded completions, including completions after a turn settles.
+        history. The default bounded policy retains a suffix; "all" retains every
+        emitted observation for this Session lifetime. Gaps report unavailable
+        observations. Use items() to recover recorded completions, including
+        completions after a turn settles.
         Use interactions() for live requests that need an answer.
         Set include_execution_details=True for a trusted reader that needs
         command, patch, MCP, or provider-hosted tool payloads. Hosted completions
@@ -6026,6 +6047,7 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                observation_after=self._observations.sequence,
                 before_step=before_step,
                 prepare_request=prepare_request,
                 budget=budget,
@@ -6046,7 +6068,8 @@ class Session(Generic[ContextT, OutputT]):
                 ),
             )
             if input is not None:
-                issued = _root_turn(self, None, uuid4().hex, state.completion)
+                # A queued root has no observation window until its own dispatch.
+                issued = _root_turn(self, None, uuid4().hex, state.completion, -1)
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
@@ -7399,7 +7422,9 @@ class Session(Generic[ContextT, OutputT]):
                     if state.parent_trace is not None:
                         request["trace"] = state.parent_trace.to_headers()
                     if state.issued is None:
-                        state.issued = _root_turn(self, None, uuid4().hex, state.completion)
+                        state.issued = _root_turn(
+                            self, None, uuid4().hex, state.completion, state.observation_after
+                        )
                     route_id = self._register_request_observation(state, state.issued)
                     request["observation_submission_id"] = route_id
                     if state.tracing is not None and state.tracing.context is not None:
@@ -7410,6 +7435,9 @@ class Session(Generic[ContextT, OutputT]):
                         request["start"] = {"final_output_json_schema": state.output.schema}
                     if state.writable_roots is not None:
                         request["writable_roots"] = state.writable_roots
+                    state.observation_after = self._observations.sequence
+                    object.__setattr__(state.issued, "_observation_after", state.observation_after)
+                    self._observations.notify()
                     if state.realtime_tool is not None:
                         receipt = json.loads(
                             await self._native._submit_realtime_tools(json.dumps(request))
@@ -7437,7 +7465,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Session ended during native admission")
                 handle = state.issued
                 if handle is None:
-                    handle = _root_turn(self, receipt["turn_id"], uuid4().hex, state.completion)
+                    handle = _root_turn(
+                        self,
+                        receipt["turn_id"],
+                        uuid4().hex,
+                        state.completion,
+                        state.observation_after,
+                    )
                 else:
                     assert handle.turn_id is None
                     object.__setattr__(handle, "turn_id", receipt["turn_id"])
@@ -7695,6 +7729,7 @@ class Session(Generic[ContextT, OutputT]):
                 assert state.handle is not None
                 continuation = _Submission(
                     state.output,
+                    observation_after=self._observations.sequence,
                     continued_from=state.handle.turn_id,
                     before_step=state.before_step,
                     prepare_request=state.prepare_request,
@@ -8175,7 +8210,10 @@ class Session(Generic[ContextT, OutputT]):
         key = (child_id, instance, turn_id)
         state = self._child_callbacks.get(key)
         if state is None:
-            state = _ChildCallbacks(ChildInvocation(self.id, child_id, instance, turn_id))
+            state = _ChildCallbacks(
+                ChildInvocation(self.id, child_id, instance, turn_id),
+                observation_after=self._observations.sequence,
+            )
             self._child_callbacks[key] = state
             self._observations.append(
                 TurnStarted(
