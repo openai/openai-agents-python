@@ -16,7 +16,7 @@ from .test_responses import get_function_tool_call, get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
 SECRET = "synthetic-private-exception-detail"
-GENERIC = "An error occurred while running the tool. Please try again."
+GENERIC = "An error occurred while running the tool."
 APPROVED = "Order IDs must start with ORD-."
 
 

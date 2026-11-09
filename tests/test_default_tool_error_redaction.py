@@ -17,7 +17,7 @@ from .test_responses import get_function_tool_call, get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
 SENTINEL = "synthetic-private-tool-detail"
-GENERIC_ERROR = "An error occurred while running the tool. Please try again."
+GENERIC_ERROR = "An error occurred while running the tool."
 
 
 @pytest.mark.asyncio
