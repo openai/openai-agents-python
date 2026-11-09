@@ -761,7 +761,7 @@ class DeferredTools:
             raise ValueError
         registered = {
             entry.name: entry
-            for entry in session._catalog.tools
+            for entry in session._manual_catalog(request).tools
             if isinstance(entry, _CapturedManual)
             and (job := self._jobs.get(entry.name))
             and job.tool is entry.declaration
