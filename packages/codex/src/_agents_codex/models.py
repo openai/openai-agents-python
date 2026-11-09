@@ -136,7 +136,7 @@ class ChatCompletionsModel:
                         "content": output if isinstance(output, str) else json.dumps(output),
                     }
                 )
-            elif kind == "reasoning":
+            elif kind in ("reasoning", "configuration_update"):
                 continue
             else:
                 raise ValueError("ChatCompletionsModel received an unsupported native input item")
@@ -166,6 +166,25 @@ class ChatCompletionsModel:
             )
             if key in request.body
         }
+        text = request.body.get("text") or {}
+        output_format = text.get("format") or {}
+        if output_format.get("type") == "json_schema":
+            options["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    key: value for key, value in output_format.items() if key != "type"
+                },
+            }
+        reasoning = request.body.get("reasoning") or {}
+        if reasoning.get("effort") is not None:
+            options["reasoning_effort"] = reasoning["effort"]
+        if "top_logprobs" in request.body:
+            options["logprobs"] = True
+            options["top_logprobs"] = request.body["top_logprobs"]
+        if any(key in request.body for key in ("prompt", "truncation", "context_management")):
+            raise ValueError(
+                "Responses-only request controls require a Responses provider or custom NativeModel"
+            )
         if "max_output_tokens" in request.body:
             options["max_completion_tokens"] = request.body["max_output_tokens"]
         if tools:
