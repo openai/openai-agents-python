@@ -241,7 +241,10 @@ class MongoDBSessionStore:
                         "amount": self.ttl,
                     }
                 }
-            result = self.collection.update_one(condition, [{"$set": values}])
+            pipeline: list[dict[str, Any]] = [{"$set": values}]
+            if self.ttl is None:
+                pipeline.append({"$unset": "expires_at"})
+            result = self.collection.update_one(condition, pipeline)
             if result.matched_count != 1:
                 raise RuntimeError("Canonical storage revision conflict or writer was fenced")
 

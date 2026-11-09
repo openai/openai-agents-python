@@ -30,7 +30,11 @@ if not same and revision ~= tonumber(ARGV[2]) then
 end
 redis.call('HSET', KEYS[2], 'revision', tonumber(ARGV[2]) + 1,
   'write_id', ARGV[3], 'payload', ARGV[4])
-if tonumber(ARGV[5]) > 0 then redis.call('EXPIRE', KEYS[2], ARGV[5]) end
+if tonumber(ARGV[5]) > 0 then
+  redis.call('EXPIRE', KEYS[2], ARGV[5])
+else
+  redis.call('PERSIST', KEYS[2])
+end
 return 1
 """
 _RENEW = """

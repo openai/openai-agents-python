@@ -219,3 +219,26 @@ async def test_redis_native_session_restores_canonical_context(redis_client, res
         assert "first answer" in json.dumps(responses.requests[1])
     finally:
         store.close()
+
+
+def test_redis_commit_without_ttl_clears_previous_expiry(redis_client) -> None:
+    expiring = RedisSessionStore(redis_client, ttl=2)
+    token = expiring.acquire("thread")
+    expiring.commit("thread", token, 0, "one", payload())
+    expiring.release("thread", token)
+    persistent = RedisSessionStore(redis_client)
+    token = persistent.acquire("thread")
+    key = persistent._keys("thread")[1]
+    try:
+        assert redis_client.ttl(key) > 0
+        with pytest.raises(ResponseError, match="revision conflict"):
+            persistent.commit("thread", token, 0, "stale", payload(1, "stale"))
+        assert redis_client.ttl(key) > 0
+        persistent.commit("thread", token, 1, "permanent", payload(2, "permanent"))
+        assert redis_client.ttl(key) == -1
+        time.sleep(2.1)
+        assert persistent.read("thread", token) == payload(2, "permanent")
+    finally:
+        persistent.release("thread", token)
+        persistent.close()
+        expiring.close()

@@ -148,3 +148,34 @@ async def test_mongodb_native_session_restores_canonical_context(mongodb_client,
         assert "first answer" in json.dumps(responses.requests[1])
     finally:
         store.close()
+
+
+def test_mongodb_commit_without_ttl_clears_previous_expiry(mongodb_client) -> None:
+    expiring = MongoDBSessionStore(mongodb_client, database="synthetic", ttl=2)
+    token = expiring.acquire("thread")
+    expiring.commit("thread", token, 0, "one", snapshot())
+    expiring.release("thread", token)
+    persistent = MongoDBSessionStore(mongodb_client, database="synthetic")
+    token = persistent.acquire("thread")
+    try:
+        before = persistent.collection.find_one({"_id": "thread"})
+        assert before is not None and "expires_at" in before
+        with pytest.raises(RuntimeError, match="revision conflict"):
+            persistent.commit("thread", token, 0, "stale", snapshot(1, "stale"))
+        rejected = persistent.collection.find_one({"_id": "thread"})
+        assert rejected is not None and rejected["expires_at"] == before["expires_at"]
+        persistent.commit("thread", token, 1, "permanent", snapshot(2, "permanent"))
+        after = persistent.collection.find_one({"_id": "thread"})
+        assert after is not None and "expires_at" not in after
+        time.sleep(2.1)
+        assert persistent.read("thread", token) == snapshot(2, "permanent")
+        assert (
+            persistent.collection.count_documents(
+                {"_id": "thread", "expires_at": {"$exists": True}}
+            )
+            == 0
+        )
+    finally:
+        persistent.release("thread", token)
+        persistent.close()
+        expiring.close()
