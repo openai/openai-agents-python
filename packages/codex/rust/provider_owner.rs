@@ -7,6 +7,8 @@ use pyo3::prelude::*;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{async_bridge, py_error};
+mod runtime;
+
 type Closing = Shared<BoxFuture<'static, std::result::Result<(), String>>>;
 type Home = Arc<Mutex<Option<tempfile::TempDir>>>;
 
@@ -33,12 +35,14 @@ struct State {
 struct ProviderResource {
     state: Mutex<State>,
     model_http_pool: codex_http_client::SdkModelHttpPool,
+    prepared_runtime: AsyncMutex<Option<runtime::PreparedRuntime>>,
 }
 impl ProviderResource {
     fn new() -> Self {
         Self {
             state: Mutex::new(State::default()),
             model_http_pool: codex_http_client::SdkModelHttpPool::default(),
+            prepared_runtime: AsyncMutex::new(None),
         }
     }
 }
@@ -350,7 +354,11 @@ impl NativeProviderOwner {
                     if !errors.is_empty() {
                         return Err(errors.join("; additional cleanup failure: "));
                     }
-                    // Scoped owners have joined before pooled clients retire.
+                    // All scopes have joined before their shared runtime retires.
+                    _resource
+                        .close_prepared_runtime()
+                        .await
+                        .map_err(|error| error.to_string())?;
                     model_http_pool.close();
                     Ok(())
                 });

@@ -331,7 +331,11 @@
     {
       "path": "0097-provider-owned-request-validation.patch",
       "sha256": "54574b90d443e0c9eeb2b13d8259d3c6e894bf3f259783547c7d05ed803f77cb"
+    },
+    {
+      "path": "0068-sdk-managed-execution-lifecycle.patch",
+      "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
     }
   ],
-  "result_tree": "788855f352cd44315d9e154996d29cf0cac250b0"
+  "result_tree": "c885d57cc6e4c78292ca6f40132fee6bf1ae5b50"
 }

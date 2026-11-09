@@ -532,12 +532,63 @@ async fn start_turn(thread: &CodexThread, value: Value) -> Result<Value> {
     start_with_params(thread, p, None, None).await
 }
 
+pub(crate) struct InitialTurn {
+    pub settings: ThreadSettingsOverrides,
+    pub initialization: std::sync::Arc<codex_core::InitialTurnInitialization>,
+}
+
 pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
     let mut value = value;
     codex_otel::sdk_trace::prepare_submission(&mut value).map_err(anyhow::Error::msg)?;
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
     let mut p: TurnParams = decode(value)?;
+    let initial = state
+        .initial_turn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("initial turn state poisoned"))?
+        .clone();
+    if let Some(initial) = &initial {
+        ensure!(
+            matches!(p.mode, Mode::StartIfIdle),
+            "initial conversation requires an idle start"
+        );
+        p.thread_settings.model = p
+            .thread_settings
+            .model
+            .take()
+            .or_else(|| initial.settings.model.clone());
+        p.thread_settings.effort = p
+            .thread_settings
+            .effort
+            .take()
+            .or_else(|| initial.settings.effort.clone());
+        p.thread_settings.summary = p
+            .thread_settings
+            .summary
+            .take()
+            .or_else(|| initial.settings.summary.clone());
+        p.thread_settings.service_tier = p
+            .thread_settings
+            .service_tier
+            .take()
+            .or_else(|| initial.settings.service_tier.clone());
+        p.thread_settings.tool_choice = p
+            .thread_settings
+            .tool_choice
+            .take()
+            .or_else(|| initial.settings.tool_choice.clone());
+        p.thread_settings.invocation_timeout_ms = p
+            .thread_settings
+            .invocation_timeout_ms
+            .take()
+            .or(initial.settings.invocation_timeout_ms);
+        p.thread_settings.request_controls = p
+            .thread_settings
+            .request_controls
+            .take()
+            .or_else(|| initial.settings.request_controls.clone());
+    }
     anyhow::ensure!(
         p.input.is_array()
             && (!matches!(p.mode, Mode::ContinueIfIdle)
@@ -573,7 +624,21 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
     } else {
         None
     };
-    let result = start_with_params(thread, p, None, Some((state, &mut mutation))).await?;
+    let turn_init = if let Some(initial) = &initial {
+        let mut init = thread.config_snapshot().await.turn_extension_init;
+        init.insert(initial.initialization.clone());
+        Some(init)
+    } else {
+        None
+    };
+    let result = start_with_params(thread, p, turn_init, Some((state, &mut mutation))).await?;
+    if initial.is_some() && result["status"] == "started" {
+        state
+            .initial_turn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("initial turn state poisoned"))?
+            .take();
+    }
     if let Some(writes) = writes
         && result["status"] == "started"
     {

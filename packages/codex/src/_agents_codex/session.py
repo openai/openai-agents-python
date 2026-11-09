@@ -2313,6 +2313,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
+        _atomic_first_turn: bool = False,
     ) -> Session[ContextT, OutputT]:
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
@@ -2579,6 +2580,31 @@ class Session(Generic[ContextT, OutputT]):
             _check_restored_tool_context(
                 restored_tools, restored_mcp, saved.operation_tools, context
             )
+        # Capture the supported ceiling before acquiring a provider lease.
+        # Excluded openings keep their durable zero-turn publication path.
+        _atomic_first_turn = (
+            _atomic_first_turn
+            and initial_messages_json is None
+            and selected is None
+            and not profiles
+            and state is None
+            and storage is None
+            and resume is None
+            and environment is None
+            and not instruction_files
+            and agent.provider is not None
+            and codex_login is None
+            and not agent.provider._websockets_enabled
+            and output.mode == "plain"
+            and not programmatic_tool_calling
+            and agent.transform_context is None
+            and agent.before_compact is None
+            and agent.before_complete is None
+            and all(
+                isinstance(tool, FunctionTool) and tool._bind is not None and not tool.defer_loading
+                for tool in available
+            )
+        )
         lease = None
         owned_provider = False
         opening = _OpeningOwner()
@@ -2971,21 +2997,23 @@ class Session(Generic[ContextT, OutputT]):
                     },
                 }
                 _install_profile_options(options, profiles, profile_roster, profile_fingerprint)
-                # Every conversation uses Core for model execution and history.
-                home = provider_lease.home()
-                assert home is not None
-                workspace = Path(home.name) / "workspace"
-                runtime.update(codex_home=home.name, cwd=str(workspace))
-                # Recreate storage for retained checkpoint data only. Saved data
-                # never enables model-facing planning or goal tools.
-                if state is not None and (
-                    state.root_goal is not None
-                    or any(child.goal is not None for child in state.descendants)
-                ):
-                    runtime["native_goal_store"] = home.name
-                workspace.mkdir(exist_ok=True)
-                if native_agents is not None:
-                    _configure_child_roles(config, home, native_agents)
+                # The private merged opener owns paths for eligible runtime scopes.
+                if not _atomic_first_turn:
+                    # Every conversation uses Core for model execution and history.
+                    home = provider_lease.home()
+                    assert home is not None
+                    workspace = Path(home.name) / "workspace"
+                    runtime.update(codex_home=home.name, cwd=str(workspace))
+                    # Recreate storage for retained checkpoint data only. Saved data
+                    # never enables model-facing planning or goal tools.
+                    if state is not None and (
+                        state.root_goal is not None
+                        or any(child.goal is not None for child in state.descendants)
+                    ):
+                        runtime["native_goal_store"] = home.name
+                    workspace.mkdir(exist_ok=True)
+                    if native_agents is not None:
+                        _configure_child_roles(config, home, native_agents)
 
                 async def initialize_engine() -> Any:
                     create_engine = (
@@ -3026,7 +3054,21 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
 
-                engine = await initialize_engine()
+                if _atomic_first_turn:
+                    engine, thread, home = await opening.acquire(
+                        native._open_conversation(
+                            json.dumps(config),
+                            json.dumps(runtime),
+                            json.dumps(options),
+                            native_specs,
+                            json.dumps(settings),
+                            api_key=opening.api_key or "",
+                            provider_lease=provider_lease,
+                            _share_model_http=True,
+                        )
+                    )
+                else:
+                    engine = await initialize_engine()
 
                 if isinstance(storage, CustomStorage) and resume is not None:
                     # Inspect before Core starts, while the canonical backend's
@@ -3045,15 +3087,19 @@ class Session(Generic[ContextT, OutputT]):
                         r"^[^\S\x1c-\x1f]+|[^\S\x1c-\x1f]+\Z", "", provider.api_key
                     )
 
-                thread = await opening.acquire(
-                    engine._start_initial_replaceable_thread(
-                        json.dumps(options),
-                        native_specs,
-                        initial_messages_json=initial_messages_json,
+                if not _atomic_first_turn:
+                    thread = await opening.acquire(
+                        engine._start_initial_replaceable_thread(
+                            json.dumps(options),
+                            native_specs,
+                            initial_messages_json=initial_messages_json,
+                        )
+                        if checkpoint is None
+                        else engine.restore_checkpoint(
+                            checkpoint, json.dumps(options), native_specs
+                        )
                     )
-                    if checkpoint is None
-                    else engine.restore_checkpoint(checkpoint, json.dumps(options), native_specs)
-                )
+                assert thread is not None
                 session = cls(
                     engine,
                     thread,
@@ -3149,74 +3195,10 @@ class Session(Generic[ContextT, OutputT]):
                             *restored_fixed_refs,
                         )
                 if resume is not None:
-                    # The writer is held. Read the saved graph, including
-                    # cold descendants, before publishing current tools.
-                    descendants = json.loads(
-                        await session._publish_startup(thread.call("list_subagents"))
-                    )
-                    recorded: dict[str, list[RecordedTurn]] = {}
-                    recorded_items: list[SessionItem] = []
-                    unknown: list[UncertainCall] = []
-                    for subagent_id in [None, *(child["id"] for child in descendants)]:
-                        history = json.loads(
-                            await session._publish_startup(thread.read_thread_history(subagent_id))
-                        )
-                        turns, items = project_history(
-                            history, session.id, subagent_id, uncertain_calls=unknown
-                        )
-                        thread_id = subagent_id if subagent_id is not None else session.id
-                        recorded[thread_id] = turns
-                        recorded_items.extend(items)
-                    if any(call.thread_id != session.id for call in unknown):
-                        raise RuntimeError(
-                            "Native local history has an unknown tool outcome in a descendant; "
-                            "local recovery cannot reconcile descendant calls"
-                        )
-                    if unknown and not reconciliation:
-                        raise LocalRecoveryRequired(
-                            tuple(unknown),
-                            tuple(turn for turns in recorded.values() for turn in turns),
-                            tuple(recorded_items),
-                        )
-                    for child in descendants:
-                        if child["status"] == "closed":
-                            continue
-                        # An open edge can outlive settled native work. Parent
-                        # turns inherited at fork do not prove child completion.
-                        parent_ids = {turn["id"] for turn in recorded[child["parent_agent_id"]]}
-                        own_turns = [
-                            turn for turn in recorded[child["id"]] if turn["id"] not in parent_ids
-                        ]
-                        if not own_turns or any(
-                            turn["status"] == "in_progress" for turn in own_turns
-                        ):
-                            raise RuntimeError(
-                                "Native local history has an active descendant; "
-                                "its runtime cannot be restored"
-                            )
-                    if isinstance(storage, LocalStorage):
-                        missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
-                        supplied = {
-                            (call.thread_id, call.turn_id, call.call_id) for call in reconciliation
-                        }
-                        prior = {
-                            (session.id, item["turn_id"], item["call_id"])
-                            for item in recorded_items
-                            if item["type"] == "function_call_output" and "reconciliation" in item
-                        }
-                        if (
-                            len(supplied) != len(reconciliation)
-                            or not missing <= supplied <= missing | prior
-                        ):
-                            raise ValueError("Reconciliation must cover every unresolved call once")
-                        await session._publish_startup(
-                            thread._reconcile_local_calls(
-                                json.dumps([asdict(call) for call in reconciliation])
-                            )
-                        )
+                    await session._reconcile_local_history(reconciliation)
                 await session._publish_opening_configuration(
                     settings=settings,
-                    fresh=checkpoint is None,
+                    fresh=checkpoint is None and not _atomic_first_turn,
                     hosted_search=web_search is not None and web_search.route == "hosted",
                     instructions=instructions,
                     instruction_receipts=instruction_receipts,
@@ -3348,6 +3330,59 @@ class Session(Generic[ContextT, OutputT]):
                     cast(Any, error).cleanup = provider
                     if owned_provider:
                         cast(Any, error).provider = provider
+
+    async def _reconcile_local_history(self, reconciliation: Sequence[ReconciledCall]) -> None:
+        # The writer is held. Read the saved graph, including
+        # cold descendants, before publishing current tools.
+        descendants = json.loads(await self._publish_startup(self._native.call("list_subagents")))
+        recorded: dict[str, list[RecordedTurn]] = {}
+        recorded_items: list[SessionItem] = []
+        unknown: list[UncertainCall] = []
+        for subagent_id in [None, *(child["id"] for child in descendants)]:
+            history = json.loads(
+                await self._publish_startup(self._native.read_thread_history(subagent_id))
+            )
+            turns, items = project_history(history, self.id, subagent_id, uncertain_calls=unknown)
+            thread_id = subagent_id if subagent_id is not None else self.id
+            recorded[thread_id] = turns
+            recorded_items.extend(items)
+        if any(call.thread_id != self.id for call in unknown):
+            raise RuntimeError(
+                "Native local history has an unknown tool outcome in a descendant; "
+                "local recovery cannot reconcile descendant calls"
+            )
+        if unknown and not reconciliation:
+            raise LocalRecoveryRequired(
+                tuple(unknown),
+                tuple(turn for turns in recorded.values() for turn in turns),
+                tuple(recorded_items),
+            )
+        for child in descendants:
+            if child["status"] == "closed":
+                continue
+            # An open edge can outlive settled native work. Parent
+            # turns inherited at fork do not prove child completion.
+            parent_ids = {turn["id"] for turn in recorded[child["parent_agent_id"]]}
+            own_turns = [turn for turn in recorded[child["id"]] if turn["id"] not in parent_ids]
+            if not own_turns or any(turn["status"] == "in_progress" for turn in own_turns):
+                raise RuntimeError(
+                    "Native local history has an active descendant; its runtime cannot be restored"
+                )
+        if isinstance(self._storage, LocalStorage):
+            missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+            supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
+            prior = {
+                (self.id, item["turn_id"], item["call_id"])
+                for item in recorded_items
+                if item["type"] == "function_call_output" and "reconciliation" in item
+            }
+            if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
+                raise ValueError("Reconciliation must cover every unresolved call once")
+            await self._publish_startup(
+                self._native._reconcile_local_calls(
+                    json.dumps([asdict(call) for call in reconciliation])
+                )
+            )
 
     def __init__(
         self,
@@ -11271,7 +11306,7 @@ class Session(Generic[ContextT, OutputT]):
                     finally:
                         # A failed shutdown leaves the native event source live.
                         # Retire its existing read without waiting for a new event.
-                        if not engine_closed:
+                        if not engine_closed and not self._reader.done():
                             cancel_once(self._reader)
                         try:
                             await self._reader
