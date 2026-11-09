@@ -20,6 +20,7 @@ from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
+    from ._completed_turn_owner import _CompletedTurnOwner
     from .decisions import DecisionInput, DecisionProvider
     from .input import UserInput
     from .manual import Interaction
@@ -78,7 +79,7 @@ class Turn(Generic[OutputT]):
     submission_id: str
     child_id: str | None
     instance_id: int | None
-    _session: Session[Any, Any] = field(repr=False, compare=False)
+    _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)
     _owner: object = field(repr=False, compare=False)
     _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)
     _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)
@@ -323,7 +324,7 @@ class ChildTurn(Protocol):
 
 
 def _root_turn(
-    session: Session[Any, Any],
+    session: Session[Any, Any] | _CompletedTurnOwner,
     turn_id: str | None,
     submission_id: str,
     completion: asyncio.Future[Any],

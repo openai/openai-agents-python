@@ -551,14 +551,18 @@ async def test_automatic_compaction_refuses_before_hidden_dispatch(
         assert effects == ([] if boundary == "pre_turn" else ["completed once"])
 
 
-@pytest.mark.parametrize("enabled", [False, True], ids=["omitted_control", "editor"])
+@pytest.mark.parametrize("opening", ["completed", "atomic", "editor"])
 async def test_post_turn_compaction_preserves_completed_answer(
-    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, enabled: bool
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, opening: str
 ) -> None:
     from agents import _native
 
+    enabled = opening == "editor"
+    if opening == "atomic":
+        monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     create_engine = _native.create_engine
     open_conversation = _native._open_conversation
+    prepare_run = _native._prepare_run_conversation
     configured_paths = []
 
     def configured_json(config_json):
@@ -580,8 +584,13 @@ async def test_post_turn_compaction_preserves_completed_answer(
         configured_paths.append("atomic")
         return await open_conversation(configured_json(config_json), *args, **kwargs)
 
+    def configured_run(config_json, *args, **kwargs):
+        configured_paths.append("completed")
+        return prepare_run(configured_json(config_json), *args, **kwargs)
+
     monkeypatch.setattr(_native, "create_engine", configured_engine)
     monkeypatch.setattr(_native, "_open_conversation", configured_conversation)
+    monkeypatch.setattr(_native, "_prepare_run_conversation", configured_run)
     preparations = []
 
     def edit(turn, request, *, preparation_index, recovery_attempt):
@@ -601,7 +610,7 @@ async def test_post_turn_compaction_preserves_completed_answer(
         result = await Agent(model="gpt-5.5", instructions="Answer", provider=current_provider).run(
             "Complete", prepare_request=edit if enabled else None
         )
-    assert configured_paths == ["ordinary" if enabled else "atomic"]
+    assert configured_paths == ["ordinary" if enabled else opening]
     assert result.final_output == "completed answer"
     assert len(responses.requests) == (1 if enabled else 2)
     assert preparations == ([(0, 0)] if enabled else [])

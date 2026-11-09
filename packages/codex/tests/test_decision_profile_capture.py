@@ -396,7 +396,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         async def cancel(self):
             return None
 
-    class Repair:
+    class Repair(Session):
         id = "repair-session"
         _broken = False
         _closed = False
