@@ -3864,6 +3864,7 @@ class Session(Generic[ContextT, OutputT]):
         self._resources_retired = False
         self._native_scope_failure: BaseException | None = None
         self._broken = False
+        self._history_context_retired = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
@@ -5744,6 +5745,7 @@ class Session(Generic[ContextT, OutputT]):
                 await self._native._transact_history(expected_revision, keep, captured)
             )
             if value.get("outcome") == "uncertain":
+                self._history_context_retired = True
                 self._broken = True
                 self._model_context_snapshots.clear()
                 raise NativeError(
@@ -11697,7 +11699,12 @@ class Session(Generic[ContextT, OutputT]):
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:
                     await asyncio.gather(self._checkpoint_task, return_exceptions=True)
-                if state is None or not state.restored_pending:
+                # History retirement holds the exclusive native context fence
+                # after idle admission without children/background execution.
+                # Its native owner still needs close, but cannot accept stop work.
+                if not self._history_context_retired and (
+                    state is None or not state.restored_pending
+                ):
                     try:
                         # Reserve the graph fence synchronously, before closing
                         # interception releases any native result to Core.
@@ -11783,7 +11790,11 @@ class Session(Generic[ContextT, OutputT]):
                     if graph_stopped and (state is None or state.deferred_close is None):
                         await asyncio.gather(*interrupts, return_exceptions=True)
                     try:
-                        if self._executor is not None and not self._executor_termination_attempted:
+                        if (
+                            self._executor is not None
+                            and not self._executor_termination_attempted
+                            and not self._history_context_retired
+                        ):
                             self._executor_termination_attempted = True
                             await self._native._terminate_executor_processes()
                     except BaseException as error:
