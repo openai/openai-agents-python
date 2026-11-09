@@ -872,6 +872,7 @@ class _NativeCallback:
 @dataclass
 class _Submission:
     output: _PreparedOutput
+    observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
@@ -951,6 +952,7 @@ class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
     handle: ChildInvocation
+    observation_after: int = 0
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
@@ -3240,6 +3242,7 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         restored_pending=True,
+                        observation_after=session._observations.sequence,
                         parent_trace=parent_trace,
                         operation_slots=operation_slots,
                         operation_mcp=mcp_tools,
@@ -3251,7 +3254,11 @@ class Session(Generic[ContextT, OutputT]):
                         operation_declaration_source=operation_source,
                     )
                     handle = _root_turn(
-                        session, continuation.turn_id, uuid4().hex, active.completion
+                        session,
+                        continuation.turn_id,
+                        uuid4().hex,
+                        active.completion,
+                        active.observation_after,
                     )
                     session._last_turn = handle
                     session._restored_turn = handle
@@ -6014,6 +6021,7 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                observation_after=self._observations.sequence,
                 before_step=before_step,
                 prepare_request=prepare_request,
                 budget=budget,
@@ -6034,7 +6042,9 @@ class Session(Generic[ContextT, OutputT]):
                 ),
             )
             if input is not None:
-                issued = _root_turn(self, None, uuid4().hex, state.completion)
+                issued = _root_turn(
+                    self, None, uuid4().hex, state.completion, state.observation_after
+                )
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
@@ -7387,7 +7397,9 @@ class Session(Generic[ContextT, OutputT]):
                     if state.parent_trace is not None:
                         request["trace"] = state.parent_trace.to_headers()
                     if state.issued is None:
-                        state.issued = _root_turn(self, None, uuid4().hex, state.completion)
+                        state.issued = _root_turn(
+                            self, None, uuid4().hex, state.completion, state.observation_after
+                        )
                     route_id = self._register_request_observation(state, state.issued)
                     request["observation_submission_id"] = route_id
                     if state.tracing is not None and state.tracing.context is not None:
@@ -7425,7 +7437,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Session ended during native admission")
                 handle = state.issued
                 if handle is None:
-                    handle = _root_turn(self, receipt["turn_id"], uuid4().hex, state.completion)
+                    handle = _root_turn(
+                        self,
+                        receipt["turn_id"],
+                        uuid4().hex,
+                        state.completion,
+                        state.observation_after,
+                    )
                 else:
                     assert handle.turn_id is None
                     object.__setattr__(handle, "turn_id", receipt["turn_id"])
@@ -7683,6 +7701,7 @@ class Session(Generic[ContextT, OutputT]):
                 assert state.handle is not None
                 continuation = _Submission(
                     state.output,
+                    observation_after=self._observations.sequence,
                     continued_from=state.handle.turn_id,
                     before_step=state.before_step,
                     prepare_request=state.prepare_request,
@@ -8163,7 +8182,10 @@ class Session(Generic[ContextT, OutputT]):
         key = (child_id, instance, turn_id)
         state = self._child_callbacks.get(key)
         if state is None:
-            state = _ChildCallbacks(ChildInvocation(self.id, child_id, instance, turn_id))
+            state = _ChildCallbacks(
+                ChildInvocation(self.id, child_id, instance, turn_id),
+                observation_after=self._observations.sequence,
+            )
             self._child_callbacks[key] = state
             self._observations.append(
                 TurnStarted(

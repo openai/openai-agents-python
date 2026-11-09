@@ -345,7 +345,9 @@ class _ObservationBuffer:
         self.retention: Literal["bounded", "all"] = retention
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
-        self.records: deque[tuple[Observation, int, int]] = deque()
+        self.records: list[tuple[Observation, int, int]] | deque[tuple[Observation, int, int]] = (
+            [] if retention == "all" else deque()
+        )
         self.characters = 0
         self.image_characters = 0
         self.sequence = 0
@@ -435,6 +437,7 @@ class _ObservationBuffer:
                 or self.characters > 65_536
                 or self.image_characters > 32 * 1024 * 1024
             ):
+                assert isinstance(self.records, deque)
                 _, removed, removed_image = self.records.popleft()
                 self.characters -= removed
                 self.image_characters -= removed_image
@@ -470,7 +473,7 @@ class EventStream(AsyncIterator[Observation]):
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
         self._buffer = buffer
-        self._after = after
+        self._after = max(after, getattr(_turn, "_observation_after", 0))
         self._closed = False
         self._reading = False
         self._turn = _turn

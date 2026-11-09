@@ -1042,3 +1042,25 @@ async def test_repair_local_eviction_does_not_report_loss_in_parent_log() -> Non
     events = await collect(EventStream(parent, after=0))
     assert [event.type for event in events] == ["output_text_delta", "session_ended"]
     assert isinstance(events[0], OutputTextDelta) and events[0].delta == "x" * 70_000
+
+
+@pytest.mark.parametrize("retention", ["bounded", "all"])
+async def test_turn_gap_window_starts_at_submission_admission(responses, retention) -> None:
+    responses.respond(*text_response("first", "first"))
+    responses.respond(*text_response("second", "second"))
+    async with Agent(instructions="Answer.", provider=provider(responses)).session(
+        observation_retention=retention
+    ) as session:
+        first = await session.submit("first")
+        await first.get_result()
+        session._observations._mark_gap()
+        second = await session.submit("second")
+        await second.get_result()
+        assert not any(isinstance(event, EventGap) for event in [e async for e in second.events()])
+        assert any(isinstance(event, EventGap) for event in [e async for e in first.events()])
+        # A loss published after completion remains observable by a fresh cursor.
+        session._observations._mark_gap()
+        events = [event async for event in second.events()]
+        gaps = [event for event in events if isinstance(event, EventGap)]
+        assert gaps
+        assert not [event async for event in second.events(after=gaps[-1].sequence)]
