@@ -9006,6 +9006,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.18",
                 "1.19",
                 "1.20",
+                "1.21",
                 CURRENT_SCHEMA_VERSION,
             }
         )

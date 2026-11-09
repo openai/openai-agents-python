@@ -43,6 +43,7 @@ state = RunState(
 # from main either.
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
 HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
+RELEASED_1_21_WRITER = "17d994bd3045dae71acda676a4ef4762ed8ecd94"
 GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
@@ -554,6 +555,18 @@ state._last_processed_response = ProcessedResponse(
 )
 """,
     ),
+    Scenario(
+        "1.21",
+        RELEASED_1_21_WRITER,
+        "duplicate_agent_hook_identity",
+        """
+from agents import AgentHooks, handoff
+
+duplicate = Agent(name=agent.name, hooks=AgentHooks())
+agent.handoffs = [handoff(duplicate)]
+state._current_agent = duplicate
+""",
+    ),
 )
 
 
@@ -599,6 +612,7 @@ MINIMAL_SCENARIOS = (
         ),
     ),
     Scenario("1.20", GUARDRAIL_1_20_WRITER, "minimal", ""),
+    Scenario("1.21", RELEASED_1_21_WRITER, "minimal", ""),
 )
 
 

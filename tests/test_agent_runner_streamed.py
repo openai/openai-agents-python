@@ -2695,6 +2695,91 @@ async def test_serialized_later_turn_approval_with_output_guardrail_resumes(
         )
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_serialized_nested_approval_with_parent_output_guardrail(streamed: bool) -> None:
+    executed: list[str] = []
+    guarded: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def check(label: str) -> str:
+        executed.append(label)
+        return label
+
+    def guard(
+        _context: RunContextWrapper[Any], _agent: Agent[Any], output: str
+    ) -> GuardrailFunctionOutput:
+        guarded.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    child_model = ScriptedModel()
+    parent_model = ScriptedModel()
+    for label in ("alpha", "beta"):
+        child_model.enqueue(
+            [
+                get_function_tool_call(
+                    "check",
+                    json.dumps({"label": label}),
+                    call_id="outer-alpha" if label == "beta" else "inner-alpha",
+                )
+            ]
+        )
+        child_model.enqueue([get_text_message(label)])
+        parent_model.enqueue(
+            [get_function_tool_call("ask", json.dumps({"input": label}), call_id=f"outer-{label}")]
+        )
+    parent_model.enqueue([get_text_message("done")])
+    child = Agent(name="child", model=child_model, tools=[check])
+    parent = Agent(
+        name="parent",
+        model=parent_model,
+        tools=[child.as_tool(tool_name="ask", tool_description="Check a label")],
+        output_guardrails=[OutputGuardrail(guardrail_function=guard)],
+    )
+    session = SimpleListSession()
+
+    async def run(value: str | RunState[Any]) -> Any:
+        if streamed:
+            result = Runner.run_streamed(parent, value, session=session)
+            await consume_stream(result)
+            return result
+        return await Runner.run(parent, value, session=session)
+
+    result = await run("Check alpha and beta")
+    for index, label in enumerate(("alpha", "beta")):
+        state = await RunState.from_string(parent, result.to_state().to_string())
+        (approval,) = state.get_interruptions()
+        assert approval.agent is child
+        assert isinstance(approval.raw_item, ResponseFunctionToolCall)
+        assert approval.raw_item.call_id == ("inner-alpha" if label == "alpha" else "outer-alpha")
+        assert executed == ["alpha", "beta"][:index]
+        if label == "beta":
+            # The child call ID overlaps a completed parent call. An older checkpoint
+            # cannot use the nested ownership marker, even if its payload contains one.
+            legacy = state.to_json()
+            legacy["$schemaVersion"] = "1.21"
+            old_state = await RunState.from_json(parent, legacy)
+            old_state.approve(old_state.get_interruptions()[0])
+            with pytest.raises(UserError, match="current response boundary cannot be proven"):
+                await run(old_state)
+            missing_child = state.to_json()
+            del missing_child["last_processed_response"]["functions"][0]["agent_run_state"]
+            unowned = await RunState.from_json(parent, missing_child)
+            with pytest.raises(UserError, match="current response boundary cannot be proven"):
+                await run(unowned)
+            assert executed == ["alpha"]
+        state.approve(approval)
+        result = await run(state)
+    assert result.final_output == "done"
+    assert executed == ["alpha", "beta"]
+    assert guarded == ["done"]
+    assert [
+        item.get("name")
+        for item in await session.get_items()
+        if item.get("type") == "function_call"
+    ] == ["ask", "ask"]
+
+
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 @pytest.mark.parametrize(
     "session_ownership",
