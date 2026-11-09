@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "a541113102acce50441e166e8ceb2cfd97e9782c",
+  "baseline_commit": "3515119ff14f4a270363ab615a97f5534ea66ee5",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -90,10 +90,12 @@
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
           "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
-          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass"
         ],
         "exports": {
           "CustomStorage": "agents.canonical_storage.CustomStorage",
+          "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
           "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
           "SessionStore": "agents.canonical_storage.SessionStore",
           "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup"
@@ -102,9 +104,15 @@
           "from dataclasses import dataclass as dataclass",
           "from pathlib import Path as Path",
           "from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from .canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore",
+          "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
+          "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
           "from .tools import ToolOutput as ToolOutput"
         ],
         "references": {
+          "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
+          "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
+          "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
           "ToolOutput": "agents.tools.ToolOutput"
         }
       },
@@ -1467,6 +1475,38 @@
     },
     "root_declarations": [],
     "root_definitions": {
+      "_agents_codex.canonical_storage_encrypt": {
+        "declarations": [
+          "class EncryptedSessionStore:\n\n    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from .canonical_storage import SessionStore"
+        ],
+        "references": {
+          "SessionStore": "agents.canonical_storage.SessionStore"
+        }
+      },
+      "_agents_codex.canonical_storage_mongodb": {
+        "declarations": [
+          "class MongoDBSessionStore:\n\n    def __init__(self, client: Any, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_uri(cls, uri: str, *, database: str, collection: str='agents_canonical_threads', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> MongoDBSessionStore:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Any"
+        ],
+        "references": {}
+      },
+      "_agents_codex.canonical_storage_redis": {
+        "declarations": [
+          "class RedisSessionStore:\n\n    def __init__(self, client: Any, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None) -> None:\n        pass\n\n    @classmethod\n    def from_url(cls, url: str, *, key_prefix: str='agents:canonical', lease_seconds: float=30, ttl: int | None=None, **client_options: Any) -> RedisSessionStore:\n        pass\n\n    def ping(self) -> bool:\n        pass\n\n    def close(self) -> None:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Any"
+        ],
+        "references": {}
+      },
       "_agents_codex.realtime_adapter": {
         "declarations": [
           "@dataclass(frozen=True)\nclass RealtimeAdapterContext:\n    url: str = field(repr=False)\n    headers: Mapping[str, str] = field(repr=False)\n    model: str | None = None",

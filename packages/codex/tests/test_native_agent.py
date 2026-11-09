@@ -44,6 +44,8 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "set_paused_goal",
         "fork",
         "items",
+        "history_snapshot",
+        "transact_history",
         "turns",
         "rate_limits",
         "cancel_all",

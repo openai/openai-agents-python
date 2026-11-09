@@ -7,7 +7,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from ._public import preserve_module_identity as _preserve_module_identity
-from .canonical_storage import SessionStore
 
 if TYPE_CHECKING:
     from cryptography.fernet import Fernet
@@ -134,5 +133,8 @@ class EncryptedSessionStore:
     def release(self, session_id: str, token: str) -> None:
         self.backend.release(session_id, token)
 
+
+# Bind deferred annotations after the adapter exists, including leaf-first imports.
+from .canonical_storage import SessionStore  # noqa: E402
 
 _preserve_module_identity(globals(), "agents.canonical_storage")
