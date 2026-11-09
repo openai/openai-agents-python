@@ -10021,6 +10021,17 @@ class Session(Generic[ContextT, OutputT]):
                 return False
             raise
 
+    async def _respond_tool(self, state: _CallbackState, reply: str) -> bool:
+        # Keep the writer's result observable when its callback is cancelled.
+        # Native cancellation joins publication but discards the cancelled result.
+        pending = asyncio.ensure_future(self._native._respond_python_tool(reply))
+        try:
+            return cast(bool, await _join(pending))
+        except asyncio.CancelledError:
+            if not pending.cancelled() and (error := pending.exception()) is not None:
+                state.retain_cleanup_error(error)
+            raise
+
     async def _invoke_tool(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("tool callback", "callback", message.get("tracing_context")) as tracing:
             await self._invoke_tool_body(state, message, tracing)
@@ -10126,7 +10137,7 @@ class Session(Generic[ContextT, OutputT]):
                     denial._validate()
                     reply = json.dumps({"request": message, "response": denial.to_native()})
                     if self._admit_tool(state, request):
-                        accepted = await self._native._respond_python_tool(reply)
+                        accepted = await self._respond_tool(state, reply)
                         # A late send does not undo an already committed receipt.
                         if accepted:
                             status = "failed"
@@ -10350,7 +10361,7 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
-            accepted = await self._native._respond_python_tool(reply)
+            accepted = await self._respond_tool(state, reply)
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:
