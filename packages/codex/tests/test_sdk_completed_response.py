@@ -114,6 +114,8 @@ async def test_captured_public_session_keeps_exact_stream_replay(
 async def test_one_shot_uses_route_captured_before_agent_provider_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep this gate after atomic acquisition and before Session publication.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     from agents import _native
 
     acquired = asyncio.Event()

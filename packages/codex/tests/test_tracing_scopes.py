@@ -797,13 +797,17 @@ async def test_session_open_captures_before_await_and_releases_after_cleanup(
     from agents import Agent
     from agents.session import Session
 
-    session = SimpleNamespace(_trace_context=None, _environment_lease=None)
+    session = object.__new__(Session)
+    session._trace_context = None
+    session._environment_lease = None
+    session._closed = False
     cleanup_leases: list[str] = []
     files = [tmp_path / "instructions.md"] if with_instruction_files else []
 
     async def close() -> None:
         assert session._trace_context not in native.released
         cleanup_leases.append(session._trace_context)
+        session._closed = True
 
     session.aclose = close
 
