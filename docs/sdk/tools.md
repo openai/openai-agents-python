@@ -98,7 +98,30 @@ def preview() -> ToolOutput:
     return ToolOutput([ToolOutputText("A one-pixel preview."), ToolOutputImage(image_url)])
 ```
 
-Annotate functions that return these objects with `ToolOutput`, as above. Images require inline base64 image data URLs. Remote URLs, file IDs, and local paths are unsupported.
+Annotate functions that return these objects with `ToolOutput`, as above. In `0.24.0-alpha.7`, images require inline base64 image data URLs; remote URLs, file IDs, and local paths are unsupported.
+
+Matching development builds also accept provider-owned image IDs with `ToolOutput.image(file_id=..., detail=...)` or `ToolOutputImage(file_id=..., detail=...)`. `detail` accepts `None`, `"auto"`, `"low"`, `"high"`, or `"original"`, subject to the current model's image support. Known combinations that would lose detail fail rather than silently changing the image. These additions require a [matching development build](versions.md).
+
+Development builds add `ToolOutput.file(...)` and `ToolOutputFile(...)`. Supply exactly one of `file_id`, canonical base64 `file_data`, or HTTPS `file_url`, with an optional `filename`. Base64 data can include a base64 data-URL prefix. The SDK does not read or upload local files for these declarations. Use a provider and model that support the selected media sources.
+
+This declaration returns text and provider-owned image and document references in order. Replace the fictional IDs with IDs available to the provider and account serving the request:
+
+```python
+from agents import ToolOutput, ToolOutputFile, ToolOutputImage, ToolOutputText, function_tool
+
+
+@function_tool
+def report_artifacts() -> ToolOutput:
+    return ToolOutput(
+        [
+            ToolOutputText("Report and chart."),
+            ToolOutputImage(file_id="your-image-file-id", detail="high"),
+            ToolOutputFile(file_id="your-report-file-id", filename="report.pdf"),
+        ]
+    )
+```
+
+Include `report_artifacts` in the Agent's tools. The references can remain in accepted history and saved state. Keep private file data and IDs out of routine logs.
 
 `ToolOutput.error(...)` returns a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can declare `output_type=ToolOutput` and submit these values through a live request.
 

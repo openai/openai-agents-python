@@ -20,7 +20,6 @@ TARGET="$(mktemp -d "$LAB/cargo-target.XXXXXX")"
 
 # Select the exact produced wheel; do not select a stale wheel with a glob.
 WHEEL="$LAB/wheels/<exact-native-wheel-filename>.whl"
-NATIVE_VERSION='0.24.0-alpha.6' # Exact installed distribution metadata version.
 sha256sum "$WHEEL" > "$LAB/native-wheel.sha256"
 BASE_PY="$(command -v python3.13)"
 uv venv --python "$BASE_PY" "$LAB/stable"
@@ -34,6 +33,7 @@ uv pip install --compile-bytecode --python "$STABLE_PY" 'openai-agents==0.24.0' 
 uv pip install --compile-bytecode --python "$NATIVE_PY" "$WHEEL" \
   'pydantic==2.12.3' 'typing-extensions==4.16.0' \
   'jsonschema==4.26.0' 'referencing==0.37.0'
+NATIVE_VERSION="$("$NATIVE_PY" -c 'from importlib.metadata import version; print(version("openai-agents"))')"
 uv pip install --compile-bytecode --python "$PEER_PY" \
   'aiohttp==3.14.3' 'openai==3.41.0' 'pydantic==2.12.3'
 ```
@@ -145,8 +145,8 @@ Select only final-result workloads for a buffered comparison, for example:
 ```sh
 "$PEER_PY" "$BENCH/compare.py" \
   --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
-  --v0-version 0.24.0 --v1-version 0.24.0-alpha.6 \
-  --server-python "$PEER_PY" --output-dir "$RESULTS/buffered" \
+  --v0-version 0.24.0 --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/buffered" \
   --v1-response-mode buffered --samples 5 --iterations 20 \
   --cases oneshot_text oneshot_tool oneshot_output_64k_1_plain \
           oneshot_output_64k_256_plain oneshot_output_64k_4096_plain
