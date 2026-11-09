@@ -655,22 +655,22 @@ index 922fa928f367f7a2adf947dba72689beac88c857..b06791830d97a81e8110c6205be69ef6
                      );
                      false
 diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
-index c98a2f57b3987c0c537fb4a02c65a1f52b907385..56914e2d7df435de66cdb7c4d0ed66c900089c15 100644
+index 9d490a4826acbf07a3cdc76a95a81da65744ab69..466bf6a2198597ada5b23b77d8a29936c9afc2a5 100644
 --- a/codex-rs/protocol/src/lib.rs
 +++ b/codex-rs/protocol/src/lib.rs
-@@ -46,6 +46,7 @@ pub mod permissions;
+@@ -47,6 +47,7 @@ pub mod permissions;
  pub mod plan_tool;
  pub mod protocol;
  pub mod realtime;
 +pub mod realtime_settings;
  pub mod request_permissions;
  pub mod request_user_input;
- pub mod review_format;
+ pub mod response_facts;
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 51df5401141dad6d393b66fa1db248a88c7750c3..437a06b6c8aa08ff2cf7671e445f97fad2828944 100644
+index a70babe058ad1dee5dab5d7d4b942b6f8d88b093..847f655a6c74ffbc734abe4b33f8b056ec57e3f0 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -611,6 +611,15 @@ pub enum Op {
+@@ -615,6 +615,15 @@ pub enum Op {
      RealtimeConversationStartSdk {
          generation: String,
          params: ConversationStartParams,
@@ -686,7 +686,7 @@ index 51df5401141dad6d393b66fa1db248a88c7750c3..437a06b6c8aa08ff2cf7671e445f97fa
          reply: oneshot::Sender<CodexResult<()>>,
      },
  
-@@ -990,6 +999,7 @@ impl Op {
+@@ -994,6 +1003,7 @@ impl Op {
              Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
              Self::CleanBackgroundTerminals => "clean_background_terminals",
              Self::RealtimeConversationStartSdk { .. } => "realtime_conversation_start_sdk",

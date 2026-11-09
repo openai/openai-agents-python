@@ -10,6 +10,7 @@ use codex_protocol::{
     protocol::{EventMsg, SessionSource, TokenUsage},
 };
 use codex_thread_store::StoredThread;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -39,7 +40,151 @@ impl std::fmt::Display for UnsupportedManualState {
 
 impl std::error::Error for UnsupportedManualState {}
 
+/// Ordinary final outcome data; it never contains a live receipt or capability.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolOutcomes {
+    pub response_observation_id: String,
+    pub call_ids: Vec<String>,
+    pub outcomes: Vec<(String, bool)>,
+}
+
+impl ToolOutcomes {
+    fn capture(history: &[RolloutItem], thread: ThreadId, turn: &str) -> Result<Option<Self>> {
+        let Some((anchor, record)) =
+            history
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, item)| match item {
+                    RolloutItem::ResponseObservationRecord(record)
+                        if record.thread_id == thread && record.turn_id == turn =>
+                    {
+                        Some((index, record))
+                    }
+                    _ => None,
+                })
+        else {
+            return Ok(None);
+        };
+        if record.observation.status
+            != codex_protocol::protocol::ResponseObservationStatus::Completed
+        {
+            return Ok(None);
+        }
+        let original_start = history[..anchor]
+            .iter()
+            .rposition(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_))))
+            .context("Recovered tool batch lacks its original turn start")?;
+        ensure!(
+            matches!(&history[original_start], RolloutItem::EventMsg(EventMsg::TurnStarted(start)) if start.turn_id == turn),
+            "Recovered tool batch has wrong original turn"
+        );
+        let start = history[original_start + 1..anchor]
+            .iter()
+            .rposition(|item| matches!(item, RolloutItem::ResponseObservationRecord(_)))
+            .map_or(original_start + 1, |index| original_start + index + 2);
+        let call_ids: Vec<_> = history[start..anchor]
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(item) => match &item.item {
+                    ResponseItem::FunctionCall { call_id, .. }
+                    | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
+                    ResponseItem::ToolSearchCall { call_id, .. } => call_id.clone(),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        if call_ids.is_empty() {
+            return Ok(None);
+        }
+        let unique: HashSet<_> = call_ids.iter().collect();
+        ensure!(
+            unique.len() == call_ids.len() && !call_ids.iter().any(String::is_empty),
+            "Invalid recovered tool batch identities"
+        );
+        let mut known = HashMap::new();
+        for item in &history[anchor + 1..] {
+            if let RolloutItem::ResponseItem(item) = item {
+                let (id, success) = match &item.item {
+                    ResponseItem::FunctionCallOutput {
+                        call_id, output, ..
+                    } => (call_id.as_deref(), output.success),
+                    ResponseItem::CustomToolCallOutput {
+                        call_id, output, ..
+                    } => (Some(call_id.as_str()), output.success),
+                    _ => continue,
+                };
+                if let (Some(id), Some(success)) = (id, success) {
+                    if unique.contains(&id.to_owned()) {
+                        ensure!(
+                            known.insert(id.to_owned(), success).is_none(),
+                            "Repeated recovered final outcome"
+                        );
+                    }
+                }
+            }
+        }
+        let outcomes = call_ids
+            .iter()
+            .filter_map(|id| known.get(id).map(|success| (id.clone(), *success)))
+            .collect();
+        Ok(Some(Self {
+            response_observation_id: record.id.clone(),
+            call_ids,
+            outcomes,
+        }))
+    }
+    fn validate(&self, history: &[RolloutItem], thread: ThreadId, turn: &str) -> Result<()> {
+        let expected = Self::capture(history, thread, turn)?
+            .context("Recovered tool outcomes lack a retained completed response")?;
+        ensure!(
+            self.response_observation_id == expected.response_observation_id
+                && self.call_ids == expected.call_ids,
+            "Recovered tool outcomes have wrong anchor or call order"
+        );
+        let mut seen = HashMap::new();
+        for (id, success) in &self.outcomes {
+            ensure!(
+                self.call_ids.contains(id) && seen.insert(id, success).is_none(),
+                "Duplicate or unrelated recovered outcome"
+            );
+        }
+        for (id, success) in expected.outcomes {
+            ensure!(
+                seen.get(&id).is_none_or(|saved| **saved == success),
+                "Recovered outcome conflicts with retained native success"
+            );
+        }
+        Ok(())
+    }
+    fn record(&mut self, id: &str, success: bool) {
+        if !self.call_ids.iter().any(|call| call == id) {
+            return;
+        }
+        if let Some((_, value)) = self.outcomes.iter_mut().find(|(call, _)| call == id) {
+            *value = success;
+        } else {
+            self.outcomes.push((id.to_owned(), success));
+        }
+    }
+    pub(crate) fn candidates(
+        &self,
+        turn: &str,
+    ) -> codex_extension_api::RecoveredToolCompletionCandidates {
+        codex_extension_api::RecoveredToolCompletionCandidates {
+            turn_id: turn.to_owned(),
+            response_observation_id: self.response_observation_id.clone(),
+            call_ids: self.call_ids.clone(),
+            outcomes: self.outcomes.clone(),
+        }
+    }
+}
+
 pub(crate) struct Frame {
+    tool_outcomes: Option<ToolOutcomes>,
+    fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -288,7 +433,7 @@ fn validate_frame(
         .as_object()
         .context("Missing native manual continuation")?;
     ensure!(
-        (frame.len() == 6 || frame.len() == 7)
+        (6..=8).contains(&frame.len())
             && frame.keys().all(|key| matches!(
                 key.as_str(),
                 "turn_id"
@@ -298,6 +443,7 @@ fn validate_frame(
                     | "accepted_replies"
                     | "pending_manual"
                     | "output_schema"
+                    | "tool_outcomes"
             ))
             && frame.get("output_schema").is_none_or(Value::is_object),
         "Invalid native continuation fields"
@@ -569,9 +715,19 @@ fn validate_frame(
             handoffs.push((codex_tools::ToolName::new(namespace, name), handoff.clone()));
         }
     }
+    let tool_outcomes = match frame.get("tool_outcomes") {
+        Some(value) => {
+            let outcomes: ToolOutcomes = serde_json::from_value(value.clone())?;
+            outcomes.validate(&history, source_id, &turn)?;
+            Some(outcomes)
+        }
+        None => ToolOutcomes::capture(&history, source_id, &turn)?,
+    };
     Ok(Frame {
         profile_source: None,
         handoffs,
+        tool_outcomes,
+        fresh: None,
         turn,
         pending: admitted,
         order,
@@ -726,9 +882,22 @@ impl Frame {
     pub(crate) fn record(
         &mut self,
         key: &crate::python_tools::PendingKey,
+        invocation: u64,
+        generation: Arc<crate::python_tools::Generation>,
         value: &DynamicToolResponse,
     ) {
         if !self.sealed && key.turn == self.turn && self.order.contains(&key.call) {
+            if let Some(outcomes) = &mut self.tool_outcomes {
+                outcomes.record(&key.call, value.success);
+            }
+            if value.success {
+                crate::python_tools::FreshTerminalReceipts::record(
+                    &mut self.fresh,
+                    generation,
+                    key,
+                    invocation,
+                );
+            }
             self.accepted.insert(
                 key.call.clone(),
                 crate::python_tools::PythonOutput(value.clone())
@@ -741,6 +910,9 @@ impl Frame {
     pub(crate) fn snapshot(&self) -> Result<Value> {
         let mut value = self.state.clone();
         value["native_continuation"]["accepted_replies"] = encode_accepted_replies(&self.accepted)?;
+        if let Some(outcomes) = &self.tool_outcomes {
+            value["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
+        }
         value["native_continuation"]["pending_manual"]
             .as_array_mut()
             .context("Missing pending manual calls")?
@@ -863,7 +1035,7 @@ pub(crate) async fn continue_if_ready(
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
-    let frame = {
+    let mut frame = {
         let mut current = owner
             .lock()
             .map_err(|_| anyhow::anyhow!("Manual continuation poisoned"))?;
@@ -877,6 +1049,14 @@ pub(crate) async fn continue_if_ready(
             .any(|call| !frame.accepted.contains_key(call))
         {
             return Ok(serde_json::json!({"status":"pending"}));
+        }
+        if let Some(fresh) = &frame.fresh {
+            let tools = thread
+                .thread
+                .thread_extension_data()
+                .get::<crate::python_tools::PythonTools>()
+                .context("Manual continuation requires current tools")?;
+            fresh.check(&tools)?;
         }
         current.take().expect("Checked continuation")
     };
@@ -898,11 +1078,22 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
+    let terminal = match (frame.tool_outcomes.take(), frame.fresh.take()) {
+        (Some(outcomes), Some(fresh)) => {
+            Some(crate::python_tools::RecoveredToolCompletionSeed::new(
+                frame.turn.clone(),
+                outcomes,
+                fresh,
+            ))
+        }
+        _ => None,
+    };
     let result = crate::ops::recover_prepared(
         thread,
         frame.turn,
         frame.seen.into_iter().collect(),
         recovery_options,
+        terminal,
     )
     .await?;
     ensure!(
@@ -1121,9 +1312,15 @@ pub(crate) async fn capture(
         .finish_manual_suspension(thread.id, suspended_turn)
         .await;
     let suspended = suspended_turn.is_some();
+    let mut tool_outcomes = None;
     let snapshot = match preserved {
         Ok(true) if suspended_turn == Some(turn.as_str()) => {
-            crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
+            async {
+                let final_history = thread.engine.load_checkpoint_history(thread.id).await?;
+                tool_outcomes = ToolOutcomes::capture(&final_history, thread.id, &turn)?;
+                crate::checkpoint::export_suspended(thread, &code_states, &managed_specs).await
+            }
+            .await
         }
         Ok(_) => Err(anyhow::anyhow!(
             "Core did not preserve the pending manual turn"
@@ -1243,6 +1440,9 @@ pub(crate) async fn capture(
         "turn_id":turn,"seen_call_ids":calls.iter().map(|(id,_)|id).collect::<Vec<_>>(),
         "turn_usage":usage,"reply_order":order,"accepted_replies":encode_accepted_replies(&accepted)?,"pending_manual":pending_manual
     });
+    if let Some(outcomes) = tool_outcomes {
+        snapshot["native_continuation"]["tool_outcomes"] = serde_json::to_value(outcomes)?;
+    }
     if let Some(schema) = output_schema {
         snapshot["native_continuation"]["output_schema"] = schema;
     }

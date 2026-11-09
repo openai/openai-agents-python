@@ -42,6 +42,8 @@ pub(crate) struct ProfileSpec {
     #[serde(default)]
     manual_slots: Vec<usize>,
     #[serde(default)]
+    terminal_slots: Vec<usize>,
+    #[serde(default)]
     step_defaults: Option<Vec<usize>>,
     #[serde(default)]
     handoffs: BTreeMap<String, String>,
@@ -58,6 +60,8 @@ pub(crate) struct ProfileSpec {
     mcp_servers: BTreeMap<String, Value>,
     #[serde(default)]
     mcp_result_tools: BTreeMap<String, BTreeMap<String, f64>>,
+    #[serde(default)]
+    mcp_metadata_tools: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     mcp_tools: BTreeMap<String, McpToolDeclaration>,
 }
@@ -669,6 +673,8 @@ pub(crate) async fn configure(
         service_tier: settings.service_tier.clone(),
         tool_choice: settings.tool_choice,
         personality: config.personality,
+        request_controls: settings.request_controls.clone(),
+        invocation_timeout_ms: settings.invocation_timeout_ms,
     });
     let mut profiles = BTreeMap::new();
     for descriptor in &opening.roster {
@@ -684,6 +690,7 @@ pub(crate) async fn configure(
         let catalog = tools.profile_catalog(
             descriptor.tools.clone(),
             &descriptor.manual_slots,
+            &descriptor.terminal_slots,
             descriptor.step_defaults.as_deref(),
             [
                 descriptor.selecting_steps,
@@ -697,6 +704,7 @@ pub(crate) async fn configure(
         let result_selection: crate::mcp_result_control::Selection =
             serde_json::from_value(json!({
                 "generation": catalog.generation.id, "servers": descriptor.mcp_result_tools,
+                "metadata_servers": descriptor.mcp_metadata_tools,
             }))?;
         result_selection.validate(&servers)?;
         let (mcp, plugins) = thread.prepare_agent_profile_mcp(servers).await?;
@@ -861,6 +869,13 @@ pub(crate) async fn update_active(
         }
         if let Some(choice) = settings.tool_choice {
             target.model.tool_choice = Some(choice);
+            target.model.request_controls.named_tool_choice = Some(None);
+        }
+        if let Some(controls) = &settings.request_controls {
+            target.model.request_controls.apply_patch(controls);
+        }
+        if let Some(timeout) = settings.invocation_timeout_ms {
+            target.model.invocation_timeout_ms = timeout;
         }
         if let Some(personality) = settings.personality {
             target.model.personality = Some(personality);
@@ -930,6 +945,7 @@ pub(crate) async fn replace_tools(
     manual_slots: &[usize],
     default_slots: Option<&[usize]>,
     profile_update: Option<&ProfileToolUpdate>,
+    terminal_slots: &[usize],
 ) -> Result<Option<u64>> {
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(None);
@@ -955,6 +971,7 @@ pub(crate) async fn replace_tools(
     let mut catalog = profiles.tools.profile_catalog(
         specs,
         manual_slots,
+        terminal_slots,
         default_slots,
         [
             previous.selecting_steps,

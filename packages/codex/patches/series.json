@@ -301,21 +301,25 @@
       "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
     },
     {
+      "path": "0090-native-session-media-history.patch",
+      "sha256": "17c3e90f5903457e5b4b377186640c92b5c2152a4c4286ee6670157d124d06fa"
+    },
+    {
       "path": "0068-sdk-realtime-owner.patch",
-      "sha256": "4b027115e15069146a8b9e09f39fbc63373da48d9ceff69be662b53d9044d504"
+      "sha256": "711c811ad949859e7b909f670d7e8652fc850ab957a69f346fe04f2b892cdfbe"
     },
     {
       "path": "0069-typed-realtime-settings.patch",
-      "sha256": "79c31fb4d973dd3b33b4ce3f8c82a49b1586f364170645eeb0d016746c83cec8"
+      "sha256": "9ef6d068910e00e8f1af4fbdf0de95148d92e6d44ca4003ce12ec8e2e37fda24"
     },
     {
       "path": "0070-realtime-settings-operations.patch",
-      "sha256": "98cfa1fe060aaab432e7c32c6ce10051ac9aa9ca75db20d60981cd052482a5bc"
+      "sha256": "cb8ca2c0b06e7844d31f0dd26d55b4bde68c31935b10534276e78edcf0e2f59d"
     },
     {
       "path": "0071-native-voice-parity.patch",
-      "sha256": "845798744768be6c820005d103f98d75b3baa9d8c4c84d0b2ff5bb1e531afdab"
+      "sha256": "78d6968f9ed34e0510408c9f105703c299a32d3a9a1e2e595254965af030a3f9"
     }
   ],
-  "result_tree": "5d6016a0953d864fad214c667a51e46936434ee7"
+  "result_tree": "089d1def0596e260475ebab2fa16b7b6218b2d56"
 }

@@ -1185,11 +1185,14 @@ async def test_native_admission_rejection_prevents_validator_and_callback_effect
             def __getattr__(self, name: str) -> Any:
                 return getattr(native_thread, name)
 
-            def _check_python_tool(self, raw: str) -> None:
-                native_thread._check_python_tool(raw)
+            def _check_python_tool(self, raw: str) -> bool:
+                accepted = native_thread._check_python_tool(raw)
+                if not accepted:
+                    return False
                 stale = json.loads(raw)
                 stale["_sdk_python_tool"]["generation"] += 1
                 native_thread._check_python_tool(json.dumps(stale))
+                return accepted
 
         # Inject stale identity only at admission; the real native gate rejects it.
         monkeypatch.setattr(session, "_native", StaleAdmission())

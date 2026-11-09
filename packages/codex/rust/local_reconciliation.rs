@@ -205,7 +205,9 @@ fn validate_sdk_receipt_identities(history: &[RolloutItem], thread_id: &str) -> 
 fn has_sampled_model(history: &[RolloutItem]) -> bool {
     history.iter().any(|item| match item {
         RolloutItem::EventMsg(EventMsg::TurnComplete(turn)) => {
-            turn.last_agent_message.is_some() || turn.time_to_first_token_ms.is_some()
+            turn.tool_completion.is_some()
+                || turn.last_agent_message.is_some()
+                || turn.time_to_first_token_ms.is_some()
         }
         RolloutItem::ResponseItem(response) => match &response.item {
             ResponseItem::Message { role, .. } => role == "assistant",

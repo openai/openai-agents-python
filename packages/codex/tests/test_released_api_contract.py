@@ -102,7 +102,11 @@ def implementation(candidate: Path, name: str) -> Path:
             "UserInput: TypeAlias = bytes | UserMessage",
         ),
         ("observation.py", "    | UsageUpdated\n", ""),
-        ("input.py", "str | Sequence[InputText | InputImage]", "str | Sequence[InputText]"),
+        (
+            "input.py",
+            "str | Sequence[InputText | InputImage | InputImageFile | InputFile]",
+            "str | Sequence[InputText | InputImageFile | InputFile]",
+        ),
         ("agent.py", "    reasoning_effort: str\n", ""),
         (
             "agent.py",

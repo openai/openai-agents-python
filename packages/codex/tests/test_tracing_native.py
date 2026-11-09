@@ -569,10 +569,11 @@ async def _flush_budget(*, shutdown: bool = False) -> None:
                 "timeout" in str(shutdown_error).lower()
                 or "timed out" in str(shutdown_error).lower()
             )
-            # Shutdown retires the processor pump even when owner admission times
-            # out. Its failed-delivery acknowledgment can complete the first flush.
+            # Shutdown retires the pump even when owner admission times out.
+            # Its current batch is acknowledged as failed. Later queued events
+            # may leave the first flush waiting until its own deadline.
             result = await first
-            assert result.status == "partial", result
+            assert result.status in ("partial", "timeout"), result
             assert result.failed_deliveries > 0, result
         else:
             assert not first.done()

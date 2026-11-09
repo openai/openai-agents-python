@@ -1,8 +1,8 @@
 diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
-index 77b3054aeeca459f33b679e3165f12652eaeaf53..e6ba6d2b12c886b3547c7ac1c5d3fe7c40095ca7 100644
+index e846ffec067f08a72319286f2e2ac5c60cbadac6..f2e43cd1804fa5999259c157706b422187a993c7 100644
 --- a/codex-rs/codex-api/src/endpoint/mod.rs
 +++ b/codex-rs/codex-api/src/endpoint/mod.rs
-@@ -32,3 +32,24 @@ pub use responses_websocket::ResponsesWebsocketClose;
+@@ -33,3 +33,24 @@ pub use responses_websocket::ResponsesWebsocketClose;
  pub use responses_websocket::ResponsesWebsocketConnection;
  pub use responses_websocket::ResponsesWebsocketProbe;
  pub use search::SearchClient;
@@ -944,10 +944,10 @@ index 0000000000000000000000000000000000000000..c8346fff5f84228e69529bbc11aeaca6
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index ce0ed21cec52b9ebd98ed82711cf7eafc83000af..49bfdb7936620865a0d09c05c107db033bd72bc7 100644
+index e2da8fdae1e6cfbac62eeda44bb8a46bff4aec9e..289791adb0743f224e0049fe9d907bcaa70116d9 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
-@@ -120,3 +120,24 @@ pub use crate::telemetry::SseTelemetry;
+@@ -124,3 +124,24 @@ pub use crate::telemetry::SseTelemetry;
  pub use crate::telemetry::WebsocketTelemetry;
  pub use codex_protocol::protocol::RealtimeAudioFrame;
  pub use codex_protocol::protocol::RealtimeEvent;

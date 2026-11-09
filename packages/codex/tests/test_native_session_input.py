@@ -152,16 +152,14 @@ async def test_one_shot_accepts_typed_text(responses: ResponsesFixture) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "reference", ["https://example.invalid/image.png", "file-123", "image.png"]
-)
+@pytest.mark.parametrize("reference", ["file-123", "image.png"])
 async def test_unsupported_image_reference_fails_before_native_submission(
     responses: ResponsesFixture, reference: str
 ) -> None:
     responses.respond(assistant_output("still usable"))
     agent = Agent(instructions="Answer briefly.", provider=provider(responses))
     async with timeout(30), agent.session() as session:
-        with pytest.raises(ValueError, match="base64 image data URL"):
+        with pytest.raises(ValueError, match="Image URL"):
             await session.submit(
                 {"role": "user", "content": [{"type": "input_image", "image_url": reference}]}
             )

@@ -78,6 +78,27 @@ def refusal(*, output_index: int = 0, added_with_refusal: bool = False) -> list[
     ]
 
 
+def undecodable(*, output_index: int = 0, added_with_invalid: bool = False) -> list[dict[str, Any]]:
+    """Use malformed text to test decoding independently of supported refusals."""
+    content = {"type": "output_text", "text": {"private": REFUSAL}}
+    message = {
+        "type": "message",
+        "id": "msg_fixture_invalid",
+        "role": "assistant",
+        "status": "completed",
+        "content": [content],
+    }
+    added = {
+        **message,
+        "status": "in_progress",
+        "content": [content] if added_with_invalid else [],
+    }
+    return [
+        {"type": "response.output_item.added", "output_index": output_index, "item": added},
+        {"type": "response.output_item.done", "output_index": output_index, "item": message},
+    ]
+
+
 def full_envelopes(peer: ResponsesFixture, *, continue_first: bool = False) -> None:
     """Give each response complete terminal metadata and its actual streamed output."""
     sequence = 0
@@ -775,7 +796,7 @@ async def test_undecodable_item_fails_exact_turn_without_retry_or_effect_replay(
         server.respond(function_call("record_effect", {}, "completed-effect"))
         commentary = assistant_output("synthetic interim")
         commentary["item"]["phase"] = "commentary"
-        invalid = refusal(output_index=1, added_with_refusal=invalid_phase == "added")
+        invalid = undecodable(output_index=1, added_with_invalid=invalid_phase == "added")
         server.expected_disconnect_event = invalid[0] if invalid_phase == "added" else invalid[-1]
         server.respond(
             commentary,
@@ -801,7 +822,7 @@ async def test_undecodable_item_fails_exact_turn_without_retry_or_effect_replay(
             assert (events[-1].turn_id, events[-1].status) == (failed.turn_id, "failed")
             assert events[-1].error_type == "NativeError"
             history = [entry async for entry in session.items()]
-            for private in (REFUSAL, "msg_fixture_refusal", "must-not-run-after-invalid-item"):
+            for private in (REFUSAL, "msg_fixture_invalid", "must-not-run-after-invalid-item"):
                 assert private not in repr(caught.value)
                 assert private not in repr(events)
                 assert private not in repr(history)
@@ -843,7 +864,7 @@ async def test_undecodable_native_child_output_keeps_sibling_root_and_successor_
             if not injected and events[0].get("item", {}).get("id") == "done-alpha":
                 injected = True
                 events[0]["item"]["phase"] = "commentary"
-                return [events[0], *refusal(output_index=1, added_with_refusal=True)]
+                return [events[0], *undecodable(output_index=1, added_with_invalid=True)]
             return events
 
         server.response = response
@@ -880,7 +901,7 @@ async def test_undecodable_native_child_output_keeps_sibling_root_and_successor_
             effects = executor.root / "integrity-effects"
             assert effects.read_text() == "proofproof"
             history = [entry async for entry in session.items(subagent_id=alpha_id)]
-            for private in (REFUSAL, "msg_fixture_refusal"):
+            for private in (REFUSAL, "msg_fixture_invalid"):
                 assert private not in repr(caught.value)
                 assert private not in repr(events)
                 assert private not in repr(history)
@@ -918,7 +939,7 @@ async def test_owned_native_child_parser_reason_after_public_admission(
             events = original()
             if events[0].get("item", {}).get("id") == "done-alpha":
                 events[0]["item"]["phase"] = "commentary"
-                return [events[0], *refusal(output_index=1, added_with_refusal=True)]
+                return [events[0], *undecodable(output_index=1, added_with_invalid=True)]
             return events
 
         server.response = response
@@ -1060,7 +1081,7 @@ async def test_public_integrity_reason_follows_selected_notice_without_terminal_
     monkeypatch.setattr(_native.NativeThread, "_next_session_event", ordered_next)
     full_envelopes(responses)
     if reason == "undecodable_output_item":
-        responses.respond(*refusal(added_with_refusal=True))
+        responses.respond(*undecodable(added_with_invalid=True))
     elif reason == "provider_owned_tool_receipt":
         responses.respond(
             {
@@ -1154,7 +1175,7 @@ async def test_same_id_manual_recovery_does_not_decorate_the_original_public_fai
             assert current.turn_id == original_request.turn_id == original_turn.turn_id
             with pytest.raises((ValueError, RuntimeError), match="foreign|expired|closed"):
                 await original_request.respond("stale")
-            responses.respond(*refusal(added_with_refusal=True))
+            responses.respond(*undecodable(added_with_invalid=True))
             await current.respond("answer-A")
             assert restored.restored_turn is not None
             with pytest.raises(NativeError) as current_error:
@@ -1188,7 +1209,7 @@ async def test_parser_failure_settles_an_already_running_tool_without_new_early_
     full_envelopes(responses)
     responses.respond(
         function_call("settle_once", {}, "owned-effect"),
-        *refusal(output_index=1, added_with_refusal=True),
+        *undecodable(output_index=1, added_with_invalid=True),
     )
     async with (
         timeout(30),
@@ -1238,7 +1259,7 @@ async def test_fresh_public_wire_failures_expose_their_originating_reason(
     async with timeout(30), peer() as server:
         full_envelopes(server)
         if reason == "undecodable_output_item":
-            invalid = refusal(added_with_refusal=True)
+            invalid = undecodable(added_with_invalid=True)
             if websocket:
                 server.expected_disconnect_event = invalid[0]
             server.respond(*invalid)

@@ -43,6 +43,7 @@ struct Entry {
     spec: ToolSpec,
     exposure: ToolExposure,
     manual: bool,
+    finish_turn: bool,
 }
 
 pub(crate) struct Generation {
@@ -77,6 +78,8 @@ struct StepReply {
     stop: crate::native_interception::CapturedTurnStop,
 }
 
+pub(crate) struct FinishToolSlots(pub(crate) Vec<usize>);
+
 impl Generation {
     fn default_names(&self, defaults: Option<&[usize]>) -> Result<Option<Vec<ToolName>>> {
         defaults
@@ -94,6 +97,18 @@ impl Generation {
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()
+    }
+
+    fn set_finish(&mut self, slots: &[usize]) -> Result<()> {
+        for &slot in slots {
+            let entry = self
+                .entries
+                .get_mut(slot)
+                .context("Invalid terminal tool slot")?;
+            ensure!(!entry.finish_turn, "Duplicate terminal tool slot");
+            entry.finish_turn = true;
+        }
+        Ok(())
     }
 
     fn set_manual(&mut self, slots: &[usize]) -> Result<()> {
@@ -203,7 +218,18 @@ pub(crate) enum ModelContextUpdate {
     Replace(Vec<ResponseItem>),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ToolCompletionReply {
+    Accept { final_output: Value },
+    Continue { feedback: Option<String> },
+}
+
 enum PreparationReply {
+    ToolCompletion {
+        reply: oneshot::Sender<std::result::Result<ToolCompletionReply, ()>>,
+        stop: crate::native_interception::CapturedTurnStop,
+    },
     Step(StepReply),
     Context(oneshot::Sender<Option<ModelContextUpdate>>),
     Compaction(oneshot::Sender<std::result::Result<Option<String>, ()>>),
@@ -216,6 +242,7 @@ enum PreparationReply {
 impl PreparationReply {
     fn is_closed(&self) -> bool {
         match self {
+            Self::ToolCompletion { reply, .. } => reply.is_closed(),
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
             Self::Compaction(reply) => reply.is_closed(),
@@ -286,6 +313,7 @@ enum QueuedRequest {
         incarnation: String,
     },
     GracefulFailure(Weak<PythonTools>, Weak<TurnAdmission>),
+    ToolCompletionFailure(Weak<PythonTools>, Weak<TurnAdmission>),
     ModelFailure {
         owner: Weak<PythonTools>,
         receipt: Weak<TurnAdmission>,
@@ -372,6 +400,8 @@ pub(crate) struct TurnAdmission {
     // Idle notification and terminal delivery are different native boundaries.
     // Reopening must never trust an idle hint alone for a fenced new turn.
     terminal: AtomicBool,
+    tool_completion_proposed: AtomicBool,
+    tool_completion_failed: AtomicBool,
     local_command_cleanup_failed: AtomicBool,
     input_recorded: AtomicBool,
     // Private namespace for SDK steers of this exact runtime, including same-ID recovery.
@@ -497,6 +527,8 @@ impl TurnAdmission {
     }
 
     pub(crate) fn generation(&self) {
+        self.tool_completion_proposed
+            .store(false, Ordering::Release);
         self.steering_tail.store(false, Ordering::Release);
     }
 
@@ -608,8 +640,18 @@ fn closed_tool_sender() -> oneshot::Sender<ToolReply> {
     sender
 }
 
+#[derive(Clone)]
+pub(crate) struct NativeMediaContext {
+    pub(crate) inline_data_url_low_detail_supported: bool,
+    pub(crate) model_info: Arc<codex_protocol::openai_models::ModelInfo>,
+    pub(crate) profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy,
+}
+
 struct PendingCall {
     callback: Option<Arc<CallbackRelease>>,
+    // Captured at enqueue; never borrow a successor turn during admission.
+    deadline: Option<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
+    media: Option<NativeMediaContext>,
     _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     invocation: u64,
     retired: bool,
@@ -1069,6 +1111,7 @@ impl PythonTools {
         &self,
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
+        terminal_slots: &[usize],
         defaults: Option<&[usize]>,
         flags: [bool; 4],
         _reuse_initial: bool,
@@ -1077,6 +1120,7 @@ impl PythonTools {
         let id = self.allocate_generation()?;
         let mut generation = self.prepare(id, specs)?;
         generation.set_manual(manual_slots)?;
+        generation.set_finish(terminal_slots)?;
         let defaults = generation.default_names(defaults)?;
         let generation = Arc::new(generation);
         let mut catalogs = self
@@ -1113,7 +1157,20 @@ impl PythonTools {
             .enumerate()
             .filter_map(|(slot, entry)| entry.manual.then_some(slot))
             .collect::<Vec<_>>();
-        self.profile_catalog(generation.specs.clone(), &manual, defaults, flags, false)
+        let terminal = generation
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| entry.finish_turn.then_some(slot))
+            .collect::<Vec<_>>();
+        self.profile_catalog(
+            generation.specs.clone(),
+            &manual,
+            &terminal,
+            defaults,
+            flags,
+            false,
+        )
     }
 
     /// Snapshot the exact native declaration owner without tool selection or MCP startup.
@@ -1824,6 +1881,9 @@ impl PythonTools {
         };
         let mut seed = tools.prepare(0, specs)?;
         seed.set_manual(manual_slots)?;
+        if let Some(slots) = startup.thread_extension_init.get::<FinishToolSlots>() {
+            seed.set_finish(&slots.0)?;
+        }
         *tools.current.write().expect("Python catalog poisoned") = Arc::new(seed);
         startup.thread_extension_init.insert(tools);
         Ok(())
@@ -1998,6 +2058,7 @@ impl PythonTools {
             };
             entries.push(Entry {
                 manual: false,
+                finish_turn: false,
                 name,
                 spec,
                 exposure: if tool.defer_loading {
@@ -2285,6 +2346,23 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Expired completion callback"))
     }
 
+    pub(crate) fn reply_tool_completion(
+        self: &Arc<Self>,
+        id: u64,
+        decision: std::result::Result<ToolCompletionReply, ()>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let PreparationReply::ToolCompletion { reply, .. } =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid terminal tool proposal reply");
+        };
+        reply
+            .send(decision)
+            .map_err(|_| anyhow::anyhow!("Expired terminal tool proposal"))
+    }
+
     pub(crate) fn retire_steps(&self) {
         self.retire_prepared_requests();
         let mut replies = self
@@ -2326,6 +2404,12 @@ impl PythonTools {
                     return false;
                 }
                 pending.stop
+            }
+            Ok(PreparationReply::ToolCompletion { reply, stop }) => {
+                if reply.send(Err(())).is_err() {
+                    return false;
+                }
+                stop
             }
             Ok(PreparationReply::Completion { reply, stop }) => {
                 if reply.send(Err(())).is_err() {
@@ -2450,6 +2534,14 @@ impl PythonTools {
                 .filter_map(|(slot, entry)| entry.manual.then_some(slot))
                 .collect::<Vec<_>>(),
         )?;
+        seed.set_finish(
+            &current
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, entry)| entry.finish_turn.then_some(slot))
+                .collect::<Vec<_>>(),
+        )?;
         *current = Arc::new(seed);
         Ok(())
     }
@@ -2461,7 +2553,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
     ) -> Result<u64> {
-        self.replace_with_defaults(thread, id, specs, manual_slots, None, None)
+        self.replace_with_defaults(thread, id, specs, manual_slots, None, None, &[])
             .await
     }
 
@@ -2473,6 +2565,7 @@ impl PythonTools {
         manual_slots: &[usize],
         default_slots: Option<&[usize]>,
         profile_update: Option<&crate::agent_profiles::ProfileToolUpdate>,
+        finish_slots: &[usize],
     ) -> Result<u64> {
         if let Some(id) = crate::agent_profiles::replace_tools(
             thread,
@@ -2481,6 +2574,7 @@ impl PythonTools {
             manual_slots,
             default_slots,
             profile_update,
+            finish_slots,
         )
         .await?
         {
@@ -2492,6 +2586,7 @@ impl PythonTools {
         );
         let mut candidate = self.prepare(id, specs)?;
         candidate.set_manual(manual_slots)?;
+        candidate.set_finish(finish_slots)?;
         let defaults = candidate.default_names(default_slots)?;
         self.check_idle(thread).await?;
         let allocated = self.allocate_generation()?;
@@ -2593,27 +2688,86 @@ impl PythonTools {
         Ok(())
     }
 
+    pub(crate) fn restored_media_model(
+        &self,
+        key: &PendingKey,
+        response: &DynamicToolResponse,
+    ) -> Result<Option<String>> {
+        if !response.content_items.iter().any(|part| {
+            matches!(
+                part,
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputFile { .. }
+                    | codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputImage { .. }
+            )
+        }) {
+            return Ok(None);
+        }
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get(key) else {
+            return Ok(None);
+        };
+        if !call.reentry {
+            return Ok(None);
+        }
+        match &call.manual_request {
+            Some(request) => Ok(Some(
+                request["msg"]["_sdk_model"]
+                    .as_str()
+                    .context("restored media reply lacks its admitted original model")?
+                    .to_owned(),
+            )),
+            // Fresh SDK approval reentry uses the current native thread configuration.
+            None => Ok(None),
+        }
+    }
+
+    // Private callback admission only. Checkpoint/mutation/manual entry checks stay strict.
+    pub(crate) fn admit_callback(
+        &self,
+        owner: &str,
+        key: &PendingKey,
+        invocation: u64,
+        entering: bool,
+    ) -> Result<bool> {
+        ensure!(
+            key.reply.thread == owner
+                && key.reply.instance == self.instance
+                && key.reply.generation == self.snapshot().id,
+            "Expired or invalid managed Python tool request"
+        );
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get_mut(key) else {
+            return Ok(false);
+        };
+        ensure!(
+            call.invocation == invocation,
+            "Invalid managed Python invocation nonce"
+        );
+        let deadline = call.deadline.clone();
+        let mut admit = || -> Result<bool> {
+            if entering {
+                ensure!(self.sdk_owned(), "effect entry requires the SDK catalog");
+                ensure!(
+                    call.phase == Phase::Admitted,
+                    "Python tool effect was entered or parked"
+                );
+                call.phase = Phase::Entered;
+            }
+            Ok(true)
+        };
+        // This synchronous gate linearizes admission with this exact turn's expiry.
+        match deadline {
+            Some(state) => state.admit(admit).unwrap_or(Ok(false)),
+            None => admit(),
+        }
+    }
+
     pub(crate) fn is_reentry(&self, key: &PendingKey) -> bool {
         self.pending
             .lock()
             .expect("Python replies poisoned")
             .get(key)
             .is_some_and(|call| call.reentry)
-    }
-
-    pub(crate) fn enter(&self, owner: &str, key: &PendingKey) -> Result<()> {
-        self.check_pending(owner, key)?;
-        ensure!(self.sdk_owned(), "effect entry requires the SDK catalog");
-        let mut pending = self.pending.lock().expect("Python replies poisoned");
-        let call = pending
-            .get_mut(key)
-            .ok_or_else(|| anyhow::anyhow!("expired Python call"))?;
-        ensure!(
-            call.phase == Phase::Admitted,
-            "Python tool effect was entered or parked"
-        );
-        call.phase = Phase::Entered;
-        Ok(())
     }
 
     pub(crate) fn park(&self, owner: &str, key: &PendingKey) -> Result<bool> {
@@ -2859,11 +3013,11 @@ impl PythonTools {
         grant: &ManualToolGrant,
         response: DynamicToolResponse,
     ) -> bool {
+        let Some(generation) = self.resolve_generation(grant.key.reply.generation) else {
+            return false;
+        };
         if !matches!(&grant.owner, ManualOwner::Core(owner) if owner.ptr_eq(&Arc::downgrade(self)))
             || grant.key.reply.thread != owner
-            || self
-                .resolve_generation(grant.key.reply.generation)
-                .is_none()
         {
             return false;
         }
@@ -2892,7 +3046,7 @@ impl PythonTools {
                 .and_then(|owner| owner.upgrade())
             {
                 if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
-                    frame.record(&grant.key, &receipt);
+                    frame.record(&grant.key, grant.invocation, generation.clone(), &receipt);
                 }
             }
         }
@@ -2960,6 +3114,7 @@ impl PythonTools {
             model,
             true,
             profile.as_ref(),
+            None,
         )
         .map(|(_, _, receiver)| receiver)
     }
@@ -3057,6 +3212,18 @@ impl PythonTools {
                         "msg": {"type": "shutdown_complete"},
                     });
                 }
+                Some(QueuedRequest::ToolCompletionFailure(owner, receipt)) => {
+                    if let (Some(owner), Some(receipt)) = (owner.upgrade(), receipt.upgrade())
+                        && Arc::ptr_eq(&self.family, &owner.family)
+                        && owner.owns_admission(&receipt)
+                        && *receipt.state.borrow() == AdmissionState::Ready
+                    {
+                        return json!({"id":receipt.turn_id,"msg":{
+                            "type":"_sdk_tool_completion_failed", "turn_id":receipt.turn_id,
+                            "thread":receipt.thread_id,"instance":owner.instance,
+                        }});
+                    }
+                }
                 Some(QueuedRequest::GracefulFailure(owner, receipt)) => {
                     if let (Some(owner), Some(receipt)) = (owner.upgrade(), receipt.upgrade())
                         && std::ptr::eq(self, owner.as_ref())
@@ -3114,6 +3281,40 @@ impl PythonTools {
         }
     }
 
+    /// Data from the exact native pending receipt, never SDK-observed call metadata.
+    pub(crate) fn native_media(&self, key: &PendingKey) -> Option<NativeMediaContext> {
+        self.pending
+            .lock()
+            .expect("managed replies poisoned")
+            .get(key)
+            .and_then(|call| call.media.clone())
+    }
+
+    /// Check automatic reply eligibility without releasing Core's waiting sender.
+    /// The outer option distinguishes a retired reply from a live no-media call.
+    pub(crate) fn automatic_reply_media(
+        &self,
+        owner: &str,
+        key: &PendingKey,
+    ) -> Result<Option<Option<NativeMediaContext>>> {
+        if key.reply.thread != owner || key.reply.instance != self.instance {
+            return Ok(None);
+        }
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get(key) else {
+            return Ok(None);
+        };
+        ensure!(
+            call.manual_request.is_none(),
+            "Manual tool replies require their native grant"
+        );
+        ensure!(
+            call.phase != Phase::Parked,
+            "parked tool cannot reply from an old owner"
+        );
+        Ok(Some(call.media.clone()))
+    }
+
     // Take the live sender only once. The binding retains it while its writer
     // commits the real result; a failed commit cannot be mistaken for success.
     pub(crate) fn take_reply(
@@ -3160,9 +3361,10 @@ impl PythonTools {
         source: &ToolCallSource,
         model: Option<&str>,
         reentry: bool,
+        media: Option<NativeMediaContext>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
-            thread, generation, slot, turn, call, arguments, source, model, reentry, None,
+            thread, generation, slot, turn, call, arguments, source, model, reentry, None, media,
         )
     }
 
@@ -3178,6 +3380,7 @@ impl PythonTools {
         model: Option<&str>,
         reentry: bool,
         profile: Option<&codex_extension_api::AgentProfileReceipt>,
+        media: Option<NativeMediaContext>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -3233,6 +3436,13 @@ impl PythonTools {
         if let Some(context) = &tracing {
             request["msg"]["tracing_context"] = json!(context.token());
         }
+        let deadline = self
+            .admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn)
+            .and_then(|receipt| receipt.sampling_stop.capture_model_deadline());
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("Python replies poisoned");
@@ -3241,6 +3451,8 @@ impl PythonTools {
                 key.clone(),
                 PendingCall {
                     callback,
+                    deadline,
+                    media,
                     _tracing: tracing,
                     invocation,
                     retired: false,
@@ -3318,6 +3530,7 @@ impl PythonTools {
             &ToolCallSource::Direct,
             None,
             true,
+            None,
         )
         .map(|(key, _, receiver)| (key, receiver))
     }
@@ -3459,7 +3672,111 @@ pub struct PythonContributor {
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
 }
+type AcceptedToolCalls = Arc<Mutex<HashMap<PendingKey, u64>>>;
+
+/// Live fresh receipts are never serialized into a checkpoint.
+pub(crate) struct FreshTerminalReceipts {
+    generation: Arc<Generation>,
+    calls: Mutex<Option<HashMap<PendingKey, u64>>>,
+}
+
+impl FreshTerminalReceipts {
+    pub(crate) fn record(
+        target: &mut Option<Self>,
+        generation: Arc<Generation>,
+        key: &PendingKey,
+        invocation: u64,
+    ) {
+        if !generation
+            .entries
+            .get(key.reply.slot)
+            .is_some_and(|entry| entry.finish_turn)
+        {
+            return;
+        }
+        let fresh = target.get_or_insert_with(|| Self {
+            generation: generation.clone(),
+            calls: Mutex::new(Some(HashMap::new())),
+        });
+        fresh
+            .calls
+            .lock()
+            .expect("fresh terminal receipts poisoned")
+            .as_mut()
+            .expect("fresh terminal receipts already adopted")
+            .insert(key.clone(), invocation);
+    }
+    pub(crate) fn check(&self, tools: &PythonTools) -> Result<()> {
+        ensure!(
+            tools.admits_generation(&self.generation),
+            "Expired recovered terminal generation"
+        );
+        Ok(())
+    }
+    fn adopt(&self, tools: &PythonTools, step: &StepCatalog) -> Result<()> {
+        self.check(tools)?;
+        ensure!(
+            Arc::ptr_eq(&self.generation, &step.generation),
+            "Recovered terminal step generation changed"
+        );
+        if let Some(calls) = self
+            .calls
+            .lock()
+            .expect("fresh terminal receipts poisoned")
+            .take()
+        {
+            step.accepted
+                .lock()
+                .expect("terminal receipts poisoned")
+                .extend(calls);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct RecoveredToolCompletionSeed {
+    turn: String,
+    pending: Mutex<
+        Option<(
+            crate::manual_checkpoint::ToolOutcomes,
+            FreshTerminalReceipts,
+        )>,
+    >,
+}
+
+impl RecoveredToolCompletionSeed {
+    pub(crate) fn new(
+        turn: String,
+        outcomes: crate::manual_checkpoint::ToolOutcomes,
+        fresh: FreshTerminalReceipts,
+    ) -> Self {
+        Self {
+            turn,
+            pending: Mutex::new(Some((outcomes, fresh))),
+        }
+    }
+    pub(crate) fn attach(self, init: &mut codex_extension_api::ExtensionDataInit) {
+        init.insert(self);
+    }
+    fn consume(&self, input: &TurnStartInput<'_>) {
+        if self.turn != input.turn_id {
+            return;
+        }
+        // Take on the first matching start, including starts cancelled before sampling.
+        if let Some((outcomes, fresh)) = self
+            .pending
+            .lock()
+            .expect("terminal recovery seed poisoned")
+            .take()
+        {
+            input.turn_store.insert(outcomes.candidates(input.turn_id));
+            input.turn_store.insert(fresh);
+        }
+    }
+}
+
 struct StepCatalog {
+    accepted: AcceptedToolCalls,
     generation: Arc<Generation>,
     use_deferred_specs: bool,
     slots: Vec<usize>,
@@ -3499,9 +3816,149 @@ impl ToolLifecycleContributor for PythonContributor {
 }
 
 impl TurnLifecycleContributor for PythonContributor {
+    fn propose_tool_completion<'a>(
+        &'a self,
+        input: codex_extension_api::ToolCompletionInput<'a>,
+    ) -> ExtensionFuture<
+        'a,
+        std::result::Result<Option<codex_extension_api::ToolCompletionDecision>, String>,
+    > {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(None);
+            };
+            let Some(step) = input.step_store.get::<StepCatalog>() else {
+                return Ok(None);
+            };
+            let ResponseItem::FunctionCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            } = input.call
+            else {
+                return Ok(None);
+            };
+            if let Some(fresh) = input.turn_store.get::<FreshTerminalReceipts>() {
+                fresh
+                    .adopt(&tools, &step)
+                    .map_err(|error| error.to_string())?;
+            }
+            let qualified_name = ToolName::new(namespace.clone(), name.clone());
+            let receipt = step
+                .accepted
+                .lock()
+                .expect("Terminal receipts poisoned")
+                .iter()
+                .find(|(key, _)| {
+                    key.call == *call_id
+                        && step
+                            .generation
+                            .entries
+                            .get(key.reply.slot)
+                            .is_some_and(|entry| entry.name == qualified_name)
+                })
+                .map(|(key, invocation)| (key.clone(), *invocation));
+            let Some((key, invocation)) = receipt else {
+                return Ok(None);
+            };
+            let verify = || -> Result<()> {
+                ensure!(
+                    tools.admits_generation(&step.generation),
+                    "Expired terminal tool generation"
+                );
+                let entry = step
+                    .generation
+                    .entries
+                    .get(key.reply.slot)
+                    .context("Invalid terminal tool slot")?;
+                ensure!(
+                    entry.finish_turn
+                        && entry.name == qualified_name
+                        && key.reply.thread == input.thread_store.level_id()
+                        && key.turn == input.turn_id
+                        && key.call == *call_id
+                        && key.reply.generation == step.generation.id
+                        && key.reply.instance == tools.instance,
+                    "Invalid terminal tool receipt identity"
+                );
+                ensure!(
+                    step.accepted
+                        .lock()
+                        .expect("Terminal receipts poisoned")
+                        .get(&key)
+                        .is_some_and(|current_invocation| *current_invocation == invocation),
+                    "Expired terminal tool receipt"
+                );
+                Ok(())
+            };
+            verify().map_err(|e| e.to_string())?;
+            let ResponseItem::FunctionCallOutput { output, .. } = input.output else {
+                return Err("Invalid terminal tool output".into());
+            };
+            let text = match &output.body {
+                FunctionCallOutputBody::Text(text) => Some(text.clone()),
+                FunctionCallOutputBody::ContentItems(items) => match items.as_slice() {
+                    [FunctionCallOutputContentItem::InputText { text }] => Some(text.clone()),
+                    _ => None,
+                },
+            };
+            let owner = tools
+                .admission_ready(input.turn_id)
+                .map_err(|e| e.to_string())?;
+            let stop =
+                crate::native_interception::capture_step_stop(input.thread_store, input.turn_store)
+                    .ok_or("Terminal tool completion owner unavailable")?;
+            let decision = tools
+                .exchange_preparation(
+                    owner.clone(),
+                    input
+                        .step_store
+                        .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
+                        .map(|scope| scope.0.clone()),
+                    [
+                        "Expired terminal tool owner",
+                        "Terminal tool reader closed",
+                        "Terminal tool proposal cancelled",
+                    ],
+                    |reply| PreparationReply::ToolCompletion { reply, stop },
+                    |id| {
+                        json!({"id":input.turn_id,"msg":{
+                            "type":"_sdk_tool_completion", "turn_id":input.turn_id,
+                            "thread":input.thread_store.level_id(),"instance":tools.instance,
+                            "step_id":id,"model":input.model,"text":text,"call_id":call_id,
+                            "name":name,"namespace":namespace,"generation":step.generation.id,
+                            "slot":key.reply.slot, "invocation":invocation,
+                        }})
+                    },
+                    |decision| {
+                        decision.map_err(|_| anyhow::anyhow!("Terminal tool validation failed"))
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            verify().map_err(|e| e.to_string())?;
+            Ok(Some(match decision {
+                ToolCompletionReply::Accept { final_output } => {
+                    owner
+                        .tool_completion_proposed
+                        .store(true, Ordering::Release);
+                    codex_extension_api::ToolCompletionDecision::Accept { final_output }
+                }
+                ToolCompletionReply::Continue { feedback } => {
+                    codex_extension_api::ToolCompletionDecision::Continue { feedback }
+                }
+            }))
+        })
+    }
+
     // The default BeforeTaskRegistration phase includes compaction tasks.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            if let Some(seed) = input.turn_store.get::<RecoveredToolCompletionSeed>() {
+                seed.consume(&input);
+            }
+
             let tracing = input.turn_store.get_or_init(|| {
                 input
                     .thread_store
@@ -3555,6 +4012,8 @@ impl TurnLifecycleContributor for PythonContributor {
                     sampling_stop: input.turn_store.get_or_init(TurnSamplingStop::default),
                     graph_fenced: graph.fenced,
                     terminal: AtomicBool::new(false),
+                    tool_completion_proposed: AtomicBool::new(false),
+                    tool_completion_failed: AtomicBool::new(false),
                     local_command_cleanup_failed: AtomicBool::new(false),
                     input_recorded: AtomicBool::new(false),
                     steering_namespace: format!(
@@ -3592,6 +4051,11 @@ impl TurnLifecycleContributor for PythonContributor {
                 && let Some(receipt) = tools.admitted_turn(input.turn_store)
                 && receipt.turn_id == input.turn_id
             {
+                if receipt.tool_completion_proposed.load(Ordering::Acquire) {
+                    receipt
+                        .tool_completion_failed
+                        .store(true, Ordering::Release);
+                }
                 // A later error, including a non-provider error, replaces the
                 // earlier metadata. Capturing this never marks a turn failed.
                 *receipt
@@ -3958,6 +4422,19 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                         false
                     }
                 });
+                if input.cause == codex_extension_api::ThreadIdleCause::Failed
+                    && receipt.tool_completion_failed.swap(false, Ordering::AcqRel)
+                {
+                    // Core deliberately emitted no replacement terminal fact.
+                    // This exact idle receipt settles SDK waiters with failure only.
+                    let _ = tools
+                        .family
+                        .requests
+                        .send(QueuedRequest::ToolCompletionFailure(
+                            Arc::downgrade(&tools),
+                            Arc::downgrade(receipt),
+                        ));
+                }
                 tools.family.graph_changed.send_replace(());
             }
         })
@@ -4012,6 +4489,7 @@ impl PythonContributor {
         use_deferred_specs: bool,
         slots: &[usize],
         profile: Option<codex_extension_api::AgentProfileReceipt>,
+        accepted: Option<AcceptedToolCalls>,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         slots
             .iter()
@@ -4019,6 +4497,7 @@ impl PythonContributor {
             .map(|slot| {
                 Arc::new(PythonExecutor {
                     managed_calls: self.managed_calls.clone(),
+                    accepted: accepted.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -4353,7 +4832,15 @@ impl ToolContributor for PythonContributor {
         if tools.managed_profiles.load(Ordering::Acquire) {
             return Vec::new();
         }
-        self.executors(thread, tools, generation, use_deferred_specs, &slots, None)
+        self.executors(
+            thread,
+            tools,
+            generation,
+            use_deferred_specs,
+            &slots,
+            None,
+            None,
+        )
     }
 
     fn tools_for_step(
@@ -4373,6 +4860,7 @@ impl ToolContributor for PythonContributor {
         };
         let profile_catalog = step.get::<ProfileCatalog>();
         let snapshot = step.get_or_init(|| StepCatalog {
+            accepted: Default::default(),
             slots: {
                 let defaults = match profile_catalog {
                     Some(catalog) => catalog.defaults.clone(),
@@ -4415,6 +4903,7 @@ impl ToolContributor for PythonContributor {
             snapshot.use_deferred_specs,
             &snapshot.slots,
             profile,
+            Some(snapshot.accepted.clone()),
         )
     }
 
@@ -4547,6 +5036,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    accepted: Option<AcceptedToolCalls>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
@@ -4624,6 +5114,12 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     Some(&call.model),
                     false,
                     self.profile.as_ref(),
+                    Some(NativeMediaContext {
+                        inline_data_url_low_detail_supported: call
+                            .inline_data_url_low_detail_supported,
+                        model_info: Arc::clone(&call.model_info),
+                        profile: call.provider_reference_profile,
+                    }),
                 )
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
             // A rejected enqueue never reaches application code. Keep Core's
@@ -4649,6 +5145,18 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 {
                     hold.entered.add_permits(1);
                     hold.release.acquire().await.unwrap().forget();
+                }
+            }
+            if call.source == ToolCallSource::Direct
+                && response.response.success
+                && self.generation.entries[self.slot].finish_turn
+                && self.tools.admits_generation(&self.generation)
+            {
+                if let Some(accepted) = &self.accepted {
+                    accepted
+                        .lock()
+                        .expect("Terminal receipts poisoned")
+                        .insert(key, invocation);
                 }
             }
             Ok(Box::new(ReplyOutput {
@@ -4953,6 +5461,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert!(
@@ -4967,6 +5476,7 @@ pub(crate) mod managed_tests {
                     &ToolCallSource::Direct,
                     None,
                     false,
+                    None,
                 )
                 .is_err()
         );
@@ -5028,6 +5538,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         let (b, b_invocation, _received_b) = tools
@@ -5041,6 +5552,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         let receipt = tools.pending.lock().unwrap()[&a]
@@ -5095,6 +5607,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         let receipt = tools.pending.lock().unwrap()[&key]
@@ -6900,6 +7413,48 @@ pub(crate) mod managed_tests {
         assert!(next.wait().await.is_err());
     }
 
+    #[tokio::test]
+    async fn native_receipt_metadata_does_not_reopen_a_consumed_sender() {
+        let tools = catalog(
+            ToolPolicy::default(),
+            DynamicToolSpec::Function(function("lookup")),
+        );
+        let model = Arc::new(codex_models_manager::model_info::model_info_from_slug(
+            "gpt-5.5",
+        ));
+        let context = NativeMediaContext {
+            inline_data_url_low_detail_supported: false,
+            model_info: Arc::clone(&model),
+            profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::QualifiedStandardResponses,
+        };
+        let source = ToolCallSource::CodeMode {
+            cell_id: "1".into(),
+            runtime_tool_call_id: "nested".into(),
+        };
+        let (key, _, _receive) = tools
+            .enqueue(
+                "root",
+                &tools.snapshot(),
+                0,
+                "turn",
+                "call",
+                json!({}),
+                &source,
+                Some("gpt-5.5"),
+                false,
+                Some(context),
+            )
+            .unwrap();
+        // The existing pending owner retains data without a live root-turn query.
+        let captured = tools.native_media(&key).unwrap();
+        assert!(Arc::ptr_eq(&captured.model_info, &model));
+        let _sender = tools.take_reply("root", &key).unwrap().unwrap();
+        assert!(tools.native_media(&key).is_none());
+        assert!(tools.take_reply("root", &key).unwrap().is_none());
+        // A detached metadata clone still carries no publication capability.
+        assert_eq!(captured.model_info.slug, "gpt-5.5");
+    }
+
     fn catalog(policy: ToolPolicy, spec: DynamicToolSpec) -> Arc<PythonTools> {
         let tools = Arc::new(PythonTools {
             current: RwLock::new(Arc::new(Generation {
@@ -7039,6 +7594,7 @@ pub(crate) mod managed_tests {
         PythonExecutor {
             managed_calls: None,
             profile: None,
+            accepted: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
@@ -7078,6 +7634,9 @@ pub(crate) mod managed_tests {
                 call_id: key.call.clone(),
                 tool_name: ToolName::new(None, "lookup"),
                 model: "test-model".into(),
+                model_info: Arc::new(codex_models_manager::model_info::model_info_from_slug("test-model")),
+                inline_data_url_low_detail_supported: false,
+                provider_reference_profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::PrepareInline,
                 codex_turn_metadata: None,
                 truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(1000),
                 source: ToolCallSource::Direct,
@@ -7145,6 +7704,7 @@ pub(crate) mod managed_tests {
                     &ToolCallSource::Direct,
                     None,
                     false,
+                    None,
                 )
                 .unwrap();
             replies.push((id, key, receiver));
@@ -7187,6 +7747,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert!(root.owner("root", &key).is_some());
@@ -7218,6 +7779,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert!(root.owner("root", &key).is_none());
@@ -7272,6 +7834,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         let old = PendingReply {
@@ -7314,6 +7877,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         drop(old);
@@ -7333,6 +7897,7 @@ pub(crate) mod managed_tests {
                 &ToolCallSource::Direct,
                 None,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(tools.next_request().await["msg"]["callId"], "other");
@@ -7406,7 +7971,23 @@ pub(crate) mod managed_tests {
         let (key, _receiver) = tools
             .enqueue_reentry("owner", "turn", &call("one", "f", "{}"))
             .unwrap();
-        tools.enter("owner", &key).unwrap();
+        let request = tools.next_request().await;
+        let invocation = request["msg"]["_sdk_invocation"].as_u64().unwrap();
+        assert!(
+            tools
+                .admit_callback("other-owner", &key, invocation, false)
+                .is_err()
+        );
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation + 1, false)
+                .is_err()
+        );
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation, true)
+                .unwrap()
+        );
         assert!(tools.park("owner", &key).is_err());
         assert!(tools.park_continuation("owner", &key, json!(true)).is_err());
         assert!(
@@ -7414,7 +7995,11 @@ pub(crate) mod managed_tests {
                 .park_continuation("owner", &key, json!({"calls":["child1"],"receipts":[]}))
                 .unwrap()
         );
-        assert!(tools.enter("owner", &key).is_err());
+        assert!(
+            tools
+                .admit_callback("owner", &key, invocation, true)
+                .is_err()
+        );
         let keys = tools.parked("owner").unwrap();
         assert_eq!(
             tools.continuations(&keys).unwrap()["one"]["calls"],
@@ -7422,6 +8007,12 @@ pub(crate) mod managed_tests {
         );
         tools.suspend_reentry(&keys).unwrap();
         assert!(!tools.park("owner", &key).unwrap());
+        assert!(
+            !tools
+                .admit_callback("owner", &key, invocation, false)
+                .unwrap()
+        );
+        assert!(tools.check_pending("owner", &key).is_err());
     }
 
     #[tokio::test]
@@ -7433,12 +8024,21 @@ pub(crate) mod managed_tests {
         let (finished, b) = tools
             .enqueue_reentry("owner", "turn", &call("second", "g", "{}"))
             .unwrap();
+        let parked_request = tools.next_request().await;
+        let finished_request = tools.next_request().await;
+        assert_eq!(parked_request["msg"]["callId"], parked.call);
+        assert_eq!(finished_request["msg"]["callId"], finished.call);
+        let finished_invocation = finished_request["msg"]["_sdk_invocation"].as_u64().unwrap();
         tools.park("owner", &parked).unwrap();
         assert!(
             tools.parked("owner").is_err(),
             "do not seal a still admitted sibling"
         );
-        tools.enter("owner", &finished).unwrap();
+        assert!(
+            tools
+                .admit_callback("owner", &finished, finished_invocation, true)
+                .unwrap()
+        );
         assert!(
             tools.parked("owner").is_err(),
             "do not seal an entered sibling"
@@ -7478,8 +8078,18 @@ pub(crate) mod managed_tests {
         let (entered, b) = tools
             .enqueue_reentry("owner", "turn", &call("second", "g", "{}"))
             .unwrap();
+        let admitted_request = tools.next_request().await;
+        let entered_request = tools.next_request().await;
+        assert_eq!(admitted_request["msg"]["callId"], admitted.call);
+        assert_eq!(entered_request["msg"]["callId"], entered.call);
+        let admitted_invocation = admitted_request["msg"]["_sdk_invocation"].as_u64().unwrap();
+        let entered_invocation = entered_request["msg"]["_sdk_invocation"].as_u64().unwrap();
         let keys = vec![admitted.clone(), entered.clone()];
-        tools.enter("owner", &entered).unwrap();
+        assert!(
+            tools
+                .admit_callback("owner", &entered, entered_invocation, true)
+                .unwrap()
+        );
         // There is no receipt for the entered effect. Cancellation may not
         // make either that work or this whole unresolved batch resumable.
         assert!(tools.park_cancelled_reentry("owner", &keys).is_empty());
@@ -7514,7 +8124,11 @@ pub(crate) mod managed_tests {
             tools.park_cancelled_reentry("owner", &keys),
             vec![admitted.clone()]
         );
-        assert!(tools.enter("owner", &admitted).is_err());
+        assert!(
+            tools
+                .admit_callback("owner", &admitted, admitted_invocation, true)
+                .is_err()
+        );
         assert!(matches!(
             a.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -7567,7 +8181,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], None, [false; 4], false)
+            .profile_catalog(specs, &[], &[], None, [false; 4], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -7658,6 +8272,7 @@ pub(crate) mod managed_tests {
             .profile_catalog(
                 vec![DynamicToolSpec::Function(function("a"))],
                 &[],
+                &[],
                 None,
                 [false; 4],
                 true,
@@ -7666,6 +8281,7 @@ pub(crate) mod managed_tests {
         let b = parent
             .profile_catalog(
                 vec![DynamicToolSpec::Function(function("b"))],
+                &[],
                 &[],
                 None,
                 [false; 4],
@@ -7686,6 +8302,7 @@ pub(crate) mod managed_tests {
             .unwrap(),
         );
         source.insert(StepCatalog {
+            accepted: Default::default(),
             generation: a.generation.clone(),
             use_deferred_specs: false,
             slots: vec![0],
@@ -7742,6 +8359,7 @@ pub(crate) mod managed_tests {
         let a = parent
             .profile_catalog(
                 vec![DynamicToolSpec::Function(function("a"))],
+                &[],
                 &[],
                 None,
                 [false; 4],

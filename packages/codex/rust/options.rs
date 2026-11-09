@@ -65,6 +65,8 @@ pub struct ThreadOptions {
     pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]
     pub(crate) manual_tool_slots: Vec<usize>,
+    #[serde(rename = "_terminal_tool_slots")]
+    pub(crate) terminal_tool_slots: Vec<usize>,
     #[serde(rename = "_transform_context")]
     pub(crate) transform_context: bool,
     #[serde(rename = "_before_compact")]
@@ -473,6 +475,19 @@ where
                     ));
                 }
                 &["type", "image_url", "file_id", "detail"]
+            }
+            (Some("input_file"), false) => {
+                if ["file_id", "file_data", "file_url"]
+                    .iter()
+                    .filter(|key| part.contains_key(**key))
+                    .count()
+                    != 1
+                {
+                    return Err(D::Error::custom(
+                        "SDK history file requires exactly one source",
+                    ));
+                }
+                &["type", "file_id", "file_data", "file_url", "filename"]
             }
             _ => return Err(D::Error::custom("Unsupported SDK history content type")),
         };

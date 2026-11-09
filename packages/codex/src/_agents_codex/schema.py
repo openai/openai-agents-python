@@ -117,11 +117,28 @@ class _PreparedOutput:
         return hashlib.sha256(value.encode()).hexdigest()
 
     def validate(self, text: str) -> Any:
+        return self._validate(text, terminal=False)[0]
+
+    def terminal_value(self, text: str) -> tuple[Any, Any]:
+        """Validate once and serialize the same validated value for Core."""
+        return self._validate(text, terminal=True)
+
+    def _validate(self, text: str, *, terminal: bool) -> tuple[Any, Any]:
         if self.adapter is None:
-            return text
+            return text, text
         try:
-            decoded = self.adapter.validate_json(text)
-            return decoded.response if self.wrapped else decoded
+            # The function supplies application JSON, without the native response wrapper.
+            source = (
+                json.dumps({"response": json.loads(text)}) if terminal and self.wrapped else text
+            )
+            decoded = self.adapter.validate_json(source)
+            value = decoded.response if self.wrapped else decoded
+            wire = None
+            if terminal:
+                wire = json.loads(self.adapter.dump_json(decoded, warnings="error"))
+                if self.wrapped:
+                    wire = wire["response"]
+            return value, wire
         except ValidationError as error:
             issues = tuple(
                 OutputValidationIssue(
@@ -134,7 +151,7 @@ class _PreparedOutput:
                     include_url=False, include_context=False, include_input=False
                 )
             )
-        except TypeError:
+        except (TypeError, ValueError):
             issues = (OutputValidationIssue(code="validation_error", path=()),)
         # Do not attach the validator exception, which contains rejected inputs.
         raise OutputValidationError(text, issues)

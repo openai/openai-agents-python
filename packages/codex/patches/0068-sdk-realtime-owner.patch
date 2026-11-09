@@ -546,7 +546,7 @@ index fa89609bb6c22adcc9eaba0ea97ab6792addd0da..27b88f5e51d36d0cd0e36d75a36bd0ab
          pending_events: Arc::new(Mutex::new(VecDeque::new())),
          transcript_state,
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 9e75242032c01f76e101602f539f221721fc8344..0678627f662bef387ff8e598aff8a87eb8ff1f9e 100644
+index 31b999ba1d69c1a60165a34e38d90a2d4bc2751e..9e9cf4f527054948d5f3a77250a9859d515c2532 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -14,6 +14,8 @@ mod model_request;
@@ -1784,10 +1784,10 @@ index db336da2bc49e1a31c5b611ff84626dadb79d3b0..922fa928f367f7a2adf947dba72689be
                      if let Err(err) =
                          handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 98ce6c473f6ef73ca4c756636e9813f9845e3914..51df5401141dad6d393b66fa1db248a88c7750c3 100644
+index 6d9005e4c1b836673af6822a156e30ccf743dcb8..a70babe058ad1dee5dab5d7d4b942b6f8d88b093 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -607,6 +607,55 @@ pub enum Op {
+@@ -611,6 +611,55 @@ pub enum Op {
      /// Use this when callers intentionally want to stop long-lived background shells.
      CleanBackgroundTerminals,
  
@@ -1843,7 +1843,7 @@ index 98ce6c473f6ef73ca4c756636e9813f9845e3914..51df5401141dad6d393b66fa1db248a8
      /// Start a realtime conversation stream.
      RealtimeConversationStart(ConversationStartParams),
  
-@@ -940,6 +989,13 @@ impl Op {
+@@ -944,6 +993,13 @@ impl Op {
              Self::Interrupt => "interrupt",
              Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
              Self::CleanBackgroundTerminals => "clean_background_terminals",

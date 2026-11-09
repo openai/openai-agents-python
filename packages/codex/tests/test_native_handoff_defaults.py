@@ -7,7 +7,7 @@ from contextlib import aclosing
 
 import pytest
 
-from agents import Agent, HttpMCP, NativeProvider, ToolRef
+from agents import Agent, HttpMCP, NativeProvider, ToolRef, function_tool
 from agents.realtime import RealtimeConfig, RealtimeToolCall
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -211,3 +211,70 @@ async def test_realtime_handoff_defaults_reject_excluded_route(
                         pytest.fail("Excluded handoff entered application dispatch")
             assert await session.get_active_agent() is active
         assert peer.responses.requests == []
+
+
+async def test_handoff_uses_leaf_captured_model_request_controls(responses) -> None:
+    effects: list[str] = []
+
+    @function_tool
+    def selected() -> str:
+        effects.append("selected")
+        return "selected result"
+
+    @function_tool
+    def excluded() -> str:
+        pytest.fail("Named leaf choice must exclude this tool")
+
+    leaf = Agent(
+        name="Leaf",
+        instructions="Use the selected leaf tool.",
+        model="fixture-unlisted-request-controls",
+        tools=[selected, excluded],
+        model_settings={
+            "max_output_tokens": 23,
+            "temperature": 0.4,
+            "metadata": {"workflow": "captured-leaf"},
+            "tool_choice": selected.ref,
+            "invocation_timeout_ms": 10_000,
+        },
+    )
+    responses.respond(function_call("transfer_to_leaf", {}, "leaf-route"))
+    responses.respond(function_call("selected", {}, "selected-leaf-tool"))
+    responses.respond(assistant_output("Leaf controls accepted"))
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=responses.url,
+            api_key="synthetic-profile-model-controls",
+            supports_websockets=False,
+        ) as native_provider,
+        Agent(
+            name="Root",
+            instructions="Hand off to Leaf.",
+            model="fixture-unlisted-request-controls",
+            handoffs=[leaf],
+            provider=native_provider,
+            model_settings={"max_output_tokens": 11, "invocation_timeout_ms": 50_000},
+        ).session() as session,
+    ):
+        result = await (await session.submit("Use the leaf controls.")).get_result()
+        assert result.final_output == "Leaf controls accepted"
+        assert await session.get_active_agent() is leaf
+        saved = await session.save_state()
+        snapshots = [
+            row["payload"]["thread_settings"]
+            for row in saved.history
+            if row.get("type") == "event_msg"
+            and row.get("payload", {}).get("type") == "thread_settings_applied"
+            and row["payload"].get("thread_id") == saved.source_session_id
+        ]
+        assert snapshots[-1]["invocation_timeout_ms"] == 10_000
+    assert effects == ["selected"]
+    assert len(responses.requests) == 3
+    assert responses.requests[0]["max_output_tokens"] == 11
+    for request in responses.requests[1:]:
+        assert request["max_output_tokens"] == 23
+        assert request["temperature"] == 0.4
+        assert request["metadata"] == {"workflow": "captured-leaf"}
+        assert request["tool_choice"] == "required"
+        assert [tool["name"] for tool in function_declarations(request)] == ["selected"]

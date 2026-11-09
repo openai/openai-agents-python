@@ -25,6 +25,7 @@ from ._events import (
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._subagent_projection import project_subagent_item as project_subagent_item
 from ._web_projection import project_web_search_item as project_web_search_item
+from .input import _response_content
 from .subagents import Subagent as Subagent
 
 
@@ -94,6 +95,7 @@ def _error_code(error: dict[str, Any]) -> str | None:
         if code
         in {
             "session_budget_exceeded",
+            "model_invocation_deadline_exceeded",
             "usage_limit_exceeded",
             "project_spend_limit_exceeded",
             "organization_spend_limit_exceeded",
@@ -493,12 +495,13 @@ class EventProjector:
         native: dict[str, Any],
         turn_id: str | None,
     ) -> SessionEvent:
-        output = []
-        for content in native.get("content_items") or []:
-            if content["type"] == "inputText":
-                output.append({"type": "input_text", "text": content["text"]})
-            elif content["type"] == "inputImage":
-                output.append({"type": "input_image", "image_url": content["imageUrl"]})
+        output = _response_content(
+            [
+                content
+                for content in native.get("content_items") or []
+                if content["type"] in {"inputText", "inputImage", "inputFile"}
+            ]
+        )
         status = "failed" if native.get("success") is False else native["status"]
         error = native.get("error")
         if status == "failed" and error is None:
@@ -556,12 +559,9 @@ class EventProjector:
             if key in self._done_items:
                 return []
             self._done_items.add(key)
-            content = []
-            for part in native["content"]:
-                if part["type"] == "text":
-                    content.append({"type": "input_text", "text": part["text"]})
-                elif part["type"] == "image":
-                    content.append({"type": "input_image", "image_url": part["image_url"]})
+            content = _response_content(
+                [part for part in native["content"] if part["type"] in {"text", "image", "file"}]
+            )
             return [
                 self._event(
                     "agent.session.turn.item.added",

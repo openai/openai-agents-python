@@ -9,9 +9,9 @@ use anyhow::{Context, Result, ensure};
 use codex_config::McpServerConfig;
 use codex_core_api::{Config, SessionSource, ThreadManager};
 use codex_extension_api::{
-    ExtensionData, ExtensionFuture, McpToolResultInput, McpToolSource, ThreadLifecycleContributor,
-    ThreadStartInput, ThreadStopInput, ToolLifecycleContributor, ToolLifecycleFuture,
-    TurnAbortInput, TurnLifecycleContributor, TurnStartInput, TurnStopInput,
+    ExtensionData, ExtensionFuture, McpToolRequestMetadataInput, McpToolResultInput, McpToolSource,
+    ThreadLifecycleContributor, ThreadStartInput, ThreadStopInput, ToolLifecycleContributor,
+    ToolLifecycleFuture, TurnAbortInput, TurnLifecycleContributor, TurnStartInput, TurnStopInput,
 };
 use codex_protocol::mcp::CallToolResult;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,16 @@ const MAX_BYTES: usize = 128 * 1024 * 1024;
 struct Notice<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tracing_context: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cell_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_tool_call_id: Option<&'a str>,
     nonce: u64,
     generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,7 +56,8 @@ struct Notice<'a> {
     callable_namespace: &'a str,
     callable_name: &'a str,
     arguments: &'a Value,
-    result: &'a CallToolResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a CallToolResult>,
 }
 
 struct Counter {
@@ -107,11 +118,34 @@ pub(crate) fn validated(reply: &str) -> Option<CallToolResult> {
     })
 }
 
+#[derive(Debug)]
+enum AcceptedReply {
+    Result(CallToolResult),
+    Metadata(serde_json::Map<String, Value>),
+}
+
+fn validated_metadata(reply: &str) -> Option<serde_json::Map<String, Value>> {
+    if reply.len() > MAX_REPLY {
+        return None;
+    }
+    let value: Value = serde_json::from_str(reply).ok()?;
+    let map = match value {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(map) => map,
+        _ => return None,
+    };
+    map.keys()
+        .all(|key| !codex_extension_api::is_reserved_mcp_request_metadata_key(key))
+        .then_some(map)
+}
+
 struct Pending {
     turn_id: String,
     call_id: String,
     deadline: Instant,
-    sender: Option<oneshot::Sender<Option<CallToolResult>>>,
+    metadata: bool,
+    is_cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    sender: Option<oneshot::Sender<Option<AcceptedReply>>>,
 }
 
 // Transport retention never keeps its issuer or reply sender alive. A handed
@@ -134,6 +168,8 @@ enum Payload {
 
 #[derive(Default)]
 struct TurnResults {
+    // Existing call nonce floor identifies this insertion without a new lifecycle.
+    first_nonce: u64,
     count: usize,
     failed: bool,
 }
@@ -144,6 +180,8 @@ struct TurnResults {
 pub(crate) struct Selection {
     pub(crate) generation: u64,
     servers: HashMap<String, HashMap<String, f64>>,
+    #[serde(default)]
+    metadata_servers: HashMap<String, Vec<String>>,
 }
 
 impl Selection {
@@ -168,6 +206,21 @@ impl Selection {
                     .values()
                     .all(|timeout| timeout.is_finite() && *timeout > 0.0 && *timeout <= 3600.0),
                 "Native MCP result timeout must be in (0, 3600] seconds"
+            );
+        }
+        for (name, tools) in &self.metadata_servers {
+            ensure!(
+                requested.get(name).is_some_and(|server| {
+                    !crate::mcp_roster::enterprise(server)
+                        && server.enabled
+                        && tools.iter().all(|tool| {
+                            server
+                                .enabled_tools
+                                .as_ref()
+                                .is_some_and(|names| names.contains(tool))
+                        })
+                }),
+                "MCP metadata policy must select admitted ordinary raw tool names"
             );
         }
         Ok(())
@@ -242,7 +295,7 @@ struct State {
 }
 
 impl State {
-    fn retire(&mut self, nonce: u64) -> Option<oneshot::Sender<Option<CallToolResult>>> {
+    fn retire(&mut self, nonce: u64) -> Option<oneshot::Sender<Option<AcceptedReply>>> {
         let item = self.pending.get_mut(&nonce)?;
         let sender = item.sender.take();
         let mut routes = self.routes.lock().expect("MCP routes poisoned");
@@ -356,6 +409,7 @@ impl McpResultControl {
         !state.revoked
             && state.pending.get(&nonce).is_some_and(|item| {
                 item.sender.is_some()
+                    && item.is_cancelled.as_ref().is_none_or(|probe| !probe())
                     && Instant::now() < item.deadline
                     && state
                         .routes
@@ -434,6 +488,7 @@ impl McpResultControl {
             p.turn_id == turn_id
                 && p.call_id == call_id
                 && p.sender.is_some()
+                && p.is_cancelled.as_ref().is_none_or(|probe| !probe())
                 && Instant::now() < p.deadline
         }) {
             return false;
@@ -551,7 +606,7 @@ impl McpResultControl {
         state: &mut State,
         notice: &Notice<'_>,
         deadline: Instant,
-    ) -> Option<oneshot::Receiver<Option<CallToolResult>>> {
+    ) -> Option<oneshot::Receiver<Option<AcceptedReply>>> {
         self.enqueue_with_context(state, notice, deadline, None)
     }
 
@@ -561,7 +616,7 @@ impl McpResultControl {
         notice: &Notice<'_>,
         deadline: Instant,
         tracing: Option<codex_otel::sdk_trace::ContextLease>,
-    ) -> Option<oneshot::Receiver<Option<CallToolResult>>> {
+    ) -> Option<oneshot::Receiver<Option<AcceptedReply>>> {
         if state.revoked || state.pending.len() >= MAX_PENDING {
             return None;
         }
@@ -584,6 +639,8 @@ impl McpResultControl {
                 turn_id: notice.turn_id.to_owned(),
                 call_id: notice.call_id.to_owned(),
                 deadline,
+                metadata: notice.phase == Some("metadata"),
+                is_cancelled: None,
                 sender: Some(tx),
             },
         );
@@ -736,11 +793,23 @@ impl McpResultControl {
     pub fn resolve(&self, nonce: u64, turn_id: &str, call_id: &str, reply: &str) -> bool {
         // Validation grants no authority. Claim only after it finishes, so a
         // deadline crossed while decoding still belongs to native expiry.
-        let edited = validated(reply);
+        let metadata = {
+            let state = self.state.lock().expect("MCP result control poisoned");
+            let Some(pending) = state.pending.get(&nonce) else {
+                return false;
+            };
+            pending.metadata
+        };
+        let edited = if metadata {
+            validated_metadata(reply).map(AcceptedReply::Metadata)
+        } else {
+            validated(reply).map(AcceptedReply::Result)
+        };
         let mut state = self.state.lock().expect("MCP result control poisoned");
         if state.revoked
             || !state.pending.get(&nonce).is_some_and(|p| {
                 p.sender.is_some()
+                    && p.is_cancelled.as_ref().is_none_or(|probe| !probe())
                     && p.turn_id == turn_id
                     && p.call_id == call_id
                     && Instant::now() < p.deadline
@@ -765,6 +834,28 @@ struct Reservation<'a> {
 }
 
 impl Reservation<'_> {
+    // The receiver owns this still-unassigned obligation even after resolve
+    // retires its nonce. Never recreate a turn consumed by its finishing owner.
+    fn claim_rejection(&self) -> bool {
+        let mut state = self
+            .control
+            .state
+            .lock()
+            .expect("MCP result control poisoned");
+        if self.assigned || state.revoked {
+            return false;
+        }
+        let Some(results) = state.unresolved.get_mut(self.turn_id) else {
+            return false;
+        };
+        if results.count == 0 || self.nonce < results.first_nonce {
+            return false;
+        }
+        results.failed = true;
+        state.retire(self.nonce);
+        true
+    }
+
     fn assign_result(
         &mut self,
         thread_store: &ExtensionData,
@@ -779,7 +870,12 @@ impl Reservation<'_> {
                 .state
                 .lock()
                 .expect("MCP result control poisoned");
-            if !state.revoked {
+            if !state.revoked
+                && state
+                    .unresolved
+                    .get(self.turn_id)
+                    .is_some_and(|entry| self.nonce >= entry.first_nonce && entry.count > 0)
+            {
                 // A successful send is insufficient: a cancelled receiver might
                 // never apply it. Discharge only at raw assignment.
                 if peer_failed {
@@ -808,7 +904,9 @@ impl Drop for Reservation<'_> {
         state.retire(self.nonce);
         if !self.assigned {
             // A terminal may already have consumed this turn. Never recreate it.
-            if let Some(results) = state.unresolved.get_mut(self.turn_id) {
+            if let Some(results) = state.unresolved.get_mut(self.turn_id)
+                && self.nonce >= results.first_nonce
+            {
                 results.failed = true;
             }
         }
@@ -916,6 +1014,165 @@ fn result_source_admitted(thread: &ExtensionData, source: &McpToolSource, server
 }
 
 impl ToolLifecycleContributor for McpResultContributor {
+    fn on_mcp_tool_request_metadata<'a>(
+        &'a self,
+        input: McpToolRequestMetadataInput<'a>,
+    ) -> ExtensionFuture<'a, Result<Option<serde_json::Map<String, Value>>, ()>> {
+        Box::pin(async move {
+            let Some(selection) =
+                source_selection(input.thread_store, input.turn_store, input.step_store)
+                    .map_err(|_| ())?
+            else {
+                return Ok(None);
+            };
+            let profile = source_profile(input.thread_store, input.step_store).map_err(|_| ())?;
+            let tool = input.mcp_tool.tool_info();
+            if !selection
+                .metadata_servers
+                .get(&tool.server_name)
+                .is_some_and(|names| names.iter().any(|name| name == tool.tool.name.as_ref()))
+            {
+                return Ok(None);
+            }
+            // A configured declaration owns failure too; never fall through to an unedited send.
+            if !matches!(input.mcp_tool.source(), McpToolSource::Config) {
+                return Err(());
+            }
+            let control = input.thread_store.get::<McpResultControl>().ok_or(())?;
+            if (input.is_cancelled)() {
+                return Err(());
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let (nonce, rx) = {
+                let mut state = control.state.lock().expect("MCP result control poisoned");
+                let results = state
+                    .unresolved
+                    .entry(input.turn_id.to_owned())
+                    .or_insert_with(|| TurnResults {
+                        first_nonce: control.channel.next_nonce.load(Ordering::Relaxed),
+                        ..Default::default()
+                    });
+                results.count = results.count.saturating_add(1);
+                let nonce = control
+                    .channel
+                    .next_nonce
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |nonce| {
+                        nonce.checked_add(1)
+                    })
+                    .map_err(|_| {
+                        state
+                            .unresolved
+                            .get_mut(input.turn_id)
+                            .expect("registered turn")
+                            .failed = true;
+                    })?;
+                let (route, cell_id, runtime_id) = match &input.source {
+                    codex_tools::ToolCallSource::Direct => ("direct", None, None),
+                    codex_tools::ToolCallSource::CodeMode {
+                        cell_id,
+                        runtime_tool_call_id,
+                    } => (
+                        "code",
+                        Some(cell_id.as_str()),
+                        Some(runtime_tool_call_id.as_str()),
+                    ),
+                };
+                let tracing = codex_otel::sdk_trace::ContextLease::capture();
+                let token = tracing.as_ref().map(|context| context.token().to_owned());
+                let notice = Notice {
+                    phase: Some("metadata"),
+                    model: Some(input.model),
+                    route: Some(route),
+                    cell_id,
+                    runtime_tool_call_id: runtime_id,
+                    tracing_context: token.as_deref(),
+                    nonce,
+                    generation: selection.generation,
+                    profile_id: profile.as_ref().map(|profile| profile.profile_id.as_str()),
+                    profile_epoch: profile.as_ref().map(|profile| profile.epoch),
+                    thread_id: &control.id,
+                    instance: control.instance.as_deref(),
+                    turn_id: input.turn_id,
+                    call_id: input.call_id,
+                    source: "config",
+                    server_name: &tool.server_name,
+                    tool_name: &tool.tool.name,
+                    callable_namespace: &tool.callable_namespace,
+                    callable_name: &tool.callable_name,
+                    arguments: input.arguments,
+                    result: None,
+                };
+                let rx = control.enqueue_with_context(&mut state, &notice, deadline, tracing);
+                if let Some(pending) = state.pending.get_mut(&nonce) {
+                    pending.is_cancelled = Some(Arc::clone(&input.is_cancelled));
+                }
+                (nonce, rx)
+            };
+            let mut reservation = Reservation {
+                control,
+                nonce,
+                turn_id: input.turn_id,
+                assigned: false,
+            };
+            let Some(rx) = rx else {
+                crate::native_interception::expire_mcp_result(
+                    input.thread_store,
+                    input.turn_store,
+                    || !(input.is_cancelled)() && reservation.claim_rejection(),
+                );
+                return Err(());
+            };
+            let mut rx = rx;
+            let reply = tokio::select! { biased;
+                reply = &mut rx => reply,
+                _ = tokio::time::sleep_until(deadline) => {
+                    crate::native_interception::expire_mcp_result(input.thread_store, input.turn_store, || {
+                        reservation.control.state.lock().expect("MCP result control poisoned").retire(nonce).is_some()
+                    });
+                    rx.await
+                }
+            };
+            let Ok(Some(AcceptedReply::Metadata(metadata))) = reply else {
+                crate::native_interception::expire_mcp_result(
+                    input.thread_store,
+                    input.turn_store,
+                    || !(input.is_cancelled)() && reservation.claim_rejection(),
+                );
+                return Err(());
+            };
+            let mut accepted = None;
+            crate::native_interception::publish_mcp_result(
+                input.thread_store,
+                input.turn_store,
+                || {
+                    if (input.is_cancelled)() {
+                        return;
+                    }
+                    let mut state = reservation
+                        .control
+                        .state
+                        .lock()
+                        .expect("MCP result control poisoned");
+                    if !state.revoked
+                        && state.unresolved.get(input.turn_id).is_some_and(|entry| {
+                            reservation.nonce >= entry.first_nonce && entry.count > 0
+                        })
+                    {
+                        reservation.assigned = true;
+                        if let Some(results) = state.unresolved.get_mut(input.turn_id) {
+                            results.count -= 1;
+                            if results.count == 0 {
+                                state.unresolved.remove(input.turn_id);
+                            }
+                        }
+                        accepted = Some(metadata);
+                    }
+                },
+            );
+            accepted.map(Some).ok_or(())
+        })
+    }
+
     fn on_mcp_tool_result<'a>(&'a self, input: McpToolResultInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
             let Some(control) = input.thread_store.get::<McpResultControl>() else {
@@ -966,7 +1223,10 @@ impl ToolLifecycleContributor for McpResultContributor {
                 let results = state
                     .unresolved
                     .entry(input.turn_id.to_owned())
-                    .or_default();
+                    .or_insert_with(|| TurnResults {
+                        first_nonce: control.channel.next_nonce.load(Ordering::Relaxed),
+                        ..Default::default()
+                    });
                 results.count = results.count.saturating_add(1);
                 let nonce = match control.channel.next_nonce.fetch_update(
                     Ordering::Relaxed,
@@ -993,6 +1253,11 @@ impl ToolLifecycleContributor for McpResultContributor {
                 let tracing = codex_otel::sdk_trace::ContextLease::capture();
                 let tracing_token = tracing.as_ref().map(|context| context.token().to_owned());
                 let notice = Notice {
+                    phase: None,
+                    model: None,
+                    route: None,
+                    cell_id: None,
+                    runtime_tool_call_id: None,
                     tracing_context: tracing_token.as_deref(),
                     nonce,
                     generation,
@@ -1008,17 +1273,9 @@ impl ToolLifecycleContributor for McpResultContributor {
                     callable_namespace: &tool.callable_namespace,
                     callable_name: &tool.callable_name,
                     arguments: input.arguments,
-                    result: &original,
+                    result: Some(&original),
                 };
-                let Some(rx) = control.enqueue_with_context(&mut state, &notice, deadline, tracing)
-                else {
-                    state
-                        .unresolved
-                        .get_mut(input.turn_id)
-                        .expect("registered turn")
-                        .failed = true;
-                    return;
-                };
+                let rx = control.enqueue_with_context(&mut state, &notice, deadline, tracing);
                 (deadline, nonce, rx)
             };
             let mut reservation = Reservation {
@@ -1026,6 +1283,14 @@ impl ToolLifecycleContributor for McpResultContributor {
                 nonce,
                 turn_id: input.turn_id,
                 assigned: false,
+            };
+            let Some(rx) = rx else {
+                crate::native_interception::expire_mcp_result(
+                    input.thread_store,
+                    input.turn_store,
+                    || reservation.claim_rejection(),
+                );
+                return;
             };
             let mut rx = rx;
             let reply = tokio::select! {
@@ -1039,13 +1304,19 @@ impl ToolLifecycleContributor for McpResultContributor {
                     rx.await
                 }
             };
-            if let Ok(Some(edited)) = reply {
+            if let Ok(Some(AcceptedReply::Result(edited))) = reply {
                 reservation.assign_result(
                     input.thread_store,
                     input.turn_store,
                     input.result,
                     edited,
                     peer_failed,
+                );
+            } else {
+                crate::native_interception::expire_mcp_result(
+                    input.thread_store,
+                    input.turn_store,
+                    || reservation.claim_rejection(),
                 );
             }
         })
@@ -1169,6 +1440,7 @@ pub(crate) mod tests {
 
     fn selected(generation: u64, enabled: bool) -> Selection {
         Selection {
+            metadata_servers: HashMap::new(),
             generation,
             servers: if enabled {
                 HashMap::from([("vault".into(), HashMap::from([("record".into(), 0.25)]))])
@@ -1176,6 +1448,125 @@ pub(crate) mod tests {
                 HashMap::new()
             },
         }
+    }
+
+    #[tokio::test]
+    async fn old_reservation_cannot_reject_or_discharge_reinserted_same_turn_key() {
+        let control = Arc::new(McpResultControl::new("root".into(), true));
+        let mut old = Reservation {
+            control: control.clone(),
+            nonce: 1,
+            turn_id: "same",
+            assigned: false,
+        };
+        control.state.lock().unwrap().unresolved.insert(
+            "same".into(),
+            TurnResults {
+                first_nonce: 2,
+                count: 1,
+                ..Default::default()
+            },
+        );
+        assert!(!old.claim_rejection());
+        let mut raw = withheld();
+        let mut edited = withheld();
+        edited.content = vec![json!({"type":"text","text":"stale edit"})];
+        let thread = ExtensionData::new("root");
+        let turn = ExtensionData::new("same");
+        let _owner = crate::native_interception::tests::bind_owner(&thread, &turn);
+        old.assign_result(&thread, &turn, &mut raw, edited, false);
+        assert_eq!(raw.content, withheld().content);
+        drop(old);
+        let state = control.state.lock().unwrap();
+        assert_eq!(state.unresolved["same"].count, 1);
+        assert!(!state.unresolved["same"].failed);
+    }
+
+    #[tokio::test]
+    async fn bounded_notice_failure_keeps_a_live_rejection_claim() {
+        for metadata in [false, true] {
+            let control = Arc::new(McpResultControl::with_budget("root".into(), true, 1));
+            let args = json!({});
+            let result = withheld();
+            let mut request = notice(1, "old", &args, &result);
+            request.phase = metadata.then_some("metadata");
+            let reservation = Reservation {
+                control: control.clone(),
+                nonce: 1,
+                turn_id: "old",
+                assigned: false,
+            };
+            {
+                let mut state = control.state.lock().unwrap();
+                state.unresolved.insert(
+                    "old".into(),
+                    TurnResults {
+                        first_nonce: 1,
+                        count: 1,
+                        ..Default::default()
+                    },
+                );
+                assert!(
+                    control
+                        .enqueue(
+                            &mut state,
+                            &request,
+                            Instant::now() + Duration::from_secs(30)
+                        )
+                        .is_none()
+                );
+            }
+            assert!(reservation.claim_rejection());
+            assert!(control.state.lock().unwrap().unresolved["old"].failed);
+        }
+    }
+
+    #[test]
+    fn rejected_obligation_is_scoped_and_never_recreated() {
+        let control = Arc::new(McpResultControl::new("root".into(), true));
+        let reservation = Reservation {
+            control: control.clone(),
+            nonce: 1,
+            turn_id: "old",
+            assigned: false,
+        };
+        assert!(!reservation.claim_rejection());
+        {
+            let mut state = control.state.lock().unwrap();
+            state.unresolved.insert(
+                "old".into(),
+                TurnResults {
+                    count: 1,
+                    ..Default::default()
+                },
+            );
+            state.unresolved.insert(
+                "new".into(),
+                TurnResults {
+                    count: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(reservation.claim_rejection());
+        {
+            let mut state = control.state.lock().unwrap();
+            assert_eq!(state.unresolved["new"].count, 1);
+            assert!(state.unresolved["old"].failed);
+            assert!(!state.unresolved["new"].failed);
+            state.unresolved.remove("old");
+        }
+        assert!(!reservation.claim_rejection());
+        assert!(!control.state.lock().unwrap().unresolved.contains_key("old"));
+        control.state.lock().unwrap().unresolved.insert(
+            "old".into(),
+            TurnResults {
+                count: 1,
+                ..Default::default()
+            },
+        );
+        control.state.lock().unwrap().revoked = true;
+        assert!(!reservation.claim_rejection());
     }
 
     #[test]
@@ -1374,6 +1765,11 @@ pub(crate) mod tests {
         result: &'a CallToolResult,
     ) -> Notice<'a> {
         Notice {
+            phase: None,
+            model: None,
+            route: None,
+            cell_id: None,
+            runtime_tool_call_id: None,
             tracing_context: None,
             nonce,
             generation: 0,
@@ -1389,7 +1785,7 @@ pub(crate) mod tests {
             callable_namespace: "mcp__vault",
             callable_name: "record",
             arguments,
-            result,
+            result: Some(result),
         }
     }
 
@@ -1433,7 +1829,9 @@ pub(crate) mod tests {
         ));
         let result_control = control.clone();
         (result_control, async move {
-            let edited = rx.await.unwrap().unwrap();
+            let AcceptedReply::Result(edited) = rx.await.unwrap().unwrap() else {
+                panic!("expected result reply");
+            };
             reservation.assign_result(thread, turn, output, edited, false);
             drop(reservation);
             assert!(control.release(nonce));
@@ -1788,6 +2186,7 @@ pub(crate) mod tests {
                 TurnResults {
                     count: 1,
                     failed: false,
+                    ..Default::default()
                 },
             );
             rx = control.enqueue(&mut state, &notice, deadline).unwrap();
@@ -1826,6 +2225,7 @@ pub(crate) mod tests {
                     TurnResults {
                         count: 1,
                         failed: false,
+                        ..Default::default()
                     },
                 );
             }
@@ -1836,6 +2236,8 @@ pub(crate) mod tests {
                     call_id: "old-call".into(),
                     deadline: Instant::now() + Duration::from_secs(30),
                     sender: Some(old_sender),
+                    metadata: false,
+                    is_cancelled: None,
                 },
             );
             state.pending.insert(
@@ -1845,6 +2247,8 @@ pub(crate) mod tests {
                     call_id: "new-call".into(),
                     deadline: Instant::now() + Duration::from_secs(30),
                     sender: Some(new_sender),
+                    metadata: false,
+                    is_cancelled: None,
                 },
             );
         }
@@ -1873,7 +2277,9 @@ pub(crate) mod tests {
         ));
         assert!(!control.has_settled_failure("new-turn"));
         assert!(control.has_settled_failure("old-turn"));
-        let edited = new_receiver.await.unwrap().unwrap();
+        let AcceptedReply::Result(edited) = new_receiver.await.unwrap().unwrap() else {
+            panic!("expected result reply")
+        };
         assert!(!control.has_settled_failure("new-turn"));
         let mut raw_result = withheld();
         new.assign_result(&thread, &turn, &mut raw_result, edited, false);

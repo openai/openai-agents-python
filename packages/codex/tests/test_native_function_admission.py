@@ -33,14 +33,17 @@ async def test_native_request_identity_is_checked_before_the_function(
             def __getattr__(self, name: str) -> Any:
                 return getattr(native, name)
 
-            def _check_python_tool(self, raw: str) -> None:
-                native._check_python_tool(raw)
+            def _check_python_tool(self, raw: str) -> bool:
+                accepted = native._check_python_tool(raw)
+                if not accepted:
+                    return False
                 if identity == "other-session":
                     other._native._check_python_tool(raw)
                 else:
                     stale = json.loads(raw)
                     stale["_sdk_python_tool"]["generation"] += 1
                     native._check_python_tool(json.dumps(stale))
+                return accepted
 
         monkeypatch.setattr(owner, "_native", Admission())
         handle = await owner.submit("use lookup")
