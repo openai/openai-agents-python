@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -28,6 +29,13 @@ from tests.native_fixtures import (
 )
 from tests.test_buffered_responses import json_peer, json_response
 from tests.test_native_plain_event_collection import instrument_reader, normalized_observations
+
+
+@pytest.fixture(autouse=True)
+def exercise_shared_atomic_opening(monkeypatch):
+    """Keep coverage of atomic opening below the separately tested completed-run shortcut."""
+    module = importlib.import_module("_agents_codex.agent")
+    monkeypatch.setattr(module, "_completed_run_eligible", lambda *args: False)
 
 
 def atomic_opening_placement() -> dict[str, bool]:

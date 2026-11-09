@@ -9,7 +9,10 @@ import pytest
 from agents import Agent, NativeProvider, Session
 from tests._asyncio import timeout
 from tests.test_buffered_responses import json_peer, json_response
-from tests.test_native_lifecycle_run import atomic_opening_placement
+from tests.test_native_lifecycle_run import (
+    atomic_opening_placement,
+    exercise_shared_atomic_opening as exercise_shared_atomic_opening,
+)
 from tests.test_native_plain_event_collection import instrument_reader
 
 
