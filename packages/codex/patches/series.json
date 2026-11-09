@@ -337,9 +337,17 @@
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
     },
     {
+      "path": "0096-native-realtime-sip-config.patch",
+      "sha256": "3c6e00a796eabde1bb6c4bee5dfc77ac501ab2ef1101e5c8a1a79cef81361486"
+    },
+    {
+      "path": "0097-native-realtime-provider-history.patch",
+      "sha256": "55f95b76ac5d49ddc840ed582f9c28770cd20e3693e4f152f141193e8fa5dad8"
+    },
+    {
       "path": "0170-canonical-history-transactions.patch",
       "sha256": "e88a2db32ae35587399c2eeae49284f96ef83383399b26f60961f9748d74e779"
     }
   ],
-  "result_tree": "6e265aa5f9096b8ce2e6836d7262cd79d0ec8d56"
+  "result_tree": "2551267bffe92252766e35671ac700d601cc263f"
 }

@@ -112,6 +112,7 @@ from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
     ExecutorContext as ExecutorContext,
+    _path_uri as _path_uri,
     _writable_roots as _writable_roots,
 )
 from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
@@ -267,6 +268,33 @@ _TurnT = TypeVar("_TurnT")
 _SelectionContextT_contra = TypeVar("_SelectionContextT_contra", contravariant=True)
 _NATIVE_HOME_CLOSE_TIMEOUT = 30.0
 _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST = hashlib.sha256(b"implicit-remote-workspace").hexdigest()
+
+
+def _canonical_executor_policies(encoded: str) -> str:
+    policies = json.loads(encoded)
+    for policy in policies:
+        roots = policy["writable_roots"]
+        if not roots:
+            continue
+        # The implicit cwd grant stays first. Canonical extra roots are a set.
+        roots[1:] = sorted(roots[1:])
+        entries = policy["permission_profile"]["file_system"]["entries"]
+        positions: list[int] = []
+        for index, entry in enumerate(entries):
+            path = entry["path"]
+            uri = _path_uri(path["path"]) if path["type"] == "path" else None
+            if uri is not None and any(uri == root or uri.startswith(root + "/") for root in roots):
+                positions.append(index)
+        # Core resolves literal filesystem rules by path depth and access mode,
+        # not their order. Normalize only rules beneath these writable roots;
+        # keep other policy fields and entry positions exactly as supplied.
+        ordered = sorted(
+            (entries[index] for index in positions),
+            key=lambda entry: json.dumps(entry, sort_keys=True, separators=(",", ":")),
+        )
+        for index, entry in zip(positions, ordered, strict=True):
+            entries[index] = entry
+    return json.dumps(policies, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _native_model_settings(model: str | None, settings: ModelSettings | None) -> dict[str, Any]:
@@ -887,6 +915,7 @@ class _Submission:
     completion_continuations: int = 0
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
+    step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
     stopping: bool = False
     cleanup_error: BaseException | None = None
     deferred_close: tuple[bool, BaseException | None, Completed[Any] | None] | None = None
@@ -3506,7 +3535,7 @@ class Session(Generic[ContextT, OutputT]):
                         # when the saved subset resolves without an executor.
                         recorded_policy = None
                     if recorded_policy is not None and (
-                        recorded_policy != await session._executor_policy_digest()
+                        recorded_policy not in await session._executor_policy_digests()
                     ):
                         raise ValueError(
                             "Checkpoint and Environment must agree on the applied executor policy"
@@ -3935,6 +3964,35 @@ class Session(Generic[ContextT, OutputT]):
         from .realtime import RealtimeConfig, RealtimeSession
 
         return RealtimeSession(self, config=RealtimeConfig() if config is None else config)
+
+    async def build_realtime_sip_config(
+        self, *, config: RealtimeConfig | None = None
+    ) -> dict[str, Any]:
+        """Build the provider session configuration for accepting an incoming SIP call.
+
+        Submit the returned object as the call-accept request body, then attach
+        using the same RealtimeConfig model, voice, instructions, settings, and
+        tool selection, with ``transport=RealtimeSIP(call_id)``. The builder
+        saves no configuration for a later attachment.
+        This prepares the same Session-owned MCP tools and captured instructions
+        as connection startup, without connecting voice or resolving voice
+        credentials. MCP discovery may perform network I/O and raise its errors.
+        An explicit tool selection must already belong to the captured catalog.
+        Transport, adapter, and API key fields do not affect this configuration.
+        To disable automatic hosted MCP follow-up responses, set
+        ``automatically_trigger_response_for_mcp_tool_calls=False`` on the
+        subsequent SIP attachment; the call-accept builder rejects that setting.
+        """
+        try:
+            self._check_open()
+            self._check_callback_operation("build Realtime SIP configuration in its own Session")
+            from .realtime import RealtimeConfig, _build_realtime_sip_config
+
+            return await _build_realtime_sip_config(
+                self, RealtimeConfig() if config is None else config
+            )
+        finally:
+            del config
 
     async def _publish_opening_configuration(
         self,
@@ -4759,16 +4817,27 @@ class Session(Generic[ContextT, OutputT]):
         )
 
     async def _executor_policy_digest(self) -> str | None:
+        return (await self._executor_policy_digests())[0]
+
+    async def _executor_policy_digests(self) -> tuple[str | None, str | None]:
         if self._executor is None:
-            return None
-        if self._strict_executor_writes:
-            # The mode also disables escalation and permission requests.
-            policy = "strict-writes:" + await self._native._executor_policies()
-        else:
+            return None, None
+        if not self._strict_executor_writes:
             # An implicit WSS workspace can move on restore. Keep the write
             # mode, and let the separate network digest check network authority.
-            return _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
-        return hashlib.sha256(policy.encode("utf-8")).hexdigest()
+            return (
+                _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST,
+                _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST,
+            )
+        # The mode also disables escalation and permission requests.
+        encoded = await self._native._executor_policies()
+        canonical = _canonical_executor_policies(encoded)
+        # Preserve previously working restores of older checkpoints with the
+        # original aliases. Their opaque hashes cannot substitute new aliases.
+        return (
+            hashlib.sha256(("strict-writes:" + canonical).encode("utf-8")).hexdigest(),
+            hashlib.sha256(("strict-writes:" + encoded).encode("utf-8")).hexdigest(),
+        )
 
     @property
     def restored_turn(self) -> Turn[Any] | None:
@@ -5371,6 +5440,21 @@ class Session(Generic[ContextT, OutputT]):
                 await asyncio.gather(changed, finished, return_exceptions=True)
         return False
 
+    def _manual_catalog(self, request: ActionRequested[Any, Any]) -> _ToolCatalog:
+        """Resolve a live request through its original native source capture."""
+        for invocation, _, raw in self._native._pending_manual_tools():
+            if invocation != request._invocation:
+                continue
+            message = json.loads(raw)["msg"]
+            marker = message["_sdk_python_tool"]
+            catalog = self._catalog_for_message(message, marker["generation"])
+            if marker["slot"] == request._slot:
+                entry = catalog.tools[request._slot]
+                if isinstance(entry, _CapturedManual) and entry.declaration is request._declaration:
+                    return catalog
+            break
+        raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
+
     async def _respond(
         self,
         request: ActionRequested[Any, Any],
@@ -5418,7 +5502,7 @@ class Session(Generic[ContextT, OutputT]):
             raise InteractionExpiredError(
                 "Manual tool reply is foreign, expired or already delivered"
             )
-        entry = self._catalog.tools[request._slot]
+        entry = self._manual_catalog(request).tools[request._slot]
         if not isinstance(entry, _CapturedManual) or entry.declaration is not request._declaration:
             raise InteractionExpiredError("Manual tool reply belongs to a different declaration")
         if prepared is not None and (
@@ -5455,7 +5539,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionExpiredError("Manual child tool reply is expired")
-            entry = self._catalog.tools[request._slot]
+            entry = self._manual_catalog(request).tools[request._slot]
             if (
                 not isinstance(entry, _CapturedManual)
                 or entry.declaration is not request._declaration
@@ -8572,7 +8656,8 @@ class Session(Generic[ContextT, OutputT]):
             return
         assert handle.turn_id is not None
         invocation = message["invocation"]
-        for server in self._mcp_tools:
+        servers = state.step_mcp if isinstance(state, _Submission) else None
+        for server in self._mcp_tools if servers is None else servers:
             if server.name != invocation["server"] or invocation["tool"] not in server.tools:
                 continue
             selected = _tool_names((server,))[server.tools.index(invocation["tool"])]
@@ -9434,6 +9519,34 @@ class Session(Generic[ContextT, OutputT]):
                     else message["candidates"]
                 )
             }
+            if self._profiles:
+                # Profiles share these captured runtime grants. Ordinary and MCP
+                # defaults remain scoped to the issuing profile's catalog.
+                fixed = _fixed_tool_refs(
+                    source_agent.tools,
+                    source_agent.programmatic_tool_calling,
+                    self._executor,
+                    self._native_agents,
+                )
+                # Idle subsets narrow only the current root profile's defaults.
+                if (
+                    isinstance(state, _Submission)
+                    and state.operation_refs is None
+                    and self._default_tools is not None
+                    and self._profile_current == (message["profile_id"], message["profile_epoch"])
+                ):
+                    fixed.intersection_update(
+                        ToolRef(ref.name, ref.namespace or "functions")
+                        for ref in _selected_tool_refs(
+                            self._default_tools,
+                            (),
+                            (),
+                            programmatic_tool_calling=source_agent.programmatic_tool_calling,
+                            environment=self._executor,
+                            native_agents=self._native_agents,
+                        )
+                    )
+                defaults.update(fixed)
             if selection is None:
                 refs = defaults
             else:
@@ -9492,7 +9605,23 @@ class Session(Generic[ContextT, OutputT]):
             search = ToolRef("tool_search", "functions")
             if refs and search in candidates:
                 refs.add(search)
-            selected_json = _native_tool_refs(tuple(refs & candidates))
+            selected = refs & candidates
+            if isinstance(state, _Submission):
+                # The native event reader drains the preceding sample before
+                # this selector. Core waits for our reply before the next sample.
+                state.step_mcp = tuple(
+                    replace(
+                        server,
+                        tools=tuple(
+                            name
+                            for name, ref in zip(server.tools, _tool_names((server,)), strict=True)
+                            if ToolRef(**ref) in selected
+                        ),
+                    )
+                    for server in source_bindings
+                    if isinstance(server, _MCP)
+                )
+            selected_json = _native_tool_refs(tuple(selected))
         except BaseException as error:
             if _native_callback_cancelled(state):
                 if not isinstance(error, asyncio.CancelledError):
