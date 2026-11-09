@@ -8525,19 +8525,22 @@ class Session(Generic[ContextT, OutputT]):
                     backend = backend.get_model(request.body["model"])
                 value = backend.complete(request)
                 if inspect.isawaitable(value):
-
-                    async def settle() -> str:
-                        result = await value
-                        if not isinstance(result, ModelResponse):
-                            raise TypeError("NativeModel.complete must return ModelResponse")
-                        return result._capture()
-
-                    return settle()
+                    # Keep the original coroutine visible to callback admission
+                    # so cancellation can close it before application entry.
+                    return value
                 if not isinstance(value, ModelResponse):
                     raise TypeError("NativeModel.complete must return ModelResponse")
                 return value._capture()
 
-            reply = await _call_callback(invoke, active, request)
+            produced = await _call_callback(invoke, active, request)
+            # Awaited producers settle on this loop. Capture immediately, before
+            # another await or handing the retained value back to the application.
+            if isinstance(produced, ModelResponse):
+                reply = produced._capture()
+            elif produced is not None and not isinstance(produced, str):
+                raise TypeError("NativeModel.complete must return ModelResponse")
+            else:
+                reply = produced
             if not active():
                 return
             failed = False
