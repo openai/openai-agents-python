@@ -483,8 +483,8 @@ pub(crate) fn publish_mcp_result(
     }
 }
 
-// Claim only an unanswered deadline. An on-time accepted reply remains valid
-// even when its native receiver resumes after the timer becomes ready.
+// Claim an unanswered deadline or a rejected live reservation. The caller
+// validates the exact unresolved obligation before stopping its captured owner.
 pub(crate) fn expire_mcp_result(
     thread_store: &ExtensionData,
     turn_store: &ExtensionData,
@@ -3008,9 +3008,23 @@ impl CodeModeSessionProvider for Provider {
         &self,
         id: codex_protocol::ThreadId,
     ) -> CodeModeSessionProviderFuture<'_> {
+        self.create_session_for_thread_with_reference_profile(
+            id,
+            codex_protocol::provider_reference_profile::ProviderImageReferencePolicy::PrepareInline,
+        )
+    }
+
+    fn create_session_for_thread_with_reference_profile(
+        &self,
+        id: codex_protocol::ThreadId,
+        profile: codex_protocol::provider_reference_profile::ProviderImageReferencePolicy,
+    ) -> CodeModeSessionProviderFuture<'_> {
         Box::pin(async move {
             let Some(state) = self.boundary.pending_code_state(id) else {
-                let session = self.inner.create_session_for_thread(id).await?;
+                let session = self
+                    .inner
+                    .create_session_for_thread_with_reference_profile(id, profile)
+                    .await?;
                 return Ok(Session::new(session, self.boundary.clone()) as Arc<dyn CodeModeSession>);
             };
             let control = self
@@ -3025,7 +3039,10 @@ impl CodeModeSessionProvider for Provider {
                 .close_pending_code_import(None)
                 .await
                 .map_err(|_| "Native CodeMode import cleanup failed")?;
-            let session = self.inner.create_session_for_thread(id).await?;
+            let session = self
+                .inner
+                .create_session_for_thread_with_reference_profile(id, profile)
+                .await?;
             let turn = control
                 .direct_turn
                 .lock()

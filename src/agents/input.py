@@ -2,7 +2,12 @@
 
 from _agents_codex.input import (
     Any as Any,
+    AssistantMessage as AssistantMessage,
+    ImageDetail as ImageDetail,
+    InitialMessage as InitialMessage,
+    InputFile as InputFile,
     InputImage as InputImage,
+    InputImageFile as InputImageFile,
     InputText as InputText,
     Literal as Literal,
     Mapping as Mapping,

@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio as asyncio
 import importlib as importlib
 import json as json
+import math as math
+import os as os
+import re as re
 from collections.abc import AsyncIterator as AsyncIterator, Mapping as Mapping, Sequence as Sequence
 from contextlib import (
     AbstractAsyncContextManager as AbstractAsyncContextManager,
@@ -25,10 +28,12 @@ from typing import (
     Any as Any,
     Generic as Generic,
     Literal,
+    NoReturn,
     SupportsIndex as SupportsIndex,
     cast as cast,
     overload as overload,
 )
+from urllib.parse import urlsplit as urlsplit
 
 from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar
 
@@ -43,7 +48,10 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
+from .initial_messages import _capture_initial_messages, _initial_messages_json
+from .input import InitialMessage
 from .model_context import _ContextTransform
+from .tools import ToolRef
 from .usage import RunBudget
 
 if TYPE_CHECKING:
@@ -69,7 +77,6 @@ if TYPE_CHECKING:
     )
     from .state import LocalStorage, SessionState
     from .telemetry import TraceOptions
-    from .tools import ToolRef
     from .turn import Turn
 
 ContextT = TypeVar("ContextT", default=None)
@@ -90,22 +97,113 @@ class ModelSettings(TypedDict, total=False, closed=True):
     ``tool_choice`` controls whether the model may call tools in the request.
     Use ``"auto"`` to let the model decide, ``"none"`` to disable tool calls,
     or ``"required"`` to require a call to an offered tool. The default is
-    ``"auto"``.
+    ``"auto"``. A ``ToolRef`` selects one currently admitted eager leaf and
+    requires it without adding authority. ``None`` clears the target to auto.
+    New request controls accept ``None`` to clear their SDK override. The response
+    cap is a positive safe integer for ordinary sampling, not internal compaction
+    or reviewers. Request TTL (30m/12h) and retention (in_memory/24h) remain
+    independent; omission injects neither default. Providers own model support
+    and cache behavior. Known formatting loss fails locally. ``store=True``
+    requires API-key authentication.
+
+    ``invocation_timeout_ms`` sets one local model invocation deadline in positive
+    integer milliseconds (at most 4,294,967,295). ``None`` clears it. It includes
+    internal request waits and retries. Cleanup can finish after expiry; accepted
+    terminal responses disarm the clock before result settlement.
     """
 
     reasoning_effort: str
     reasoning_summary: str
     service_tier: str | None
-    tool_choice: Literal["auto", "none", "required"]
+    tool_choice: Literal["auto", "none", "required"] | ToolRef | None
+    max_output_tokens: int | None
+    temperature: float | None
+    top_p: float | None
+    top_logprobs: int | None
+    parallel_tool_calls: bool | None
+    verbosity: Literal["low", "medium", "high"] | None
+    metadata: Mapping[str, str] | None
+    store: bool | None
+    prompt_cache_retention: Literal["in_memory", "24h"] | None
+    prompt_cache_ttl: Literal["30m", "12h"] | None
+    invocation_timeout_ms: int | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     if settings is None:
         return {}
+    if not isinstance(settings, Mapping):
+        raise TypeError("model_settings must be a mapping")
     unknown = settings.keys() - ModelSettings.__annotations__.keys()
     if unknown:
         raise ValueError(f"Unsupported model setting(s): {sorted(unknown)}")
-    return settings.copy()
+    if "invocation_timeout_ms" in settings:
+        timeout_ms = settings["invocation_timeout_ms"]
+        if timeout_ms is not None and (
+            type(timeout_ms) is not int or not 1 <= timeout_ms <= 4_294_967_295
+        ):
+            raise ValueError(
+                "invocation_timeout_ms must be an integer in the range 1..=4294967295 or None"
+            )
+
+    captured: dict[str, Any] = dict(settings)
+    for key, value in captured.items():
+        if value is None:
+            continue
+        if key == "max_output_tokens":
+            if type(value) is not int or not 1 <= value <= 9_007_199_254_740_991:
+                raise ValueError("max_output_tokens must be a positive safe integer")
+        elif key == "top_logprobs":
+            if type(value) is not int or not 0 <= value <= 20:
+                raise ValueError("top_logprobs must be an integer between zero and 20")
+        elif key in ("temperature", "top_p"):
+            upper = 2.0 if key == "temperature" else 1.0
+            if (
+                type(value) not in (int, float)
+                or not 0 <= value <= upper
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"{key} must be finite and between zero and {upper}")
+        elif key in ("parallel_tool_calls", "store"):
+            if type(value) is not bool:
+                raise TypeError(f"{key} must be bool or None")
+        elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
+            allowed = {
+                "verbosity": ("low", "medium", "high"),
+                "prompt_cache_retention": ("in_memory", "24h"),
+                "prompt_cache_ttl": ("30m", "12h"),
+            }[key]
+            if value not in allowed:
+                raise ValueError(f"Unsupported {key}")
+        elif key == "metadata":
+            if (
+                not isinstance(value, Mapping)
+                or len(value) > 16
+                or any(
+                    not isinstance(k, str) or not isinstance(v, str) or len(k) > 64 or len(v) > 512
+                    for k, v in value.items()
+                )
+            ):
+                raise ValueError(
+                    "metadata allows at most 16 string pairs, "
+                    "64 characters per key and 512 per value"
+                )
+            captured[key] = MappingProxyType(dict(value))
+        elif key == "tool_choice":
+            if isinstance(value, ToolRef):
+                if (
+                    not isinstance(value.name, str)
+                    or not value.name.strip()
+                    or (
+                        value.namespace is not None
+                        and (not isinstance(value.namespace, str) or not value.namespace.strip())
+                    )
+                ):
+                    raise ValueError("tool_choice needs a nonempty captured tool identity")
+                captured["tool_choice"] = ToolRef(value.name, value.namespace)
+            elif value not in ("auto", "none", "required"):
+                raise ValueError("tool_choice must be an outer mode or ToolRef")
+    return cast(ModelSettings, captured)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -142,6 +240,18 @@ class CodexAccount:
     plan_type: str
 
 
+class _ProviderStrings(dict[str, str]):
+    """Frozen captured strings that preserve dataclass asdict/copy/pickle support."""
+
+    def _immutable(self: object, *args: Any, **kwargs: Any) -> NoReturn:
+        raise TypeError("Captured provider routing is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+
+    def __reduce__(self) -> Any:
+        return (type(self), (dict(self),))
+
+
 @dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
@@ -172,6 +282,12 @@ class NativeProvider:
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
+    Routing maps are captured at construction. ``env_headers`` resolves values
+    once; missing/empty values stay omitted. Query pairs use URL encoding.
+    Supplied routing options reject same-origin and cross-origin redirects.
+    Native auth/protocol/private-hop headers remain reserved. Construct a new
+    provider to refresh these captured values.
+
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
 
@@ -195,6 +311,11 @@ class NativeProvider:
     supports_websockets: bool | None = None
     auth: CodexLogin | None = field(default=None, repr=False)
     response_mode: Literal["streaming", "buffered"] = "streaming"
+    query_params: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
+    headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
+    env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
+    organization: str | None = field(default=None, repr=False)
+    project: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
@@ -214,6 +335,132 @@ class NativeProvider:
                 raise ValueError("Buffered Responses require API-key authentication")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
                 raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
+        self._capture_routing()
+
+    def _capture_routing(self) -> None:
+        names = ("query_params", "headers", "env_headers", "organization", "project")
+        configured = any(getattr(self, name) is not None for name in names)
+        if configured and self.auth is not None:
+            raise ValueError("Custom provider routing requires API-key authentication")
+        if configured:
+            try:
+                parsed = urlsplit(self.base_url or "https://api.openai.com/v1")
+            except ValueError:
+                raise ValueError(
+                    "Custom provider routing requires an absolute HTTP(S) base URL"
+                ) from None
+            if (
+                parsed.scheme not in ("http", "https")
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Custom provider routing requires an absolute HTTP(S) URL "
+                    "without userinfo or fragment"
+                )
+        captured: dict[str, dict[str, str] | None] = {}
+        for name in ("query_params", "headers", "env_headers"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, Mapping)
+                or any(
+                    not isinstance(key, str) or not key or not isinstance(item, str)
+                    for key, item in value.items()
+                )
+            ):
+                raise TypeError(f"{name} must be a string map with nonempty keys")
+            captured[name] = dict(value) if value is not None else None
+            object.__setattr__(self, name, _ProviderStrings(value) if value is not None else None)
+        protected = {
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "host",
+            "connection",
+            "upgrade",
+            "content-length",
+            "transfer-encoding",
+            "te",
+            "trailer",
+            "keep-alive",
+            "proxy-connection",
+            "content-type",
+            "accept",
+            "accept-encoding",
+            "user-agent",
+            "openai-beta",
+            "originator",
+            "session_id",
+            "x-client-request-id",
+            "x-request-id",
+            "chatgpt-account-id",
+            "openai-organization",
+            "openai-project",
+            "x-responsesapi-include-timing-metrics",
+            "x-sdk-sentinel-grant",
+        }
+        headers: dict[str, str] = {}
+        seen: set[str] = set()
+        for field_name in ("headers", "env_headers"):
+            for key, value in (captured[field_name] or {}).items():
+                lower = key.lower()
+                if (
+                    not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key)
+                    or lower in protected
+                    or lower.startswith(("sec-websocket-", "x-codex-", "x-openai-"))
+                ):
+                    raise ValueError(
+                        "Provider header name is invalid or belongs to native transport/auth"
+                    )
+                if lower in seen:
+                    raise ValueError("Provider header names must be unique ignoring case")
+                seen.add(lower)
+                if field_name == "env_headers":
+                    if not value or "=" in value or "\x00" in value:
+                        raise ValueError("env_headers values must name environment variables")
+                    selected = os.environ.get(value)
+                    if selected is None or not selected.strip():
+                        continue
+                    value = selected
+                if any(ord(char) < 32 or ord(char) > 126 for char in value):
+                    raise ValueError("Provider header values must contain printable ASCII")
+                headers[lower] = value
+        for name, header in (
+            ("organization", "openai-organization"),
+            ("project", "openai-project"),
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                if (
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or any(ord(char) < 32 or ord(char) > 126 for char in value)
+                ):
+                    raise ValueError(f"{name} must be a nonempty printable ASCII string")
+                headers[header] = value
+        object.__setattr__(
+            self,
+            "_routing",
+            (
+                tuple(sorted((captured["query_params"] or {}).items())),
+                tuple(sorted(headers.items())),
+                configured,
+            ),
+        )
+
+    def _routing_config(self) -> dict[str, Any]:
+        query, headers, _ = vars(self).get("_routing", ((), (), False))
+        result: dict[str, Any] = {}
+        if self.query_params is not None:
+            result["query_params"] = dict(query)
+        if any(
+            value is not None
+            for value in (self.headers, self.env_headers, self.organization, self.project)
+        ):
+            result["http_headers"] = dict(headers)
+        return result
 
     @property
     def _websockets_enabled(self) -> bool:
@@ -237,10 +484,24 @@ class NativeProvider:
             return reduction
         # Copy settings and the closed fence, never another descriptor's resource.
         dictionary = dictionary.copy()
+        for name in ("query_params", "headers", "env_headers"):
+            if dictionary.get(name) is not None:
+                dictionary[name] = dict(dictionary[name])
         dictionary.pop("_transport", None)
         dictionary.pop("_deferred_openings", None)
         state = (dictionary, *state[1:]) if isinstance(state, tuple) else dictionary
         return (*reduction[:2], state, *reduction[3:])
+
+    def __setstate__(self, state: Any) -> None:
+        # Object reduction can carry both instance dictionary and subclass slots.
+        states = state if isinstance(state, tuple) else (state,)
+        for attributes in states:
+            if attributes is None:
+                continue
+            for name, value in attributes.items():
+                if name in ("query_params", "headers", "env_headers") and value is not None:
+                    value = _ProviderStrings(value)
+                object.__setattr__(self, name, value)
 
     def _acquire_lease(self) -> tuple[Any, Any, Any]:
         # This lock guards only synchronous publication. It is never held across
@@ -585,6 +846,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -606,6 +868,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -627,6 +890,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -648,6 +912,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
@@ -663,6 +928,14 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        initial_messages seeds settled user messages and assistant text without
+        starting a model turn. It accepts UserMessage media through the current
+        native route; Core can normalize images. Pass it only for a fresh opening,
+        without state or resume, even when the sequence is empty. The Session
+        becomes usable after native publication and its durability fence. An
+        in-memory store adds no crash guarantee. Failed startup can leave accepted
+        history in persistent storage; recover it instead of resubmitting seeds.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -746,6 +1019,7 @@ class Agent(Generic[ContextT, OutputT]):
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state, resume=resume)
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Session
@@ -762,6 +1036,7 @@ class Agent(Generic[ContextT, OutputT]):
                 self,
                 context=context,
                 state=state,
+                initial_messages_json=_initial_messages_json(initial_messages),
                 storage=storage,
                 resume=resume,
                 environment=environment,
@@ -821,6 +1096,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -844,6 +1120,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -867,6 +1144,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -894,6 +1172,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -944,6 +1223,7 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state)
         options: dict[str, Any] = {}
         try:
             from .prepared_request import _check_output, _check_profile, _check_tools
@@ -1051,6 +1331,8 @@ class Agent(Generic[ContextT, OutputT]):
             # Capture before opening. An override may expose the Session and its
             # observations, including when it delegates to the original method.
             session_factory = self.session
+            if initial_messages is not None:
+                options["initial_messages"] = initial_messages
             if on_interaction is not None:
                 options["on_interaction"] = on_interaction
             if parent_trace is not None:
@@ -1174,6 +1456,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1197,6 +1480,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1220,6 +1504,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1247,6 +1532,7 @@ class Agent(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1265,6 +1551,7 @@ class Agent(Generic[ContextT, OutputT]):
         retry cleanup. Explicit providers remain the caller's responsibility and
         are not attached to the error.
         """
+        initial_messages = _capture_initial_messages(initial_messages, state=state)
         if budget is not None and not isinstance(budget, RunBudget):
             raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
@@ -1278,6 +1565,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["trace_options"] = trace_options
                 if state is not None:
                     options["state"] = state
+                if initial_messages is not None:
+                    options["initial_messages"] = initial_messages
                 if return_state is not False:
                     options["return_state"] = return_state
                 if on_interaction is not None:

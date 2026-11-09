@@ -2,10 +2,11 @@
 
 from collections.abc import Awaitable as Awaitable, Callable as Callable
 from dataclasses import dataclass as dataclass, field as field
-from typing import Generic as Generic, TypeAlias as TypeAlias, TypeVar as TypeVar
+from typing import Any as Any, Generic as Generic, TypeAlias as TypeAlias, TypeVar as TypeVar
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import StopTurn as StopTurn
+from .tools import ToolCallInfo as ToolCallInfo
 
 ContextT = TypeVar("ContextT")
 
@@ -54,6 +55,8 @@ class CompletionContext(Generic[ContextT]):
     subagent_id: str | None
     model: str
     continuation_count: int
+    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    final_output: Any = field(default=None, kw_only=True, repr=False)
 
 
 _BeforeComplete: TypeAlias = Callable[

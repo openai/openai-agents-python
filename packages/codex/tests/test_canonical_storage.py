@@ -409,8 +409,6 @@ async def test_reconciliation_cleanup_joins_retries_without_repeating_work(
 async def test_reconcile_rejects_invalid_output_before_native_acquisition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pydantic import ValidationError
-
     from agents import ToolOutput, _native
 
     calls = []
@@ -423,7 +421,7 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
     storage = CustomStorage(store)
     with pytest.raises(TypeError, match="str or ToolOutput"):
         await storage.reconcile(session_id="session", turn_id="turn", call_id="call", output={})  # type: ignore[arg-type]
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="Unsupported tool content"):
         await storage.reconcile(
             session_id="session",
             turn_id="turn",

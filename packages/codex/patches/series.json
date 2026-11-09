@@ -299,7 +299,11 @@
     {
       "path": "0091-mcp-windows-env-precedence.patch",
       "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
+    },
+    {
+      "path": "0090-native-session-media-history.patch",
+      "sha256": "17c3e90f5903457e5b4b377186640c92b5c2152a4c4286ee6670157d124d06fa"
     }
   ],
-  "result_tree": "afbd3fe4a27ca847c61bb8ba444bd9214cb238b0"
+  "result_tree": "c82459a4735f65c83102c85c94ec000b674fb6ab"
 }

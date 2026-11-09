@@ -38,6 +38,11 @@ from ._events import (
 from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .rate_limits import ApiRateLimits as ApiRateLimits
+from .response_facts import (
+    RecordedResponseFact as RecordedResponseFact,
+    RecordedResponseFactSummary as RecordedResponseFactSummary,
+    _summarize_response_fact,
+)
 from .usage import TokenUsageInfo as TokenUsageInfo
 
 if TYPE_CHECKING:
@@ -123,6 +128,17 @@ class OutputTextDelta(_SubmissionEvent):
     item_id: str
     delta: str
     type: Literal["output_text_delta"] = field(default="output_text_delta", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResponseFactReceived(_SubmissionEvent):
+    """Private received facts; durable history remains available after failure.
+
+    A probability delta refers to provider text, not a rendered output segment.
+    """
+
+    record: RecordedResponseFact | RecordedResponseFactSummary = field(repr=False)
+    type: Literal["response_fact"] = field(default="response_fact", init=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -303,6 +319,7 @@ Observation: TypeAlias = (
     | TurnFinished
     | SubagentLifecycle
     | OutputTextDelta
+    | ResponseFactReceived
     | ModelOutputItemCompleted
     | HostedToolCallProgress
     | UsageUpdated
@@ -371,6 +388,8 @@ class _ObservationBuffer:
         )
         if isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
+        if isinstance(event, ResponseFactReceived):
+            size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
         image_size = 0
         if isinstance(event, HostedToolCallProgress):
             metadata = event.event
@@ -467,7 +486,14 @@ class EventStream(AsyncIterator[Observation]):
                     event, _, _ = records[index]
                     if event.sequence > self._after:
                         self._after = event.sequence
-                        if isinstance(event, ModelOutputItemCompleted):
+                        if isinstance(event, ResponseFactReceived):
+                            event = replace(
+                                event,
+                                record=deepcopy(event.record)
+                                if self._include_execution_details
+                                else _summarize_response_fact(event.record),
+                            )
+                        elif isinstance(event, ModelOutputItemCompleted):
                             model_item = event.item
                             if (
                                 not self._include_execution_details
