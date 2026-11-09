@@ -7664,8 +7664,13 @@ class Session(Generic[ContextT, OutputT]):
         proposal: _ToolCompletionProposal | None = None
 
         def admitted() -> bool:
-            self._native._check_step(message["step_id"], message["thread"], message["instance"])
-            return not state.stopping and not state.failure.done()
+            if state.stopping or state.failure.done():
+                return False
+            try:
+                self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            except RuntimeError:
+                return False
+            return True
 
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal

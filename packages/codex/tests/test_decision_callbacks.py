@@ -457,3 +457,94 @@ async def test_child_decision_keeps_usage_after_root_finishes(
             assert child_result.thread_usage.last_token_usage.total_tokens == 7
             assert (await root.get_result()).thread_usage == root_result.thread_usage
     assert len(decisions.requests) == 1
+
+
+async def test_terminal_decision_cancellation_keeps_late_usage_and_cancellation(responses):
+    class Final(BaseModel):
+        value: int
+
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    requests, resumed, candidates = [], [], []
+
+    class SlowProvider:
+        async def get_decision(self, request):
+            requests.append(request.input)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleaning.set()
+                await release.wait()
+            return DecisionResponse(
+                value={"response": True},
+                usage=USAGE,
+                request_id="req-terminal-late",
+                model="fixture-decision",
+            )
+
+    @function_tool(finish_turn=True)
+    def finish() -> dict[str, int]:
+        return {"value": 7}
+
+    async def complete(candidate):
+        if candidate.tool_call is None:
+            return
+        candidates.append(candidate)
+        assert candidate.text is None
+        assert candidate.tool_call.tool == ToolRef("finish")
+        assert candidate.tool_call.call_id == "cancelled-finish"
+        assert candidate.final_output == Final(value=7)
+        await candidate.decide("Approve tool result?", input="value=7")
+        resumed.append(candidate.turn_id)
+
+    responses.respond(function_call("finish", {}, "cancelled-finish"))
+    responses.respond(assistant_output('{"value":8}'))
+    agent = Agent(
+        instructions="Use finish.",
+        tools=[finish],
+        provider=generative_provider(responses),
+        decisions=SlowProvider(),
+        output_type=PromptedOutput(Final, max_retries=1),
+        before_complete=complete,
+    )
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit("Finish.")
+        await entered.wait()
+        state = session._active
+        assert state is not None and state.handle is not None
+        assert state.handle.turn_id == turn.turn_id
+        stopping = asyncio.create_task(turn.cancel())
+        try:
+            await cleaning.wait()
+            assert not stopping.done()
+            # Observe real native retirement before releasing completed metadata.
+            # Shield the owner's receipt from cancellation of this test waiter.
+            terminal = await asyncio.shield(state.terminal)
+            assert terminal["type"] == "turn_aborted"
+            assert not stopping.done()
+        finally:
+            release.set()
+        await stopping
+        with pytest.raises(TurnStoppedError):
+            await turn.get_result()
+        history = [record async for record in session.turns()]
+        assert history[-1]["usage"]["total_tokens"] == 24
+        decision_responses = [
+            response
+            for response in history[-1]["responses"]
+            if response.get("upstream_request_id") == "req-terminal-late"
+        ]
+        assert len(decision_responses) == 1
+        assert decision_responses[0]["response_id"] is None
+        assert decision_responses[0]["turn_id"] == turn.turn_id
+        assert candidates[0].turn_id == turn.turn_id and not resumed
+        assert requests == ["value=7"]
+        assert state.cleanup_error is None
+        successor = await (await session.submit("Next.")).get_result()
+        assert successor.final_output == Final(value=8)
+        assert successor.repair_attempts == ()
+        assert successor.thread_usage.total_token_usage.total_tokens == 38
+        history = [record async for record in session.turns()]
+        assert [record["usage"]["total_tokens"] for record in history] == [24, 14]
+    assert requests == ["value=7"] and not resumed
+    assert len(responses.requests) == 2
