@@ -22,8 +22,8 @@ async def running():
 async def test_serves_only_fixed_assets_with_app_cors(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "client.js").write_text("// synthetic host client\n")
-    (dist / "app.js").write_text("// synthetic iframe app\n")
+    (dist / "client.js").write_bytes(b"// synthetic host client\n")
+    (dist / "app.js").write_bytes(b"// synthetic iframe app\n")
     # These exist so an accidental wildcard route would actually expose them.
     (dist / "clientXjs").write_text("private adjacent file")
     (dist / "appXjs").write_text("private adjacent file")
