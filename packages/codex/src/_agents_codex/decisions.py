@@ -234,9 +234,22 @@ async def _decide(
         if scope is not None:
             # Retain a delivered completion before checking cancellation or the
             # local output validator. The recorder owns joined publication.
+            # Accounting receives only metadata. Failed publication or revoked
+            # ownership must not retain the completed value in traceback locals.
             assert record is not None
-            await record(response)
-            scope.check(scope.owner, after_await=True)
+            try:
+                await record(
+                    DecisionResponse(
+                        value=None,
+                        usage=response.usage,
+                        request_id=response.request_id,
+                        model=response.model,
+                    )
+                )
+                scope.check(scope.owner, after_await=True)
+            except BaseException:
+                del response
+                raise
         try:
             text = json.dumps(response.value, allow_nan=False)
         except (TypeError, ValueError, RecursionError):

@@ -857,6 +857,111 @@ async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bo
     assert_no_response_in_sdk_traceback(caught.value, marker)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("budget", id="injected-usage-observer-error"),
+        "reader",
+        "native",
+        "revoked",
+        "cancelled",
+    ],
+)
+async def test_successful_bound_response_discards_payload_when_accounting_fails(compiler, failure):
+    from _agents_codex._decision_accounting import (
+        begin_decision_response,
+        consume_decision_response,
+    )
+    from agents import NativeError
+    from tests.test_decision_accounting import boundary
+
+    marker = "PRIVATE_SUCCESSFUL_DECISION_MARKER"
+    compiler["supported"] = False
+    provider = OpenAIDecisions(
+        client=Client(
+            {
+                "status": "completed",
+                "model": "fixture-generation",
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+                "output": [
+                    {"content": [{"type": "output_text", "text": json.dumps({"response": marker})}]}
+                ],
+            }
+        ),
+        fallback_model="generation",
+    )
+    fixture = boundary()
+    owner = contexts()[1]
+    live = True
+    budget_error = RuntimeError("Decision budget observation failed")
+    if failure == "budget":
+        # Fault injection covers observer errors, not ordinary budget exhaustion.
+
+        def reject_usage(_usage):
+            raise budget_error
+
+        fixture.state.budget.observe = reject_usage
+    elif failure == "native":
+        commit = fixture.receipt.commit
+
+        async def reject_commit(metadata):
+            await commit(metadata)
+            return "Native decision accounting failed"
+
+        fixture.receipt.commit = reject_commit
+
+    async def begin():
+        return await begin_decision_response(fixture.session, fixture.state, {})
+
+    async def invoke():
+        with _bind_decisions(owner, lambda: live, begin, provider):
+            return await owner.decide("Assess", input="Synthetic evidence", output_type=str)
+
+    task = asyncio.create_task(invoke())
+    try:
+        await fixture.entered.wait()
+        if failure == "reader":
+            fixture.session._reader.set_result(None)
+        elif failure == "revoked":
+            live = False
+        elif failure == "cancelled":
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        fixture.release.set()
+        await fixture.finished.wait()
+        if failure != "reader":
+            assert consume_decision_response(fixture.session, fixture.event)
+        expected = (
+            RuntimeError
+            if failure == "budget"
+            else asyncio.CancelledError
+            if failure in ("revoked", "cancelled")
+            else NativeError
+        )
+        with pytest.raises(expected) as caught:
+            await task
+        if failure == "budget":
+            assert caught.value is budget_error
+        elif failure == "reader":
+            assert "not delivered" in str(caught.value)
+        elif failure == "native":
+            assert str(caught.value) == "Native decision accounting failed"
+        assert len(provider._client.requests) == len(fixture.commits) == 1
+        metadata = json.loads(fixture.commits[0])
+        assert metadata["usage"]["total_tokens"] == 10
+        assert metadata["request_id"] == "req_openai"
+        assert metadata["model"] == "fixture-generation"
+        assert marker not in fixture.commits[0]
+        assert fixture.session._decision_completions == {}
+        assert_no_response_in_sdk_traceback(caught.value, marker)
+    finally:
+        fixture.release.set()
+        if not task.done() and not fixture.session._reader.done():
+            fixture.session._reader.set_result(None)
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_non_finite_model_input_fails_before_provider_work():
     provider = Provider(None)
     with pytest.raises(ValueError):
