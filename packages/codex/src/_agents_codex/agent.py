@@ -1338,6 +1338,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         options: dict[str, Any] = {}
         try:
+            from .manual import _CapturedApproval
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
@@ -1401,7 +1402,7 @@ class Agent(Generic[ContextT, OutputT]):
                 if on_interaction is None
                 and before_step is None
                 and prepare_request is None
-                and tool._bind is None
+                and (tool._bind is None or tool.needs_approval is not False)
                 and (tools is None or tool in tools or tool.ref in tools)
             )
             budget_capture_error = None
@@ -1514,13 +1515,19 @@ class Agent(Generic[ContextT, OutputT]):
                         native_agents=None if effective is None else session._native_agents,
                     )
                     if budget_capture_error is not None:
-                        if any(tool._bind is None for tool in selected):
+                        if any(
+                            tool._bind is None or tool.needs_approval is not False
+                            for tool in selected
+                        ):
                             raise budget_capture_error
                         pause_manual = ()
                     if (
                         prepare_request is not None
                         and before_step is None
-                        and any(tool._bind is None for tool in selected)
+                        and any(
+                            tool._bind is None or tool.needs_approval is not False
+                            for tool in selected
+                        )
                     ):
                         raise InteractionRequired(
                             "Running manual tools with prepare_request requires on_interaction. "
@@ -1535,7 +1542,7 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._storage is not None
                         or selected_mcp
                         or any(
-                            isinstance(tool, _CapturedFunction)
+                            isinstance(tool, (_CapturedFunction, _CapturedApproval))
                             and tool._requires_live_manual_session
                             for tool in session._bound_tools
                         )

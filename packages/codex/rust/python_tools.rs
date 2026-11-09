@@ -663,6 +663,7 @@ struct PendingCall {
     invocation: u64,
     retired: bool,
     manual_request: Option<Value>,
+    approval_request: Option<Value>,
     sender: oneshot::Sender<ToolReply>,
     phase: Phase,
     // Imported approvals have no live Core turn. Only their current binding
@@ -839,7 +840,15 @@ impl PythonTools {
                 true
             }
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
-            "release" => callback.release(),
+            "release" => {
+                let released = callback.release();
+                // Restored approval waiters have no live PendingReply drop guard.
+                // The accepted receipt is recorded before physical callback release.
+                if call.reentry && call.approval_request.is_some() && call.sender.is_closed() {
+                    pending.remove(&key);
+                }
+                released
+            }
             _ => false,
         }
     }
@@ -2716,7 +2725,11 @@ impl PythonTools {
         if !call.reentry {
             return Ok(None);
         }
-        match &call.manual_request {
+        match call
+            .manual_request
+            .as_ref()
+            .or(call.approval_request.as_ref())
+        {
             Some(request) => Ok(Some(
                 request["msg"]["_sdk_model"]
                     .as_str()
@@ -3061,6 +3074,142 @@ impl PythonTools {
             }
         }
         accepted
+    }
+
+    /// Capture the decision requirement before exposing an approval interaction.
+    pub(crate) fn require_approval(
+        self: &Arc<Self>,
+        owner: &str,
+        grant: &ManualToolGrant,
+        arguments: Option<Value>,
+    ) -> bool {
+        if !self.check_manual(owner, grant) {
+            return false;
+        }
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get_mut(&grant.key) else {
+            return false;
+        };
+        let Some(request) = call.manual_request.as_mut() else {
+            return false;
+        };
+        request["msg"]["_sdk_approval_required"] = Value::Bool(true);
+        if let Some(arguments) = arguments {
+            request["msg"]["_sdk_effective_arguments"] = arguments;
+        }
+        true
+    }
+
+    pub(crate) fn manual_approval_state(&self, key: &PendingKey) -> Result<(bool, Option<Value>)> {
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let request = pending
+            .get(key)
+            .and_then(|call| call.manual_request.as_ref())
+            .context("Manual approval call is no longer pending")?;
+        Ok((
+            request["msg"]["_sdk_approval_required"] == true,
+            request["msg"].get("_sdk_effective_arguments").cloned(),
+        ))
+    }
+
+    pub(crate) fn restore_approval_requirement(
+        &self,
+        call_id: &str,
+        required: bool,
+        arguments: Option<Value>,
+    ) {
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        for (key, call) in pending.iter_mut().filter(|(key, _)| key.call == call_id) {
+            let _ = key;
+            if let Some(request) = call.manual_request.as_mut() {
+                request["msg"]["_sdk_restored_approval"] = Value::Bool(true);
+                request["msg"]["_sdk_approval_required"] = Value::Bool(required);
+                if let Some(arguments) = &arguments {
+                    request["msg"]["_sdk_effective_arguments"] = arguments.clone();
+                }
+            }
+        }
+    }
+
+    /// Claim the exact native waiter once, then use the ordinary callback inbox.
+    pub(crate) fn approve_manual(
+        self: &Arc<Self>,
+        owner: &str,
+        grant: &ManualToolGrant,
+    ) -> Result<bool> {
+        if !self.check_manual(owner, grant) {
+            return Ok(false);
+        }
+        let request = {
+            let mut pending = self.pending.lock().expect("Python replies poisoned");
+            let Some(call) = pending.get_mut(&grant.key) else {
+                return Ok(false);
+            };
+            let Some(original) = call.manual_request.as_ref() else {
+                return Ok(false);
+            };
+            ensure!(
+                original["msg"]["_sdk_approval_required"] == true,
+                "Tool has no captured approval requirement"
+            );
+            ensure!(
+                original["msg"]["_sdk_code_origin"].is_null(),
+                "Managed approvals require a direct function call"
+            );
+            if call
+                .deadline
+                .as_ref()
+                .is_some_and(|deadline| !deadline.admit(|| true).unwrap_or(false))
+            {
+                return Ok(false);
+            }
+            let mut request = original.clone();
+            let callback = CallbackRelease::new(
+                json!({"kind":"tool","request":grant.key,"invocation":grant.invocation.to_string()}),
+            );
+            request["msg"]["_sdk_manual"] = Value::Bool(false);
+            request["msg"]["_sdk_callback"] = callback.receipt.clone();
+            call.approval_request = call.manual_request.take();
+            call.callback = Some(callback);
+            request
+        };
+        self.family
+            .requests
+            .send(QueuedRequest::Call(
+                Arc::downgrade(self),
+                grant.key.clone(),
+                grant.invocation,
+                request,
+            ))
+            .map_err(|_| anyhow::anyhow!("Managed approval owner closed"))?;
+        Ok(true)
+    }
+
+    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) {
+        let Some(generation) = self.resolve_generation(key.reply.generation) else {
+            return;
+        };
+        let invocation = self
+            .pending
+            .lock()
+            .expect("Python replies poisoned")
+            .get(key)
+            .filter(|call| call.approval_request.is_some())
+            .map(|call| call.invocation);
+        let Some(invocation) = invocation else {
+            return;
+        };
+        if let Some(owner) = self
+            .manual_restore
+            .lock()
+            .expect("Manual restore poisoned")
+            .as_ref()
+            .and_then(|owner| owner.upgrade())
+        {
+            if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
+                frame.record(key, invocation, generation, response);
+            }
+        }
     }
 
     pub(crate) fn bind_manual_restore(&self, owner: crate::manual_checkpoint::WeakOwner) {
@@ -3471,6 +3620,7 @@ impl PythonTools {
                     _tracing: tracing,
                     invocation,
                     retired: false,
+                    approval_request: None,
                     manual_request: entry.manual.then(|| {
                         let mut manual = request.clone();
                         // Trace metadata belongs to automatic ToolContext callbacks,

@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from .native_agents import ChildInvocation
     from .session import Session
     from .telemetry import SpanContext
-    from .tools import ToolCallInfo, ToolRef
+    from .tools import ToolCallInfo, ToolRef, _CapturedFunction
     from .turn import Turn
 
 
@@ -288,6 +288,68 @@ class ActionRequested(Generic[InputT, ResultT]):
         await session._respond(self, value)
 
 
+@dataclass(frozen=True)
+class ApprovalDecision:
+    """A managed function decision; always applies within this Session and agent."""
+
+    approve: bool
+    always: bool = False
+    reason: str = "Tool execution was rejected"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.approve, bool)
+            or not isinstance(self.always, bool)
+            or not isinstance(self.reason, str)
+        ):
+            raise TypeError("Approval decisions require boolean approve/always and a string reason")
+
+
+class ApprovalRequested(ActionRequested[InputT, Any]):
+    """A managed function awaiting a decision; approval executes its registered callback.
+
+    A decision is valid only for this live invocation. Remembered decisions are
+    scoped to this Session's exact agent and function declaration. They do not
+    turn saved metadata into permission or retry an uncertain effect.
+    """
+
+    _approval_generation: int
+    _effective_arguments: InputT
+
+    @property
+    def effective_arguments(self) -> InputT:
+        """Detached validated arguments after the pre-approval input policy."""
+        return deepcopy(self._effective_arguments)
+
+    def reply(self, value: bool | ApprovalDecision) -> ActionReply[Any]:
+        """Return a decision from on_interaction without executing the callback here."""
+        decision = ApprovalDecision(value) if isinstance(value, bool) else value
+        if not isinstance(decision, ApprovalDecision):
+            raise TypeError("A managed function reply requires an approval decision")
+        return _reply(self, decision)
+
+    async def respond(self, value: Any) -> None:
+        raise TypeError("Use approve() or reject() for a managed function approval")
+
+    async def approve(self, *, always: bool = False) -> None:
+        session = self._session()
+        if session is None:
+            from .session import InteractionExpiredError
+
+            raise InteractionExpiredError("Managed approval is expired")
+        await session._decide_approval(self, True, always=always)
+
+    async def reject(
+        self, reason: str = "Tool execution was rejected", *, always: bool = False
+    ) -> None:
+        session = self._session()
+        if session is None:
+            from .session import InteractionExpiredError
+
+            raise InteractionExpiredError("Managed approval is expired")
+        await session._decide_approval(self, False, reason=reason, always=always)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class _NativeQuestion:
     """A native prompt whose only receipt is submission to Core's queue."""
@@ -525,15 +587,18 @@ class _ElicitationRequest(_NativeQuestion):
                     continue
                 prop = properties[key]
                 adapter: TypeAdapter[Any] = TypeAdapter(
-                    Annotated[
-                        types[prop["type"]],
-                        Field(
-                            min_length=prop.get("minLength", prop.get("minItems")),
-                            max_length=prop.get("maxLength", prop.get("maxItems")),
-                            ge=prop.get("minimum"),
-                            le=prop.get("maximum"),
-                        ),
-                    ]
+                    cast(
+                        Any,
+                        Annotated[
+                            types[prop["type"]],
+                            Field(
+                                min_length=prop.get("minLength", prop.get("minItems")),
+                                max_length=prop.get("maxLength", prop.get("maxItems")),
+                                ge=prop.get("minimum"),
+                                le=prop.get("maximum"),
+                            ),
+                        ],
+                    )
                 )
                 parsed = adapter.validate_python(item, strict=True)
                 options = prop["items"] if prop["type"] == "array" else prop
@@ -970,6 +1035,22 @@ class _CapturedManual:
             "_tracing_context": tracing_context,
         }.items():
             object.__setattr__(request, key, value)
+        return request
+
+
+@dataclass(frozen=True)
+class _CapturedApproval(_CapturedManual):
+    function: _CapturedFunction = field(repr=False)
+
+    @property
+    def _requires_live_manual_session(self) -> bool:
+        return self.function._requires_live_manual_session
+
+    def request(self, *args: Any, **kwargs: Any) -> ApprovalRequested[Any]:
+        manual = super().request(*args, **kwargs)
+        request = object.__new__(ApprovalRequested)
+        for name in ActionRequested.__dataclass_fields__:
+            object.__setattr__(request, name, getattr(manual, name))
         return request
 
 

@@ -49,7 +49,9 @@ if TYPE_CHECKING:
     from .manual import (
         ActionReply as ActionReply,
         ActionRequested as ActionRequested,
+        ApprovalDecision as ApprovalDecision,
         ApprovalRequest as ApprovalRequest,
+        ApprovalRequested as ApprovalRequested,
         ElicitationRequest as ElicitationRequest,
         FormRequest as FormRequest,
         Interaction as Interaction,
@@ -210,6 +212,8 @@ _MODULES = {
     "ChecklistStep": ".state",
     "ActionReply": ".manual",
     "ActionRequested": ".manual",
+    "ApprovalRequested": ".manual",
+    "ApprovalDecision": ".manual",
     "ApprovalRequest": ".manual",
     "FormRequest": ".manual",
     "UrlRequest": ".manual",
