@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +35,7 @@ class CallPeer:
     hangups: list[tuple[str, dict[str, str]]] = field(default_factory=list)
     frames: list[dict[str, Any]] = field(default_factory=list)
     sequence: list[str] = field(default_factory=list)
+    changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     receipt_release: asyncio.Event = field(default_factory=asyncio.Event)
     sideband_connected: asyncio.Event = field(default_factory=asyncio.Event)
     disconnected: asyncio.Event = field(default_factory=asyncio.Event)
@@ -94,11 +95,22 @@ class CallPeer:
             self.sequence.append("ready")
             async for message in socket:
                 assert message.type == WSMsgType.TEXT
-                self.frames.append(json.loads(message.data))
+                async with self.changed:
+                    self.frames.append(json.loads(message.data))
+                    self.changed.notify_all()
         finally:
             self.socket = None
             self.disconnected.set()
         return socket
+
+    async def frame(
+        self, predicate: Callable[[dict[str, Any]], bool], *, after: int = 0
+    ) -> dict[str, Any]:
+        async with self.changed:
+            await self.changed.wait_for(
+                lambda: any(predicate(frame) for frame in self.frames[after:])
+            )
+            return next(frame for frame in self.frames[after:] if predicate(frame))
 
     async def hangup(self, request: web.Request) -> web.Response:
         headers = {key.lower(): value for key, value in request.headers.items()}

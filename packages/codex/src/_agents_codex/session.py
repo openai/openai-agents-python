@@ -3569,6 +3569,8 @@ class Session(Generic[ContextT, OutputT]):
         credentials. MCP discovery may perform network I/O and raise its errors.
         An explicit tool selection must already belong to the captured catalog.
         Transport, adapter, and API key fields do not affect this configuration.
+        Set ``automatically_trigger_response_for_mcp_tool_calls=False`` on the
+        subsequent SIP attachment; the call-accept builder rejects that setting.
         """
         self._check_open()
         self._check_callback_operation("build Realtime SIP configuration in its own Session")

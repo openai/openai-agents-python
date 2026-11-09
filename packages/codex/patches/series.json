@@ -338,12 +338,12 @@
     },
     {
       "path": "0096-native-realtime-sip-config.patch",
-      "sha256": "8302ac5a150bb45f734d732852782c7d85d8ddf3dac01c24a96e57484a65b868"
+      "sha256": "3c6e00a796eabde1bb6c4bee5dfc77ac501ab2ef1101e5c8a1a79cef81361486"
     },
     {
       "path": "0097-native-realtime-provider-history.patch",
-      "sha256": "db4b2f4f3b4759591a5602248c981dcd7b2b830dba9b6d8f1121624c2ee6b716"
+      "sha256": "5e00fdb96c3bfdf78c2d9b7f3610efccf56501a87cf5034f9dbf62f2e73fbc9f"
     }
   ],
-  "result_tree": "c26aca9e5b933812b96b7e9bca2aaeedfc68fb34"
+  "result_tree": "eecc388cab26d5927e37aad5cd9ce25e3bbe7495"
 }

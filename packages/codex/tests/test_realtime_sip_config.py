@@ -53,7 +53,7 @@ async def test_sip_config_prepares_captured_tools_without_connecting(explicit_to
         api_key=unexpected,
         adapter=cast(Any, SimpleNamespace(connect=unexpected)),
         settings={"temperature": 0.7},
-        automatically_trigger_response_for_mcp_tool_calls=False,
+        automatically_trigger_response_for_mcp_tool_calls=True,
     )
     result = await Session.build_realtime_sip_config(session, config=config)
     assert result == provider_config
@@ -65,7 +65,7 @@ async def test_sip_config_prepares_captured_tools_without_connecting(explicit_to
     assert "api_key" not in request
     assert request["function_tools"] == [{"name": "captured_tool"}]
     assert request["expected_selection_id"] == "captured-selection"
-    assert request["hosted_mcp_auto_response"] is False
+    assert "hosted_mcp_auto_response" not in request
     assert request["settings"] == {"temperature": 0.7}
     assert request["params"]["transport"] == {"type": "websocket"}
     assert request["params"]["model"] == "fixture-realtime"
@@ -101,3 +101,26 @@ async def test_sip_config_default_and_native_rejection() -> None:
     )
     with pytest.raises(ValueError, match="Captured source"):
         await Session.build_realtime_sip_config(session)
+
+
+async def test_sip_config_rejects_attachment_policy_before_preparing_tools() -> None:
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(
+            "Invalid call-accept settings must fail before discovery or native calls"
+        )
+
+    session = cast(
+        Session[Any, Any],
+        SimpleNamespace(
+            _check_open=lambda: None,
+            _check_callback_operation=lambda _: None,
+            _native=SimpleNamespace(call=unexpected),
+            _prepare_realtime_mcp=unexpected,
+            _realtime_function_tools=unexpected,
+        ),
+    )
+    with pytest.raises(ValueError, match="subsequent SIP attachment"):
+        await Session.build_realtime_sip_config(
+            session,
+            config=RealtimeConfig(automatically_trigger_response_for_mcp_tool_calls=False),
+        )

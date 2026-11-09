@@ -177,6 +177,14 @@ async def _build_realtime_sip_config(
     prepared: dict[str, Any] = {}
     settings: dict[str, Any] = {}
     try:
+        auto_response = config.automatically_trigger_response_for_mcp_tool_calls
+        if type(auto_response) is not bool:
+            raise TypeError("automatically_trigger_response_for_mcp_tool_calls must be a bool")
+        if not auto_response:
+            raise ValueError(
+                "Set automatically_trigger_response_for_mcp_tool_calls=False on the "
+                "subsequent SIP attachment, not the call-accept configuration"
+            )
         settings = _serialize_settings(config.settings or {})
         if config.tools is None:
             await session._prepare_realtime_mcp()
@@ -187,6 +195,7 @@ async def _build_realtime_sip_config(
             tools=None if config.tools is None else tuple(config.tools),
             transport={"type": "websocket"},
         )
+        prepared.pop("hosted_mcp_auto_response")
         request = json.dumps(prepared)
         return cast(
             dict[str, Any],
