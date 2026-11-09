@@ -14,7 +14,7 @@ import pytest
 from _agents_codex._completed_turn_owner import _CompletedTurnOwner
 from _agents_codex.session import _join_run_owner
 from agents import Agent, NativeProvider, Session
-from agents.observation import TurnFinished
+from agents.observation import EventGap, OutputTextDelta, TurnFinished
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, responses as responses
 from tests.test_native_agent_observation import text_response
@@ -92,6 +92,39 @@ async def test_large_output_handoff_preserves_output_and_single_request(response
         assert len(responses.requests) == 1
         assert await result.turn.get_result() is result
         assert [row async for row in result.turn.events()]
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_all_retention_keeps_complete_late_observations_after_run(responses: Any) -> None:
+    text = "x" * 40_000
+    provider = NativeProvider(base_url=responses.url, api_key="completed-retention-key")
+    agent = Agent(instructions="Answer plainly.", provider=provider)
+    try:
+        responses.replies.append(text_response("warm", "warm"))
+        warm = await agent.run("warm the shared runtime")
+        reply = text_response("retained", text)
+        reply[-1]["item"]["content"][0]["annotations"] = [
+            {
+                "type": "url_citation",
+                "start_index": 0,
+                "end_index": 1,
+                "url": "https://example.test/source",
+                "title": "Synthetic source",
+            }
+        ]
+        responses.replies.append(reply)
+        result = await agent.run("retain every observation", observation_retention="all")
+        await provider.aclose()
+        rows = [row async for row in result.turn.events()]
+        assert result.turn.session_id != warm.turn.session_id
+        assert result.final_output == text
+        assert not any(isinstance(row, EventGap) for row in rows)
+        assert "".join(row.delta for row in rows if isinstance(row, OutputTextDelta)) == text
+        assert sum(isinstance(row, TurnFinished) for row in rows) == 1
+        assert len(responses.requests) == 2
+        assert [row async for row in result.turn.events()] == rows
     finally:
         await provider.aclose()
 

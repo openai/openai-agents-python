@@ -1,7 +1,8 @@
-"""Bounded, passive observations of a native Session.
+"""Passive observations of a native Session.
 
-Sequences belong to one Session. Observations are an in-memory suffix, not a
-durable log. Use Turn.get_result and canonical history for authoritative results.
+Sequences belong to one Session. Observations are retained in memory (a bounded
+suffix by default), not a durable log. Use Turn.get_result and canonical history
+for authoritative results.
 """
 
 from __future__ import annotations
@@ -336,12 +337,17 @@ _ObservationT = TypeVar("_ObservationT", bound=Observation)
 
 
 class _ObservationBuffer:
-    """One bounded suffix; publishing never awaits or invokes application code."""
+    """One retained event log; publishing never awaits or invokes application code."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self, session_id: str, *, retention: Literal["bounded", "all"] = "bounded"
+    ) -> None:
+        self.retention: Literal["bounded", "all"] = retention
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
-        self.records: deque[tuple[Observation, int, int]] = deque()
+        self.records: list[tuple[Observation, int, int]] | deque[tuple[Observation, int, int]] = (
+            [] if retention == "all" else deque()
+        )
         self.characters = 0
         self.image_characters = 0
         self.sequence = 0
@@ -367,10 +373,26 @@ class _ObservationBuffer:
                 return event
         return None
 
-    def _mark_gap(self) -> None:
+    def _mark_gap(self, *, forward: bool = True) -> None:
         if self.closed:
             return
         self.sequence += 1
+        if forward and self.repair_parent is not None:
+            self.repair_parent[0]._mark_gap()
+        if self.retention == "all":
+            self.records.append(
+                (
+                    EventGap(
+                        session_id=self.session_id,
+                        sequence=self.sequence,
+                        first_sequence=self.sequence,
+                    ),
+                    0,
+                    0,
+                )
+            )
+            self.notify()
+            return
         # Drop the prefix so the retained observations form a contiguous suffix.
         self.records.clear()
         self.characters = 0
@@ -402,18 +424,20 @@ class _ObservationBuffer:
                     key: value for key, value in metadata.items() if key != "partial_image_b64"
                 }
             size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
-        if size > 65_536 or image_size > 16 * 1024 * 1024:
-            self._mark_gap()
+        if self.retention == "bounded" and (size > 65_536 or image_size > 16 * 1024 * 1024):
+            # The parent receives the full event below; this eviction is local.
+            self._mark_gap(forward=False)
         else:
             self.sequence += 1
             self.records.append((event, size, image_size))
             self.characters += size
             self.image_characters += image_size
-            while (
+            while self.retention == "bounded" and (
                 len(self.records) > 256
                 or self.characters > 65_536
                 or self.image_characters > 32 * 1024 * 1024
             ):
+                assert isinstance(self.records, deque)
                 _, removed, removed_image = self.records.popleft()
                 self.characters -= removed
                 self.image_characters -= removed_image
@@ -471,6 +495,16 @@ class EventStream(AsyncIterator[Observation]):
         try:
             while not self._closed:
                 signal = self._buffer.changed
+                if self._buffer.retention == "all" and self._turn is not None:
+                    # Queued roots have no observation window until dispatch. Read
+                    # the live floor after every wake, including pre-opened readers.
+                    floor = getattr(self._turn, "_observation_after", 0)
+                    if floor < 0:
+                        if self._buffer.closed or self._turn._root_result_ready():
+                            break
+                        await signal.wait()
+                        continue
+                    self._after = max(self._after, floor)
                 records = self._buffer.records
                 oldest = records[0][0].sequence if records else self._buffer.sequence + 1
                 if self._after < oldest - 1:
@@ -540,7 +574,7 @@ class EventStream(AsyncIterator[Observation]):
                                     "native_status": item.get("native_status"),
                                 }
                             event = replace(event, item=item)
-                        if self._turn is None:
+                        if self._turn is None or isinstance(event, EventGap):
                             return event
                         owners = {step.submission_id for step in self._turn._steps()}
                         if getattr(event, "submission_id", None) in owners:

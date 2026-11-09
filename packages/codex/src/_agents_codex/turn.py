@@ -82,6 +82,7 @@ class Turn(Generic[OutputT]):
     _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)
     _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)
     _native: Any = field(repr=False, compare=False)
+    _observation_after: int = field(repr=False, compare=False)
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:
         raise TypeError("Turns are issued by a Session or Subagent")
@@ -182,7 +183,7 @@ class Turn(Generic[OutputT]):
         await self._session._cancel_turn(self, mode)
 
     def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
-        """Observe owned steps with their native IDs. Gaps remain Session-global.
+        """Observe owned steps; all retention omits gaps from before admission.
 
         TurnFinished describes an actual native step; get_result() is overall completion.
         The iterator ends when the owned steps settle. For a yielded cell or background
@@ -259,6 +260,7 @@ def _root_turn(
     turn_id: str | None,
     submission_id: str,
     completion: asyncio.Future[Any],
+    observation_after: int = 0,
 ) -> Turn[Any]:
     result = object.__new__(Turn)
     for name, value in {
@@ -273,6 +275,7 @@ def _root_turn(
         "_continuation": None,
         "_result": None,
         "_native": None,
+        "_observation_after": observation_after,
     }.items():
         object.__setattr__(result, name, value)
     return result
@@ -284,6 +287,7 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         from .session import NativeError
 
         raise NativeError("Native child turn has no captured SDK incarnation")
+    observed = session._child_callbacks.get((native.child_id, incarnation, native.turn_id))
     result = object.__new__(Turn)
     for name, value in {
         "session_id": session.id,
@@ -297,6 +301,9 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "_continuation": None,
         "_result": None,
         "_native": native,
+        "_observation_after": observed.observation_after
+        if observed is not None
+        else session._observations.sequence,
     }.items():
         object.__setattr__(result, name, value)
     return result
