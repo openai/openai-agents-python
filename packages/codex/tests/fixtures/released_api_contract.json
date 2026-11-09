@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "00a4f8af7e5dbf1b889c873bcf280e7e7f190f07",
+  "baseline_commit": "641745375078f61d9c4cb9d865f0a8708bf155d2",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -17,7 +17,7 @@
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeProvider:\n    base_url: str | None = field(default=None, repr=False)\n    api_key: str | None = field(default=None, repr=False)\n    supports_websockets: bool | None = None\n    auth: CodexLogin | None = field(default=None, repr=False)\n    response_mode: Literal['streaming', 'buffered'] = 'streaming'\n    query_params: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    organization: str | None = field(default=None, repr=False)\n    project: str | None = field(default=None, repr=False)\n\n    async def aclose(self) -> None:\n        pass\n\n    async def __aenter__(self) -> NativeProvider:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass",
-          "@dataclass(init=False, eq=False, repr=False)\nclass Agent(Generic[ContextT, OutputT]):\n    instructions: str\n    name: str | None\n    tools: tuple[Tool[ContextT], ...]\n    handoffs: tuple[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]], ...]\n    model: str | None\n    model_settings: ModelSettings\n    provider: NativeProvider | None\n    output_type: OutputSpec[OutputT] | None\n    programmatic_tool_calling: bool\n    transform_context: _ContextTransform[ContextT] | None\n    before_compact: _BeforeCompact[ContextT] | None\n    before_complete: _BeforeComplete[ContextT] | None\n    if TYPE_CHECKING:\n\n        @overload\n        def __new__(cls: type[TextAgentT], *args: Any, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]] | None=None, output_type: None=None, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None, **kwargs: Any) -> TextAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]] | None=None, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        def __new__(cls, *args: Any, **kwargs: Any) -> Agent[Any, Any]:\n            pass\n\n    @overload\n    def __init__(self: Agent[ContextT, str], *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    @overload\n    def __init__(self, *, instructions: str, name: str | None=None, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    def __init__(self, *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, Any] | _Callable[[], Agent[ContextT, Any]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: OutputSpec[OutputT] | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    def validate(self) -> None:\n        pass\n\n    def with_output_type(self, output_type: OutputSpec[NewOutputT]) -> Agent[ContextT, NewOutputT]:\n        pass\n\n    @overload\n    def session(self: Agent[None, OutputT], *, context: None=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[Tool[None]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None) -> AbstractAsyncContextManager[Session[None, OutputT]]:\n        pass\n\n    @overload\n    def session(self: Agent[object, OutputT], *, context: object=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[Tool[object]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None) -> AbstractAsyncContextManager[Session[object, OutputT]]:\n        pass\n\n    @overload\n    def session(self, *, context: ContextT, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[Tool[ContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]:\n        pass\n\n    @asynccontextmanager\n    async def session(self: Agent[SessionContextT, OutputT], *, context: SessionContextT | None=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[Tool[SessionContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=_MAX_FUNCTION_CONCURRENCY_UNSET) -> AsyncIterator[Session[SessionContextT, OutputT]]:\n        pass\n\n    @overload\n    async def run(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    async def run(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents[SessionContextT]] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    def run_sync(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents[SessionContextT]] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass"
+          "@dataclass(init=False, eq=False, repr=False)\nclass Agent(Generic[ContextT, OutputT]):\n    instructions: str\n    name: str | None\n    tools: tuple[Tool[ContextT], ...]\n    handoffs: tuple[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]], ...]\n    model: str | None\n    model_settings: ModelSettings\n    provider: NativeProvider | None\n    output_type: OutputSpec[OutputT] | None\n    programmatic_tool_calling: bool\n    transform_context: _ContextTransform[ContextT] | None\n    before_compact: _BeforeCompact[ContextT] | None\n    before_complete: _BeforeComplete[ContextT] | None\n    if TYPE_CHECKING:\n\n        @overload\n        def __new__(cls: type[TextAgentT], *args: Any, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]] | None=None, output_type: None=None, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None, **kwargs: Any) -> TextAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]] | None=None, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        def __new__(cls, *args: Any, **kwargs: Any) -> Agent[Any, Any]:\n            pass\n\n    @overload\n    def __init__(self: Agent[ContextT, str], *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    @overload\n    def __init__(self, *, instructions: str, name: str | None=None, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    def __init__(self, *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, handoffs: Sequence[Agent[ContextT, Any] | _Callable[[], Agent[ContextT, Any]]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: OutputSpec[OutputT] | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None, before_compact: _BeforeCompact[ContextT] | None=None, before_complete: _BeforeComplete[ContextT] | None=None) -> None:\n        pass\n\n    def validate(self) -> None:\n        pass\n\n    def with_output_type(self, output_type: OutputSpec[NewOutputT]) -> Agent[ContextT, NewOutputT]:\n        pass\n\n    @overload\n    def session(self: Agent[None, OutputT], *, context: None=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[Tool[None]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None, project_guidance: bool=False) -> AbstractAsyncContextManager[Session[None, OutputT]]:\n        pass\n\n    @overload\n    def session(self: Agent[object, OutputT], *, context: object=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[Tool[object]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None, project_guidance: bool=False) -> AbstractAsyncContextManager[Session[object, OutputT]]:\n        pass\n\n    @overload\n    def session(self, *, context: ContextT, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[Tool[ContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=None, project_guidance: bool=False) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]:\n        pass\n\n    @asynccontextmanager\n    async def session(self: Agent[SessionContextT, OutputT], *, context: SessionContextT | None=None, state: SessionState | None=None, restored_output_type: OutputSpec[Any] | None=None, initial_messages: Sequence[InitialMessage] | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[Tool[SessionContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, on_interaction: _InteractionHandler | None=None, max_function_concurrency: int | None=_MAX_FUNCTION_CONCURRENCY_UNSET, project_guidance: bool=False) -> AsyncIterator[Session[SessionContextT, OutputT]]:\n        pass\n\n    @overload\n    async def run(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    async def run(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents[SessionContextT]] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents[None]] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents[object]] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass\n\n    def run_sync(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents[SessionContextT]] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, initial_messages: Sequence[InitialMessage] | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None, max_function_concurrency: int | None=None) -> Completed[OutputT]:\n        pass"
         ],
         "exports": {
           "Agent": "agents.agent.Agent",
@@ -106,6 +106,36 @@
         ],
         "references": {
           "ToolOutput": "agents.tools.ToolOutput"
+        }
+      },
+      "agents.codex": {
+        "declarations": [
+          "def codex_tool(*, codex: Codex | None=None, codex_options: CodexOptions | Mapping[str, Any] | None=None, thread_options: ThreadOptions | Mapping[str, Any] | None=None, turn_options: TurnOptions | Mapping[str, Any] | None=None, name: str='codex', description: str='Run an external Codex CLI task in the configured workspace.', persist_session: bool=False, on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None=None) -> _PythonTool[Any, object]:\n    pass"
+        ],
+        "exports": {
+          "Codex": "agents.classic.extensions.experimental.codex.codex.Codex",
+          "CodexOptions": "agents.classic.extensions.experimental.codex.codex_options.CodexOptions",
+          "ThreadOptions": "agents.classic.extensions.experimental.codex.thread_options.ThreadOptions",
+          "TurnOptions": "agents.classic.extensions.experimental.codex.turn_options.TurnOptions",
+          "codex_tool": "agents.codex.codex_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Mapping",
+          "from typing import Any",
+          "from ._codex_cli.codex import Codex",
+          "from ._codex_cli.codex_options import CodexOptions",
+          "from ._codex_cli.events import ThreadEvent",
+          "from ._codex_cli.thread_options import ThreadOptions",
+          "from ._codex_cli.turn_options import TurnOptions",
+          "from ._function_tools import _PythonTool"
+        ],
+        "references": {
+          "Codex": "agents._codex_cli.codex.Codex",
+          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
+          "ThreadEvent": "agents._codex_cli.events.ThreadEvent",
+          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions",
+          "TurnOptions": "agents._codex_cli.turn_options.TurnOptions",
+          "_PythonTool": "agents._function_tools._PythonTool"
         }
       },
       "agents.compaction": {
@@ -790,11 +820,12 @@
         "declarations": [
           "_OptionsT = TypeVar('_OptionsT')",
           "_ContextT = TypeVar('_ContextT')",
-          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]]) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
+          "@redact_mount_error_data_sync\ndef sandbox_environment(client: BaseSandboxClient[_OptionsT], *, manifest: Manifest, options: _OptionsT | Mapping[str, Any], connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]], snapshot: SnapshotSpec | SnapshotBase | None=None, session: SandboxSession | None=None, authorized_resume_state: SandboxSessionState | None=None, concurrency_limits: SandboxConcurrencyLimits | None=None, archive_limits: SandboxArchiveLimits | None=None) -> AbstractAsyncContextManager[Environment[_ContextT]]:\n    pass",
           "@redact_mount_error_data_sync\ndef render_storage_layout(manifest: Manifest) -> str:\n    pass"
         ],
         "exports": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.providers.azure_blob.AzureBlobMount",
+          "BackoffStrategy": "agents.classic.sandbox.util.retry.BackoffStrategy",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BoxMount": "agents.classic.sandbox.entries.mounts.providers.box.BoxMount",
           "Dir": "agents.classic.sandbox.entries.artifacts.Dir",
@@ -804,32 +835,54 @@
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.base.InContainerMountStrategy",
           "LocalDir": "agents.classic.sandbox.entries.artifacts.LocalDir",
           "LocalFile": "agents.classic.sandbox.entries.artifacts.LocalFile",
+          "LocalSnapshot": "agents.classic.sandbox.snapshot.LocalSnapshot",
+          "LocalSnapshotSpec": "agents.classic.sandbox.snapshot.LocalSnapshotSpec",
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "Mount": "agents.classic.sandbox.entries.mounts.base.Mount",
           "MountpointMountPattern": "agents.classic.sandbox.entries.mounts.patterns.MountpointMountPattern",
+          "NoopSnapshot": "agents.classic.sandbox.snapshot.NoopSnapshot",
+          "NoopSnapshotSpec": "agents.classic.sandbox.snapshot.NoopSnapshotSpec",
           "R2Mount": "agents.classic.sandbox.entries.mounts.providers.r2.R2Mount",
           "RcloneMountPattern": "agents.classic.sandbox.entries.mounts.patterns.RcloneMountPattern",
+          "RemoteSnapshot": "agents.classic.sandbox.snapshot.RemoteSnapshot",
+          "RemoteSnapshotSpec": "agents.classic.sandbox.snapshot.RemoteSnapshotSpec",
           "S3FilesMount": "agents.classic.sandbox.entries.mounts.providers.s3_files.S3FilesMount",
           "S3FilesMountPattern": "agents.classic.sandbox.entries.mounts.patterns.S3FilesMountPattern",
           "S3Mount": "agents.classic.sandbox.entries.mounts.providers.s3.S3Mount",
+          "SandboxArchiveLimits": "agents.classic.run_config.SandboxArchiveLimits",
+          "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
+          "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
+          "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "SnapshotSpec": "agents.classic.sandbox.snapshot.SnapshotSpec",
+          "TruncationPolicy": "agents.classic.sandbox.util.token_truncation.TruncationPolicy",
+          "apply_diff": "agents.classic.apply_diff.apply_diff",
           "render_storage_layout": "agents.sandbox.render_storage_layout",
-          "sandbox_environment": "agents.sandbox.sandbox_environment"
+          "retry_async": "agents.classic.sandbox.util.retry.retry_async",
+          "sandbox_environment": "agents.sandbox.sandbox_environment",
+          "truncate_text": "agents.classic.sandbox.util.token_truncation.truncate_text"
         },
         "imports": [
           "from collections.abc import Callable, Mapping",
           "from contextlib import AbstractAsyncContextManager",
           "from typing import Any, TypeVar",
+          "from .classic.apply_diff import apply_diff",
+          "from .classic.run_config import SandboxArchiveLimits, SandboxConcurrencyLimits",
           "from .classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from .classic.sandbox.entries import Dir, LocalDir, LocalFile",
           "from .classic.sandbox.entries.mounts import AzureBlobMount, BoxMount, DockerVolumeMountStrategy, FuseMountPattern, GCSMount, InContainerMountStrategy, Mount, MountpointMountPattern, R2Mount, RcloneMountPattern, S3FilesMount, S3FilesMountPattern, S3Mount",
           "from .classic.sandbox.manifest import Manifest",
           "from .classic.sandbox.session.sandbox_client import BaseSandboxClient",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
+          "from .classic.sandbox.session.sandbox_session_state import SandboxSessionState",
+          "from .classic.sandbox.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
+          "from .classic.sandbox.util.retry import BackoffStrategy, retry_async",
+          "from .classic.sandbox.util.token_truncation import TruncationPolicy, truncate_text",
           "from .executor import Environment"
         ],
         "references": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.AzureBlobMount",
+          "BackoffStrategy": "agents.classic.sandbox.util.retry.BackoffStrategy",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BoxMount": "agents.classic.sandbox.entries.mounts.BoxMount",
           "Dir": "agents.classic.sandbox.entries.Dir",
@@ -840,16 +893,31 @@
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.InContainerMountStrategy",
           "LocalDir": "agents.classic.sandbox.entries.LocalDir",
           "LocalFile": "agents.classic.sandbox.entries.LocalFile",
+          "LocalSnapshot": "agents.classic.sandbox.snapshot.LocalSnapshot",
+          "LocalSnapshotSpec": "agents.classic.sandbox.snapshot.LocalSnapshotSpec",
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "Mount": "agents.classic.sandbox.entries.mounts.Mount",
           "MountpointMountPattern": "agents.classic.sandbox.entries.mounts.MountpointMountPattern",
+          "NoopSnapshot": "agents.classic.sandbox.snapshot.NoopSnapshot",
+          "NoopSnapshotSpec": "agents.classic.sandbox.snapshot.NoopSnapshotSpec",
           "R2Mount": "agents.classic.sandbox.entries.mounts.R2Mount",
           "RcloneMountPattern": "agents.classic.sandbox.entries.mounts.RcloneMountPattern",
+          "RemoteSnapshot": "agents.classic.sandbox.snapshot.RemoteSnapshot",
+          "RemoteSnapshotSpec": "agents.classic.sandbox.snapshot.RemoteSnapshotSpec",
           "S3FilesMount": "agents.classic.sandbox.entries.mounts.S3FilesMount",
           "S3FilesMountPattern": "agents.classic.sandbox.entries.mounts.S3FilesMountPattern",
           "S3Mount": "agents.classic.sandbox.entries.mounts.S3Mount",
+          "SandboxArchiveLimits": "agents.classic.run_config.SandboxArchiveLimits",
+          "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
-          "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
+          "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
+          "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "SnapshotSpec": "agents.classic.sandbox.snapshot.SnapshotSpec",
+          "TruncationPolicy": "agents.classic.sandbox.util.token_truncation.TruncationPolicy",
+          "apply_diff": "agents.classic.apply_diff.apply_diff",
+          "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync",
+          "retry_async": "agents.classic.sandbox.util.retry.retry_async",
+          "truncate_text": "agents.classic.sandbox.util.token_truncation.truncate_text"
         }
       },
       "agents.schema": {
@@ -1533,6 +1601,191 @@
         ],
         "references": {}
       },
+      "agents._codex_cli.codex": {
+        "declarations": [
+          "class _UnsetType:\n    pass",
+          "_UNSET = _UnsetType()",
+          "class Codex:\n\n    @overload\n    def __init__(self, options: CodexOptions | Mapping[str, Any] | None=None) -> None:\n        pass\n\n    @overload\n    def __init__(self, *, codex_path_override: str | None=None, base_url: str | None=None, api_key: str | None=None, env: Mapping[str, str] | None=None, codex_subprocess_stream_limit_bytes: int | None=None) -> None:\n        pass\n\n    def __init__(self, options: CodexOptions | Mapping[str, Any] | None=None, *, codex_path_override: str | None | _UnsetType=_UNSET, base_url: str | None | _UnsetType=_UNSET, api_key: str | None | _UnsetType=_UNSET, env: Mapping[str, str] | None | _UnsetType=_UNSET, codex_subprocess_stream_limit_bytes: int | None | _UnsetType=_UNSET) -> None:\n        pass\n\n    def start_thread(self, options: ThreadOptions | Mapping[str, Any] | None=None) -> Thread:\n        pass\n\n    def resume_thread(self, thread_id: str, options: ThreadOptions | Mapping[str, Any] | None=None) -> Thread:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping",
+          "from typing import Any, overload",
+          "from .codex_options import CodexOptions",
+          "from .thread import Thread",
+          "from .thread_options import ThreadOptions"
+        ],
+        "references": {
+          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
+          "Thread": "agents._codex_cli.thread.Thread",
+          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions"
+        }
+      },
+      "agents._codex_cli.codex_options": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass CodexOptions:\n    codex_path_override: str | None = None\n    base_url: str | None = None\n    api_key: str | None = None\n    env: Mapping[str, str] | None = None\n    codex_subprocess_stream_limit_bytes: int | None = None"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping",
+          "from dataclasses import dataclass"
+        ],
+        "references": {}
+      },
+      "agents._codex_cli.events": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass ThreadStartedEvent(_DictLike):\n    thread_id: str\n    type: Literal['thread.started'] = field(default='thread.started', init=False)",
+          "@dataclass(frozen=True)\nclass TurnStartedEvent(_DictLike):\n    type: Literal['turn.started'] = field(default='turn.started', init=False)",
+          "@dataclass(frozen=True)\nclass Usage(_DictLike):\n    input_tokens: int\n    cached_input_tokens: int\n    output_tokens: int",
+          "@dataclass(frozen=True)\nclass TurnCompletedEvent(_DictLike):\n    usage: Usage | None = None\n    type: Literal['turn.completed'] = field(default='turn.completed', init=False)",
+          "@dataclass(frozen=True)\nclass ThreadError(_DictLike):\n    message: str",
+          "@dataclass(frozen=True)\nclass TurnFailedEvent(_DictLike):\n    error: ThreadError\n    type: Literal['turn.failed'] = field(default='turn.failed', init=False)",
+          "@dataclass(frozen=True)\nclass ItemStartedEvent(_DictLike):\n    item: ThreadItem\n    type: Literal['item.started'] = field(default='item.started', init=False)",
+          "@dataclass(frozen=True)\nclass ItemUpdatedEvent(_DictLike):\n    item: ThreadItem\n    type: Literal['item.updated'] = field(default='item.updated', init=False)",
+          "@dataclass(frozen=True)\nclass ItemCompletedEvent(_DictLike):\n    item: ThreadItem\n    type: Literal['item.completed'] = field(default='item.completed', init=False)",
+          "@dataclass(frozen=True)\nclass ThreadErrorEvent(_DictLike):\n    message: str\n    type: Literal['error'] = field(default='error', init=False)",
+          "@dataclass(frozen=True)\nclass _UnknownThreadEvent(_DictLike):\n    type: str\n    payload: Mapping[str, Any] = field(default_factory=dict)",
+          "ThreadEvent: TypeAlias = ThreadStartedEvent | TurnStartedEvent | TurnCompletedEvent | TurnFailedEvent | ItemStartedEvent | ItemUpdatedEvent | ItemCompletedEvent | ThreadErrorEvent | _UnknownThreadEvent"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping",
+          "from dataclasses import dataclass, field",
+          "from typing import Any, Literal, TypeAlias",
+          "from .items import ThreadItem",
+          "from .payloads import _DictLike"
+        ],
+        "references": {
+          "ThreadItem": "agents._codex_cli.items.ThreadItem",
+          "_DictLike": "agents._codex_cli.payloads._DictLike"
+        }
+      },
+      "agents._codex_cli.exec": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass CodexExecArgs:\n    input: str\n    base_url: str | None = None\n    api_key: str | None = None\n    thread_id: str | None = None\n    images: list[str] | None = None\n    model: str | None = None\n    sandbox_mode: SandboxMode | None = None\n    working_directory: str | None = None\n    additional_directories: list[str] | None = None\n    skip_git_repo_check: bool | None = None\n    output_schema_file: str | None = None\n    model_reasoning_effort: ModelReasoningEffort | None = None\n    signal: asyncio.Event | None = None\n    idle_timeout_seconds: float | None = None\n    network_access_enabled: bool | None = None\n    web_search_mode: WebSearchMode | None = None\n    web_search_enabled: bool | None = None\n    approval_policy: ApprovalMode | None = None",
+          "class CodexExec:\n\n    def __init__(self, *, executable_path: str | None=None, env: dict[str, str] | None=None, subprocess_stream_limit_bytes: int | None=None) -> None:\n        pass\n\n    async def run(self, args: CodexExecArgs) -> AsyncGenerator[str, None]:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import asyncio",
+          "from collections.abc import AsyncGenerator",
+          "from dataclasses import dataclass",
+          "from .thread_options import ApprovalMode, ModelReasoningEffort, SandboxMode, WebSearchMode"
+        ],
+        "references": {
+          "ApprovalMode": "agents._codex_cli.thread_options.ApprovalMode",
+          "ModelReasoningEffort": "agents._codex_cli.thread_options.ModelReasoningEffort",
+          "SandboxMode": "agents._codex_cli.thread_options.SandboxMode",
+          "WebSearchMode": "agents._codex_cli.thread_options.WebSearchMode"
+        }
+      },
+      "agents._codex_cli.items": {
+        "declarations": [
+          "if TYPE_CHECKING:\n    pass\nelse:\n    McpContentBlock = Any",
+          "CommandExecutionStatus = Literal['in_progress', 'completed', 'failed']",
+          "PatchChangeKind = Literal['add', 'delete', 'update']",
+          "PatchApplyStatus = Literal['completed', 'failed']",
+          "McpToolCallStatus = Literal['in_progress', 'completed', 'failed']",
+          "@dataclass(frozen=True)\nclass CommandExecutionItem(_DictLike):\n    id: str\n    command: str\n    status: CommandExecutionStatus\n    aggregated_output: str = ''\n    exit_code: int | None = None\n    type: Literal['command_execution'] = field(default='command_execution', init=False)",
+          "@dataclass(frozen=True)\nclass FileUpdateChange(_DictLike):\n    path: str\n    kind: PatchChangeKind",
+          "@dataclass(frozen=True)\nclass FileChangeItem(_DictLike):\n    id: str\n    changes: list[FileUpdateChange]\n    status: PatchApplyStatus\n    type: Literal['file_change'] = field(default='file_change', init=False)",
+          "@dataclass(frozen=True)\nclass McpToolCallResult(_DictLike):\n    content: list[McpContentBlock]\n    structured_content: Any",
+          "@dataclass(frozen=True)\nclass McpToolCallError(_DictLike):\n    message: str",
+          "@dataclass(frozen=True)\nclass McpToolCallItem(_DictLike):\n    id: str\n    server: str\n    tool: str\n    arguments: Any\n    status: McpToolCallStatus\n    result: McpToolCallResult | None = None\n    error: McpToolCallError | None = None\n    type: Literal['mcp_tool_call'] = field(default='mcp_tool_call', init=False)",
+          "@dataclass(frozen=True)\nclass AgentMessageItem(_DictLike):\n    id: str\n    text: str\n    type: Literal['agent_message'] = field(default='agent_message', init=False)",
+          "@dataclass(frozen=True)\nclass ReasoningItem(_DictLike):\n    id: str\n    text: str\n    type: Literal['reasoning'] = field(default='reasoning', init=False)",
+          "@dataclass(frozen=True)\nclass WebSearchItem(_DictLike):\n    id: str\n    query: str\n    type: Literal['web_search'] = field(default='web_search', init=False)",
+          "@dataclass(frozen=True)\nclass ErrorItem(_DictLike):\n    id: str\n    message: str\n    type: Literal['error'] = field(default='error', init=False)",
+          "@dataclass(frozen=True)\nclass TodoItem(_DictLike):\n    text: str\n    completed: bool",
+          "@dataclass(frozen=True)\nclass TodoListItem(_DictLike):\n    id: str\n    items: list[TodoItem]\n    type: Literal['todo_list'] = field(default='todo_list', init=False)",
+          "@dataclass(frozen=True)\nclass _UnknownThreadItem(_DictLike):\n    type: str\n    payload: Mapping[str, Any] = field(default_factory=dict)\n    id: str | None = None",
+          "ThreadItem: TypeAlias = AgentMessageItem | ReasoningItem | CommandExecutionItem | FileChangeItem | McpToolCallItem | WebSearchItem | TodoListItem | ErrorItem | _UnknownThreadItem"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping",
+          "from dataclasses import dataclass, field",
+          "from typing import TYPE_CHECKING, Any, Literal, TypeAlias",
+          "from .payloads import _DictLike",
+          "from mcp.types import ContentBlock as McpContentBlock"
+        ],
+        "references": {
+          "_DictLike": "agents._codex_cli.payloads._DictLike"
+        }
+      },
+      "agents._codex_cli.payloads": {
+        "declarations": [
+          "class _DictLike:\n\n    def get(self, key: str, default: Any=None) -> Any:\n        pass\n\n    def keys(self) -> Iterable[str]:\n        pass\n\n    def as_dict(self) -> dict[str, Any]:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Iterable",
+          "from typing import Any"
+        ],
+        "references": {}
+      },
+      "agents._codex_cli.thread": {
+        "declarations": [
+          "class TextInput(TypedDict):\n    type: Literal['text']\n    text: str",
+          "class LocalImageInput(TypedDict):\n    type: Literal['local_image']\n    path: str",
+          "UserInput: TypeAlias = TextInput | LocalImageInput",
+          "Input: TypeAlias = str | list[UserInput]",
+          "@dataclass(frozen=True)\nclass Turn:\n    items: list[ThreadItem]\n    final_response: str\n    usage: Usage | None",
+          "@dataclass(frozen=True)\nclass StreamedTurn:\n    events: AsyncGenerator[ThreadEvent, None]",
+          "class Thread:\n\n    def __init__(self, *, exec_client: CodexExec, options: CodexOptions, thread_options: ThreadOptions, thread_id: str | None=None) -> None:\n        pass\n\n    @property\n    def id(self) -> str | None:\n        pass\n\n    async def run_streamed(self, input: Input, turn_options: TurnOptions | None=None) -> StreamedTurn:\n        pass\n\n    async def run(self, input: Input, turn_options: TurnOptions | None=None) -> Turn:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import AsyncGenerator",
+          "from dataclasses import dataclass",
+          "from typing import Literal, TypeAlias",
+          "from typing_extensions import TypedDict",
+          "from .codex_options import CodexOptions",
+          "from .events import ThreadEvent, Usage",
+          "from .exec import CodexExec",
+          "from .items import ThreadItem",
+          "from .thread_options import ThreadOptions",
+          "from .turn_options import TurnOptions"
+        ],
+        "references": {
+          "CodexExec": "agents._codex_cli.exec.CodexExec",
+          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
+          "ThreadEvent": "agents._codex_cli.events.ThreadEvent",
+          "ThreadItem": "agents._codex_cli.items.ThreadItem",
+          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions",
+          "TurnOptions": "agents._codex_cli.turn_options.TurnOptions",
+          "Usage": "agents._codex_cli.events.Usage"
+        }
+      },
+      "agents._codex_cli.thread_options": {
+        "declarations": [
+          "ApprovalMode = Literal['never', 'on-request', 'on-failure', 'untrusted']",
+          "SandboxMode = Literal['read-only', 'workspace-write', 'danger-full-access']",
+          "ModelReasoningEffort = Literal['minimal', 'low', 'medium', 'high', 'xhigh']",
+          "WebSearchMode = Literal['disabled', 'cached', 'live']",
+          "@dataclass(frozen=True)\nclass ThreadOptions:\n    model: str | None = None\n    sandbox_mode: SandboxMode | None = None\n    working_directory: str | None = None\n    skip_git_repo_check: bool | None = None\n    model_reasoning_effort: ModelReasoningEffort | None = None\n    network_access_enabled: bool | None = None\n    web_search_mode: WebSearchMode | None = None\n    web_search_enabled: bool | None = None\n    approval_policy: ApprovalMode | None = None\n    additional_directories: Sequence[str] | None = None"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Sequence",
+          "from dataclasses import dataclass",
+          "from typing import Literal"
+        ],
+        "references": {}
+      },
+      "agents._codex_cli.turn_options": {
+        "declarations": [
+          "AbortSignal = asyncio.Event",
+          "@dataclass(frozen=True)\nclass TurnOptions:\n    output_schema: dict[str, Any] | None = None\n    signal: AbortSignal | None = None\n    idle_timeout_seconds: float | None = None"
+        ],
+        "exports": {},
+        "imports": [
+          "import asyncio",
+          "from dataclasses import dataclass",
+          "from typing import Any"
+        ],
+        "references": {}
+      },
       "agents._events": {
         "declarations": [
           "class InputTokensDetails(TypedDict):\n    cached_tokens: int\n    cache_write_tokens: NotRequired[int]",
@@ -1837,7 +2090,8 @@
       },
       "agents.classic.apply_diff": {
         "declarations": [
-          "ApplyDiffMode = Literal['default', 'create']"
+          "ApplyDiffMode = Literal['default', 'create']",
+          "def apply_diff(input: str, diff: str, mode: ApplyDiffMode='default') -> str:\n    pass"
         ],
         "exports": {},
         "imports": [
@@ -3244,13 +3498,20 @@
         "declarations": [
           "SnapshotClass = type['SnapshotBase']",
           "class SnapshotBase(BaseModel, abc.ABC):\n    model_config = ConfigDict(frozen=True)\n    type: str\n    id: str\n    _subclass_registry: ClassVar[dict[str, SnapshotClass]] = {}\n\n    @classmethod\n    def parse(cls, payload: object) -> 'SnapshotBase':\n        pass\n\n    @abc.abstractmethod\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    @abc.abstractmethod\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    @abc.abstractmethod\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
-          "class SnapshotSpec(BaseModel, abc.ABC):\n    type: str\n\n    @abc.abstractmethod\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass"
+          "class LocalSnapshot(SnapshotBase):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class NoopSnapshot(SnapshotBase):\n    type: Literal['noop'] = 'noop'\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class RemoteSnapshot(SnapshotBase):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class SnapshotSpec(BaseModel, abc.ABC):\n    type: str\n\n    @abc.abstractmethod\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class LocalSnapshotSpec(SnapshotSpec):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class NoopSnapshotSpec(SnapshotSpec):\n    type: Literal['noop'] = 'noop'\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class RemoteSnapshotSpec(SnapshotSpec):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass"
         ],
         "exports": {},
         "imports": [
           "import abc",
           "import io",
-          "from typing import ClassVar",
+          "from pathlib import Path",
+          "from typing import ClassVar, Literal",
           "from pydantic import BaseModel, ConfigDict",
           "from .session.dependencies import Dependencies"
         ],
@@ -3273,6 +3534,37 @@
           "from enum import IntEnum",
           "from pydantic import BaseModel, Field",
           "from typing_extensions import Self"
+        ],
+        "references": {}
+      },
+      "agents.classic.sandbox.util.retry": {
+        "declarations": [
+          "P = ParamSpec('P')",
+          "T = TypeVar('T')",
+          "class BackoffStrategy(str, Enum):\n    FIXED = 'fixed'\n    LINEAR = 'linear'\n    EXPONENTIAL = 'exponential'",
+          "DEFAULT_TRANSIENT_RETRY_INTERVAL_S = 0.25",
+          "DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT = 3",
+          "DEFAULT_TRANSIENT_RETRY_BACKOFF = BackoffStrategy.EXPONENTIAL",
+          "def retry_async(*, interval: float=DEFAULT_TRANSIENT_RETRY_INTERVAL_S, max_attempt: int=DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT, backoff: BackoffStrategy=DEFAULT_TRANSIENT_RETRY_BACKOFF, retry_if: Callable[..., bool], on_retry: Callable[..., object] | None=None) -> Callable[[Callable[P, Coroutine[object, object, T]]], Callable[P, Coroutine[object, object, T]]]:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Callable, Coroutine",
+          "from enum import Enum",
+          "from typing import ParamSpec, TypeVar"
+        ],
+        "references": {}
+      },
+      "agents.classic.sandbox.util.token_truncation": {
+        "declarations": [
+          "TruncationMode = Literal['bytes', 'tokens']",
+          "@dataclass(frozen=True)\nclass TruncationPolicy:\n    mode: TruncationMode\n    limit: int\n\n    @classmethod\n    def bytes(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    @classmethod\n    def tokens(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    def token_budget(self) -> int:\n        pass\n\n    def byte_budget(self) -> int:\n        pass",
+          "def truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass",
+          "from typing import Literal"
         ],
         "references": {}
       },

@@ -883,12 +883,12 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -907,12 +907,12 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -931,12 +931,12 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -955,12 +955,12 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -1107,13 +1107,13 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         _atomic_first_turn: bool = False,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")

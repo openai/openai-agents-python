@@ -41,6 +41,8 @@ def cli(tmp_path: Path) -> Path:
     ]
     path.write_text(
         f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
+        f"open({str(tmp_path / 'arguments.jsonl')!r}, 'a').write("
+        "json.dumps(sys.argv[1:]) + '\\n')\n"
         f"events = {events!r}\n"
         "for event in events: print(json.dumps(event), flush=True)\n"
     )
@@ -48,17 +50,20 @@ def cli(tmp_path: Path) -> Path:
     return path
 
 
-async def test_cli_tool_uses_native_binding_and_real_cli_stream(tmp_path: Path) -> None:
+@pytest.mark.parametrize("thread_id", [None, "selected-thread"])
+async def test_cli_tool_uses_native_binding_and_real_cli_stream(
+    tmp_path: Path,
+    thread_id: str | None,
+) -> None:
     events = []
     declaration = codex_tool(
         codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))),
         turn_options=TurnOptions(idle_timeout_seconds=5),
-        persist_session=True,
         on_event=events.append,
     )
     assert isinstance(declaration, FunctionTool)
     binding = declaration._bind(None, None, declaration)
-    result = await binding.callback(prompt="Do the task", thread_id=None)
+    result = await binding.callback(None, prompt="Do the task", thread_id=thread_id)
     assert result == {
         "thread_id": "synthetic-thread",
         "response": "CLI completed",
@@ -69,6 +74,12 @@ async def test_cli_tool_uses_native_binding_and_real_cli_stream(tmp_path: Path) 
         "item.completed",
         "turn.completed",
     ]
+    arguments = json.loads((tmp_path / "arguments.jsonl").read_text())
+    if thread_id is None:
+        assert "resume" not in arguments
+    else:
+        assert "resume" in arguments
+        assert thread_id in arguments
 
 
 async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses) -> None:
@@ -102,7 +113,7 @@ async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path) -> None:
     )
     binding = declaration._bind(None, None, declaration)
     with pytest.raises(RuntimeError, match="idle"):
-        await binding.callback(prompt="Do the task", thread_id=None)
+        await binding.callback(None, prompt="Do the task", thread_id=None)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_path.read_text()), 0)
 
@@ -123,10 +134,49 @@ async def test_cli_callback_cancellation_joins_the_subprocess(tmp_path: Path) ->
         on_event=lambda event: started.set(),
     )
     binding = declaration._bind(None, None, declaration)
-    task = asyncio.create_task(binding.callback(prompt="Do the task", thread_id=None))
+    task = asyncio.create_task(binding.callback(None, prompt="Do the task", thread_id=None))
     await asyncio.wait_for(started.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_path.read_text()), 0)
+
+
+async def test_persisted_cli_threads_are_scoped_to_the_invoking_native_session(
+    tmp_path: Path,
+    responses,
+) -> None:
+    calls = tmp_path / "calls.jsonl"
+    path = cli(tmp_path)
+    source = path.read_text()
+    source = source.replace(
+        "sys.stdin.read()\n",
+        f"sys.stdin.read()\nopen({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n",
+    )
+    path.write_text(source)
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        persist_session=True,
+    )
+    responses.replies.extend(
+        [
+            [function_call("codex", {"prompt": "A first", "thread_id": None}, "cli-a1")],
+            [assistant_output("A first done")],
+            [function_call("codex", {"prompt": "B first", "thread_id": None}, "cli-b1")],
+            [assistant_output("B first done")],
+            [function_call("codex", {"prompt": "A next", "thread_id": None}, "cli-a2")],
+            [assistant_output("A next done")],
+        ]
+    )
+    agent = Agent(instructions="Use codex.", provider=provider(responses), tools=[declaration])
+    async with agent.session() as first, agent.session() as second:
+        assert (await (await first.submit("A first")).get_result()).final_output == "A first done"
+        assert (await (await second.submit("B first")).get_result()).final_output == "B first done"
+        assert (await (await first.submit("A next")).get_result()).final_output == "A next done"
+    arguments = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(arguments) == 3
+    assert "resume" not in arguments[0]
+    assert "resume" not in arguments[1]
+    assert "resume" in arguments[2]
+    assert "synthetic-thread" in arguments[2]

@@ -7,33 +7,41 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any
+from weakref import WeakKeyDictionary
 
-from agents.classic.extensions.experimental.codex.codex import Codex
-from agents.classic.extensions.experimental.codex.codex_options import (
+from agents._codex_cli.codex import Codex
+from agents._codex_cli.codex_options import (
     CodexOptions,
     coerce_codex_options,
 )
-from agents.classic.extensions.experimental.codex.events import (
+from agents._codex_cli.events import (
     ItemCompletedEvent,
     ThreadErrorEvent,
     ThreadEvent,
     TurnCompletedEvent,
     TurnFailedEvent,
 )
-from agents.classic.extensions.experimental.codex.items import is_agent_message_item
-from agents.classic.extensions.experimental.codex.thread import Thread
-from agents.classic.extensions.experimental.codex.thread_options import (
+from agents._codex_cli.items import is_agent_message_item
+from agents._codex_cli.thread import Thread
+from agents._codex_cli.thread_options import (
     ThreadOptions,
     coerce_thread_options,
 )
-from agents.classic.extensions.experimental.codex.turn_options import (
+from agents._codex_cli.turn_options import (
     TurnOptions,
     coerce_turn_options,
 )
 
-from ._function_tools import _PythonTool, function_tool
+from ._function_tools import ToolContext, _PythonTool, function_tool
 from ._public import preserve_module_identity as _preserve_module_identity
+
+
+@dataclass
+class _SessionThread:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    thread: Thread | None = None
 
 
 def codex_tool(
@@ -56,9 +64,11 @@ def codex_tool(
     on_event observes the CLI stream. Python task cancellation closes and joins
     the stream's subprocess. TurnOptions supports stdout inactivity timeouts.
 
-    persist_session reuses this tool's most recently completed thread and
-    serializes its calls. Model-supplied thread_id explicitly selects a CLI
-    thread; omit it to start a fresh thread or reuse the configured session.
+    persist_session reuses the most recently completed CLI thread within the
+    invoking native Session and serializes that Session's calls. Separate native
+    Sessions never implicitly share a thread. Model-supplied thread_id explicitly
+    selects a CLI thread; omit it to start a fresh thread or reuse this Session's
+    thread. Thread IDs must be nonempty and cannot start with a dash.
     """
     if codex is not None and codex_options is not None:
         raise ValueError("supply codex or codex_options, not both")
@@ -79,22 +89,27 @@ def codex_tool(
         if turn_options is not None
         else None
     )
-    persisted: Thread | None = None
-    lock = asyncio.Lock()
+    sessions: WeakKeyDictionary[object, _SessionThread] = WeakKeyDictionary()
 
-    async def execute(prompt: str, thread_id: str | None) -> dict[str, Any]:
-        nonlocal persisted, client
-        if client is None:
-            client = Codex(captured_codex_options)
+    async def execute(
+        prompt: str,
+        thread_id: str | None,
+        state: _SessionThread | None = None,
+    ) -> dict[str, Any]:
+        nonlocal client
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
-        if thread_id is not None and not thread_id.strip():
-            raise ValueError("thread_id must not be empty")
+        if thread_id is not None:
+            thread_id = thread_id.strip()
+            if not thread_id or thread_id.startswith("-"):
+                raise ValueError("thread_id must be nonempty and cannot start with a dash")
+        if client is None:
+            client = Codex(captured_codex_options)
         thread = (
             client.resume_thread(thread_id, captured_thread_options)
             if thread_id is not None
-            else persisted
-            if persist_session and persisted is not None
+            else state.thread
+            if state is not None and state.thread is not None
             else client.start_thread(captured_thread_options)
         )
         stream = await thread.run_streamed(prompt, captured_turn_options)
@@ -114,15 +129,33 @@ def codex_tool(
                     raise RuntimeError(event.error.message)
                 elif isinstance(event, ThreadErrorEvent):
                     raise RuntimeError(event.message)
-        if persist_session:
-            persisted = thread
+        if state is not None:
+            state.thread = thread
         return {"thread_id": thread.id, "response": response, "usage": usage}
 
     @function_tool(name=name, description=description)
-    async def invoke(prompt: str, thread_id: str | None = None) -> dict[str, Any]:
+    async def invoke(
+        context: ToolContext[object],
+        prompt: str,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
         if persist_session:
-            async with lock:
-                return await execute(prompt, thread_id)
+            from .session import Session, _invocation
+
+            invocation = _invocation.get()
+            if (
+                invocation is None
+                or not invocation.active
+                or not isinstance(invocation.session, Session)
+                or invocation.session.id != context.submission.session_id
+            ):
+                raise RuntimeError(
+                    "persistent Codex tools require an active native Session callback"
+                )
+            # Values contain only a CLI thread and lock; neither retains this key.
+            state = sessions.setdefault(invocation.session, _SessionThread())
+            async with state.lock:
+                return await execute(prompt, thread_id, state)
         return await execute(prompt, thread_id)
 
     return invoke

@@ -2307,7 +2307,6 @@ class Session(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
-        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         _captured_api_key: str | None = None,
@@ -2315,6 +2314,7 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
+        project_guidance: bool = False,
     ) -> Session[ContextT, OutputT]:
         if not isinstance(project_guidance, bool):
             raise TypeError("project_guidance must be a bool")
