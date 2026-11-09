@@ -5538,6 +5538,8 @@ class Session(Generic[ContextT, OutputT]):
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
+            if self._model_backend is not None:
+                thread._enable_model_producer(True)
             await change.validate_candidate(thread)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
@@ -8556,11 +8558,13 @@ class Session(Generic[ContextT, OutputT]):
             request = ModelRequest(
                 deepcopy(message["data"]), self._context, self.id, message["turn_id"]
             )
+            backend = self._model_backend
+            if not callable(getattr(backend, "complete", None)):
+                backend = await _call_callback(backend.get_model, active, request.body["model"])
+                if not active():
+                    return
 
             def invoke(request: ModelRequest) -> Any:
-                backend = self._model_backend
-                if not callable(getattr(backend, "complete", None)):
-                    backend = backend.get_model(request.body["model"])
                 value = backend.complete(request)
                 if inspect.isawaitable(value):
                     # Keep the original coroutine visible to callback admission

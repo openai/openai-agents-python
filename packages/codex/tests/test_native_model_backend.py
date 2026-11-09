@@ -634,3 +634,128 @@ async def test_chat_tool_output_rejects_media_before_next_client_call(kind: str)
                     await pending
                 assert len(requests) == 1
             assert effects == ["called"]
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+async def test_model_backend_survives_owned_compaction(supplied: bool) -> None:
+    requests = []
+    provider_requests = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            requests.append(request)
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Owned model summary or answer."}
+                        ],
+                    }
+                ]
+            )
+
+    async def unexpected_provider(request):
+        provider_requests.append(await request.json())
+        return web.json_response({"error": {"message": "Unexpected provider fallback"}}, status=400)
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", unexpected_provider)
+    async with TestServer(app) as server, timeout(20):
+        async with NativeProvider(
+            base_url=str(server.make_url("/v1")), model_backend=Model(), request_max_retries=0
+        ) as provider:
+            async with Agent(
+                model="gpt-5.2", instructions="Answer.", provider=provider
+            ).session() as session:
+                assert (
+                    await (await session.submit("Before compaction.")).get_result()
+                ).final_output == "Owned model summary or answer."
+                await session.compact(**({"summary": "Supplied summary."} if supplied else {}))
+                assert (
+                    await (await session.submit("After compaction.")).get_result()
+                ).final_output == "Owned model summary or answer."
+    assert len(requests) == (2 if supplied else 3)
+    assert provider_requests == []
+
+
+async def test_cancellation_during_model_resolution_does_not_start_completion() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    effects = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            effects.append("complete")
+            return ModelResponse([])
+
+    class Provider:
+        def get_model(self, model_name: str) -> Model:
+            entered.set()
+            release.wait(10)
+            return Model()
+
+    async with timeout(20), NativeProvider(model_backend=Provider()) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            turn = await session.submit("Begin.")
+            await asyncio.to_thread(entered.wait, 5)
+            assert entered.is_set()
+            stopping = asyncio.create_task(turn.cancel())
+            try:
+                await asyncio.sleep(0)
+                assert not stopping.done()
+            finally:
+                release.set()
+                await stopping
+            with pytest.raises(TurnStoppedError):
+                await turn.get_result()
+    assert effects == []
+
+
+async def test_cancel_model_compaction_joins_callback_and_allows_next_submission() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    requests = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            requests.append(request)
+            if len(requests) == 2:
+                entered.set()
+                release.wait(10)
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Model answer."}],
+                    }
+                ]
+            )
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url="http://127.0.0.1:1/v1", model_backend=Model(), request_max_retries=0
+        ) as provider,
+    ):
+        async with Agent(
+            model="gpt-5.2", instructions="Answer.", provider=provider
+        ).session() as session:
+            await (await session.submit("Before compaction.")).get_result()
+            compacting = asyncio.create_task(session.compact())
+            await asyncio.to_thread(entered.wait, 5)
+            assert entered.is_set()
+            compacting.cancel()
+            try:
+                await asyncio.sleep(0)
+                assert not compacting.done()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await compacting
+            assert (
+                await (await session.submit("After cancellation.")).get_result()
+            ).final_output == "Model answer."
+    assert len(requests) == 3
