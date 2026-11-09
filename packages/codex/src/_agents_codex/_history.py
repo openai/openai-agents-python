@@ -352,7 +352,8 @@ def project_history(
                         and len(kinds) > 0
                         and len(kinds) == len(payload["content"])
                         and all(
-                            value in {"user.text", "user.image", "images.preparation_error"}
+                            value
+                            in {"user.text", "user.image", "user.file", "images.preparation_error"}
                             for value in kinds
                         )
                     ):

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, LocalStorage, NativeError, SessionState, TurnStoppedError, function_tool
+from agents.input import UserInput
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -20,26 +21,55 @@ from tests.native_fixtures import (
 from tests.test_native_agent import provider
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Same synthetic prompt",
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "file_data": "data:application/pdf;base64,JVBERi0xLjcK",
+                    "filename": "synthetic.pdf",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Same synthetic prompt"},
+                {
+                    "type": "input_file",
+                    "file_data": "data:application/pdf;base64,JVBERi0xLjcK",
+                    "filename": "synthetic.pdf",
+                },
+            ],
+        },
+    ],
+    ids=["text", "file", "text-and-file"],
+)
 async def test_local_storage_user_history_preserves_repeated_prompts_after_reopen(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture, tmp_path: Path, prompt: UserInput
 ) -> None:
     responses.respond(assistant_output("First answer"))
     responses.respond(assistant_output("Second answer"))
-    agent = Agent(instructions="Answer.", provider=provider(responses))
+    agent = Agent(instructions="Answer.", model="gpt-5.5", provider=provider(responses))
     storage = LocalStorage(tmp_path / "history")
+    expected_content = (
+        [{"type": "input_text", "text": prompt}] if isinstance(prompt, str) else prompt["content"]
+    )
     async with timeout(30):
         async with agent.session(storage=storage) as session:
             turn_ids = []
             for _ in range(2):
-                handle = await session.submit("Same synthetic prompt")
+                handle = await session.submit(prompt)
                 await handle.get_result()
                 turn_ids.append(handle.turn_id)
             items = [item async for item in session.items()]
             users = [item for item in items if item["type"] == "message" and item["role"] == "user"]
             assert [item["turn_id"] for item in users] == turn_ids
-            assert [item["content"] for item in users] == [
-                [{"type": "input_text", "text": "Same synthetic prompt"}]
-            ] * 2
+            assert [item["content"] for item in users] == [expected_content] * 2
             session_id = session.id
         async with agent.session(storage=storage, resume=session_id) as reopened:
             assert [item async for item in reopened.items()] == items
