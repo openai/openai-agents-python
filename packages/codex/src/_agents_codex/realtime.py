@@ -337,21 +337,46 @@ class RealtimeHostedMcpToolsListed:
 _MAX_HOSTED_MCP_TOOLS = 1024
 
 
-def _hosted_mcp_schema_size(value: Any, limit: int, depth: int = 0) -> int:
+def _hosted_mcp_string_size(value: str, limit: int, json_text: bool) -> int:
+    size = 4 * len(value)
+    if size > limit:
+        raise RuntimeError("Realtime hosted MCP value capacity exceeded")
+    if json_text:
+        for char in value:
+            code = ord(char)
+            escaped = (
+                2
+                if code in (8, 9, 10, 12, 13, 34, 92)
+                else 6
+                if code < 32 or 127 <= code <= 0xFFFF
+                else 12
+                if code > 0xFFFF
+                else 1
+            )
+            size += 4 * (escaped - 1)
+            if size > limit:
+                raise RuntimeError("Realtime hosted MCP value capacity exceeded")
+    return size
+
+
+def _hosted_mcp_schema_size(
+    value: Any, limit: int, depth: int = 0, *, json_text: bool = False
+) -> int:
     # Conservatively charge JSON containers/scalars and object keys, including
     # their allocator overhead, without serializing or copying the schema.
     size = 256
     if depth > 128 or size > limit:
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     if isinstance(value, str):
-        size += 4 * len(value)
+        size += _hosted_mcp_string_size(value, limit - size, json_text)
     elif isinstance(value, dict):
         for key, child in value.items():
-            size += 128 + 4 * len(key)
-            size += _hosted_mcp_schema_size(child, limit - size, depth + 1)
+            size += 128
+            size += _hosted_mcp_string_size(key, limit - size, json_text)
+            size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
     elif isinstance(value, list):
         for child in value:
-            size += _hosted_mcp_schema_size(child, limit - size, depth + 1)
+            size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
     if size > limit:
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     return size
@@ -2136,6 +2161,32 @@ class RealtimeSession:
         elif name == "HostedMcpCallCompleted":
             profile = value.get("profile_receipt") or {}
             error = value.get("error")
+            if error is not None and not isinstance(error, str):
+                try:
+                    if self._queue.full():
+                        raise RuntimeError("Realtime hosted MCP event capacity exceeded")
+                    metadata_size = 4 * sum(
+                        len(text)
+                        for text in (
+                            value["item_id"],
+                            value["response_id"],
+                            value["server_label"],
+                            value["tool_name"],
+                            value["arguments"],
+                            value.get("output"),
+                            profile.get("profile_id"),
+                        )
+                        if isinstance(text, str)
+                    )
+                    _hosted_mcp_schema_size(
+                        error,
+                        self._BUFFER_BYTES_LIMIT - self._queue_bytes - metadata_size,
+                        json_text=True,
+                    )
+                except RuntimeError:
+                    # Do not retain the decoded value through a guard traceback.
+                    self._finish(RuntimeError("Realtime hosted MCP error capacity exceeded"))
+                    return
             self._emit(
                 RealtimeHostedMcpCallCompleted(
                     value["item_id"],

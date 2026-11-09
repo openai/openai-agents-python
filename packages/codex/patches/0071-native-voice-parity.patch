@@ -1050,10 +1050,10 @@ index 0000000000000000000000000000000000000000..5ac57176697eae74bfcac71d538cde82
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5dab73cb1
+index 0000000000000000000000000000000000000000..80dfee35d99f2fed176b88e876a4238f27c1b015
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,715 @@
 +//! Provider-hosted MCP observations and receipts inside the connection owner.
 +use super::readiness::{ActiveResponse, RealtimeAcceptedConfiguration};
 +use codex_protocol::protocol::{
@@ -1075,7 +1075,7 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +    Ok(())
 +}
 +
-+fn schema_bytes(value: &Value, bytes: &mut usize, depth: usize) -> Result<(), ObserveError> {
++fn json_bytes(value: &Value, bytes: &mut usize, depth: usize) -> Result<(), ObserveError> {
 +    // Bound container/scalar/key allocations without serializing or cloning.
 +    if depth > 128 {
 +        return Err(ObserveError::Capacity);
@@ -1085,13 +1085,13 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +        Value::String(text) => charge(bytes, text.len().saturating_mul(4))?,
 +        Value::Array(values) => {
 +            for value in values {
-+                schema_bytes(value, bytes, depth + 1)?;
++                json_bytes(value, bytes, depth + 1)?;
 +            }
 +        }
 +        Value::Object(values) => {
 +            for (key, value) in values {
 +                charge(bytes, 128usize.saturating_add(key.len().saturating_mul(4)))?;
-+                schema_bytes(value, bytes, depth + 1)?;
++                json_bytes(value, bytes, depth + 1)?;
 +            }
 +        }
 +        _ => {}
@@ -1115,7 +1115,7 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +    charge(bytes, 256)?;
 +    charge(bytes, name.len().saturating_mul(4))?;
 +    charge(bytes, description.map_or(0, str::len).saturating_mul(4))?;
-+    schema_bytes(schema, bytes, 0)
++    json_bytes(schema, bytes, 0)
 +}
 +
 +pub(super) fn event_bytes(event: &RealtimeEvent) -> Result<usize, ObserveError> {
@@ -1134,9 +1134,17 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +        }
 +        Ok(bytes)
 +    } else {
-+        serde_json::to_vec(event)
-+            .map(|value| value.len())
-+            .map_err(|_| ObserveError::Invalid)
++        // Admit structured errors before serializing, and retain their allocation
++        // charge in the same queue permits as the serialized event.
++        let mut bytes = 0;
++        if let RealtimeEvent::HostedMcpCallCompleted(call) = event {
++            if let Some(error) = &call.error {
++                json_bytes(error, &mut bytes, 0)?;
++            }
++        }
++        let encoded = serde_json::to_vec(event).map_err(|_| ObserveError::Invalid)?;
++        charge(&mut bytes, encoded.len())?;
++        Ok(bytes)
 +    }
 +}
 +
@@ -1561,11 +1569,10 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +                    .profile_receipt()
 +                    .map_or(0, |receipt| receipt.profile_id.len());
 +                let output_bytes = c.item["output"].as_str().map_or(0, str::len);
-+                let error_bytes = c
-+                    .item
-+                    .get("error")
-+                    .filter(|e| !e.is_null())
-+                    .map_or(0, |e| e.to_string().len());
++                let mut error_bytes = 0;
++                if let Some(error) = c.item.get("error").filter(|e| !e.is_null()) {
++                    json_bytes(error, &mut error_bytes, 0)?;
++                }
 +                exported_bytes = exported_bytes.saturating_add(
 +                    c.source.id.len()
 +                        + c.id.len()
@@ -1763,7 +1770,7 @@ index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5
 +    event.to_string()
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 33cba07f28b965beb7d163f0f56cf5bcee408812..2c25aba04c60973fe1318fdb6cf96be5a451a4cf 100644
+index 33cba07f28b965beb7d163f0f56cf5bcee408812..a20c25d1d0752f895b6305d9aea9bed4fd7e7bcb 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 @@ -1,3 +1,7 @@
@@ -3422,7 +3429,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..2c25aba04c60973fe1318fdb6cf96be5
          };
          let (_events_tx, events_rx) = async_channel::bounded(1);
          let connection = RealtimeWebsocketConnection::new(
-@@ -3653,4 +4546,812 @@ mod tests {
+@@ -3653,4 +4546,850 @@ mod tests {
          );
          writer.abort_and_join().await;
      }
@@ -3839,6 +3846,44 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..2c25aba04c60973fe1318fdb6cf96be5
 +        );
 +        assert!(queued.len() > 1);
 +        assert!(budget.available_permits() < SDK_WIRE_BYTES_CAPACITY);
++        drop(queued);
++        assert_eq!(budget.available_permits(), SDK_WIRE_BYTES_CAPACITY);
++    }
++
++    #[test]
++    fn structured_hosted_errors_share_queue_permits_and_release_on_drop() {
++        use codex_protocol::protocol::RealtimeHostedMcpCallCompleted;
++        let event = RealtimeEvent::HostedMcpCallCompleted(RealtimeHostedMcpCallCompleted {
++            item_id: "call".into(),
++            response_id: "r".into(),
++            server_label: "docs".into(),
++            tool_name: "search".into(),
++            arguments: "{}".into(),
++            output: None,
++            error: Some(serde_json::json!({"details": vec![serde_json::json!({}); 4096]})),
++            profile_receipt: None,
++        });
++        let budget = Arc::new(tokio::sync::Semaphore::new(SDK_WIRE_BYTES_CAPACITY));
++        let mut queued = Vec::new();
++        let mut rejected = false;
++        for _ in 0..10 {
++            let mut message =
++                QueuedWireMessage::new(Ok(Message::Text("{}".into())), Some(Arc::clone(&budget)))
++                    .unwrap();
++            if message
++                .charge_hosted_events(vec![event.clone()], Some(Arc::clone(&budget)))
++                .is_err()
++            {
++                rejected = true;
++                break;
++            }
++            queued.push(message);
++        }
++        assert!(
++            rejected,
++            "compact structured errors must charge retained allocations"
++        );
++        assert!(queued.len() > 1);
 +        drop(queued);
 +        assert_eq!(budget.available_permits(), SDK_WIRE_BYTES_CAPACITY);
 +    }
@@ -4791,10 +4836,10 @@ index ee0bba99461438b5ae24a1f3d283ab043546e1a3..492ed911fee8a17f692b020d268cd640
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..45ef150f70d1b2151b2803b8ad25c07c59a0e8e9
+index 0000000000000000000000000000000000000000..cf974a4fb9a3bf20e494faeeff99a138491ffb1a
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-@@ -0,0 +1,3353 @@
+@@ -0,0 +1,3388 @@
 +//! Connection-owned accepted configuration and its single pending revision.
 +use crate::ApiError;
 +use codex_protocol::agent_profile::AgentProfileReceipt;
@@ -7751,6 +7796,41 @@ index 0000000000000000000000000000000000000000..45ef150f70d1b2151b2803b8ad25c07c
 +        }
 +        assert!(observer.mismatched());
 +    }
++    #[test]
++    fn hosted_errors_admit_structure_before_copying_from_both_completion_paths() {
++        for sparse in [false, true] {
++            for nodes in [100, 33_000] {
++                let observer = accepted_hosted_observer();
++                created(&observer, "r");
++                hosted_event(
++                    &observer,
++                    "response.output_item.added",
++                    Some("r"),
++                    json!({"type":"mcp_call","id":"call","server_label":"docs","name":"search","arguments":"{}"}),
++                );
++                let error = json!({"details": vec![json!({}); nodes]});
++                let frame = if sparse {
++                    json!({"type":"response.mcp_call.failed","response_id":"r","item_id":"call","error":error})
++                } else {
++                    json!({"type":"response.output_item.done","response_id":"r","item":{"type":"mcp_call","id":"call","server_label":"docs","name":"search","arguments":"{}","error":error}})
++                };
++                let observation = observer.observe_frame(&frame.to_string(), true);
++                if nodes == 100 {
++                    let [codex_protocol::protocol::RealtimeEvent::HostedMcpCallCompleted(call)] =
++                        observation.hosted_mcp_events.as_slice()
++                    else {
++                        panic!("bounded structured error must remain observable");
++                    };
++                    assert_eq!(call.error.as_ref(), Some(&error));
++                    assert!(!observer.mismatched());
++                } else {
++                    assert!(observation.hosted_mcp_events.is_empty());
++                    assert!(observer.mismatched());
++                }
++            }
++        }
++    }
++
 +    #[test]
 +    fn sparse_hosted_failure_is_terminal_only_for_its_actual_registered_item() {
 +        let observer = accepted_hosted_observer();
