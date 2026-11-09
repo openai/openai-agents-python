@@ -226,7 +226,7 @@ class ChatCompletionsModel:
                     "content": [{"type": "output_text", "text": message["content"]}],
                 }
             )
-        for call in message.get("tool_calls", []):
+        for call in message.get("tool_calls") or []:
             if call.get("type") != "function":
                 raise ValueError("ChatCompletionsModel received an unsupported tool call")
             output.append(
