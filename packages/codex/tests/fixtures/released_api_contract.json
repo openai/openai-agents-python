@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "c7a60813f086a9937c050331be200e4ac0d2b236",
+  "baseline_commit": "f70d620cf8977ec21884324d752b3e868789e9af",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -180,17 +180,12 @@
       },
       "agents.decisions": {
         "declarations": [
-          "T = TypeVar('T')",
           "DecisionInput = str | Sequence[dict[str, Any]]",
           "@dataclass(frozen=True, kw_only=True)\nclass DecisionRequest:\n    question: str\n    input: DecisionInput = field(repr=False)\n    output_schema: dict[str, Any] = field(repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass DecisionResponse:\n    value: Any = field(repr=False)\n    usage: TokenUsage | None = None\n    request_id: str | None = None\n    model: str | None = None",
           "class DecisionProvider(Protocol):\n\n    async def get_decision(self, request: DecisionRequest) -> DecisionResponse:\n        pass",
           "class DecisionError(ValueError):\n\n    def __init__(self, reason: Literal['refusal', 'invalid_response'], *, usage: TokenUsage | None=None, request_id: str | None=None, model: str | None=None) -> None:\n        pass",
-          "@overload\nasync def decide(question: str, *, input: DecisionInput, provider: DecisionProvider, choices: None=None, output_type: None=None) -> bool:\n    pass",
-          "@overload\nasync def decide(question: str, *, input: DecisionInput, provider: DecisionProvider, choices: Sequence[T], output_type: None=None) -> T:\n    pass",
-          "@overload\nasync def decide(question: str, *, input: DecisionInput, provider: DecisionProvider, output_type: type[T], choices: None=None) -> T:\n    pass",
-          "async def decide(question: str, *, input: DecisionInput, provider: DecisionProvider, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n    pass",
-          "class OpenAIDecisions:\n\n    def __init__(self, *, client: AsyncOpenAI | None=None, fallback_model: str | None=None) -> None:\n        pass\n\n    async def __aenter__(self) -> OpenAIDecisions:\n        pass\n\n    async def __aexit__(self, *args: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, choices: Sequence[T], output_type: None=None) -> T:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, output_type: type[T], choices: None=None) -> T:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass\n\n    async def get_decision(self, request: DecisionRequest) -> DecisionResponse:\n        pass"
+          "class OpenAIDecisions:\n\n    def __init__(self, *, client: AsyncOpenAI | None=None, fallback_model: str | None=None) -> None:\n        pass\n\n    async def __aenter__(self) -> OpenAIDecisions:\n        pass\n\n    async def __aexit__(self, *args: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    async def get_decision(self, request: DecisionRequest) -> DecisionResponse:\n        pass"
         ],
         "exports": {
           "DecisionError": "agents.decisions.DecisionError",
@@ -198,13 +193,12 @@
           "DecisionProvider": "agents.decisions.DecisionProvider",
           "DecisionRequest": "agents.decisions.DecisionRequest",
           "DecisionResponse": "agents.decisions.DecisionResponse",
-          "OpenAIDecisions": "agents.decisions.OpenAIDecisions",
-          "decide": "agents.decisions.decide"
+          "OpenAIDecisions": "agents.decisions.OpenAIDecisions"
         },
         "imports": [
           "from collections.abc import Sequence",
           "from dataclasses import dataclass, field",
-          "from typing import Any, Literal, Protocol, TypeVar, overload",
+          "from typing import Any, Literal, Protocol",
           "from .usage import TokenUsage",
           "from openai import AsyncOpenAI"
         ],
@@ -1511,7 +1505,6 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
-      "decide": "agents.decisions.decide",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup"
     },
@@ -3763,7 +3756,6 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
-      "decide",
       "function_tool",
       "get_cleanup"
     ],
@@ -3774,7 +3766,7 @@
       "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
-      "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions, decide as decide",
+      "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .input import AssistantMessage as AssistantMessage, ImageDetail as ImageDetail, InitialMessage as InitialMessage, InputFile as InputFile, InputImage as InputImage, InputImageFile as InputImageFile, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalRequest as ApprovalRequest, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",

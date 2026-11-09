@@ -7,7 +7,6 @@ from _agents_codex.decisions import (
     DecisionRequest as DecisionRequest,
     DecisionResponse as DecisionResponse,
     OpenAIDecisions as OpenAIDecisions,
-    decide as decide,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "DecisionRequest",
     "DecisionResponse",
     "OpenAIDecisions",
-    "decide",
 ]

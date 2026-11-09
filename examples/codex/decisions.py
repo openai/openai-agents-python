@@ -33,16 +33,16 @@ async def check_completion(ctx: CompletionContext[None]):
 async def main() -> None:
     request = "Our production checkout stopped working. Please help now."
     async with OpenAIDecisions() as decisions:
-        assessment = await decisions.decide(
-            "Classify this support request.", input=request, output_type=Assessment
-        )
-        print(assessment.model_dump_json())
         agent = Agent(
             instructions="Write a short support reply with one clear next action.",
             model=os.environ["OPENAI_MODEL"],
             decisions=decisions,
             before_complete=check_completion,
         )
+        assessment = await agent.decide(
+            "Classify this support request.", input=request, output_type=Assessment
+        )
+        print(assessment.model_dump_json())
         result = await agent.run(request)
         print(result.final_output)
 

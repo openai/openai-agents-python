@@ -26,7 +26,6 @@ from agents import (
     ToolContext,
     ToolRef,
     Turn,
-    decide,
 )
 from agents.tools import ToolCallInfo
 from agents.usage import TokenUsage
@@ -55,7 +54,12 @@ class Assessment(BaseModel):
 
 async def test_default_boolean_and_explicit_input_reach_swappable_provider():
     provider = Provider({"response": True})
-    assert await decide("Is this allowed?", input="Evidence", provider=provider) is True
+    assert (
+        await Agent(instructions="Answer").decide(
+            "Is this allowed?", input="Evidence", provider=provider
+        )
+        is True
+    )
     request = provider.requests[0]
     assert request.question == "Is this allowed?"
     assert request.input == "Evidence"
@@ -66,7 +70,7 @@ async def test_default_boolean_and_explicit_input_reach_swappable_provider():
 async def test_choices_and_pydantic_output_reuse_existing_schema_validation():
     choices = Provider({"response": "technical"})
     assert (
-        await decide(
+        await Agent(instructions="Answer").decide(
             "Select a specialist", input=[], choices=["billing", "technical"], provider=choices
         )
         == "technical"
@@ -77,7 +81,7 @@ async def test_choices_and_pydantic_output_reuse_existing_schema_validation():
         "technical",
     ]
     provider = Provider({"category": "review", "approved": False})
-    assert await decide(
+    assert await Agent(instructions="Answer").decide(
         "Assess", input="Evidence", output_type=Assessment, provider=provider
     ) == Assessment(category="review", approved=False)
     schema = provider.requests[0].output_schema
@@ -88,7 +92,9 @@ async def test_choices_and_pydantic_output_reuse_existing_schema_validation():
     assert schema["required"] == ["category", "approved"]
     provider.value = {"category": "invented", "approved": True}
     with pytest.raises(OutputValidationError):
-        await decide("Assess", input="Evidence", output_type=Assessment, provider=provider)
+        await Agent(instructions="Answer").decide(
+            "Assess", input="Evidence", output_type=Assessment, provider=provider
+        )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +111,7 @@ async def test_invalid_requests_fail_before_provider_work(options):
     provider = Provider(None)
     values = {"question": "Question", "input": "Evidence", **options}
     with pytest.raises((TypeError, ValueError)):
-        await decide(provider=provider, **values)
+        await Agent(instructions="Answer").decide(provider=provider, **values)
     assert not provider.requests
 
 
@@ -328,7 +334,7 @@ async def test_openai_adapter_uses_fixed_backend_and_keeps_borrowed_client_open(
     assert client.requests[0][1]["model"] == "gpt-6-luna"
     assert not client.closed
     with pytest.raises(RuntimeError, match="closed"):
-        await provider.decide("Allowed?", input="evidence")
+        await Agent(instructions="Answer", decisions=provider).decide("Allowed?", input="evidence")
 
 
 async def test_openai_fallback_is_selected_before_inference_only(compiler):
@@ -342,10 +348,17 @@ async def test_openai_fallback_is_selected_before_inference_only(compiler):
     )
     async with OpenAIDecisions(client=client) as no_fallback:
         with pytest.raises(ValueError, match="Unsupported Decisions output schema"):
-            await no_fallback.decide("Answer", input="evidence", output_type=str)
+            await Agent(instructions="Answer", decisions=no_fallback).decide(
+                "Answer", input="evidence", output_type=str
+            )
     assert not client.requests
     async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
-        assert await provider.decide("Answer", input="evidence", output_type=str) == "accepted"
+        assert (
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Answer", input="evidence", output_type=str
+            )
+            == "accepted"
+        )
     assert len(client.requests) == 1
     path, body = client.requests[0]
     assert path == "/responses" and body["model"] == "generation"
@@ -374,7 +387,9 @@ async def test_openai_completed_errors_keep_metadata_without_raw_answers(compile
     )
     async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
         with pytest.raises(DecisionError) as caught:
-            await provider.decide("Allowed?", input="evidence")
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Allowed?", input="evidence"
+            )
     error = caught.value
     assert error.reason == reason and error.usage.total_tokens == 10
     assert error.request_id == "req_openai" and error.model == "luna-resolved"
@@ -405,7 +420,7 @@ async def test_invalid_usage_remains_unknown_and_transport_failure_is_not_a_comp
 
     client.post = fail
     with pytest.raises(OSError, match="transport failed"):
-        await provider.decide("Allowed?", input="evidence")
+        await Agent(instructions="Answer", decisions=provider).decide("Allowed?", input="evidence")
 
 
 @pytest.mark.parametrize("entry", ["session", "run", "run_sync"])
@@ -495,7 +510,12 @@ async def test_owned_client_is_created_lazily_and_closed(compiler, monkeypatch):
     provider = OpenAIDecisions()
     assert not created
     async with provider:
-        assert await provider.decide("Allowed?", input="evidence") is True
+        assert (
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Allowed?", input="evidence"
+            )
+            is True
+        )
     assert created == [client] and client.closed
 
 
@@ -595,7 +615,9 @@ async def test_fallback_requires_completed_status_even_when_partial_json_is_vali
     )
     async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
         with pytest.raises(DecisionError) as caught:
-            await provider.decide("Answer", input="Evidence", output_type=str)
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Answer", input="Evidence", output_type=str
+            )
     assert caught.value.reason == "invalid_response"
     assert len(client.requests) == 1 and client.requests[0][0] == "/responses"
 
@@ -603,7 +625,7 @@ async def test_fallback_requires_completed_status_even_when_partial_json_is_vali
 @pytest.mark.parametrize("value", [False, 0, "0", "false", 7, None])
 async def test_choices_preserve_json_scalar_identity(value):
     provider = Provider({"response": value})
-    result = await decide(
+    result = await Agent(instructions="Answer").decide(
         "Select", input="Evidence", choices=[False, 0, "0", "false", 7, None], provider=provider
     )
     assert result == value and type(result) is type(value)
@@ -613,7 +635,9 @@ async def test_choices_preserve_json_scalar_identity(value):
 async def test_choices_reject_duplicate_json_numbers_before_provider_work(choices):
     provider = Provider(None)
     with pytest.raises(ValueError, match="distinct"):
-        await decide("Select", input="Evidence", choices=choices, provider=provider)
+        await Agent(instructions="Answer").decide(
+            "Select", input="Evidence", choices=choices, provider=provider
+        )
     assert not provider.requests
 
 
@@ -621,7 +645,7 @@ async def test_choices_reject_duplicate_json_numbers_before_provider_work(choice
 async def test_non_json_provider_output_is_a_safe_completed_error(value):
     provider = Provider({"response": value})
     with pytest.raises(DecisionError) as caught:
-        await decide("Allowed?", input="Evidence", provider=provider)
+        await Agent(instructions="Answer").decide("Allowed?", input="Evidence", provider=provider)
     error = caught.value
     assert error.reason == "invalid_response"
     assert error.usage == USAGE and error.request_id == "req_test" and error.model == "custom"
@@ -661,7 +685,7 @@ def assert_no_response_in_sdk_traceback(error, marker):
     assert frames
 
 
-@pytest.mark.parametrize("entry", ["raw", "provider", "standalone", "agent", "bound"])
+@pytest.mark.parametrize("entry", ["raw", "agent-provider", "agent-override", "agent", "bound"])
 @pytest.mark.parametrize(
     "case",
     [
@@ -748,10 +772,14 @@ async def test_completed_error_tracebacks_discard_provider_payload(
                     question="Allowed?", input="evidence", output_schema={"type": "boolean"}
                 )
             )
-        elif entry == "provider":
-            await provider.decide("Allowed?", input="evidence")
-        elif entry == "standalone":
-            await decide("Allowed?", input="evidence", provider=provider)
+        elif entry == "agent-provider":
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Allowed?", input="evidence"
+            )
+        elif entry == "agent-override":
+            await Agent(instructions="Answer").decide(
+                "Allowed?", input="evidence", provider=provider
+            )
         elif entry == "agent":
             await Agent(instructions="Answer", decisions=provider).decide(
                 "Allowed?", input="evidence"
@@ -795,7 +823,9 @@ async def test_non_json_error_tracebacks_discard_completed_value(bound, failure)
             with _bind_decisions(owner, lambda: True, begin, provider):
                 await owner.decide("Allowed?", input="evidence")
         else:
-            await decide("Allowed?", input="evidence", provider=provider)
+            await Agent(instructions="Answer").decide(
+                "Allowed?", input="evidence", provider=provider
+            )
     assert caught.value.reason == "invalid_response"
     assert caught.value.usage == USAGE
     assert caught.value.request_id == "req_test" and caught.value.model == "custom"
@@ -807,7 +837,7 @@ async def test_non_json_error_tracebacks_discard_completed_value(bound, failure)
 async def test_non_finite_model_input_fails_before_provider_work():
     provider = Provider(None)
     with pytest.raises(ValueError):
-        await decide(
+        await Agent(instructions="Answer").decide(
             "Allowed?", input=[{"role": "user", "content": float("nan")}], provider=provider
         )
     assert not provider.requests

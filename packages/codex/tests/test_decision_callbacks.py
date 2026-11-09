@@ -120,7 +120,9 @@ async def test_builtin_uses_shared_compiler_and_real_http(decision_peer):
         urgent: bool
 
     decisions = OpenAIDecisions(client=decision_peer.client)
-    result = await decisions.decide("Classify.", input="Evidence", output_type=Ticket)
+    result = await Agent(instructions="Assess the supplied evidence.", decisions=decisions).decide(
+        "Classify.", input="Evidence", output_type=Ticket
+    )
     assert result == Ticket(category="technical", urgent=True)
     assert decision_peer.requests[0][0] == "/decisions"
     assert decision_peer.requests[0][1]["input"] == "Evidence"
@@ -142,9 +144,9 @@ async def test_builtin_boolean_choices_use_decisions_without_fallback(
     decision_peer, choices, expected
 ):
     async with OpenAIDecisions(client=decision_peer.client) as decisions:
-        result = await decisions.decide(
-            "Choose the exact value.", input="Evidence", choices=choices
-        )
+        result = await Agent(
+            instructions="Assess the supplied evidence.", decisions=decisions
+        ).decide("Choose the exact value.", input="Evidence", choices=choices)
     assert result == expected
     assert type(result) is type(expected)
     assert len(decision_peer.requests) == 1
@@ -159,7 +161,9 @@ async def test_builtin_errors_retain_completed_metadata(decision_peer, mode, rea
     decision_peer.mode = mode
     decisions = OpenAIDecisions(client=decision_peer.client, fallback_model="fixture-fallback")
     with pytest.raises(DecisionError) as error:
-        await decisions.decide("Check.", input="Evidence")
+        await Agent(instructions="Assess the supplied evidence.", decisions=decisions).decide(
+            "Check.", input="Evidence"
+        )
     assert error.value.reason == reason
     assert error.value.usage == USAGE
     assert error.value.request_id == "req-http-decision"
@@ -172,15 +176,19 @@ async def test_fallback_is_selected_before_inference_and_rejects_incomplete(deci
 
     decisions = OpenAIDecisions(client=decision_peer.client)
     with pytest.raises(ValueError, match="Unsupported Decisions output schema"):
-        await decisions.decide("Explain.", input="Evidence", output_type=Explanation)
+        await Agent(instructions="Assess the supplied evidence.", decisions=decisions).decide(
+            "Explain.", input="Evidence", output_type=Explanation
+        )
     assert not decision_peer.requests
     fallback = OpenAIDecisions(client=decision_peer.client, fallback_model="fixture-fallback")
-    assert await fallback.decide(
+    assert await Agent(instructions="Assess the supplied evidence.", decisions=fallback).decide(
         "Explain.", input="Evidence", output_type=Explanation
     ) == Explanation(text="An explanation.")
     decision_peer.mode = "incomplete"
     with pytest.raises(DecisionError) as error:
-        await fallback.decide("Explain.", input="Evidence", output_type=Explanation)
+        await Agent(instructions="Assess the supplied evidence.", decisions=fallback).decide(
+            "Explain.", input="Evidence", output_type=Explanation
+        )
     assert error.value.reason == "invalid_response"
     assert error.value.usage == USAGE
     assert [path for path, _ in decision_peer.requests] == ["/responses", "/responses"]

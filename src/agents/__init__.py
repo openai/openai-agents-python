@@ -35,7 +35,6 @@ if TYPE_CHECKING:
         DecisionRequest as DecisionRequest,
         DecisionResponse as DecisionResponse,
         OpenAIDecisions as OpenAIDecisions,
-        decide as decide,
     )
     from .executor import (
         Environment as Environment,
@@ -190,7 +189,6 @@ _MODULES = {
     "DecisionRequest": ".decisions",
     "DecisionResponse": ".decisions",
     "OpenAIDecisions": ".decisions",
-    "decide": ".decisions",
     "CompactionContext": ".compaction",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",

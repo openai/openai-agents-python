@@ -41,13 +41,29 @@ sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool, get_cleanup
 from agents import ModelContextSnapshot, ModelRequestContext
-from agents import DecisionProvider, DecisionRequest, DecisionResponse, OpenAIDecisions, decide
+from agents import DecisionProvider, DecisionRequest, DecisionResponse, OpenAIDecisions
 from agents.model_context import ModelContextSnapshot as SnapshotFromModule
 from agents._events import URLCitation, WebSearchSource
 from agents.observation import ModelOutputItemCompleted
 from agents.state import SessionState
 from agents.tools import WebSearch, WebSearchLocation
 
+from agents import decisions
+import _agents_codex.decisions as decision_implementation
+assert not hasattr(agents, 'decide')
+assert not hasattr(decisions, 'decide')
+assert not hasattr(decision_implementation, 'decide')
+assert not hasattr(OpenAIDecisions, 'decide')
+
+class Decisions:
+    async def get_decision(self, request):
+        return DecisionResponse(value={'response': True})
+
+import asyncio
+assert asyncio.run(Agent(instructions='Answer.', decisions=Decisions()).decide(
+    'Allowed?', input='Evidence'
+)) is True
+assert 'agents._native' not in sys.modules
 assert ModelContextSnapshot is SnapshotFromModule
 assert get_cleanup(RuntimeError("no retained owner")) is None
 

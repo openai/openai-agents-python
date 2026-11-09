@@ -58,7 +58,6 @@ from agents import (
     Turn,
     UserInput,
     WebSearch,
-    decide,
     function_tool,
 )
 from agents._events import OutputText, URLCitation, WebSearchSource
@@ -1018,16 +1017,34 @@ async def typed_decision_helpers(
     child_step: ChildStepContext[Application],
     builtin: OpenAIDecisions,
 ) -> None:
-    assert_type(await decide("Allowed?", input="Evidence", provider=decision_provider), bool)
     assert_type(
-        await decide("Select", input=[], choices=["a", "b"], provider=decision_provider), str
+        await Agent(instructions="Answer").decide(
+            "Allowed?", input="Evidence", provider=decision_provider
+        ),
+        bool,
     )
     assert_type(
-        await decide("Assess", input="Evidence", output_type=Answer, provider=decision_provider),
+        await Agent(instructions="Answer").decide(
+            "Select", input=[], choices=["a", "b"], provider=decision_provider
+        ),
+        str,
+    )
+    assert_type(
+        await Agent(instructions="Answer").decide(
+            "Assess", input="Evidence", output_type=Answer, provider=decision_provider
+        ),
         Answer,
     )
-    assert_type(await builtin.decide("Allowed?", input="Evidence"), bool)
-    assert_type(await builtin.decide("Select", input="Evidence", choices=["a", "b"]), str)
+    assert_type(
+        await Agent(instructions="Answer", decisions=builtin).decide("Allowed?", input="Evidence"),
+        bool,
+    )
+    assert_type(
+        await Agent(instructions="Answer", decisions=builtin).decide(
+            "Select", input="Evidence", choices=["a", "b"]
+        ),
+        str,
+    )
     assert_type(await deciding_agent.decide("Assess", input="Evidence", output_type=Answer), Answer)
     assert_type(await turn.decide("Assess", input="Evidence", output_type=Answer), Answer)
     assert_type(await completion.decide("Allowed?", input=completion.text or ""), bool)

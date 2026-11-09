@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, cast
 
 from ._lifecycle import _close_after_error
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -20,7 +20,6 @@ from .usage import TokenUsage
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
-T = TypeVar("T")
 DecisionInput = str | Sequence[dict[str, Any]]
 
 
@@ -131,7 +130,7 @@ def _bind_decisions(
 
 def _check_provider(provider: DecisionProvider | None) -> DecisionProvider:
     if provider is None:
-        raise ValueError("Configure decisions on the Agent or pass provider to decide()")
+        raise ValueError("Configure decisions on the Agent or pass provider to Agent.decide()")
     if not callable(getattr(provider, "get_decision", None)):
         raise TypeError("provider must implement async get_decision(request)")
     return provider
@@ -142,59 +141,6 @@ def _capture_decisions(
 ) -> DecisionProvider | None:
     selected = default if override is None else override
     return None if selected is None else _check_provider(selected)
-
-
-@overload
-async def decide(
-    question: str,
-    *,
-    input: DecisionInput,
-    provider: DecisionProvider,
-    choices: None = None,
-    output_type: None = None,
-) -> bool: ...
-
-
-@overload
-async def decide(
-    question: str,
-    *,
-    input: DecisionInput,
-    provider: DecisionProvider,
-    choices: Sequence[T],
-    output_type: None = None,
-) -> T: ...
-
-
-@overload
-async def decide(
-    question: str,
-    *,
-    input: DecisionInput,
-    provider: DecisionProvider,
-    output_type: type[T],
-    choices: None = None,
-) -> T: ...
-
-
-async def decide(
-    question: str,
-    *,
-    input: DecisionInput,
-    provider: DecisionProvider,
-    choices: Sequence[Any] | None = None,
-    output_type: Any = None,
-) -> Any:
-    """Answer one question as bool, one declared choice, or a validated output type.
-
-    Input is always explicit. ``choices`` and ``output_type`` are mutually
-    exclusive. A provider receives the SDK's captured JSON schema and must
-    return matching JSON, including a ``response`` wrapper for scalar roots.
-    No Agent run starts and no conversation history changes.
-    """
-    return await _decide(
-        question, input=input, provider=provider, choices=choices, output_type=output_type
-    )
 
 
 async def _bound_decide(
@@ -385,34 +331,6 @@ class OpenAIDecisions:
         self._closed = True
         if self._owned and self._client is not None:
             await self._client.close()
-
-    @overload
-    async def decide(
-        self, question: str, *, input: DecisionInput, choices: None = None, output_type: None = None
-    ) -> bool: ...
-
-    @overload
-    async def decide(
-        self, question: str, *, input: DecisionInput, choices: Sequence[T], output_type: None = None
-    ) -> T: ...
-
-    @overload
-    async def decide(
-        self, question: str, *, input: DecisionInput, output_type: type[T], choices: None = None
-    ) -> T: ...
-
-    async def decide(
-        self,
-        question: str,
-        *,
-        input: DecisionInput,
-        choices: Sequence[Any] | None = None,
-        output_type: Any = None,
-    ) -> Any:
-        """Answer through the same typed facade as standalone and bound calls."""
-        return await _decide(
-            question, input=input, provider=self, choices=choices, output_type=output_type
-        )
 
     async def get_decision(self, request: DecisionRequest) -> DecisionResponse:
         if self._closed:

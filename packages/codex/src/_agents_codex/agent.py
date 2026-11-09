@@ -53,7 +53,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
-from .decisions import DecisionInput, DecisionProvider, _check_provider, decide
+from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
@@ -882,12 +882,12 @@ class Agent(Generic[ContextT, OutputT]):
         choices: Sequence[Any] | None = None,
         output_type: Any = None,
     ) -> Any:
-        """Answer a standalone typed question using this Agent's Decisions default.
+        """Answer a typed question using this Agent's Decisions default.
 
         This starts no Agent run and records no conversation or turn usage.
         A per-call provider overrides the declaration's ``decisions`` default.
         """
-        return await decide(
+        return await _decide(
             question,
             input=input,
             provider=_check_provider(provider if provider is not None else self.decisions),

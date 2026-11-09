@@ -1,6 +1,6 @@
 # Make typed decisions
 
-Use `decide()` for a boolean, a choice, or a structured value. A decision provider sends the request. The SDK validates the result as it validates Agent output. You can call it directly or bind it to an Agent for use in its callbacks.
+Use `Agent.decide()` for a boolean, a choice, or a structured value. A decision provider sends the request. The SDK validates the result as it validates Agent output. Configure the provider on an Agent and use its decision method or its callback contexts.
 
 Decisions support is not in the latest published preview. [Build the matching source](../../CONTRIBUTING.md), then install that build with its `decisions` extra to use `OpenAIDecisions`. Custom providers do not require the OpenAI client dependency. Set `OPENAI_API_KEY` before running these examples.
 
@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agents import OpenAIDecisions
+from agents import Agent, OpenAIDecisions
 
 
 class TicketDecision(BaseModel):
@@ -22,7 +22,8 @@ class TicketDecision(BaseModel):
 
 async def main() -> None:
     async with OpenAIDecisions() as decisions:
-        result = await decisions.decide(
+        agent = Agent(instructions="Assess the supplied evidence.", decisions=decisions)
+        result = await agent.decide(
             "Classify this support ticket.",
             input="I was charged twice for my subscription.",
             output_type=TicketDecision,
@@ -83,7 +84,7 @@ Completion feedback does enter the conversation. Already streamed text remains v
 
 Any object implementing `DecisionProvider.get_decision(request)` can replace `OpenAIDecisions`. It receives a `DecisionRequest` with `question`, `input`, and `output_schema`, and returns `DecisionResponse(value=..., usage=..., request_id=..., model=...)`. Only `value` is required. Return JSON matching the supplied schema; scalar outputs use the schema's `response` wrapper. The SDK validates and unwraps that value for the caller.
 
-Use the same provider through `await decide(question, input=..., provider=...)`, `await agent.decide(...)`, or the callback helpers. `Agent.decide()` is a standalone convenience: it does not open a run or use history.
+Use the same provider through `await agent.decide(...)` or the callback helpers. `Agent.decide()` does not open a run or use history.
 
 Provider defaults are captured when opening starts. A callback uses its exact captured Agent profile's provider, then the captured root default. An explicit `decisions=` on `agent.run()` or `agent.session()` overrides those defaults across profiles for that opening. A helper's `provider=` overrides them for one call. Profile changes do not retarget an in-flight decision. Agent and Session neither serialize nor close borrowed providers. `OpenAIDecisions(client=...)` also leaves a supplied OpenAI client open.
 
