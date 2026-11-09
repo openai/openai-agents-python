@@ -73,6 +73,34 @@ pub(crate) struct McpToolDeclaration {
     pub(crate) approval: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProfileToolUpdate {
+    pub(crate) mcp_tools: BTreeMap<String, McpToolDeclaration>,
+    pub(crate) default_handoffs: Option<Vec<String>>,
+}
+
+fn handoff_defaults(
+    declaration: &ProfileSpec,
+    names: Option<&[String]>,
+) -> Result<Option<Vec<ToolName>>> {
+    names
+        .map(|names| {
+            let mut seen = HashSet::new();
+            names
+                .iter()
+                .map(|name| {
+                    ensure!(
+                        declaration.handoffs.contains_key(name) && seen.insert(name),
+                        "Handoff defaults must name distinct captured handoffs"
+                    );
+                    Ok(ToolName::new(None, name.clone()).with_default_namespace())
+                })
+                .collect()
+        })
+        .transpose()
+}
+
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
@@ -541,6 +569,7 @@ pub(crate) async fn configure(
     roster_json: &str,
     root_id: &str,
     default_slots: Option<&[usize]>,
+    default_handoffs: Option<&[String]>,
 ) -> Result<Value> {
     let thread = &state.thread;
     let opening = thread
@@ -569,6 +598,26 @@ pub(crate) async fn configure(
                 "Restored Agent defaults changed after configuration"
             );
         }
+        if let Some(names) = default_handoffs {
+            let captured = thread
+                .captured_agent_profile()
+                .await?
+                .context("Managed Agent has no committed source")?;
+            let declaration = &profiles
+                .profiles
+                .get(&captured.receipt.profile_id)
+                .context("Managed Agent is outside the captured graph")?
+                .declaration;
+            let catalog = captured
+                .profile
+                .data
+                .get::<ProfileCatalog>()
+                .context("Managed Agent has no captured catalog")?;
+            ensure!(
+                handoff_defaults(declaration, Some(names))? == catalog.handoff_defaults,
+                "Restored handoff defaults changed after configuration"
+            );
+        }
         return profiles.receipt(thread).await;
     }
     let tools = thread
@@ -594,7 +643,7 @@ pub(crate) async fn configure(
     let history = thread.load_history(true).await?;
     let restored = restored_envelope(&opening, &history.items)?.is_some();
     ensure!(
-        restored || default_slots.is_none(),
+        restored || (default_slots.is_none() && default_handoffs.is_none()),
         "Restored Agent defaults require checkpoint history"
     );
     let opening_model = history.items.iter().find_map(|item| {
@@ -684,7 +733,7 @@ pub(crate) async fn configure(
             .get(&receipt.profile_id)
             .context("Restored Agent is outside the captured graph")?;
         let accepted = validate_restored(&profiles.opening, &history.items)?;
-        let catalog = profiles.tools.startup_profile_catalog(
+        let mut catalog = profiles.tools.startup_profile_catalog(
             [
                 prepared.catalog.selecting_steps,
                 prepared.catalog.transform_context,
@@ -693,6 +742,7 @@ pub(crate) async fn configure(
             ],
             default_slots,
         )?;
+        catalog.handoff_defaults = handoff_defaults(&prepared.declaration, default_handoffs)?;
         let generation = catalog.generation.id;
         let mut data = ExtensionDataInit::new();
         data.insert(codex_extension_api::AgentProfileInstructions {
@@ -720,7 +770,13 @@ pub(crate) async fn configure(
             data,
             mcp: prepared.mcp.clone(),
         };
-        bind_accepted_mcp(thread, &mut target, &prepared.declaration, generation).await?;
+        bind_accepted_mcp(
+            thread,
+            &mut target,
+            &prepared.declaration.mcp_tools,
+            generation,
+        )
+        .await?;
         Arc::new(target)
     } else {
         profiles.candidate(thread, &profiles.opening.root_id)?
@@ -779,7 +835,7 @@ pub(crate) async fn update_active(
     thread: &CodexThread,
     settings: Option<&codex_protocol::protocol::ThreadSettingsOverrides>,
     instructions: Option<(&str, Vec<InstructionFile>)>,
-    catalog: Option<ProfileCatalog>,
+    catalog: Option<(ProfileCatalog, BTreeMap<String, McpToolDeclaration>)>,
 ) -> Result<bool> {
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(false);
@@ -828,18 +884,8 @@ pub(crate) async fn update_active(
             text: Some(accepted.text.clone()),
         });
     target.data.insert(accepted);
-    if let Some(catalog) = catalog {
-        let declaration = profiles
-            .profiles
-            .get(&captured.receipt.profile_id)
-            .context("Active Agent is outside the captured declaration graph")?;
-        bind_accepted_mcp(
-            thread,
-            &mut target,
-            &declaration.declaration,
-            catalog.generation.id,
-        )
-        .await?;
+    if let Some((catalog, mcp_tools)) = catalog {
+        bind_accepted_mcp(thread, &mut target, &mcp_tools, catalog.generation.id).await?;
         target.data.insert(catalog);
     }
     thread
@@ -853,18 +899,15 @@ pub(crate) async fn update_active(
 async fn bind_accepted_mcp(
     thread: &CodexThread,
     target: &mut AgentProfile,
-    declaration: &ProfileSpec,
+    declarations: &BTreeMap<String, McpToolDeclaration>,
     generation: u64,
 ) -> Result<()> {
     let current = thread.config().await;
     let (mcp, plugins) = thread
         .prepare_agent_profile_mcp(current.mcp_servers.get().clone())
         .await?;
-    let policy = crate::native_interception::ProfileMcpPolicy::prepare(
-        &mcp,
-        &declaration.mcp_tools,
-        generation,
-    )?;
+    let policy =
+        crate::native_interception::ProfileMcpPolicy::prepare(&mcp, declarations, generation)?;
     let mut selection = thread
         .thread_extension_data()
         .get::<crate::mcp_result_control::McpResultControl>()
@@ -886,6 +929,7 @@ pub(crate) async fn replace_tools(
     specs: Vec<DynamicToolSpec>,
     manual_slots: &[usize],
     default_slots: Option<&[usize]>,
+    profile_update: Option<&ProfileToolUpdate>,
 ) -> Result<Option<u64>> {
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(None);
@@ -900,7 +944,15 @@ pub(crate) async fn replace_tools(
         .data
         .get::<ProfileCatalog>()
         .context("Managed Agent replacement has no captured catalog")?;
-    let catalog = profiles.tools.profile_catalog(
+    let profile_update = profile_update
+        .context("Managed Agent tool replacement requires captured source policies")?;
+    let declaration = &profiles
+        .profiles
+        .get(&captured.receipt.profile_id)
+        .context("Active Agent is outside the captured declaration graph")?
+        .declaration;
+    let handoffs = handoff_defaults(declaration, profile_update.default_handoffs.as_deref())?;
+    let mut catalog = profiles.tools.profile_catalog(
         specs,
         manual_slots,
         default_slots,
@@ -912,12 +964,19 @@ pub(crate) async fn replace_tools(
         ],
         false,
     )?;
+    catalog.handoff_defaults = handoffs;
     let generation = catalog.generation.id;
     ensure!(
         requested == generation,
         "Python tool generation is out of sequence"
     );
-    update_active(thread, None, None, Some(catalog)).await?;
+    update_active(
+        thread,
+        None,
+        None,
+        Some((catalog, profile_update.mcp_tools.clone())),
+    )
+    .await?;
     Ok(Some(generation))
 }
 

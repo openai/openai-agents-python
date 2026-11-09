@@ -1223,6 +1223,33 @@ def _ordinary_default_slots(
     return [slot for slot, tool in enumerate(catalog.tools) if tool._ref in selection]
 
 
+def _handoff_default_names(
+    selection: Sequence[object] | None, handoffs: Mapping[str, str] | None
+) -> list[str] | None:
+    if selection is None:
+        return None
+    selected = {
+        tool.name
+        for tool in selection
+        if isinstance(tool, ToolRef) and tool.namespace in (None, "functions")
+    }
+    return [name for name in handoffs or () if name in selected]
+
+
+def _mcp_profile_declarations(servers: Sequence[_MCP[Any]]) -> dict[str, Any]:
+    declarations: dict[str, Any] = {}
+    for server in servers:
+        declaration = declarations.setdefault(
+            server.name,
+            {"tools": [], "defer_loading": False, "before": False, "approval": False},
+        )
+        declaration["tools"] = list(dict.fromkeys([*declaration["tools"], *server.tools]))
+        declaration["defer_loading"] |= server.defer_loading
+        declaration["before"] |= server.before is not None
+        declaration["approval"] |= server.approval is not None
+    return declarations
+
+
 def _split_tools(
     tools: Sequence[
         ToolRef | _MCPResourceRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]
@@ -1601,15 +1628,7 @@ def _capture_profile_runtimes(
                 # Connection configs are completed only after environment entry.
                 "mcp_servers": {server.name: {} for server in mcp},
                 "mcp_result_tools": json.loads(_result_policies(mcp, 0))["servers"],
-                "mcp_tools": {
-                    server.name: {
-                        "tools": list(server.tools),
-                        "defer_loading": server.defer_loading,
-                        "before": server.before is not None,
-                        "approval": server.approval is not None,
-                    }
-                    for server in mcp
-                },
+                "mcp_tools": _mcp_profile_declarations(mcp),
             }
         )
     return captured, roster
@@ -3079,6 +3098,7 @@ class Session(Generic[ContextT, OutputT]):
                     generation=catalog.generation,
                     profile_roster=profile_roster,
                     default_slots=_ordinary_default_slots(restored_catalog, restored_defaults),
+                    default_handoffs=_handoff_default_names(restored_defaults, restored_handoffs),
                 )
                 if restored_profile is not None:
                     session._instructions = native._read_session_instructions(
@@ -3384,6 +3404,7 @@ class Session(Generic[ContextT, OutputT]):
         generation: int,
         profile_roster: list[dict[str, Any]],
         default_slots: list[int] | None = None,
+        default_handoffs: list[str] | None = None,
     ) -> None:
         thread = self._native
         if hosted_search and (not fresh or "model" not in settings):
@@ -3412,7 +3433,10 @@ class Session(Generic[ContextT, OutputT]):
         if profile_roster:
             receipt = await self._publish_startup(
                 thread._configure_agent_profiles(
-                    json.dumps(profile_roster), profile_roster[0]["id"], default_slots
+                    json.dumps(profile_roster),
+                    profile_roster[0]["id"],
+                    default_slots,
+                    default_handoffs,
                 )
             )
             self._accept_profile_catalogs(json.loads(receipt))
@@ -6134,6 +6158,7 @@ class Session(Generic[ContextT, OutputT]):
                     allowed_mcp,
                     candidate.native_specs(),
                     default_slots=default_slots,
+                    default_handoffs=_handoff_default_names(defaults, self._effective_handoffs()),
                 )
                 self._bound_tools = bound_tools
                 self._bindings = tuple(bindings)
@@ -6269,6 +6294,7 @@ class Session(Generic[ContextT, OutputT]):
         specs: str,
         *,
         default_slots: list[int] | None = None,
+        default_handoffs: list[str] | None = None,
     ) -> None:
         if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
             raise ValueError("CustomStorage preview does not support manual tools")
@@ -6315,8 +6341,25 @@ class Session(Generic[ContextT, OutputT]):
             mcp_published = True
         try:
             manual_slots = candidate.manual_slots()
+            if default_handoffs is None:
+                default_handoffs = _handoff_default_names(
+                    self._default_tools, self._effective_handoffs()
+                )
             acknowledgement = await (
                 self._native._replace_tools(
+                    candidate.generation,
+                    specs,
+                    manual_slots,
+                    default_slots,
+                    json.dumps(
+                        {
+                            "mcp_tools": _mcp_profile_declarations(mcp_tools),
+                            "default_handoffs": default_handoffs,
+                        }
+                    ),
+                )
+                if self._profiles
+                else self._native._replace_tools(
                     candidate.generation, specs, manual_slots, default_slots
                 )
                 if default_slots is not None

@@ -56,6 +56,7 @@ pub(crate) struct Generation {
 pub(crate) struct ProfileCatalog {
     pub(crate) generation: Arc<Generation>,
     pub(crate) defaults: Option<Vec<ToolName>>,
+    pub(crate) handoff_defaults: Option<Vec<ToolName>>,
     pub(crate) selecting_steps: bool,
     pub(crate) transform_context: bool,
     pub(crate) before_compact: bool,
@@ -1092,6 +1093,7 @@ impl PythonTools {
         Ok(ProfileCatalog {
             generation,
             defaults,
+            handoff_defaults: None,
             selecting_steps: flags[0],
             transform_context: flags[1],
             before_compact: flags[2],
@@ -2459,7 +2461,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
     ) -> Result<u64> {
-        self.replace_with_defaults(thread, id, specs, manual_slots, None)
+        self.replace_with_defaults(thread, id, specs, manual_slots, None, None)
             .await
     }
 
@@ -2470,6 +2472,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
         default_slots: Option<&[usize]>,
+        profile_update: Option<&crate::agent_profiles::ProfileToolUpdate>,
     ) -> Result<u64> {
         if let Some(id) = crate::agent_profiles::replace_tools(
             thread,
@@ -2477,6 +2480,7 @@ impl PythonTools {
             specs.clone(),
             manual_slots,
             default_slots,
+            profile_update,
         )
         .await?
         {
@@ -4065,6 +4069,7 @@ impl ToolContributor for PythonContributor {
                         }
                         ProfileCatalog {
                             generation: tools.snapshot(),
+                            handoff_defaults: None,
                             defaults: tools
                                 .step_defaults
                                 .read()
@@ -4142,7 +4147,14 @@ impl ToolContributor for PythonContributor {
                 crate::agent_profiles::realtime_handoff_declarations(&handoffs)
                     .map_err(|error| error.to_string())?
                     .into_iter()
-                    .filter(|declaration| tools.policy.allows(&declaration.native_name)),
+                    .filter(|declaration| {
+                        tools.policy.allows(&declaration.native_name)
+                            && catalog.handoff_defaults.as_ref().is_none_or(|defaults| {
+                                defaults.contains(
+                                    &declaration.native_name.clone().with_default_namespace(),
+                                )
+                            })
+                    }),
             );
         }
         if let Some(binding) = input.mcp {

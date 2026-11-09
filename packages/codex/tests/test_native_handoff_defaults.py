@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from contextlib import aclosing
 
 import pytest
 
 from agents import Agent, HttpMCP, NativeProvider, ToolRef
-from agents.realtime import RealtimeConfig
+from agents.realtime import RealtimeConfig, RealtimeToolCall
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -104,3 +105,109 @@ async def test_idle_mcp_request_uses_effective_profile_and_selected_handoff_defa
             assert await session.get_active_agent() is middle
             assert [row["method"] for row in peer.requests].count("resources/list") == 1
             assert responses.requests == []
+
+
+@pytest.mark.parametrize("selection", ["omitted", "subset", "empty"])
+@pytest.mark.parametrize("restore", [False, True])
+async def test_realtime_handoff_defaults_advertise_exact_selected_routes(
+    realtime_peer: RealtimePeer, selection: str, restore: bool
+) -> None:
+    peer = realtime_peer
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-handoff-default-ceiling",
+            supports_websockets=False,
+        ) as native_provider,
+    ):
+        last = Agent(name="D", instructions="D answers.")
+        included = Agent(name="B", instructions="B routes to D.", handoffs=[last])
+        excluded = Agent(name="C", instructions="C answers.")
+        source = Agent(
+            name="A",
+            instructions="Choose an admitted route.",
+            handoffs=[included, excluded],
+            provider=native_provider,
+        )
+
+        async def verify(session):
+            async with session.realtime(config=RealtimeConfig(model="fixture-realtime")):
+                initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+                offered = {
+                    tool["name"]
+                    for tool in initial["session"]["tools"]
+                    if tool["name"].startswith("transfer_to_")
+                }
+                assert offered == (
+                    {"transfer_to_b", "transfer_to_c"}
+                    if selection == "omitted"
+                    else {"transfer_to_b"}
+                    if selection == "subset"
+                    else set()
+                )
+                if selection != "empty":
+                    start = len(peer.frames)
+                    await peer.function("transfer_to_b", {}, "selected-route")
+                    updated = await peer.frame(
+                        lambda frame: frame["type"] == "session.update", after=start
+                    )
+                    assert await session.get_active_agent() is included
+                    assert {
+                        tool["name"]
+                        for tool in updated["session"]["tools"]
+                        if tool["name"].startswith("transfer_to_")
+                    } == {"transfer_to_d"}
+
+        async with source.session() as session:
+            if selection != "omitted":
+                await session.update(
+                    tools=[ToolRef("transfer_to_b")] if selection == "subset" else []
+                )
+            if restore:
+                saved = await session.save_state()
+            else:
+                await verify(session)
+        if restore:
+            async with source.session(state=SessionState.from_json(saved.to_json())) as session:
+                await verify(session)
+        assert peer.responses.requests == []
+
+
+@pytest.mark.parametrize("selection", ["subset", "empty"])
+async def test_realtime_handoff_defaults_reject_excluded_route(
+    realtime_peer: RealtimePeer, selection: str
+) -> None:
+    peer = realtime_peer
+    included = Agent(name="B", instructions="B answers.")
+    excluded = Agent(name="C", instructions="C answers.")
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-excluded-handoff",
+            supports_websockets=False,
+        ) as native_provider,
+        Agent(
+            name="A",
+            instructions="Choose an admitted route.",
+            handoffs=[included, excluded],
+            provider=native_provider,
+        ).session() as session,
+    ):
+        await session.update(tools=[ToolRef("transfer_to_b")] if selection == "subset" else [])
+        active = await session.get_active_agent()
+        async with (
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as owner,
+            aclosing(owner.events()) as events,
+        ):
+            await peer.frame(lambda frame: frame["type"] == "session.update")
+            await peer.function("transfer_to_c", {}, "excluded-route")
+            # Native rejects unadvertised calls before application dispatch and
+            # closes the transport; its internal rejection text is not a wire event.
+            with pytest.raises(RuntimeError, match="Realtime connection closed unexpectedly"):
+                async for event in events:
+                    if isinstance(event, RealtimeToolCall) and event.call_id == "excluded-route":
+                        pytest.fail("Excluded handoff entered application dispatch")
+            assert await session.get_active_agent() is active
+        assert peer.responses.requests == []

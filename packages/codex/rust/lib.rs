@@ -1728,22 +1728,28 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature=(roster_json,root_id,default_slots=None))]
+    #[pyo3(signature=(roster_json,root_id,default_slots=None,default_handoffs=None))]
     fn _configure_agent_profiles<'py>(
         &self,
         py: Python<'py>,
         roster_json: String,
         root_id: String,
         default_slots: Option<Vec<usize>>,
+        default_handoffs: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_factory_into_py(py, move || async move {
             let _operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
-            let receipt =
-                agent_profiles::configure(&inner, &roster_json, &root_id, default_slots.as_deref())
-                    .await
-                    .map_err(py_error)?;
+            let receipt = agent_profiles::configure(
+                &inner,
+                &roster_json,
+                &root_id,
+                default_slots.as_deref(),
+                default_handoffs.as_deref(),
+            )
+            .await
+            .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
         })
     }
@@ -1814,7 +1820,7 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new(),default_slots=None))]
+    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new(),default_slots=None,profile_update_json=None))]
     fn _replace_tools<'py>(
         &self,
         py: Python<'py>,
@@ -1822,8 +1828,13 @@ impl NativeThread {
         specs_json: &str,
         manual_slots: Vec<usize>,
         default_slots: Option<Vec<usize>>,
+        profile_update_json: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
+        let profile_update = profile_update_json
+            .map(serde_json::from_str::<agent_profiles::ProfileToolUpdate>)
+            .transpose()
+            .map_err(py_error)?;
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
@@ -1840,6 +1851,7 @@ impl NativeThread {
                     specs,
                     &manual_slots,
                     default_slots.as_deref(),
+                    profile_update.as_ref(),
                 )
                 .await
                 .map_err(py_error)
