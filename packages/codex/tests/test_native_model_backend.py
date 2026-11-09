@@ -75,7 +75,8 @@ async def test_custom_model_core_executes_tool_and_supplies_result_to_next_respo
     assert seen[0].context == {"tenant": "synthetic"}
 
 
-async def test_chat_client_adapter_stays_inside_native_tool_loop() -> None:
+@pytest.mark.parametrize("native_model", [None, "fixture-chat-standard"])
+async def test_chat_client_adapter_stays_inside_native_tool_loop(native_model: str | None) -> None:
     seen = []
 
     async def create(raw_request):
@@ -128,9 +129,9 @@ async def test_chat_client_adapter_stays_inside_native_tool_loop() -> None:
             async with NativeProvider(
                 model_backend=ChatCompletionsModel(client, "chat-model")
             ) as provider:
-                result = await Agent(instructions="Use echo.", tools=[echo], provider=provider).run(
-                    "Call echo."
-                )
+                result = await Agent(
+                    model=native_model, instructions="Use echo.", tools=[echo], provider=provider
+                ).run("Call echo.")
     assert result.final_output == "native chat finished"
     assert len(seen) == 2
     assert seen[0]["model"] == "chat-model"

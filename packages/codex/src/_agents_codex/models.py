@@ -92,8 +92,12 @@ class ChatCompletionsModel:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         messages: list[dict[str, Any]] = []
+        native_tools = list(request.body.get("tools") or [])
         for item in request.body["input"]:
             kind = item.get("type")
+            if kind == "additional_tools":
+                native_tools.extend(item["tools"])
+                continue
             if kind == "message":
                 content = []
                 for part in item.get("content", []):
@@ -115,6 +119,8 @@ class ChatCompletionsModel:
                         )
                 messages.append({"role": item["role"], "content": content})
             elif kind == "function_call":
+                if item.get("namespace") not in (None, "functions"):
+                    raise ValueError("ChatCompletionsModel supports the default function namespace")
                 messages.append(
                     {
                         "role": "assistant",
@@ -141,19 +147,26 @@ class ChatCompletionsModel:
             else:
                 raise ValueError("ChatCompletionsModel received an unsupported native input item")
         tools = []
-        for tool in request.body.get("tools", []):
-            if tool.get("type") != "function":
-                raise ValueError("ChatCompletionsModel supports native function tools")
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        key: value
-                        for key, value in tool.items()
-                        if key in ("name", "description", "parameters", "strict")
-                    },
-                }
-            )
+        for declaration in native_tools:
+            if declaration.get("type") == "namespace":
+                if declaration.get("name") != "functions":
+                    raise ValueError("ChatCompletionsModel supports the default function namespace")
+                leaves = declaration["tools"]
+            else:
+                leaves = [declaration]
+            for tool in leaves:
+                if tool.get("type") != "function":
+                    raise ValueError("ChatCompletionsModel supports native function tools")
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            key: value
+                            for key, value in tool.items()
+                            if key in ("name", "description", "parameters", "strict")
+                        },
+                    }
+                )
         options = {
             key: request.body[key]
             for key in (
@@ -163,6 +176,8 @@ class ChatCompletionsModel:
                 "tool_choice",
                 "metadata",
                 "store",
+                "frequency_penalty",
+                "presence_penalty",
             )
             if key in request.body
         }
