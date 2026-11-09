@@ -3557,6 +3557,27 @@ class Session(Generic[ContextT, OutputT]):
 
         return RealtimeSession(self, config=RealtimeConfig() if config is None else config)
 
+    async def build_realtime_sip_config(
+        self, *, config: RealtimeConfig | None = None
+    ) -> dict[str, Any]:
+        """Build the provider session configuration for accepting an incoming SIP call.
+
+        Submit the returned object as the call-accept request body, then attach
+        with ``realtime(config=RealtimeConfig(transport=RealtimeSIP(call_id)))``.
+        This prepares the same Session-owned MCP tools and captured instructions
+        as connection startup, without connecting voice or resolving voice
+        credentials. MCP discovery may perform network I/O and raise its errors.
+        An explicit tool selection must already belong to the captured catalog.
+        Transport, adapter, and API key fields do not affect this configuration.
+        """
+        self._check_open()
+        self._check_callback_operation("build Realtime SIP configuration in its own Session")
+        from .realtime import RealtimeConfig, _build_realtime_sip_config
+
+        return await _build_realtime_sip_config(
+            self, RealtimeConfig() if config is None else config
+        )
+
     async def _publish_opening_configuration(
         self,
         *,

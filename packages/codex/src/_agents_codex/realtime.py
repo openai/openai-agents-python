@@ -129,6 +129,79 @@ class RealtimeConfig:
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
 
 
+async def _prepare_realtime_params(
+    session: Session[Any, Any],
+    config: RealtimeConfig,
+    *,
+    settings: dict[str, Any],
+    tools: Sequence[FunctionTool[Any, Any, Any]] | None,
+    transport: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the same captured native source for connection and call acceptance."""
+    function_tools, selection_id = await session._realtime_function_tools(tools)
+    params: dict[str, Any] = {
+        "settings": settings,
+        "function_tools": function_tools,
+        "expected_selection_id": selection_id,
+        "hosted_mcp_auto_response": config.automatically_trigger_response_for_mcp_tool_calls,
+        "params": {
+            "client_managed_handoffs": True,
+            "delegation_ack_filler": None,
+            "flush_transcript_tail_on_session_end": True,
+            "codex_responses_as_items": False,
+            "codex_response_item_prefix": None,
+            "codex_response_handoff_mode": "thinking",
+            "backend_reasoning_status": False,
+            "codex_response_handoff_channel_prefixes": None,
+            "model": config.model,
+            "output_modality": "audio",
+            "include_startup_context": False,
+            "initial_items": [],
+            "realtime_start_instructions": None,
+            "realtime_end_instructions": None,
+            "realtime_session_id": None,
+            "transport": transport,
+            "version": "v2",
+            "voice": config.voice,
+        },
+    }
+    if config.instructions is not None:
+        params["params"]["prompt"] = config.instructions
+    return params
+
+
+async def _build_realtime_sip_config(
+    session: Session[Any, Any], config: RealtimeConfig
+) -> dict[str, Any]:
+    request: str | None = None
+    prepared: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    try:
+        settings = _serialize_settings(config.settings or {})
+        if config.tools is None:
+            await session._prepare_realtime_mcp()
+        prepared = await _prepare_realtime_params(
+            session,
+            config,
+            settings=settings,
+            tools=None if config.tools is None else tuple(config.tools),
+            transport={"type": "websocket"},
+        )
+        request = json.dumps(prepared)
+        return cast(
+            dict[str, Any],
+            json.loads(await session._native.call("realtime_conversation_config_sdk", request)),
+        )
+    except BaseException as error:
+        _clear_adapter_error_frames(error)
+        raise
+    finally:
+        prepared.clear()
+        settings.clear()
+        request = None
+        del config
+
+
 class RealtimeUserInputText(TypedDict):
     """One user text part for native Realtime input."""
 
@@ -692,40 +765,14 @@ class RealtimeSession:
                 transport = {"type": "existing_call", "call_id": self._config.transport.call_id}
             if self._selected_tools is None:
                 await self._session._prepare_realtime_mcp()
-            function_tools, selection_id = await self._session._realtime_function_tools(
-                self._selected_tools
+            prepare_params = await _prepare_realtime_params(
+                self._session,
+                self._config,
+                settings=self._settings,
+                tools=self._selected_tools,
+                transport=transport,
             )
             self._check_live(require_ready=False)
-            prepare_params: dict[str, Any] = {
-                "settings": self._settings,
-                "function_tools": function_tools,
-                "expected_selection_id": selection_id,
-                "hosted_mcp_auto_response": (
-                    self._config.automatically_trigger_response_for_mcp_tool_calls
-                ),
-                "params": {
-                    "client_managed_handoffs": True,
-                    "delegation_ack_filler": None,
-                    "flush_transcript_tail_on_session_end": True,
-                    "codex_responses_as_items": False,
-                    "codex_response_item_prefix": None,
-                    "codex_response_handoff_mode": "thinking",
-                    "backend_reasoning_status": False,
-                    "codex_response_handoff_channel_prefixes": None,
-                    "model": self._config.model,
-                    "output_modality": "audio",
-                    "include_startup_context": False,
-                    "initial_items": [],
-                    "realtime_start_instructions": None,
-                    "realtime_end_instructions": None,
-                    "realtime_session_id": None,
-                    "transport": transport,
-                    "version": "v2",
-                    "voice": self._config.voice,
-                },
-            }
-            if self._config.instructions is not None:
-                prepare_params["params"]["prompt"] = self._config.instructions
             try:
                 if self._config.adapter is not None:
                     handle = self._session._native._realtime_adapter(self._generation)
@@ -921,6 +968,68 @@ class RealtimeSession:
         if not isinstance(provider_item_id, str) or not provider_item_id:
             raise ValueError("provider_item_id must be a nonempty string")
         await _join(asyncio.create_task(self._call("delete_item", item_id=provider_item_id)))
+
+    async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:
+        """Edit provider history observed during this connection, in the supplied order.
+
+        Supply unique item IDs. Only supported message rows are editable; retain
+        tool, MCP, and approval rows exactly and in order. Messages cannot move
+        across those authority anchors. Native validation owns item eligibility.
+        Items predating attachment that this connection has not observed remain
+        untouched. The canonical ``history`` audit and Session context remain intact.
+        A provider failure after acknowledgements can leave partial edits; retrieve
+        observed history before retrying. Cancellation joins native acceptance.
+        """
+        captured: Any = None
+        try:
+            self._check_live()
+            self._check_adapter_operation("update history in its own Realtime session")
+            captured = json.loads(json.dumps(items))
+            await _join(asyncio.create_task(self._call("update_history", items=captured)))
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+        finally:
+            del items, captured
+
+    async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:
+        """Retrieve one provider item, including media absent from ``history``.
+
+        A known ID may identify an item predating attachment. Retrieving it does
+        not add it to this connection's observed order or canonical audit view.
+        """
+        try:
+            self._check_live()
+            self._check_adapter_operation("retrieve an item in its own Realtime session")
+            if not isinstance(provider_item_id, str) or not provider_item_id:
+                raise ValueError("provider_item_id must be a nonempty string")
+            return cast(
+                dict[str, Any],
+                await _join(
+                    asyncio.create_task(self._call("retrieve_item", item_id=provider_item_id))
+                ),
+            )
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+
+    async def retrieve_conversation_history(self) -> list[dict[str, Any]]:
+        """Retrieve full provider items observed during this connection, in order.
+
+        Results include media absent from ``history``. Items predating attachment
+        are omitted unless this connection observed them; use a known item ID to
+        retrieve one explicitly. Retrieval does not modify the canonical audit.
+        """
+        try:
+            self._check_live()
+            self._check_adapter_operation("retrieve history in its own Realtime session")
+            return cast(
+                list[dict[str, Any]],
+                await _join(asyncio.create_task(self._call("retrieve_history"))),
+            )
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
 
     def _check_adapter_operation(self, operation: str) -> None:
         from .session import _invocation

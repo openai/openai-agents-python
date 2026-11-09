@@ -1,0 +1,364 @@
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index 5f1170960932e1ecffd3aadb37fa0495fde1f46f..9f72e662a60ce194ff6550b6a7085eada8a72c4b 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -31,6 +31,7 @@ pub use realtime_websocket::RealtimeWebsocketConnection;
+ pub use realtime_websocket::RealtimeWebsocketEvents;
+ pub use realtime_websocket::RealtimeWebsocketWriter;
+ pub use realtime_websocket::session_update_session_json;
++pub use realtime_websocket::sip_session_config_json;
+ pub use responses::ResponsesClient;
+ pub use responses::ResponsesOptions;
+ pub use responses_websocket::ResponsesWebsocketClient;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+index 276d1d21433aada115d192079e674c4772d0bd9f..7e9cf251ffcfcdae262c64bc9f36398e816edffa 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+@@ -137,6 +137,27 @@ pub(super) fn session_update_message(
+     }
+ }
+ 
++/// Build the provider's SIP accept session object with the native V2 settings mapping.
++pub fn sip_session_config_json(config: RealtimeSessionConfig) -> JsonResult<Value> {
++    if let Some(settings) = &config.v2 {
++        super::settings::validate_sip(settings)?;
++    }
++    let mut session = session_update_session_json(config)?;
++    session
++        .as_object_mut()
++        .expect("typed session object")
++        .remove("id");
++    if let Some(vad) = session
++        .pointer_mut("/audio/input/turn_detection")
++        .and_then(Value::as_object_mut)
++    {
++        vad.remove("threshold");
++        vad.remove("prefix_padding_ms");
++        vad.remove("silence_duration_ms");
++    }
++    Ok(session)
++}
++
+ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<Value> {
+     if (config.v2.is_some() || !config.function_tools.is_empty())
+         && config.event_parser != RealtimeWireAdapter::RealtimeV2
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+index ac14f3ae3559d6406efa09ee88d0b9bd2897b4a6..a143517cb4d9c4e483a6181821fac323967513da 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+@@ -19,6 +19,7 @@ pub use methods::RealtimeWebsocketConnection;
+ pub use methods::RealtimeWebsocketEvents;
+ pub use methods::RealtimeWebsocketWriter;
+ pub use methods_common::session_update_session_json;
++pub use methods_common::sip_session_config_json;
+ pub use protocol::RealtimeContextAppendChannel;
+ pub use protocol::RealtimeEventParser;
+ pub use protocol::RealtimeOutputModality;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index 2f23ef5de1e07ae7a79ed9544115f81cdd87c9ae..844a9511cc038ed0ce20f35662e6b3778d172b10 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -41,6 +41,25 @@ fn validate(settings: &RealtimeV2SessionSettings) -> serde_json::Result<()> {
+     Ok(())
+ }
+ 
++/// SIP accepts fewer server VAD controls than a media WebSocket session.
++pub(super) fn validate_sip(settings: &RealtimeV2SessionSettings) -> serde_json::Result<()> {
++    validate(settings)?;
++    if let Some(Some(RealtimeTurnDetection::ServerVad {
++        threshold,
++        prefix_padding_ms,
++        silence_duration_ms,
++        ..
++    })) = &settings.turn_detection
++    {
++        if threshold.is_some() || prefix_padding_ms.is_some() || silence_duration_ms.is_some() {
++            return Err(serde::ser::Error::custom(
++                "SIP server VAD does not support threshold, prefix_padding_ms, or silence_duration_ms",
++            ));
++        }
++    }
++    Ok(())
++}
++
+ // Only named leaves are replaced; initial defaults and sparse updates use
+ // the same mapping without maintaining another copy of session state.
+ pub(super) fn apply(
+@@ -626,4 +645,36 @@ mod tests {
+             "auto"
+         );
+     }
++    #[test]
++    fn sip_accept_payload_uses_native_settings_and_rejects_unsupported_vad_controls() {
++        let mut initial = config();
++        initial.session_id = Some("native-thread-id".into());
++        assert_eq!(
++            session_update_session_json(initial.clone()).unwrap()["id"],
++            "native-thread-id"
++        );
++        let payload = crate::sip_session_config_json(initial).unwrap();
++        assert_eq!(payload["type"], "realtime");
++        assert_eq!(payload["model"], "gpt-realtime");
++        assert!(payload.get("session").is_none());
++        assert!(payload.get("id").is_none());
++        assert!(
++            payload
++                .pointer("/audio/input/turn_detection/silence_duration_ms")
++                .is_none()
++        );
++        assert_eq!(
++            session_update_session_json(config()).unwrap()["audio"]["input"]["turn_detection"]["silence_duration_ms"],
++            500
++        );
++        for key in ["threshold", "prefix_padding_ms", "silence_duration_ms"] {
++            let mut initial = config();
++            initial.v2 = Some(
++                serde_json::from_value(json!({"turn_detection":{"type":"server_vad",key:0}}))
++                    .unwrap(),
++            );
++            assert!(crate::sip_session_config_json(initial.clone()).is_err());
++            assert!(session_update_session_json(initial).is_ok());
++        }
++    }
+ }
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 5188fd100baacaf82d395bec206d581bf3d8333c..0df7ae06a640fc839c7b864b2b2699c5a3911b3a 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -30,10 +30,10 @@ pub use crate::auth::AuthProvider;
+ pub use crate::auth::AuthProviderFuture;
+ pub use crate::auth::SharedAuthProvider;
+ pub use crate::auth::auth_header_telemetry;
+-pub use crate::common::ModelInvocationDeadlineState;
+ pub use crate::common::AccessPrograms;
+ pub use crate::common::MemorySummarizeInput;
+ pub use crate::common::MemorySummarizeOutput;
++pub use crate::common::ModelInvocationDeadlineState;
+ pub use crate::common::OpenAiVerbosity;
+ pub use crate::common::PromptCacheOptions;
+ pub use crate::common::RawMemory;
+@@ -85,6 +85,7 @@ pub use crate::endpoint::ResponsesWebsocketProbe;
+ pub use crate::endpoint::SearchClient;
+ pub use crate::endpoint::realtime_call::RealtimeCallCreation;
+ pub use crate::endpoint::session_update_session_json;
++pub use crate::endpoint::sip_session_config_json;
+ pub use crate::error::ApiError;
+ pub use crate::files::HostedFileUploadContext;
+ pub use crate::files::OPENAI_FILE_UPLOAD_LIMIT_BYTES;
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 93dd80ad437469d4c0724d7cdd50f912bc4c5bc0..25c467a618b3d4758a24990b39a7e94d1b7c0d96 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -3,7 +3,7 @@ mod preparation;
+ use preparation::SdkStartPreparation;
+ pub(crate) use preparation::{
+     dispatch_start_sdk, dispatch_tool_sdk, dispatch_tools_sdk, handle_activate_sdk,
+-    handle_prepare_sdk,
++    handle_config_sdk, handle_prepare_sdk,
+ };
+ mod tool_task;
+ use crate::client::ModelClient;
+diff --git a/codex-rs/core/src/realtime_conversation/preparation.rs b/codex-rs/core/src/realtime_conversation/preparation.rs
+index b7c84df7de49b0e6f1a3ee1e0d74721c734ac43c..a25b1166539c8d51695272144b45770f52c4d3ae 100644
+--- a/codex-rs/core/src/realtime_conversation/preparation.rs
++++ b/codex-rs/core/src/realtime_conversation/preparation.rs
+@@ -152,6 +152,47 @@ impl RealtimeConversationManager {
+     }
+ }
+ 
++/// A current snapshot only: no generation reservation, credentials, or voice transport.
++pub(crate) async fn handle_config_sdk(
++    sess: &Arc<Session>,
++    mut params: ConversationStartParams,
++    settings: Option<RealtimeV2SessionSettings>,
++    function_tools: Option<Vec<codex_protocol::realtime_settings::RealtimeFunctionTool>>,
++    expected_selection_id: Option<String>,
++    _hosted_mcp_auto_response: bool,
++) -> CodexResult<serde_json::Value> {
++    if params.version != Some(RealtimeWsVersion::V2) {
++        return Err(CodexErr::InvalidRequest(
++            "SIP configuration requires RealtimeV2".into(),
++        ));
++    }
++    let draft = tool_task::capture_realtime_source_draft(sess).await?;
++    draft
++        .validate_selection_identity(function_tools.as_deref(), expected_selection_id.as_deref())?;
++    if params.prompt.is_none() {
++        params.prompt = Some(draft.application_instructions());
++    }
++    let mut config = build_realtime_session_config_from_config(
++        sess,
++        &params,
++        RealtimeWsVersion::V2,
++        ConfiguredRealtimeVoice::Use,
++        Arc::clone(draft.inputs.config()),
++    )
++    .await?;
++    let source = tool_task::finish_realtime_native_source(sess, draft).await?;
++    config.v2 = settings;
++    config.function_tools =
++        tool_task::select_source_tools(&source, function_tools, expected_selection_id.as_deref())?;
++    codex_api::sip_session_config_json(config)
++        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
++}
++
++fn serialize_sdk_configuration(config: RealtimeSessionConfig) -> CodexResult<serde_json::Value> {
++    codex_api::session_update_session_json(config)
++        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
++}
++
+ pub(crate) async fn handle_prepare_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+@@ -378,8 +419,7 @@ async fn run_prepared_start(
+             function_tools,
+             expected_selection_id.as_deref(),
+         )?;
+-        codex_api::session_update_session_json(prepared.session_config.clone())
+-            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++        serialize_sdk_configuration(prepared.session_config.clone())?;
+         Ok::<_, CodexErr>((prepared, source))
+     };
+     let (prepared, source) = tokio::select! {biased;_=preparation.stop.cancelled()=>return Err(CodexErr::TurnAborted),result=stage=>result?};
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index dda07d8364b8cf44dd1cbefedaec21d955f2604c..2db2b7c8cb0325d542e23ca4ad0b99402ac7838e 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -4951,3 +4951,76 @@ async fn sdk_terminal_reclamation_keeps_pending_physical_preparation_and_handoff
+     assert!(calls.contains_key("pending"));
+     server.abort();
+ }
++
++#[tokio::test]
++async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voice() {
++    let (session, _, _events, policy, http, _) = realtime_tool_fixture(false, false).await;
++    super::handle_close_sdk(&session, "tools-generation".into())
++        .await
++        .unwrap();
++    let mut params = prepared_voice_params();
++    params.prompt = Some(Some("Use this accepted application instruction".into()));
++    let settings = codex_api::RealtimeV2SessionSettings::default();
++    let actual = super::handle_config_sdk(
++        &session,
++        params.clone(),
++        Some(settings.clone()),
++        None,
++        None,
++        true,
++    )
++    .await
++    .unwrap();
++    let draft = super::tool_task::capture_realtime_source_draft(&session)
++        .await
++        .unwrap();
++    let mut expected = super::build_realtime_session_config_from_config(
++        &session,
++        &params,
++        codex_config::config_toml::RealtimeWsVersion::V2,
++        super::ConfiguredRealtimeVoice::Use,
++        Arc::clone(draft.inputs.config()),
++    )
++    .await
++    .unwrap();
++    let source = super::tool_task::finish_realtime_native_source(&session, draft)
++        .await
++        .unwrap();
++    expected.v2 = Some(settings);
++    expected.function_tools = super::tool_task::select_source_tools(&source, None, None).unwrap();
++    assert_eq!(
++        actual,
++        codex_api::sip_session_config_json(expected).unwrap()
++    );
++    assert_eq!(
++        actual["instructions"],
++        "Use this accepted application instruction"
++    );
++    assert!(
++        actual["tools"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|tool| tool["name"] == "approved_function")
++    );
++    assert_eq!(
++        policy.admissions.load(std::sync::atomic::Ordering::Acquire),
++        0
++    );
++    assert!(http.received_requests().await.unwrap().is_empty());
++    super::handle_prepare_sdk(
++        &session,
++        "after-sip-projection".into(),
++        prepared_voice_params(),
++        Some(Default::default()),
++        None,
++        None,
++        true,
++        None,
++    )
++    .await
++    .unwrap();
++    super::handle_close_sdk(&session, "after-sip-projection".into())
++        .await
++        .unwrap();
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index a8d24dc3a546ba2e28e25d0cd43cd781af8f173b..6832fc6c1c70948395af5703bd403b0b2eff6688 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -508,6 +508,27 @@ pub(super) async fn submission_loop(
+                     clean_background_terminals(&sess).await;
+                     false
+                 }
++                Op::RealtimeConversationConfigSdk {
++                    params,
++                    settings,
++                    function_tools,
++                    expected_selection_id,
++                    hosted_mcp_auto_response,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        crate::realtime_conversation::handle_config_sdk(
++                            &sess,
++                            params,
++                            settings,
++                            function_tools,
++                            expected_selection_id,
++                            hosted_mcp_auto_response,
++                        )
++                        .await,
++                    );
++                    false
++                }
+                 Op::RealtimeConversationPrepareSdk {
+                     generation,
+                     params,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 562634d1cc5268689b58c5b2132ba2294cbd6276..69817c872ec417e702d9130c60cec53ee60f00f2 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -872,6 +872,16 @@ pub enum Op {
+     /// Use this when callers intentionally want to stop long-lived background shells.
+     CleanBackgroundTerminals,
+ 
++    /// Project the current native declarations and V2 session configuration without connecting.
++    RealtimeConversationConfigSdk {
++        params: ConversationStartParams,
++        settings: Option<crate::realtime_settings::RealtimeV2SessionSettings>,
++        function_tools: Option<Vec<crate::realtime_settings::RealtimeFunctionTool>>,
++        expected_selection_id: Option<String>,
++        hosted_mcp_auto_response: bool,
++        reply: oneshot::Sender<CodexResult<serde_json::Value>>,
++    },
++
+     /// Reserve the immutable source before application credential resolution.
+     RealtimeConversationPrepareSdk {
+         generation: String,
+@@ -1339,6 +1349,7 @@ impl Op {
+             Self::Interrupt => "interrupt",
+             Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
+             Self::CleanBackgroundTerminals => "clean_background_terminals",
++            Self::RealtimeConversationConfigSdk { .. } => "realtime_conversation_config_sdk",
+             Self::RealtimeConversationPrepareSdk { .. } => "realtime_conversation_prepare_sdk",
+             Self::RealtimeConversationActivateSdk { .. } => "realtime_conversation_activate_sdk",
+             Self::RealtimeConversationStartSdk { .. } => "realtime_conversation_start_sdk",

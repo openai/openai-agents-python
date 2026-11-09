@@ -335,7 +335,15 @@
     {
       "path": "0068-sdk-managed-execution-lifecycle.patch",
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
+    },
+    {
+      "path": "0096-native-realtime-sip-config.patch",
+      "sha256": "8302ac5a150bb45f734d732852782c7d85d8ddf3dac01c24a96e57484a65b868"
+    },
+    {
+      "path": "0097-native-realtime-provider-history.patch",
+      "sha256": "db4b2f4f3b4759591a5602248c981dcd7b2b830dba9b6d8f1121624c2ee6b716"
     }
   ],
-  "result_tree": "c885d57cc6e4c78292ca6f40132fee6bf1ae5b50"
+  "result_tree": "c26aca9e5b933812b96b7e9bca2aaeedfc68fb34"
 }
