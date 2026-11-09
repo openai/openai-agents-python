@@ -62,6 +62,8 @@ Development builds accept these additional content sources:
 
 Import these types from `agents`. A provider ID is an opaque reference, never a host file path. The SDK does not upload a local file for you. Use a provider connection and model that support the chosen source. The native runtime rejects unsupported combinations of request representation, model, and detail rather than silently changing them. For example, inline `detail="low"` is unsupported on models that use detail to size image input.
 
+HTTP(S) image URLs and image file IDs require API-key authentication and a compatible standard Responses model. Select `Agent.model` explicitly; the current default uses Responses Lite. `CodexLogin` and Responses Lite require inline image data. The native runtime checks the current model and detail before accepting the image; see [image reference limits](tools.md#return-text-images-and-tool-errors). Local filesystem paths are unsupported.
+
 This fragment sends a provider-owned file ID through your configured `agent`. Replace the fictional ID with one available to the provider and account serving the request:
 
 ```python
