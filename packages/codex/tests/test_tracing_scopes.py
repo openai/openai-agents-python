@@ -1124,9 +1124,23 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
     delivering, durable = asyncio.Event(), asyncio.Event()
     deliveries = []
     calls: list[tuple[str, str | None]] = []
+    grant = object()
+    message = {
+        "msg": {
+            "turnId": "original-turn",
+            "callId": "manual-call",
+            "tool": "manual",
+            "arguments": {"value": "synthetic"},
+            "_sdk_python_tool": {"thread": "restored-session", "generation": 0, "slot": 0},
+            "_sdk_code_origin": None,
+        }
+    }
 
     class Thread:
         id = "restored-session"
+
+        def _pending_manual_tools(self) -> list[tuple[int, object, str]]:
+            return [(0, grant, json.dumps(message))]
 
         def _check_manual_tool(self, grant: Any) -> bool:
             return True
@@ -1166,6 +1180,7 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
         "test",
         _start_readers=False,
     )
+    pending = None
     try:
         with telemetry.trace("historical") as historical:
             old = historical.context.span_id
@@ -1178,17 +1193,17 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             state.accepted.set_result(handle)
             session._active = state
             request = entry.request(
-                object(), 0, 0, session, handle, "manual-call", Args(value="synthetic"), None
+                grant, 0, 0, session, handle, "manual-call", Args(value="synthetic"), None
             )
             with telemetry.trace("unrelated response caller"):
                 pending = asyncio.create_task(request.respond("accepted"))
-            await delivering.wait()
+            await asyncio.wait_for(delivering.wait(), timeout=5)
             if cancel_phase == "delivery":
                 pending.cancel()
                 await asyncio.sleep(0)
                 assert not pending.done() and calls == [] and deliveries == []
             durable.set()
-            await admitted.wait()
+            await asyncio.wait_for(admitted.wait(), timeout=5)
             context = captured.context
             assert calls == [(handle.submission_id, context)]
             if scoped:
@@ -1213,6 +1228,11 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             if context is not None:
                 assert context in native.released
     finally:
+        durable.set()
+        resume.set()
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
         session._reader.cancel()
         await asyncio.gather(session._reader, return_exceptions=True)
 

@@ -200,14 +200,14 @@ impl EngineState {
         runtime_json: String,
         checkpoint: bool,
         api_key: Option<String>,
-        initial_model: Option<String>,
+        initial_models: Option<crate::checkpoint::ManagedModels>,
     ) -> anyhow::Result<Self> {
         Self::new_with_store(
             config_json,
             runtime_json,
             checkpoint,
             api_key,
-            initial_model,
+            initial_models,
             None,
             false,
         )
@@ -219,7 +219,7 @@ impl EngineState {
         runtime_json: String,
         checkpoint: bool,
         api_key: Option<String>,
-        initial_model: Option<String>,
+        initial_models: Option<crate::checkpoint::ManagedModels>,
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
         session_initial_config: bool,
     ) -> anyhow::Result<Self> {
@@ -228,7 +228,7 @@ impl EngineState {
             runtime_json,
             checkpoint,
             api_key,
-            initial_model,
+            initial_models,
             canonical_store,
             session_initial_config,
             None,
@@ -241,7 +241,7 @@ impl EngineState {
         runtime_json: String,
         checkpoint: bool,
         api_key: Option<String>,
-        initial_model: Option<String>,
+        initial_models: Option<crate::checkpoint::ManagedModels>,
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
         session_initial_config: bool,
         prepared: Option<(
@@ -269,6 +269,9 @@ impl EngineState {
             Self::check_controlled_config(&config)?;
         }
         let native_agents = runtime_options.native_agents();
+        let initial_model = initial_models
+            .as_ref()
+            .and_then(|models| models.root.clone());
         if native_agents {
             if let Some(model) = &initial_model {
                 config.model = Some(model.clone());
@@ -417,7 +420,14 @@ impl EngineState {
             models
         };
         let models: SharedModelsManager = if native_agents {
-            let catalog = crate::native_agents::validated_catalog(&config, &models).await?;
+            let catalog = crate::native_agents::validated_catalog(
+                &config,
+                &models,
+                initial_models
+                    .as_ref()
+                    .map_or(&[], |models| models.descendants.as_slice()),
+            )
+            .await?;
             Arc::new(codex_models_manager::manager::StaticModelsManager::new(
                 Some(auth.clone()),
                 ModelsResponse { models: catalog },

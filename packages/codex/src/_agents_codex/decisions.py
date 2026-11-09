@@ -243,10 +243,10 @@ async def _decide(
             output_type = cast(Any, Union)[tuple(cast(Any, Literal)[value] for value in choices)]
         else:
             output_type = cast(Any, Literal)[tuple(choices)]
-    adapter, schema, wrapped = _prepare_output(
+    adapter, schema, wrapped, value_adapter = _prepare_output(
         bool if output_type is None else output_type, wrap_scalars=False
     )
-    output = _PreparedOutput("native", adapter, schema, wrapped)
+    output = _PreparedOutput("native", adapter, schema, wrapped, value_adapter=value_adapter)
     provider = _check_provider(provider)
     request = DecisionRequest(
         question=question, input=deepcopy(input), output_schema=deepcopy(schema)

@@ -655,9 +655,10 @@ async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bo
 def test_direct_decision_schema_keeps_generation_scalar_wrapper():
     from _agents_codex.schema import _prepare_output
 
-    adapter, schema, wrapped = _prepare_output(bool)
+    adapter, schema, wrapped, value_adapter = _prepare_output(bool)
     assert wrapped and schema["properties"]["response"]["type"] == "boolean"
     assert adapter.validate_json('{"response":true}').response is True
+    assert value_adapter.validate_json("true") is True
 
 
 def fail_usage_span(monkeypatch, error, phase):

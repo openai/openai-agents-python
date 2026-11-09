@@ -102,6 +102,7 @@ class _PreparedOutput:
     schema: dict[str, Any] | None
     wrapped: bool = False
     max_retries: int = 0
+    value_adapter: TypeAdapter[Any] | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -163,11 +164,15 @@ def _prepare_spec(output: OutputSpec[Any] | None) -> _PreparedOutput:
     if isinstance(output, PromptedOutput):
         adapter: TypeAdapter[Any] = TypeAdapter(output.type_)
         return _PreparedOutput(
-            "prompted", adapter, adapter.json_schema(), max_retries=output.max_retries
+            "prompted",
+            adapter,
+            adapter.json_schema(),
+            max_retries=output.max_retries,
+            value_adapter=adapter,
         )
     native_type = output.type_ if isinstance(output, NativeOutput) else output
-    adapter, schema, wrapped = _prepare_output(native_type)
-    return _PreparedOutput("native", adapter, schema, wrapped)
+    adapter, schema, wrapped, value_adapter = _prepare_output(native_type)
+    return _PreparedOutput("native", adapter, schema, wrapped, value_adapter=value_adapter)
 
 
 def output_schema(output_type: Any) -> dict[str, Any] | None:
@@ -176,8 +181,9 @@ def output_schema(output_type: Any) -> dict[str, Any] | None:
 
 def _prepare_output(
     output_type: Any, *, wrap_scalars: bool = True
-) -> tuple[TypeAdapter[Any], dict[str, Any], bool]:
+) -> tuple[TypeAdapter[Any], dict[str, Any], bool, TypeAdapter[Any]]:
     adapter: TypeAdapter[Any] = TypeAdapter(output_type)
+    value_adapter = adapter
     schema = adapter.json_schema()
     if "$ref" in schema:
         reference = schema.pop("$ref")
@@ -220,7 +226,7 @@ def _prepare_output(
             close(branch)
 
     close(schema)
-    return adapter, schema, wrapped
+    return adapter, schema, wrapped, value_adapter
 
 
 _preserve_module_identity(globals(), "agents.schema")
