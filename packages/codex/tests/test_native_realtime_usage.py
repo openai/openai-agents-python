@@ -1,5 +1,7 @@
 """Provider speech usage passes through Core's accepted response completions."""
 
+from contextlib import aclosing
+
 from agents import Agent, NativeProvider
 from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeUsage
 from agents.testing import RealtimeStep, ScriptedRealtimeAdapter
@@ -66,16 +68,17 @@ async def test_missing_zero_detailed_usage_and_duplicate_completion():
             assert voice.usage is None
             for index, usage in enumerate(values):
                 await voice.send_text("Synthetic usage turn")
-                async for event in voice.events():
-                    if (
-                        isinstance(event, RealtimeResponse)
-                        and event.status == "done"
-                        and event.response_id == f"r{index}"
-                    ):
-                        assert (None if event.usage is None else event.usage.total_tokens) == (
-                            None if usage is None else usage["total_tokens"]
-                        )
-                        break
+                async with aclosing(voice.events()) as events:
+                    async for event in events:
+                        if (
+                            isinstance(event, RealtimeResponse)
+                            and event.status == "done"
+                            and event.response_id == f"r{index}"
+                        ):
+                            assert (None if event.usage is None else event.usage.total_tokens) == (
+                                None if usage is None else usage["total_tokens"]
+                            )
+                            break
                 assert (None if voice.usage is None else voice.usage.total_tokens) == (
                     None if usage is None else usage["total_tokens"]
                 )
