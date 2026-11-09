@@ -49,6 +49,7 @@ def _strip_mcp_frames(error: BaseException) -> None:
 
 
 def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Declarations) -> bool:
+    from .agent import Agent
     from .mcp import _MCP
 
     tools = kwargs.get("tools")
@@ -62,7 +63,12 @@ def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Decl
             return True
     owner = args[0] if args else kwargs.get("self")
     try:
-        return any(isinstance(tool, _MCP) for tool in declarations(owner))
+        # A lazy handoff can capture MCP declarations outside the opening tools.
+        # Protect that graph without evaluating its application-owned resolvers.
+        return any(
+            isinstance(value, _MCP) or isinstance(value, Agent) and bool(value.handoffs)
+            for value in declarations(owner)
+        )
     except (AttributeError, TypeError):
         # Preserve the ordinary error for an invalid or partially initialized owner.
         return False

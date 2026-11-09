@@ -3265,6 +3265,7 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
     from _agents_codex.native_interception import _CellPolicyOwner, _NativeInterception
     from _agents_codex.schema import _prepare_spec
     from _agents_codex.session import _ChildCallbacks, _Submission
+    from _agents_codex.tools import _ToolCatalog
     from agents import Environment, HttpMCP, NativeAgents
     from agents.native_interception import Allow, NativeToolCall
     from agents.session import Session
@@ -3344,7 +3345,10 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
         nonlocal read_count
         read_count += 1
         if read_count == 1:
-            return json.dumps({"nonce": 41, "request": request})
+            notice = {"nonce": 41, "request": request}
+            if route == "mcp":
+                notice["generation"] = 0
+            return json.dumps(notice)
         await released.wait()
         return "null"
 
@@ -3387,6 +3391,19 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
             _finish_native_interception_reader=lambda: None,
         ),
     )
+    if route == "mcp":
+        # Match the captured source carried by actual native MCP notices.
+        issuer._profiles = {}
+        issuer._opening_agent = issuer._agent
+        issuer._profile_catalogs = {(None, 0): _ToolCatalog(0, ())}
+        issuer._catalog_bindings = {(None, 0): issuer._mcp_tools}
+        for name in (
+            "_catalog_for_message",
+            "_bindings_for_message",
+            "_agent_for_message",
+            "_agent_for_profile",
+        ):
+            setattr(issuer, name, MethodType(getattr(Session, name), issuer))
     issuer._invoke_executor_policy = MethodType(Session._invoke_executor_policy, issuer)
     issuer._invoke_executor_policy_body = MethodType(Session._invoke_executor_policy_body, issuer)
     issuer._call_decision_callback = MethodType(Session._call_decision_callback, issuer)

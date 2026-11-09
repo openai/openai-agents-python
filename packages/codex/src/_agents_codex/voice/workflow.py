@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .._function_tools import FunctionTool, Tool
 from .._public import preserve_module_identity as _preserve_module_identity
-from ..session import Session
+from ..session import Session, _split_tools
+from ..tools import ToolRef
 from ..turn import Turn
 
 
@@ -41,10 +43,19 @@ class NativeSessionVoiceWorkflow:
     an already busy Session follows its normal rejection policy. Close a run
     iterator explicitly when stopping early, for example with contextlib.aclosing.
     Closing or cancelling a run stops and joins only its own native turn.
+
+    Omit tools to use the Session's current defaults for each run. An explicit
+    sequence is captured at construction and limits each submitted turn; an
+    empty sequence excludes all tools. Runs use the current acknowledged
+    replacements for selected opening tools. An active profile that does not
+    admit the selection causes submission to fail.
     """
 
-    def __init__(self, session: Session[Any, Any]) -> None:
+    def __init__(
+        self, session: Session[Any, Any], *, tools: Sequence[Tool[Any] | ToolRef] | None = None
+    ) -> None:
         self._session = session
+        self._tools = tuple(tools) if tools is not None else None
         self._invocation: _Invocation | None = None
 
     async def on_start(self) -> AsyncGenerator[str, None]:
@@ -59,9 +70,35 @@ class NativeSessionVoiceWorkflow:
         if self._invocation is not None:
             raise RuntimeError("NativeSessionVoiceWorkflow already has an active run")
 
+        tools = self._tools
+        if tools:
+            self._session._check_open()
+            source = self._session._effective_agent()
+            current, _, _ = _split_tools(
+                tools,
+                source.programmatic_tool_calling,
+                available=self._session._bindings,
+                ceiling=source.tools,
+                environment=self._session._executor,
+                native_agents=self._session._native_agents,
+                handoffs=self._session._effective_handoffs(),
+            )
+            # Resolve only after the original selector passes exact source checks.
+            # Submission still rejects a binding superseded by a racing mutation.
+            bindings = {tool.ref: tool for tool in current}
+            tools = tuple(
+                bindings[tool.ref] if isinstance(tool, FunctionTool) else tool for tool in tools
+            )
+
         # Reserve before awaiting admission. A passive wait retains the exact Turn if
         # cancellation races with submit returning its locally issued handle.
-        invocation = _Invocation(asyncio.create_task(self._session.submit(transcription)))
+        invocation = _Invocation(
+            asyncio.create_task(
+                self._session.submit(transcription)
+                if tools is None
+                else self._session.submit(transcription, tools=tools)
+            )
+        )
         self._invocation = invocation
         completed = False
         primary_error: BaseException | None = None

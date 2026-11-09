@@ -97,12 +97,19 @@ _Descriptor: TypeAlias = "Environment[Any] | NativeAgents | _MCP[Any]"
 
 
 def _has_interceptors(session: Session[Any, Any]) -> bool:
+    from .mcp import _MCP
+
     return (
         session._executor is not None
         and session._executor._has_callbacks
         or session._native_agents is not None
         and session._native_agents.approval is not None
         or any(server._has_before for server in session._mcp_tools)
+        or any(
+            isinstance(tool, _MCP) and tool._has_before
+            for profile in session._profiles.values()
+            for tool in profile.profile.declaration.tools
+        )
     )
 
 
@@ -193,12 +200,15 @@ class _NativeInterception:
                         **name,
                         "timeout": None if server.approval is not None else 30.0,
                         "scope": "thread_tree",
+                        "generation": str(self.session._catalog.generation),
                     }
                     for name in _tool_names((server,))
                 )
         self.session._native._configure_native_interception(json.dumps(rules))
 
-    def _select(self, call: NativeToolCall) -> _Descriptor | None:
+    def _select(
+        self, call: NativeToolCall, notice: dict[str, Any] | None = None
+    ) -> _Descriptor | None:
         from .executor import Environment
         from .mcp import _MCP, _tool_names
         from .native_agents import _COLLABORATION_TOOLS
@@ -218,11 +228,22 @@ class _NativeInterception:
         ):
             selected = session._native_agents
         else:
+            if call.namespace is None or not call.namespace.startswith("mcp__"):
+                return None
+            if notice is None:
+                if session._profiles:
+                    raise RuntimeError("Managed MCP policy requires its captured source")
+            else:
+                session._catalog_for_message(notice, notice["generation"])
+            bindings = (
+                session._mcp_tools if notice is None else session._bindings_for_message(notice)
+            )
             selected = next(
                 (
                     server
-                    for server in session._mcp_tools
-                    if server._has_before
+                    for server in bindings
+                    if isinstance(server, _MCP)
+                    and server._has_before
                     and {"namespace": call.namespace, "name": call.name} in _tool_names((server,))
                 ),
                 None,
@@ -465,7 +486,7 @@ class _NativeInterception:
                             else request["route"]
                         ),
                     )
-                    descriptor = self._select(call)
+                    descriptor = self._select(call, notice)
                     if descriptor is None:
                         native._resolve_native_interception(nonce, '{"action":"continue"}')
                         continue
@@ -520,7 +541,7 @@ class _NativeInterception:
                             self.session._invoke_executor_policy, state, nonce, request
                         )
                     else:
-                        invoke = partial(self._invoke, state, nonce, call, descriptor)
+                        invoke = partial(self._invoke, state, nonce, call, descriptor, notice)
                     task = _create_task(self._dispatch(nonce, tracing, invoke))
                     self._start_task(nonce, task)
                     state.add_callback(task)
@@ -560,6 +581,7 @@ class _NativeInterception:
         nonce: int,
         call: NativeToolCall,
         descriptor: NativeAgents | _MCP[Any],
+        notice: dict[str, Any] | None = None,
     ) -> None:
         from ._function_tools import ToolContext
         from .mcp import _MCP, MCPCallContext, _tool_names
@@ -717,7 +739,15 @@ class _NativeInterception:
                 )
                 value = await session._call_decision_callback(
                     state,
-                    {"type": "_sdk_native_interception", "nonce": nonce},
+                    {
+                        "type": "_sdk_native_interception",
+                        "nonce": nonce,
+                        **{
+                            key: notice[key]
+                            for key in ("profile_id", "profile_epoch")
+                            if notice is not None and key in notice
+                        },
+                    },
                     approval,
                     admitted,
                     collab_context,

@@ -57,6 +57,8 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "get_mcp_prompt",
         "compact",
         "update",
+        "get_active_agent",
+        "realtime",
         "events",
         "interactions",
         "pending_interactions",

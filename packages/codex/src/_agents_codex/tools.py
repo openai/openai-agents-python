@@ -21,6 +21,7 @@ from ._events import FunctionCallResponse as FunctionCallResponse
 from ._media import ImageDetail as ImageDetail, _capture_file, _capture_image, _capture_tool_part
 from ._public import preserve_module_identity as _preserve_module_identity
 from .manual import _CapturedManual as _CapturedManual
+from .realtime_result import BackgroundResult as BackgroundResult
 
 if TYPE_CHECKING:
     from ._function_tools import ToolContext, ToolTimeoutBehavior, ToolTimeoutError
@@ -441,7 +442,15 @@ class _CapturedFunction:
         ]
         | None
     )
-    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None
+    after: (
+        Callable[
+            [ToolContext[Any], ToolOutput],
+            ToolOutput
+            | BackgroundResult[ToolOutput]
+            | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+        ]
+        | None
+    )
     context: Any = field(repr=False)
     namespace: str | None = None
     finish_turn: bool = False

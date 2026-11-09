@@ -3240,6 +3240,7 @@ mod managed_receipt_tests {
         let completed = HashSet::from(["automatic".to_owned(), "patch".to_owned()]);
         store
             .create_thread(CreateThreadParams {
+                sdk_mcp_source_required: false,
                 creator_user_id: None,
                 creator_account_id: None,
                 session_id: id.into(),
@@ -3653,6 +3654,7 @@ mod managed_receipt_tests {
         let id = ThreadId::new();
         owner
             .create_thread(CreateThreadParams {
+                sdk_mcp_source_required: false,
                 creator_user_id: None,
                 creator_account_id: None,
                 session_id: id.into(),
@@ -3898,6 +3900,7 @@ mod local_rebuild_tests {
         };
         owner
             .create_thread(CreateThreadParams {
+                sdk_mcp_source_required: false,
                 creator_user_id: None,
                 creator_account_id: None,
                 session_id: id.into(),
@@ -4068,6 +4071,7 @@ mod local_rebuild_tests {
         };
         owner
             .create_thread(CreateThreadParams {
+                sdk_mcp_source_required: false,
                 creator_user_id: None,
                 creator_account_id: None,
                 session_id: id.into(),
@@ -4195,6 +4199,7 @@ mod graph_tests {
         );
         let id = ThreadId::new();
         let params = CreateThreadParams {
+            sdk_mcp_source_required: false,
             creator_user_id: None,
             creator_account_id: None,
             session_id: id.into(),
@@ -4390,6 +4395,7 @@ mod graph_tests {
         let child = ThreadId::new();
         let mut existing = graph.subscribe(root).await;
         let params = CreateThreadParams {
+            sdk_mcp_source_required: false,
             creator_user_id: None,
             creator_account_id: None,
             session_id: root.into(),
@@ -4587,6 +4593,7 @@ mod graph_tests {
             memory_mode: ThreadMemoryMode::Disabled,
         };
         let mut params = CreateThreadParams {
+            sdk_mcp_source_required: false,
             creator_user_id: None,
             creator_account_id: None,
             session_id: root.into(),

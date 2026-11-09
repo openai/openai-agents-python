@@ -1,4 +1,5 @@
 //! Retry only the short gap between delivery of a managed terminal and Core idle.
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -8,7 +9,7 @@ use codex_extension_api::{
     ExtensionDataInit, ExtensionFuture, ThreadIdleInput, ThreadLifecycleContributor,
     ThreadStopInput, TurnLifecycleContributor, TurnStartInput,
 };
-use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::{EventMsg, ThreadSettingsOverrides, W3cTraceContext};
 use codex_protocol::turn_input::{
     NotSubmittedReason, StartIfIdleSubmission, TurnInputRequest, TurnInputSubmission,
 };
@@ -164,9 +165,93 @@ pub(crate) async fn start<'a>(
     state: &'a crate::engine::ThreadState,
     mutation: &mut Option<MutexGuard<'a, ()>>,
     request: TurnInputRequest,
-    mut init: ExtensionDataInit,
+    init: ExtensionDataInit,
     previous: Option<&str>,
 ) -> anyhow::Result<StartIfIdleSubmission> {
+    start_with_settlement(state, mutation, init, previous, |init| {
+        let input = WithTurnExtensionData::new(request.clone(), init);
+        async move {
+            match previous {
+                None => state.thread.start_turn_if_idle(input).await,
+                Some(previous) => Ok(
+                    match state
+                        .thread
+                        .continue_turn_if_idle(input, previous.into())
+                        .await?
+                    {
+                        TurnInputSubmission::Started { turn_id } => {
+                            StartIfIdleSubmission::Started { turn_id }
+                        }
+                        TurnInputSubmission::NotSubmitted { reason } => {
+                            StartIfIdleSubmission::NotSubmitted { reason }
+                        }
+                        TurnInputSubmission::Steered { .. } => {
+                            unreachable!("continuation cannot steer")
+                        }
+                    },
+                ),
+            }
+        }
+    })
+    .await
+}
+
+pub(crate) async fn start_realtime<'a>(
+    state: &'a crate::engine::ThreadState,
+    mutation: &mut Option<MutexGuard<'a, ()>>,
+    generation: String,
+    response_id: String,
+    call_ids: Vec<String>,
+    settings: ThreadSettingsOverrides,
+    trace: Option<W3cTraceContext>,
+    init: ExtensionDataInit,
+) -> anyhow::Result<StartIfIdleSubmission> {
+    start_with_settlement(state, mutation, init, None, |init| {
+        let generation = generation.clone();
+        let response_id = response_id.clone();
+        let call_ids = call_ids.clone();
+        let settings = WithTurnExtensionData::new(settings.clone(), init);
+        let trace = trace.clone();
+        async move {
+            Ok(
+                match state
+                    .thread
+                    .start_realtime_tools_if_idle(
+                        generation,
+                        response_id,
+                        call_ids,
+                        settings,
+                        trace,
+                    )
+                    .await?
+                {
+                    TurnInputSubmission::Started { turn_id } => {
+                        StartIfIdleSubmission::Started { turn_id }
+                    }
+                    TurnInputSubmission::NotSubmitted { reason } => {
+                        StartIfIdleSubmission::NotSubmitted { reason }
+                    }
+                    TurnInputSubmission::Steered { .. } => {
+                        unreachable!("Realtime tool submission cannot steer")
+                    }
+                },
+            )
+        }
+    })
+    .await
+}
+
+async fn start_with_settlement<'a, F, Fut>(
+    state: &'a crate::engine::ThreadState,
+    mutation: &mut Option<MutexGuard<'a, ()>>,
+    mut init: ExtensionDataInit,
+    previous: Option<&str>,
+    submit: F,
+) -> anyhow::Result<StartIfIdleSubmission>
+where
+    F: Fn(ExtensionDataInit) -> Fut,
+    Fut: Future<Output = codex_protocol::error::Result<StartIfIdleSubmission>>,
+{
     let settlement = state
         .thread
         .thread_extension_data()
@@ -197,30 +282,7 @@ pub(crate) async fn start<'a>(
         });
     }
     let seed = Seed::attach(&mut init);
-    let submit = || async {
-        let input = WithTurnExtensionData::new(request.clone(), init.clone());
-        match previous {
-            None => state.thread.start_turn_if_idle(input).await,
-            Some(previous) => Ok(
-                match state
-                    .thread
-                    .continue_turn_if_idle(input, previous.into())
-                    .await?
-                {
-                    TurnInputSubmission::Started { turn_id } => {
-                        StartIfIdleSubmission::Started { turn_id }
-                    }
-                    TurnInputSubmission::NotSubmitted { reason } => {
-                        StartIfIdleSubmission::NotSubmitted { reason }
-                    }
-                    TurnInputSubmission::Steered { .. } => {
-                        unreachable!("continuation cannot steer")
-                    }
-                },
-            ),
-        }
-    };
-    let mut result = submit().await?;
+    let mut result = submit(init.clone()).await?;
     let deadline = Instant::now() + SETTLEMENT_GRACE;
     loop {
         seed.confirm(&result);
@@ -250,6 +312,6 @@ pub(crate) async fn start<'a>(
         if Instant::now() >= deadline || !settlement.is_current(expected) || !authorized() {
             return Ok(result);
         }
-        result = submit().await?;
+        result = submit(init.clone()).await?;
     }
 }

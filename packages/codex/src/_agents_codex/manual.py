@@ -978,7 +978,7 @@ def _request_mcp(request: Any) -> Any:
     registration = getattr(request, "_registration", None)
     if session is None:
         return (registration,)
-    return (*session._opening_agent.tools, registration)
+    return (session._opening_agent, *session._opening_agent.tools, registration)
 
 
 for _request_type in (

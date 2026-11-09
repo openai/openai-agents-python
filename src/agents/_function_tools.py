@@ -9,6 +9,7 @@ from _agents_codex._function_tools import (
     Annotated as Annotated,
     Any as Any,
     Awaitable as Awaitable,
+    BackgroundResult as BackgroundResult,
     BaseModel as BaseModel,
     BinderT_co as BinderT_co,
     Callable as Callable,

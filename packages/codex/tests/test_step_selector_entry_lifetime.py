@@ -6,6 +6,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -39,14 +40,27 @@ def owner(callback):
 
     native._check_step = check
     native._reply_step = reply
+    catalog = SimpleNamespace(generation=7)
     session = SimpleNamespace(
         _native=native,
         _native_agents=SimpleNamespace(before_step=callback),
-        _catalog=SimpleNamespace(generation=7),
+        _catalog=catalog,
         _context=None,
+        _profiles={},
+        _profile_catalogs={(None, 7): catalog},
+        _catalog_bindings={(None, 7): ()},
+        _opening_agent=SimpleNamespace(tools=(), programmatic_tool_calling=False),
+        _fail_unhandled_questions=False,
     )
-    session._select_step_body = Session._select_step_body.__get__(session, Session)
-    session._call_decision_callback = Session._call_decision_callback.__get__(session, Session)
+    for method in (
+        "_select_step_body",
+        "_call_decision_callback",
+        "_catalog_for_message",
+        "_agent_for_profile",
+        "_agent_for_message",
+        "_bindings_for_message",
+    ):
+        setattr(session, method, getattr(Session, method).__get__(session, Session))
     message = {
         "step_id": key[0],
         "thread": key[1],
@@ -55,7 +69,7 @@ def owner(callback):
         "defaults": [],
         "candidates": [],
     }
-    return session, state, message, native, checks
+    return cast(Any, session), state, message, native, checks
 
 
 def expire(state, native, expiry):
@@ -216,7 +230,7 @@ async def test_expired_child_step_reply_preserves_later_native_cancelled_outcome
 
         with patch.object(loop, "run_in_executor", enqueue):
             task = asyncio.create_task(Session._select_step(session, state, message))
-            state.callbacks.add(task)
+            state.add_callback(task)
             try:
                 await asyncio.wait_for(queued.wait(), 5)
                 expire(state, native, "nonce")
@@ -252,7 +266,7 @@ async def test_expired_child_step_reply_keeps_real_callback_failure():
     session, state, message, native, checks = owner(select)
     observations = settlement(session, state)
     task = asyncio.create_task(Session._select_step(session, state, message))
-    state.callbacks.add(task)
+    state.add_callback(task)
     try:
         await asyncio.wait_for(entered.wait(), 5)
         expire(state, native, "nonce")

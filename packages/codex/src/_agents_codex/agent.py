@@ -8,7 +8,12 @@ import json as json
 import math as math
 import os as os
 import re as re
-from collections.abc import AsyncIterator as AsyncIterator, Mapping as Mapping, Sequence as Sequence
+from collections.abc import (
+    AsyncIterator as AsyncIterator,
+    Callable as _Callable,
+    Mapping as Mapping,
+    Sequence as Sequence,
+)
 from contextlib import (
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     asynccontextmanager as asynccontextmanager,
@@ -644,6 +649,11 @@ class Agent(Generic[ContextT, OutputT]):
     Python functions execute in the application and use its own authority.
     Include NativeAgents in tools to grant native child agents at opening.
 
+    ``handoffs`` declares named native Agent targets. A synchronous function
+    returning an Agent can refer to a target defined later, including cycles.
+    Targets are resolved once when the Session captures the graph; subsequent
+    model handoffs select from those captured declarations.
+
     ``transform_context`` runs before each model request, including children,
     output repair, and model-based compaction. Return replacement input items
     or None to keep the original input. The callback does not edit saved history.
@@ -671,6 +681,7 @@ class Agent(Generic[ContextT, OutputT]):
     instructions: str
     name: str | None
     tools: tuple[Tool[ContextT], ...]
+    handoffs: tuple[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]], ...]
     model: str | None
     model_settings: ModelSettings
     provider: NativeProvider | None
@@ -700,6 +711,8 @@ class Agent(Generic[ContextT, OutputT]):
             cls: type[TextAgentT],
             *args: Any,
             tools: Sequence[Tool[ContextT]] | None = None,
+            handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]]
+            | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
@@ -713,6 +726,8 @@ class Agent(Generic[ContextT, OutputT]):
             *args: Any,
             output_type: OutputSpec[OutputT],
             tools: Sequence[Tool[ContextT]] | None = None,
+            handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]]
+            | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
@@ -735,6 +750,8 @@ class Agent(Generic[ContextT, OutputT]):
         instructions: str,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
+        handoffs: Sequence[Agent[ContextT, str] | _Callable[[], Agent[ContextT, str]]]
+        | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
@@ -754,6 +771,8 @@ class Agent(Generic[ContextT, OutputT]):
         name: str | None = None,
         output_type: OutputSpec[OutputT],
         tools: Sequence[Tool[ContextT]] | None = None,
+        handoffs: Sequence[Agent[ContextT, OutputT] | _Callable[[], Agent[ContextT, OutputT]]]
+        | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
@@ -770,6 +789,8 @@ class Agent(Generic[ContextT, OutputT]):
         instructions: str,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
+        handoffs: Sequence[Agent[ContextT, Any] | _Callable[[], Agent[ContextT, Any]]]
+        | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
@@ -796,9 +817,15 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
             raise TypeError("provider must be a NativeProvider or None")
+        captured_handoffs = tuple(handoffs or ())
+        if any(
+            not isinstance(target, Agent) and not callable(target) for target in captured_handoffs
+        ):
+            raise TypeError("handoffs must contain native Agents or synchronous target resolvers")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "tools", tuple(tools or ()))
+        object.__setattr__(self, "handoffs", captured_handoffs)
         object.__setattr__(self, "model", model)
         if decisions is not None:
             _check_provider(decisions)
@@ -903,7 +930,11 @@ class Agent(Generic[ContextT, OutputT]):
         to session(state=...). Current tools, context and provider still apply.
         Application subclass hooks and their policy references are retained;
         the application initializer is not run again.
+        Agents with outgoing handoffs require a new graph with compatible
+        output types. A per-submit output override can still cover a whole turn.
         """
+        if self.handoffs:
+            raise ValueError("with_output_type requires an Agent without outgoing handoffs")
         variant = copy(self)
         object.__setattr__(variant, "output_type", output_type)
         return cast("Agent[ContextT, NewOutputT]", variant)
@@ -914,6 +945,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | None = None,
+        restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -937,6 +969,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | None = None,
+        restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -960,6 +993,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | None = None,
+        restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -983,6 +1017,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | None = None,
+        restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
@@ -1000,6 +1035,11 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        restored_output_type selects only a pending restored turn's output
+        decoder, validator and repair policy. It must match the saved contract.
+        It leaves this Session's future output default unchanged. Use str for a
+        restored plain-text override; omit it to use the source Agent's default.
 
         initial_messages seeds settled user messages and assistant text without
         starting a model turn. It accepts UserMessage media through the current
@@ -1108,6 +1148,7 @@ class Agent(Generic[ContextT, OutputT]):
                 self,
                 context=context,
                 state=state,
+                restored_output_type=restored_output_type,
                 initial_messages_json=_initial_messages_json(initial_messages),
                 storage=storage,
                 resume=resume,
@@ -1685,5 +1726,5 @@ class Agent(Generic[ContextT, OutputT]):
             del trace_options
 
 
-_protect_mcp_methods(Agent, lambda owner: owner.tools)
+_protect_mcp_methods(Agent, lambda owner: (owner, *owner.tools))
 _preserve_module_identity(globals(), "agents.agent")

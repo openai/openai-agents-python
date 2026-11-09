@@ -658,11 +658,12 @@ def _request_observation(
 
 def _event_stream_mcp(stream: Any) -> Any:
     if stream._turn is not None:
-        return stream._turn._session._opening_agent.tools
+        agent = stream._turn._session._opening_agent
+        return (agent, *agent.tools)
     reference = stream._buffer._callback_check
     callback = None if reference is None else reference()
     session = getattr(callback, "__self__", None)
-    return () if session is None else session._opening_agent.tools
+    return () if session is None else (session._opening_agent, *session._opening_agent.tools)
 
 
 _protect_mcp_methods(EventStream, _event_stream_mcp)

@@ -253,7 +253,11 @@ def _module_contract(
                         if owner.startswith(package + "."):
                             node.level = 1
                             node.module = owner[len(package) + 1 :]
-                    if owner == "agents" or owner.startswith("agents."):
+                    if (
+                        owner == "agents"
+                        or owner.startswith("agents.")
+                        or owner.startswith("_agents_codex.")
+                    ):
                         references.update(
                             (alias.asname or alias.name, f"{owner}.{alias.name}")
                             for alias in aliases
@@ -278,7 +282,15 @@ def _module_contract(
 
 
 def _public_owner(name: str) -> str:
-    return name.replace("_agents_codex.", "agents.", 1)
+    if not name.startswith("_agents_codex."):
+        return name
+    public = name.replace("_agents_codex.", "agents.", 1)
+    path = ROOT / "src" / Path(*public.split("."))
+    if path.with_suffix(".py").is_file() or (path / "__init__.py").is_file():
+        return public
+    # Some public types share a facade but live in separate private source files.
+    # Retain their actual owner so the declaration traversal can read that source.
+    return name
 
 
 def public_api() -> dict[str, Any]:
@@ -291,6 +303,9 @@ def public_api() -> dict[str, Any]:
         for path in sorted((ROOT / "src/agents").glob("*.py"))
         if not path.stem.startswith("_") and path.stem != "version"
     }
+    # Realtime is a supported native package facade, not a top-level .py module.
+    # Include every explicit export without importing optional Classic packages.
+    public_modules.add("agents.realtime")
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
     required = {name: set() for name in public_modules | {"agents"}}

@@ -1,5 +1,7 @@
 # Run an SDK example
 
+Read the [native voice guide](native_voice.md) for Session-owned Realtime, per-connection credentials, custom adapters, and speech pipelines. Run [native_realtime_voice.py](native_realtime_voice.py) to record a reply.
+
 Use these examples with the SDK preview wheel and source files from the same release. Start with one Python tool, or choose a workflow below for scripted tests, browser applications, and background jobs.
 
 ## Set up your environment

@@ -1,0 +1,961 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+index 62e2fcc715415dca33aff50db189ead8dca57f6e..dff532ffb95548819c8b2012a59f00c4c5c663a3 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+@@ -161,7 +161,10 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
+             session.model = config.model;
+             let mut session = to_value(session)?;
+             if let Some(settings) = &config.v2 {
+-                settings.apply(session.as_object_mut().expect("typed session object"))?;
++                super::settings::apply(
++                    settings,
++                    session.as_object_mut().expect("typed session object"),
++                )?;
+             }
+             Ok(session)
+         }
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index c8346fff5f84228e69529bbc11aeaca6c3796992..db53a6cc5816fa0db9e881121e4c66f662581c60 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -1,264 +1,10 @@
+-//! Typed public Realtime V2 settings. Omitted update fields retain provider state.
+-use std::collections::BTreeMap;
+-
+-use serde::Deserialize;
++//! Public Realtime V2 payload construction; DTOs live in codex-protocol.
++use super::protocol::RealtimeOutputModality;
++pub use codex_protocol::realtime_settings::*;
+ use serde::Serialize;
+ use serde_json::Map;
+ use serde_json::Value;
+ 
+-use super::protocol::RealtimeOutputModality;
+-
+-// serde's ordinary nested Option decoding collapses a present null into None.
+-fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+-where
+-    D: serde::Deserializer<'de>,
+-    T: Deserialize<'de>,
+-{
+-    Option::<T>::deserialize(deserializer).map(Some)
+-}
+-
+-/// Optional initial overrides and sparse updates. Nullable fields distinguish omission from disabling.
+-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimeV2SessionSettings {
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub input_format: Option<RealtimeAudioFormat>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub output_format: Option<RealtimeAudioFormat>,
+-    #[serde(
+-        default,
+-        skip_serializing_if = "Option::is_none",
+-        deserialize_with = "present_nullable"
+-    )]
+-    pub noise_reduction: Option<Option<RealtimeNoiseReduction>>,
+-    #[serde(
+-        default,
+-        skip_serializing_if = "Option::is_none",
+-        deserialize_with = "present_nullable"
+-    )]
+-    pub transcription: Option<Option<RealtimeTranscription>>,
+-    #[serde(
+-        default,
+-        skip_serializing_if = "Option::is_none",
+-        deserialize_with = "present_nullable"
+-    )]
+-    pub turn_detection: Option<Option<RealtimeTurnDetection>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub output_voice: Option<RealtimeOutputVoice>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub output_speed: Option<f64>,
+-    #[serde(
+-        default,
+-        skip_serializing_if = "Option::is_none",
+-        deserialize_with = "present_nullable"
+-    )]
+-    pub prompt: Option<Option<RealtimePrompt>>,
+-    #[serde(
+-        default,
+-        skip_serializing_if = "Option::is_none",
+-        deserialize_with = "present_nullable"
+-    )]
+-    pub tracing: Option<Option<RealtimeProviderTracing>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub max_output_tokens: Option<RealtimeMaxOutputTokens>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub parallel_tool_calls: Option<bool>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub reasoning: Option<RealtimeReasoning>,
+-}
+-
+-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimeSessionUpdate {
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub model: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub instructions: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub output_modality: Option<RealtimeOutputModality>,
+-    #[serde(flatten)]
+-    pub settings: RealtimeV2SessionSettings,
+-}
+-
+-/// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-pub enum RealtimeAudioFormat {
+-    #[serde(rename = "pcm16")]
+-    Pcm24k,
+-    #[serde(rename = "g711_ulaw")]
+-    G711Ulaw,
+-    #[serde(rename = "g711_alaw")]
+-    G711Alaw,
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(tag = "type", rename_all = "snake_case")]
+-pub enum RealtimeNoiseReduction {
+-    NearField,
+-    FarField,
+-}
+-
+-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimeTranscription {
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub model: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub language: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub prompt: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub keywords: Option<Vec<String>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub languages: Option<Vec<String>>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub delay: Option<RealtimeTranscriptionDelay>,
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(rename_all = "snake_case")]
+-pub enum RealtimeTranscriptionDelay {
+-    Minimal,
+-    Low,
+-    Medium,
+-    High,
+-    Xhigh,
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(rename_all = "snake_case")]
+-pub enum RealtimeVadEagerness {
+-    Auto,
+-    Low,
+-    Medium,
+-    High,
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(rename_all = "snake_case")]
+-pub enum RealtimeImageDetail {
+-    Auto,
+-    Low,
+-    High,
+-    Original,
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+-#[serde(tag = "type", rename_all = "snake_case")]
+-pub enum RealtimeTurnDetection {
+-    ServerVad {
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        create_response: Option<bool>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        interrupt_response: Option<bool>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        threshold: Option<f64>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        prefix_padding_ms: Option<u32>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        silence_duration_ms: Option<u32>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        idle_timeout_ms: Option<u32>,
+-    },
+-    SemanticVad {
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        create_response: Option<bool>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        interrupt_response: Option<bool>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        eagerness: Option<RealtimeVadEagerness>,
+-    },
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(untagged)]
+-pub enum RealtimeOutputVoice {
+-    Named(String),
+-    Custom { id: String },
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimePrompt {
+-    pub id: String,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub version: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub variables: Option<BTreeMap<String, RealtimePromptVariable>>,
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+-#[serde(untagged)]
+-pub enum RealtimePromptVariable {
+-    String(String),
+-    Content(RealtimePromptContent),
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+-#[serde(tag = "type", rename_all = "snake_case")]
+-pub enum RealtimePromptContent {
+-    InputText {
+-        text: String,
+-    },
+-    InputImage {
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        image_url: Option<String>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        file_id: Option<String>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        detail: Option<RealtimeImageDetail>,
+-    },
+-    InputFile {
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        file_url: Option<String>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        file_id: Option<String>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        file_data: Option<String>,
+-        #[serde(default, skip_serializing_if = "Option::is_none")]
+-        filename: Option<String>,
+-    },
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+-#[serde(untagged)]
+-pub enum RealtimeProviderTracing {
+-    Auto(RealtimeTracingAuto),
+-    Config(RealtimeTracingConfig),
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-pub enum RealtimeTracingAuto {
+-    #[serde(rename = "auto")]
+-    Auto,
+-}
+-
+-/// Provider trace configuration, independent of client span export. Group IDs correlate traces.
+-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimeTracingConfig {
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub workflow_name: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub group_id: Option<String>,
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub metadata: Option<Value>,
+-}
+-
+-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(untagged)]
+-pub enum RealtimeMaxOutputTokens {
+-    Count(u32),
+-    Unlimited(RealtimeUnlimitedTokens),
+-}
+-
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+-pub enum RealtimeUnlimitedTokens {
+-    #[serde(rename = "inf")]
+-    Inf,
+-}
+-
+-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+-pub struct RealtimeReasoning {
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
+-    pub effort: Option<String>,
+-}
+-
+ fn put<T: Serialize>(
+     map: &mut Map<String, Value>,
+     key: &str,
+@@ -278,63 +24,70 @@ fn format_value(format: RealtimeAudioFormat) -> Value {
+     }
+ }
+ 
+-impl RealtimeV2SessionSettings {
+-    pub(super) fn validate(&self) -> serde_json::Result<()> {
+-        let threshold = match &self.turn_detection {
+-            Some(Some(RealtimeTurnDetection::ServerVad { threshold, .. })) => *threshold,
+-            _ => None,
+-        };
+-        if self.output_speed.is_some_and(|speed| !speed.is_finite())
+-            || threshold.is_some_and(|value| !value.is_finite())
+-        {
+-            return Err(serde::ser::Error::custom(
+-                "Realtime numeric settings must be finite",
+-            ));
+-        }
+-        Ok(())
++fn validate(settings: &RealtimeV2SessionSettings) -> serde_json::Result<()> {
++    let threshold = match &settings.turn_detection {
++        Some(Some(RealtimeTurnDetection::ServerVad { threshold, .. })) => *threshold,
++        _ => None,
++    };
++    if settings
++        .output_speed
++        .is_some_and(|speed| !speed.is_finite())
++        || threshold.is_some_and(|value| !value.is_finite())
++    {
++        return Err(serde::ser::Error::custom(
++            "Realtime numeric settings must be finite",
++        ));
+     }
++    Ok(())
++}
+ 
+-    // Only named leaves are replaced; initial defaults and sparse updates use
+-    // the same mapping without maintaining another copy of session state.
+-    pub(super) fn apply(&self, session: &mut Map<String, Value>) -> serde_json::Result<()> {
+-        self.validate()?;
+-        put(session, "prompt", &self.prompt)?;
+-        put(session, "tracing", &self.tracing)?;
+-        put(session, "max_output_tokens", &self.max_output_tokens)?;
+-        put(session, "parallel_tool_calls", &self.parallel_tool_calls)?;
+-        put(session, "reasoning", &self.reasoning)?;
+-        let mut input = Map::new();
+-        if let Some(format) = self.input_format {
+-            input.insert("format".into(), format_value(format));
+-        }
+-        put(&mut input, "noise_reduction", &self.noise_reduction)?;
+-        put(&mut input, "transcription", &self.transcription)?;
+-        put(&mut input, "turn_detection", &self.turn_detection)?;
+-        let mut output = Map::new();
+-        if let Some(format) = self.output_format {
+-            output.insert("format".into(), format_value(format));
+-        }
+-        put(&mut output, "voice", &self.output_voice)?;
+-        put(&mut output, "speed", &self.output_speed)?;
+-        if !input.is_empty() || !output.is_empty() {
+-            let audio = session
+-                .entry("audio")
+-                .or_insert_with(|| Value::Object(Map::new()));
+-            let audio = audio.as_object_mut().expect("typed audio object");
+-            for (name, fields) in [("input", input), ("output", output)] {
+-                if !fields.is_empty() {
+-                    let section = audio
+-                        .entry(name)
+-                        .or_insert_with(|| Value::Object(Map::new()));
+-                    section
+-                        .as_object_mut()
+-                        .expect("typed audio section")
+-                        .extend(fields);
+-                }
++// Only named leaves are replaced; initial defaults and sparse updates use
++// the same mapping without maintaining another copy of session state.
++pub(super) fn apply(
++    settings: &RealtimeV2SessionSettings,
++    session: &mut Map<String, Value>,
++) -> serde_json::Result<()> {
++    validate(settings)?;
++    put(session, "prompt", &settings.prompt)?;
++    put(session, "tracing", &settings.tracing)?;
++    put(session, "max_output_tokens", &settings.max_output_tokens)?;
++    put(
++        session,
++        "parallel_tool_calls",
++        &settings.parallel_tool_calls,
++    )?;
++    put(session, "reasoning", &settings.reasoning)?;
++    let mut input = Map::new();
++    if let Some(format) = settings.input_format {
++        input.insert("format".into(), format_value(format));
++    }
++    put(&mut input, "noise_reduction", &settings.noise_reduction)?;
++    put(&mut input, "transcription", &settings.transcription)?;
++    put(&mut input, "turn_detection", &settings.turn_detection)?;
++    let mut output = Map::new();
++    if let Some(format) = settings.output_format {
++        output.insert("format".into(), format_value(format));
++    }
++    put(&mut output, "voice", &settings.output_voice)?;
++    put(&mut output, "speed", &settings.output_speed)?;
++    if !input.is_empty() || !output.is_empty() {
++        let audio = session
++            .entry("audio")
++            .or_insert_with(|| Value::Object(Map::new()));
++        let audio = audio.as_object_mut().expect("typed audio object");
++        for (name, fields) in [("input", input), ("output", output)] {
++            if !fields.is_empty() {
++                let section = audio
++                    .entry(name)
++                    .or_insert_with(|| Value::Object(Map::new()));
++                section
++                    .as_object_mut()
++                    .expect("typed audio section")
++                    .extend(fields);
+             }
+         }
+-        Ok(())
+     }
++    Ok(())
+ }
+ 
+ /// Build a sparse public V2 session.update event without connecting to a provider.
+@@ -353,7 +106,7 @@ pub fn realtime_v2_session_update_json(
+         };
+         session.insert("output_modalities".into(), serde_json::json!([value]));
+     }
+-    update.settings.apply(&mut session)?;
++    apply(&update.settings, &mut session)?;
+     Ok(serde_json::json!({"type": "session.update", "session": session}))
+ }
+ 
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index ae3220fe79d7c2e7b4f3245dca367616879697fd..b292dcca5baca22880610f8af463dd5e9451c389 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -23,6 +23,8 @@ use codex_api::RealtimeEvent;
+ use codex_api::RealtimeEventParser;
+ use codex_api::RealtimeSessionConfig;
+ use codex_api::RealtimeSessionMode;
++use codex_api::RealtimeSessionUpdate;
++use codex_api::RealtimeV2SessionSettings;
+ use codex_api::RealtimeWebsocketClient;
+ use codex_api::RealtimeWebsocketConnection;
+ use codex_api::RealtimeWebsocketEvents;
+@@ -217,6 +219,7 @@ const SDK_HANDOFF_LIMIT: usize = 1024;
+ pub(crate) enum SdkRealtimeCommand {
+     Audio(RealtimeAudioFrame),
+     Text(ConversationTextParams),
++    Update(RealtimeSessionUpdate),
+     Complete { handoff_id: String, text: String },
+     Fail { handoff_id: String },
+     Interrupt { response_id: Option<String> },
+@@ -661,6 +664,17 @@ impl RealtimeConversationManager {
+             .as_ref()
+             .filter(|sdk| sdk.generation == generation && sdk.active.load(Ordering::Acquire))
+             .ok_or_else(|| CodexErr::InvalidRequest("SDK Realtime generation is stale".into()))?;
++        if let SdkRealtimeCommand::Update(update) = &command {
++            // Reject local encoding/protocol errors before admission so invalid
++            // configuration does not tear down an otherwise healthy connection.
++            if state.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
++                return Err(CodexErr::InvalidRequest(
++                    "Public V2 settings require the RealtimeV2 protocol".into(),
++                ));
++            }
++            codex_api::realtime_v2_session_update_json(update)
++                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++        }
+         let result_id = match &command {
+             SdkRealtimeCommand::Complete { handoff_id, .. }
+             | SdkRealtimeCommand::Fail { handoff_id } => Some(handoff_id),
+@@ -1463,6 +1477,7 @@ pub(crate) async fn handle_start_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+     mut params: ConversationStartParams,
++    settings: Option<RealtimeV2SessionSettings>,
+ ) -> CodexResult<()> {
+     if generation.is_empty() {
+         return Err(CodexErr::InvalidRequest(
+@@ -1471,7 +1486,11 @@ pub(crate) async fn handle_start_sdk(
+     }
+     params.client_managed_handoffs = true;
+     params.backend_reasoning_status = false;
+-    let prepared = prepare_realtime_start(sess, params).await?;
++    let mut prepared = prepare_realtime_start(sess, params).await?;
++    prepared.session_config.v2 = settings;
++    // Validate before acquiring a live owner or opening its connection.
++    codex_api::session_update_session_json(prepared.session_config.clone())
++        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+     handle_start_inner(sess, &generation, prepared, Some(generation.clone())).await
+ }
+ 
+@@ -2746,6 +2765,7 @@ async fn handle_sdk_realtime_command(
+     }
+     match command.context("SDK Realtime command channel closed")? {
+         SdkRealtimeCommand::Audio(frame) => writer.send_audio_frame(frame).await?,
++        SdkRealtimeCommand::Update(update) => writer.send_session_patch(&update).await?,
+         SdkRealtimeCommand::Text(params) => {
+             writer
+                 .send_conversation_item_create(params.text, params.role)
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 55086b676a50f2a550ac292ecc0791dcd72dc2f8..ab19f84ae7212931d59d0e20f155005ca93f641a 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -819,3 +819,129 @@ async fn sdk_close_joins_socket_pump_for_concurrent_callers() {
+         .unwrap();
+     writer.abort_and_join().await;
+ }
++
++#[tokio::test]
++async fn sdk_settings_update_is_sparse_and_fenced_by_generation() {
++    use super::SdkRealtimeCommand;
++    use codex_protocol::realtime_settings::RealtimeSessionUpdate;
++    use codex_protocol::realtime_settings::RealtimeV2SessionSettings;
++    let (connection, mut wire, server) = sdk_wire_connection().await;
++    assert_eq!(wire.recv().await.unwrap()["type"], "session.update");
++    let (manager, sdk) = sdk_manager("settings-1");
++    let update = RealtimeSessionUpdate {
++        settings: RealtimeV2SessionSettings {
++            output_speed: Some(1.25),
++            turn_detection: Some(None),
++            ..Default::default()
++        },
++        ..Default::default()
++    };
++    assert!(
++        manager
++            .sdk_enqueue("old-generation", SdkRealtimeCommand::Update(update.clone()))
++            .await
++            .is_err()
++    );
++    assert!(sdk.commands_rx.is_empty());
++    manager
++        .sdk_enqueue("settings-1", SdkRealtimeCommand::Update(update.clone()))
++        .await
++        .unwrap();
++    let handoff = manager
++        .state
++        .lock()
++        .await
++        .conversation
++        .as_ref()
++        .unwrap()
++        .handoff
++        .clone();
++    let mut responses = super::RealtimeResponseCreateQueue::default();
++    super::handle_sdk_realtime_command(
++        sdk.commands_rx.recv().await,
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        wire.recv().await.unwrap(),
++        serde_json::json!({
++            "type": "session.update", "session": {"type": "realtime", "audio": {
++                "input": {"turn_detection": null}, "output": {"speed": 1.25}
++            }}
++        })
++    );
++    // A command accepted before retirement must not reach this or a later connection.
++    manager
++        .sdk_enqueue("settings-1", SdkRealtimeCommand::Update(update))
++        .await
++        .unwrap();
++    sdk.active
++        .store(false, std::sync::atomic::Ordering::Release);
++    super::handle_sdk_realtime_command(
++        sdk.commands_rx.recv().await,
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(20), wire.recv())
++            .await
++            .is_err()
++    );
++    connection.close().await.unwrap();
++    server.await.unwrap();
++}
++
++#[tokio::test]
++async fn sdk_invalid_settings_are_rejected_before_queue_admission() {
++    use super::SdkRealtimeCommand;
++    use codex_protocol::realtime_settings::RealtimeSessionUpdate;
++    use codex_protocol::realtime_settings::RealtimeV2SessionSettings;
++    let (manager, sdk) = sdk_manager("settings-1");
++    let invalid = RealtimeSessionUpdate {
++        settings: RealtimeV2SessionSettings {
++            output_speed: Some(f64::NAN),
++            ..Default::default()
++        },
++        ..Default::default()
++    };
++    assert!(
++        manager
++            .sdk_enqueue("settings-1", SdkRealtimeCommand::Update(invalid))
++            .await
++            .is_err()
++    );
++    assert!(sdk.commands_rx.is_empty());
++    assert!(sdk.active.load(std::sync::atomic::Ordering::Acquire));
++    let valid = RealtimeSessionUpdate::default();
++    manager
++        .sdk_enqueue("settings-1", SdkRealtimeCommand::Update(valid.clone()))
++        .await
++        .unwrap();
++    assert!(matches!(
++        sdk.commands_rx.try_recv().unwrap(),
++        SdkRealtimeCommand::Update(_)
++    ));
++    manager
++        .state
++        .lock()
++        .await
++        .conversation
++        .as_mut()
++        .unwrap()
++        .handoff
++        .event_parser = RealtimeEventParser::V1;
++    assert!(
++        manager
++            .sdk_enqueue("settings-1", SdkRealtimeCommand::Update(valid))
++            .await
++            .is_err()
++    );
++    assert!(sdk.commands_rx.is_empty());
++    assert!(sdk.active.load(std::sync::atomic::Ordering::Acquire));
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 922fa928f367f7a2adf947dba72689beac88c857..b06791830d97a81e8110c6205be69ef6ced8511e 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -511,10 +511,28 @@ pub(super) async fn submission_loop(
+                 Op::RealtimeConversationStartSdk {
+                     generation,
+                     params,
++                    settings,
+                     reply,
+                 } => {
+                     let _ = reply.send(
+-                        crate::realtime_conversation::handle_start_sdk(&sess, generation, params)
++                        crate::realtime_conversation::handle_start_sdk(
++                            &sess, generation, params, settings,
++                        )
++                        .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationUpdateSdk {
++                    generation,
++                    update,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Update(update),
++                            )
+                             .await,
+                     );
+                     false
+diff --git a/codex-rs/protocol/src/lib.rs b/codex-rs/protocol/src/lib.rs
+index 9d490a4826acbf07a3cdc76a95a81da65744ab69..466bf6a2198597ada5b23b77d8a29936c9afc2a5 100644
+--- a/codex-rs/protocol/src/lib.rs
++++ b/codex-rs/protocol/src/lib.rs
+@@ -47,6 +47,7 @@ pub mod permissions;
+ pub mod plan_tool;
+ pub mod protocol;
+ pub mod realtime;
++pub mod realtime_settings;
+ pub mod request_permissions;
+ pub mod request_user_input;
+ pub mod response_facts;
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index a70babe058ad1dee5dab5d7d4b942b6f8d88b093..847f655a6c74ffbc734abe4b33f8b056ec57e3f0 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -615,6 +615,15 @@ pub enum Op {
+     RealtimeConversationStartSdk {
+         generation: String,
+         params: ConversationStartParams,
++        settings: Option<crate::realtime_settings::RealtimeV2SessionSettings>,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// Admit a sparse public V2 settings update for this exact connection generation.
++    /// A successful reply acknowledges queue admission, not provider acceptance.
++    RealtimeConversationUpdateSdk {
++        generation: String,
++        update: crate::realtime_settings::RealtimeSessionUpdate,
+         reply: oneshot::Sender<CodexResult<()>>,
+     },
+ 
+@@ -994,6 +1003,7 @@ impl Op {
+             Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
+             Self::CleanBackgroundTerminals => "clean_background_terminals",
+             Self::RealtimeConversationStartSdk { .. } => "realtime_conversation_start_sdk",
++            Self::RealtimeConversationUpdateSdk { .. } => "realtime_conversation_update_sdk",
+             Self::RealtimeConversationAudioSdk { .. } => "realtime_conversation_audio_sdk",
+             Self::RealtimeConversationTextSdk { .. } => "realtime_conversation_text_sdk",
+             Self::RealtimeConversationCompleteSdk { .. } => "realtime_conversation_complete_sdk",
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6467572a2401e601ca9fd813db5d3e36e41b0765
+--- /dev/null
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -0,0 +1,259 @@
++//! Typed public Realtime V2 settings. Omitted update fields retain provider state.
++use std::collections::BTreeMap;
++
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Value;
++
++use crate::protocol::RealtimeOutputModality;
++
++// serde's ordinary nested Option decoding collapses a present null into None.
++fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++    T: Deserialize<'de>,
++{
++    Option::<T>::deserialize(deserializer).map(Some)
++}
++
++/// Optional initial overrides and sparse updates. Nullable fields distinguish omission from disabling.
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeV2SessionSettings {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub input_format: Option<RealtimeAudioFormat>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_format: Option<RealtimeAudioFormat>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub noise_reduction: Option<Option<RealtimeNoiseReduction>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub transcription: Option<Option<RealtimeTranscription>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub turn_detection: Option<Option<RealtimeTurnDetection>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_voice: Option<RealtimeOutputVoice>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_speed: Option<f64>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub prompt: Option<Option<RealtimePrompt>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub tracing: Option<Option<RealtimeProviderTracing>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub max_output_tokens: Option<RealtimeMaxOutputTokens>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub parallel_tool_calls: Option<bool>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub reasoning: Option<RealtimeReasoning>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeSessionUpdate {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub instructions: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_modality: Option<RealtimeOutputModality>,
++    #[serde(flatten)]
++    pub settings: RealtimeV2SessionSettings,
++}
++
++/// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeAudioFormat {
++    #[serde(rename = "pcm16")]
++    Pcm24k,
++    #[serde(rename = "g711_ulaw")]
++    G711Ulaw,
++    #[serde(rename = "g711_alaw")]
++    G711Alaw,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimeNoiseReduction {
++    NearField,
++    FarField,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeTranscription {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub language: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub prompt: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub keywords: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub languages: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub delay: Option<RealtimeTranscriptionDelay>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeTranscriptionDelay {
++    Minimal,
++    Low,
++    Medium,
++    High,
++    Xhigh,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeVadEagerness {
++    Auto,
++    Low,
++    Medium,
++    High,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeImageDetail {
++    Auto,
++    Low,
++    High,
++    Original,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimeTurnDetection {
++    ServerVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        create_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        interrupt_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        threshold: Option<f64>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        prefix_padding_ms: Option<u32>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        silence_duration_ms: Option<u32>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        idle_timeout_ms: Option<u32>,
++    },
++    SemanticVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        create_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        interrupt_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        eagerness: Option<RealtimeVadEagerness>,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeOutputVoice {
++    Named(String),
++    Custom { id: String },
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RealtimePrompt {
++    pub id: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub version: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub variables: Option<BTreeMap<String, RealtimePromptVariable>>,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimePromptVariable {
++    String(String),
++    Content(RealtimePromptContent),
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimePromptContent {
++    InputText {
++        text: String,
++    },
++    InputImage {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        image_url: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_id: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        detail: Option<RealtimeImageDetail>,
++    },
++    InputFile {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_url: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_id: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_data: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        filename: Option<String>,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeProviderTracing {
++    Auto(RealtimeTracingAuto),
++    Config(RealtimeTracingConfig),
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeTracingAuto {
++    #[serde(rename = "auto")]
++    Auto,
++}
++
++/// Provider trace configuration, independent of client span export. Group IDs correlate traces.
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeTracingConfig {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub workflow_name: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub group_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub metadata: Option<Value>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeMaxOutputTokens {
++    Count(u32),
++    Unlimited(RealtimeUnlimitedTokens),
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeUnlimitedTokens {
++    #[serde(rename = "inf")]
++    Inf,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeReasoning {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub effort: Option<String>,
++}

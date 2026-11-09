@@ -1,0 +1,1859 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 58ade3b75f596f2ca3765dfd5949ca841d8a7808..1b09a358545d7946322dfaa0c6757a3870df39c0 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -32,6 +32,7 @@ use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
+ use codex_websocket_client::WebSocketConnection;
+ use codex_websocket_client::WebSocketConnector;
+ use codex_websocket_client::WebSocketTlsMode;
++use futures::FutureExt;
+ use futures::SinkExt;
+ use futures::StreamExt;
+ use http::HeaderMap;
+@@ -60,13 +61,50 @@ use url::Url;
+ 
+ const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
+ const OPENAI_REALTIME_API_BASE_URL: &str = "https://api.openai.com/v1";
++const SDK_WIRE_EVENTS_CAPACITY: usize = 256;
++const SDK_WIRE_BYTES_CAPACITY: usize = 8 * 1024 * 1024;
+ const MAX_ACTIVE_TRANSCRIPT_BYTES: usize = 8 * 1024;
+ const TRUNCATED_TRANSCRIPT_PREFIX: &str = "…";
+ 
++#[derive(Debug)]
++struct QueuedWireMessage {
++    message: Result<Message, WsError>,
++    // Owned permits return capacity when a message is received or discarded.
++    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
++}
++
++impl QueuedWireMessage {
++    fn new(
++        message: Result<Message, WsError>,
++        budget: Option<Arc<tokio::sync::Semaphore>>,
++    ) -> Result<Self, ()> {
++        let bytes = message.as_ref().map_or(0, |message| message.len());
++        let permit = budget
++            .map(|budget| {
++                let bytes = u32::try_from(bytes).map_err(|_| ())?;
++                budget.try_acquire_many_owned(bytes).map_err(|_| ())
++            })
++            .transpose()?;
++        Ok(Self {
++            message,
++            _permit: permit,
++        })
++    }
++
++    fn unbounded(message: Result<Message, WsError>) -> Self {
++        Self {
++            message,
++            _permit: None,
++        }
++    }
++}
++
+ struct WsStream {
+     tx_command: mpsc::Sender<WsCommand>,
+-    pump_task: tokio::task::JoinHandle<()>,
++    pump_task: futures::future::Shared<futures::future::BoxFuture<'static, ()>>,
++    pump_abort: tokio::task::AbortHandle,
+     terminal_policy_error: tokio::sync::watch::Receiver<Option<NetworkPolicyDenied>>,
++    ingress_overflow: Arc<AtomicBool>,
+ }
+ 
+ enum WsCommand {
+@@ -82,9 +120,18 @@ enum WsCommand {
+ impl WsStream {
+     fn new(
+         inner: WebSocketConnection,
+-    ) -> (Self, async_channel::Receiver<Result<Message, WsError>>) {
++        bounded_events: bool,
++    ) -> (Self, async_channel::Receiver<QueuedWireMessage>) {
+         let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
+-        let (tx_message, rx_message) = async_channel::unbounded::<Result<Message, WsError>>();
++        let (tx_message, rx_message) = if bounded_events {
++            async_channel::bounded::<QueuedWireMessage>(SDK_WIRE_EVENTS_CAPACITY)
++        } else {
++            async_channel::unbounded::<QueuedWireMessage>()
++        };
++        let ingress_overflow = Arc::new(AtomicBool::new(false));
++        let pump_overflow = Arc::clone(&ingress_overflow);
++        let wire_budget =
++            bounded_events.then(|| Arc::new(tokio::sync::Semaphore::new(SDK_WIRE_BYTES_CAPACITY)));
+ 
+         let (terminal_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
+         let pump_task = tokio::spawn(async move {
+@@ -92,7 +139,9 @@ impl WsStream {
+             let report_write_policy_error = |error: &WsError| {
+                 if let Some(denied) = codex_websocket_client::network_policy_denial(error) {
+                     terminal_policy_tx.send_replace(Some(denied));
+-                    let _ = tx_message.try_send(Err(Self::policy_error(denied)));
++                    let _ = tx_message.try_send(QueuedWireMessage::unbounded(Err(
++                        Self::policy_error(denied),
++                    )));
+                 }
+             };
+             loop {
+@@ -137,7 +186,9 @@ impl WsStream {
+                                 if let Err(err) = inner.send(Message::Pong(payload)).await {
+                                     error!("realtime websocket failed to send pong: {err}");
+                                     terminal_policy_tx.send_replace(codex_websocket_client::network_policy_denial(&err));
+-                                    let _ = tx_message.send(Err(err)).await;
++                                    if bounded_events {
++                                        if tx_message.try_send(QueuedWireMessage::unbounded(Err(err))).is_err() { pump_overflow.store(true, Ordering::Release); }
++                                    } else { let _ = tx_message.send(QueuedWireMessage::unbounded(Err(err))).await; }
+                                     break;
+                                 }
+                             }
+@@ -165,9 +216,20 @@ impl WsStream {
+                                     }
+                                     Message::Ping(_) | Message::Pong(_) => {}
+                                 }
+-                                if tx_message.send(Ok(message)).await.is_err() {
+-                                    break;
+-                                }
++                                if bounded_events {
++                                    let queued = match QueuedWireMessage::new(Ok(message), wire_budget.clone()) {
++                                        Ok(queued) => queued,
++                                        Err(()) => { pump_overflow.store(true, Ordering::Release); break; },
++                                    };
++                                    match tx_message.try_send(queued) {
++                                        Ok(()) => {},
++                                        Err(async_channel::TrySendError::Full(_)) => {
++                                            pump_overflow.store(true, Ordering::Release);
++                                            break;
++                                        },
++                                        Err(async_channel::TrySendError::Closed(_)) => break,
++                                    }
++                                } else if tx_message.send(QueuedWireMessage::unbounded(Ok(message))).await.is_err() { break; }
+                                 if is_close {
+                                     break;
+                                 }
+@@ -175,7 +237,9 @@ impl WsStream {
+                             Err(err) => {
+                                 error!("realtime websocket receive failed: {err}");
+                                     terminal_policy_tx.send_replace(codex_websocket_client::network_policy_denial(&err));
+-                                let _ = tx_message.send(Err(err)).await;
++                                if bounded_events {
++                                        if tx_message.try_send(QueuedWireMessage::unbounded(Err(err))).is_err() { pump_overflow.store(true, Ordering::Release); }
++                                    } else { let _ = tx_message.send(QueuedWireMessage::unbounded(Err(err))).await; }
+                                 break;
+                             }
+                         }
+@@ -185,11 +249,19 @@ impl WsStream {
+             info!("realtime websocket pump exiting");
+         });
+ 
++        let pump_abort = pump_task.abort_handle();
++        let pump_task = async move {
++            let _ = pump_task.await;
++        }
++        .boxed()
++        .shared();
+         (
+             Self {
+                 tx_command,
+                 pump_task,
++                pump_abort,
+                 terminal_policy_error,
++                ingress_overflow,
+             },
+             rx_message,
+         )
+@@ -209,6 +281,9 @@ impl WsStream {
+     fn closed_error(&self) -> WsError {
+         match *self.terminal_policy_error.borrow() {
+             Some(denied) => Self::policy_error(denied),
++            None if self.ingress_overflow.load(Ordering::Acquire) => WsError::Io(
++                std::io::Error::other("SDK Realtime wire event queue capacity exceeded"),
++            ),
+             None => WsError::ConnectionClosed,
+         }
+     }
+@@ -225,6 +300,11 @@ impl WsStream {
+             .await
+     }
+ 
++    async fn abort_and_join(&self) {
++        self.pump_abort.abort();
++        self.pump_task.clone().await;
++    }
++
+     async fn close(&self) -> Result<(), WsError> {
+         self.request(|tx_result| WsCommand::Close { tx_result })
+             .await
+@@ -233,7 +313,7 @@ impl WsStream {
+ 
+ impl Drop for WsStream {
+     fn drop(&mut self) {
+-        self.pump_task.abort();
++        self.pump_abort.abort();
+     }
+ }
+ 
+@@ -252,7 +332,8 @@ pub struct RealtimeWebsocketWriter {
+ 
+ #[derive(Clone)]
+ pub struct RealtimeWebsocketEvents {
+-    rx_message: async_channel::Receiver<Result<Message, WsError>>,
++    ingress_overflow: Arc<AtomicBool>,
++    rx_message: async_channel::Receiver<QueuedWireMessage>,
+     pending_events: Arc<Mutex<VecDeque<RealtimeEvent>>>,
+     transcript_state: RealtimeTranscriptState,
+     event_parser: RealtimeEventParser,
+@@ -312,7 +393,7 @@ impl RealtimeWebsocketConnection {
+ 
+     fn new(
+         stream: WsStream,
+-        rx_message: async_channel::Receiver<Result<Message, WsError>>,
++        rx_message: async_channel::Receiver<QueuedWireMessage>,
+         event_parser: RealtimeEventParser,
+         transcript_state: RealtimeTranscriptState,
+     ) -> Self {
+@@ -326,6 +407,7 @@ impl RealtimeWebsocketConnection {
+                 context_append_channel: None,
+             },
+             events: RealtimeWebsocketEvents {
++                ingress_overflow: Arc::clone(&stream.ingress_overflow),
+                 rx_message,
+                 pending_events: Arc::new(Mutex::new(VecDeque::new())),
+                 transcript_state,
+@@ -337,6 +419,13 @@ impl RealtimeWebsocketConnection {
+ }
+ 
+ impl RealtimeWebsocketWriter {
++    /// End the owned socket pump and join it, including concurrent close callers.
++    /// Bytes already dispatched before cancellation cannot be retracted.
++    pub async fn abort_and_join(&self) {
++        self.is_closed.store(true, Ordering::SeqCst);
++        self.stream.abort_and_join().await;
++    }
++
+     pub fn with_context_append_channel(mut self, channel: RealtimeContextAppendChannel) -> Self {
+         self.context_append_channel = Some(channel);
+         self
+@@ -537,20 +626,41 @@ impl RealtimeWebsocketEvents {
+             return Ok(None);
+         }
+ 
++        if self.ingress_overflow.load(Ordering::Acquire) {
++            self.is_closed.store(true, Ordering::SeqCst);
++            return Err(ApiError::Stream(
++                "SDK Realtime wire event queue capacity exceeded".into(),
++            ));
++        }
+         if let Some(event) = self.pending_events.lock().await.pop_front() {
+             return Ok(Some(event));
+         }
+ 
+         loop {
++            if self.ingress_overflow.load(Ordering::Acquire) {
++                self.is_closed.store(true, Ordering::SeqCst);
++                return Err(ApiError::Stream(
++                    "SDK Realtime wire event queue capacity exceeded".into(),
++                ));
++            }
+             let msg = match self.rx_message.recv().await {
+-                Ok(Ok(msg)) => msg,
+-                Ok(Err(err)) => {
++                Ok(QueuedWireMessage {
++                    message: Ok(msg), ..
++                }) => msg,
++                Ok(QueuedWireMessage {
++                    message: Err(err), ..
++                }) => {
+                     self.is_closed.store(true, Ordering::SeqCst);
+                     error!("realtime websocket read failed: {err}");
+                     return Err(map_realtime_websocket_connect_error(err));
+                 }
+                 Err(_) => {
+                     self.is_closed.store(true, Ordering::SeqCst);
++                    if self.ingress_overflow.load(Ordering::Acquire) {
++                        return Err(ApiError::Stream(
++                            "SDK Realtime wire event queue capacity exceeded".into(),
++                        ));
++                    }
+                     if self.event_parser == RealtimeEventParser::FramelessBidi {
+                         error!("realtime websocket event stream ended unexpectedly");
+                         return Err(ApiError::Stream(
+@@ -832,6 +942,7 @@ pub struct RealtimeWebsocketClient {
+     provider: Provider,
+     http_client_factory: HttpClientFactory,
+     webrtc_sideband_base_url: String,
++    bounded_events: bool,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -847,9 +958,16 @@ impl RealtimeWebsocketClient {
+             provider,
+             http_client_factory,
+             webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
++            bounded_events: false,
+         }
+     }
+ 
++    /// Bound unread wire events for SDK-owned voice. Overflow ends the connection.
++    pub fn with_bounded_events(mut self) -> Self {
++        self.bounded_events = true;
++        self
++    }
++
+     /// Overrides the direct WebRTC sideband URL for local development and tests.
+     pub fn with_webrtc_sideband_base_url(mut self, base_url: String) -> Self {
+         self.webrtc_sideband_base_url = base_url;
+@@ -1059,7 +1177,7 @@ impl RealtimeWebsocketClient {
+             "realtime websocket connected"
+         );
+ 
+-        let (stream, rx_message) = WsStream::new(stream);
++        let (stream, rx_message) = WsStream::new(stream, self.bounded_events);
+         let connection = RealtimeWebsocketConnection::new(
+             stream,
+             rx_message,
+@@ -1413,6 +1531,7 @@ mod tests {
+     async fn takes_only_transcript_after_last_handoff_once() {
+         let (_tx_message, rx_message) = async_channel::unbounded();
+         let events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(false)),
+             rx_message,
+             pending_events: Arc::new(Mutex::new(VecDeque::new())),
+             transcript_state: RealtimeTranscriptState::default(),
+@@ -1465,6 +1584,7 @@ mod tests {
+         let transcript_state = RealtimeTranscriptState::default();
+         let (_first_tx, first_rx) = async_channel::unbounded();
+         let first_events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(false)),
+             rx_message: first_rx,
+             pending_events: Arc::new(Mutex::new(VecDeque::new())),
+             transcript_state: transcript_state.clone(),
+@@ -1478,6 +1598,7 @@ mod tests {
+ 
+         let (_second_tx, second_rx) = async_channel::unbounded();
+         let second_events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(false)),
+             rx_message: second_rx,
+             pending_events: Arc::new(Mutex::new(VecDeque::new())),
+             transcript_state,
+@@ -1503,6 +1624,7 @@ mod tests {
+     async fn active_transcript_retains_a_bounded_suffix() {
+         let (_tx_message, rx_message) = async_channel::unbounded();
+         let events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(false)),
+             rx_message,
+             pending_events: Arc::new(Mutex::new(VecDeque::new())),
+             transcript_state: RealtimeTranscriptState::default(),
+@@ -1545,6 +1667,7 @@ mod tests {
+     ) -> bool {
+         let (tx_message, rx_message) = async_channel::unbounded();
+         let events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(false)),
+             rx_message,
+             pending_events: Arc::new(Mutex::new(VecDeque::new())),
+             transcript_state: RealtimeTranscriptState::default(),
+@@ -1558,7 +1681,7 @@ mod tests {
+                     reason: "session ended".into(),
+                 });
+                 tx_message
+-                    .send(Ok(Message::Close(frame)))
++                    .send(QueuedWireMessage::unbounded(Ok(Message::Close(frame))))
+                     .await
+                     .expect("send close frame");
+             }
+@@ -1594,7 +1717,7 @@ mod tests {
+         let request = url.into_client_request().unwrap();
+         let connected = connector.connect(request, websocket_config());
+         let (socket, _) = connected.await.unwrap();
+-        let (stream, rx_message) = WsStream::new(socket);
++        let (stream, rx_message) = WsStream::new(socket, false);
+         let parser = RealtimeEventParser::V1;
+         let transcript = RealtimeTranscriptState::default();
+         let connection = RealtimeWebsocketConnection::new(stream, rx_message, parser, transcript);
+@@ -3222,4 +3345,164 @@ mod tests {
+         connection.close().await.expect("close");
+         server.await.expect("server task");
+     }
++    #[tokio::test]
++    async fn sdk_wire_byte_permits_release_on_receive_and_discard() {
++        let budget = Arc::new(tokio::sync::Semaphore::new(8));
++        let (tx, rx) = async_channel::bounded(2);
++        tx.send(
++            QueuedWireMessage::new(Ok(Message::Text("12345".into())), Some(Arc::clone(&budget)))
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++        assert_eq!(budget.available_permits(), 3);
++        assert!(
++            QueuedWireMessage::new(Ok(Message::Text("1234".into())), Some(Arc::clone(&budget)))
++                .is_err()
++        );
++        let message = rx.recv().await.unwrap();
++        drop(message);
++        assert_eq!(budget.available_permits(), 8);
++        tx.send(
++            QueuedWireMessage::new(
++                Ok(Message::Text("12345678".into())),
++                Some(Arc::clone(&budget)),
++            )
++            .unwrap(),
++        )
++        .await
++        .unwrap();
++        assert!(
++            QueuedWireMessage::new(
++                Ok(Message::Text("123456789".into())),
++                Some(Arc::clone(&budget))
++            )
++            .is_err()
++        );
++        drop(rx);
++        drop(tx);
++        assert_eq!(budget.available_permits(), 8);
++    }
++
++    #[tokio::test]
++    async fn sdk_wire_overflow_is_reported_outside_a_full_queue() {
++        let (tx, rx_message) = async_channel::bounded(1);
++        tx.send(QueuedWireMessage::unbounded(Ok(Message::Text("{}".into()))))
++            .await
++            .unwrap();
++        let events = RealtimeWebsocketEvents {
++            ingress_overflow: Arc::new(AtomicBool::new(true)),
++            rx_message,
++            pending_events: Arc::new(Mutex::new(VecDeque::new())),
++            transcript_state: RealtimeTranscriptState::default(),
++            event_parser: RealtimeEventParser::RealtimeV2,
++            is_closed: Arc::new(AtomicBool::new(false)),
++        };
++        let error = events.next_event().await.unwrap_err();
++        assert!(error.to_string().contains("queue capacity exceeded"));
++        assert!(events.next_event().await.unwrap().is_none());
++    }
++    #[tokio::test]
++    async fn sdk_wire_pump_overflow_terminates_without_waiting_for_reader() {
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let url = format!("ws://{}/", listener.local_addr().unwrap());
++        let server = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            let mut websocket = accept_async(socket).await.unwrap();
++            for _ in 0..=SDK_WIRE_EVENTS_CAPACITY {
++                if websocket.send(Message::Text("{}".into())).await.is_err() {
++                    break;
++                }
++            }
++            std::future::pending::<()>().await;
++        });
++        let factory = HttpClientFactory::new(ReqwestDefault);
++        let connector = WebSocketConnector::new(&factory).unwrap();
++        let (socket, _) = connector
++            .connect(url.into_client_request().unwrap(), websocket_config())
++            .await
++            .unwrap();
++        let (stream, rx_message) = WsStream::new(socket, true);
++        let connection = RealtimeWebsocketConnection::new(
++            stream,
++            rx_message,
++            RealtimeEventParser::RealtimeV2,
++            RealtimeTranscriptState::default(),
++        );
++        tokio::time::timeout(Duration::from_secs(2), async {
++            while !connection.events.ingress_overflow.load(Ordering::Acquire) {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++        assert!(connection.events.rx_message.len() <= SDK_WIRE_EVENTS_CAPACITY);
++        assert!(
++            connection
++                .next_event()
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("queue capacity exceeded")
++        );
++        tokio::time::timeout(Duration::from_secs(1), connection.writer().abort_and_join())
++            .await
++            .unwrap();
++        server.abort();
++    }
++    #[tokio::test]
++    async fn sdk_wire_overflow_survives_pending_write_ack_and_closed_fast_path() {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let ingress_overflow = Arc::new(AtomicBool::new(false));
++        let pump_overflow = Arc::clone(&ingress_overflow);
++        let pump = tokio::spawn(async move {
++            let command = rx_command.recv().await.unwrap();
++            let WsCommand::Send { tx_result, .. } = command else {
++                panic!("expected queued write")
++            };
++            // Overflow exits the independent pump without acknowledging the write.
++            pump_overflow.store(true, Ordering::Release);
++            drop(tx_result);
++        });
++        let pump_abort = pump.abort_handle();
++        let pump_task = async move {
++            let _ = pump.await;
++        }
++        .boxed()
++        .shared();
++        let (_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
++        let stream = WsStream {
++            tx_command,
++            pump_task,
++            pump_abort,
++            terminal_policy_error,
++            ingress_overflow,
++        };
++        let (_events_tx, events_rx) = async_channel::bounded(1);
++        let connection = RealtimeWebsocketConnection::new(
++            stream,
++            events_rx,
++            RealtimeEventParser::RealtimeV2,
++            RealtimeTranscriptState::default(),
++        );
++        let writer = connection.writer();
++        assert!(
++            writer
++                .send_payload("{}".into())
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("queue capacity exceeded")
++        );
++        writer.is_closed.store(true, Ordering::SeqCst);
++        assert!(
++            writer
++                .send_payload("{}".into())
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("queue capacity exceeded")
++        );
++        writer.abort_and_join().await;
++    }
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/transcript_tests.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/transcript_tests.rs
+index fa89609bb6c22adcc9eaba0ea97ab6792addd0da..27b88f5e51d36d0cd0e36d75a36bd0abce101692 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/transcript_tests.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/transcript_tests.rs
+@@ -7,6 +7,7 @@ use pretty_assertions::assert_eq;
+ fn events(transcript_state: RealtimeTranscriptState) -> RealtimeWebsocketEvents {
+     let (_, rx_message) = async_channel::unbounded();
+     RealtimeWebsocketEvents {
++        ingress_overflow: Arc::new(AtomicBool::new(false)),
+         rx_message,
+         pending_events: Arc::new(Mutex::new(VecDeque::new())),
+         transcript_state,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 31b999ba1d69c1a60165a34e38d90a2d4bc2751e..9e9cf4f527054948d5f3a77250a9859d515c2532 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -14,6 +14,8 @@ mod model_request;
+ mod prepared_request;
+ mod realtime_context;
+ mod realtime_conversation;
++/// Native input for an SDK-owned Realtime handoff, including accumulated voice context.
++pub use realtime_conversation::realtime_delegation_from_handoff as prepare_realtime_delegation_input;
+ mod realtime_history;
+ mod realtime_prompt;
+ mod request_observation;
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 394311e2539561de8a89a7c34c354594b5f1e8d8..1c71ea0c60f9ef4a60041fe01a27b7c1a72b22aa 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -71,6 +71,7 @@ use http::header::AUTHORIZATION;
+ use serde_json::json;
+ use std::collections::BTreeMap;
+ use std::collections::HashMap;
++use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+@@ -174,6 +175,22 @@ struct RealtimeConversationManagerState {
+     mode_instructions: Option<RealtimeModeInstructions>,
+     // Keep context active until the terminal transcript is recorded.
+     context_active: bool,
++    last_sdk_generation: Option<String>,
++}
++
++impl RealtimeConversationManagerState {
++    fn ensure_start_available(&self, sdk_requested: bool) -> CodexResult<()> {
++        if self
++            .conversation
++            .as_ref()
++            .is_some_and(|state| sdk_requested || state.handoff.sdk.is_some())
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Realtime conversation is already running".into(),
++            ));
++        }
++        Ok(())
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -194,8 +211,61 @@ enum RealtimeSessionKind {
+     V2,
+ }
+ 
++const SDK_HANDOFF_LIMIT: usize = 1024;
++
++#[derive(Clone, Debug)]
++pub(crate) enum SdkRealtimeCommand {
++    Audio(RealtimeAudioFrame),
++    Text(ConversationTextParams),
++    Complete { handoff_id: String, text: String },
++    Fail { handoff_id: String },
++    Interrupt { response_id: Option<String> },
++}
++
++#[derive(Debug)]
++struct SdkRealtimeState {
++    generation: String,
++    active: AtomicBool,
++    commands_tx: Sender<SdkRealtimeCommand>,
++    commands_rx: Receiver<SdkRealtimeCommand>,
++    // Retain seen IDs for the connection so duplicate provider events stay inert.
++    seen: Mutex<HashSet<String>>,
++    pending: Mutex<HashMap<String, bool>>,
++}
++
++impl SdkRealtimeState {
++    fn new(generation: String) -> Self {
++        let (commands_tx, commands_rx) = async_channel::bounded(HANDOFF_OUT_QUEUE_CAPACITY);
++        Self {
++            generation,
++            active: AtomicBool::new(true),
++            commands_tx,
++            commands_rx,
++            seen: Mutex::new(HashSet::new()),
++            pending: Mutex::new(HashMap::new()),
++        }
++    }
++
++    async fn register(&self, id: &str) -> anyhow::Result<bool> {
++        if !self.active.load(Ordering::Acquire) {
++            anyhow::bail!("SDK Realtime generation is retired");
++        }
++        let mut seen = self.seen.lock().await;
++        if seen.contains(id) {
++            return Ok(false);
++        }
++        if seen.len() == SDK_HANDOFF_LIMIT {
++            anyhow::bail!("SDK Realtime handoff capacity exceeded");
++        }
++        seen.insert(id.to_owned());
++        self.pending.lock().await.insert(id.to_owned(), false);
++        Ok(true)
++    }
++}
++
+ #[derive(Clone, Debug)]
+ struct RealtimeHandoffState {
++    sdk: Option<Arc<SdkRealtimeState>>,
+     output_tx: Sender<RealtimeOutbound>,
+     last_output: Arc<Mutex<Option<RealtimeHandoffOutput>>>,
+     stream: Arc<Mutex<RealtimeHandoffStreamState>>,
+@@ -419,6 +489,8 @@ struct OutputAudioState {
+ 
+ #[derive(Default)]
+ struct RealtimeResponseCreateQueue {
++    sdk_response_id: Option<String>,
++    sdk_cancelled_response: Option<String>,
+     active_default_response: bool,
+     pending_create: bool,
+ }
+@@ -526,6 +598,7 @@ struct ConversationState {
+ }
+ 
+ struct RealtimeStart {
++    sdk_generation: Option<String>,
+     api_provider: ApiProvider,
+     http_client_factory: HttpClientFactory,
+     realtime_sideband_base_url: Option<String>,
+@@ -560,6 +633,7 @@ impl RealtimeConversationManager {
+                 conversation: None,
+                 mode_instructions: None,
+                 context_active: false,
++                last_sdk_generation: None,
+             }),
+         }
+     }
+@@ -572,6 +646,70 @@ impl RealtimeConversationManager {
+         }
+     }
+ 
++    pub(crate) async fn sdk_enqueue(
++        &self,
++        generation: &str,
++        command: SdkRealtimeCommand,
++    ) -> CodexResult<()> {
++        let guard = self.state.lock().await;
++        let state = guard.conversation.as_ref().ok_or_else(|| {
++            CodexErr::InvalidRequest("SDK Realtime generation is not running".into())
++        })?;
++        let sdk = state
++            .handoff
++            .sdk
++            .as_ref()
++            .filter(|sdk| sdk.generation == generation && sdk.active.load(Ordering::Acquire))
++            .ok_or_else(|| CodexErr::InvalidRequest("SDK Realtime generation is stale".into()))?;
++        let result_id = match &command {
++            SdkRealtimeCommand::Complete { handoff_id, .. }
++            | SdkRealtimeCommand::Fail { handoff_id } => Some(handoff_id),
++            _ => None,
++        };
++        let mut pending = sdk.pending.lock().await;
++        if let Some(id) = result_id
++            && pending.get(id) != Some(&false)
++        {
++            return Err(CodexErr::InvalidRequest(
++                "SDK Realtime handoff is unknown or already resolved".into(),
++            ));
++        }
++        let id = result_id.cloned();
++        sdk.commands_tx.try_send(command).map_err(|_| {
++            CodexErr::InvalidRequest("SDK Realtime command queue is full or closed".into())
++        })?;
++        if let Some(id) = id {
++            pending.insert(id, true);
++        }
++        Ok(())
++    }
++
++    async fn shutdown_sdk(&self, generation: &str) -> CodexResult<bool> {
++        let state = {
++            let mut guard = self.state.lock().await;
++            match guard.conversation.as_ref() {
++                Some(state)
++                    if state
++                        .handoff
++                        .sdk
++                        .as_ref()
++                        .is_some_and(|sdk| sdk.generation == generation) => {}
++                _ if guard.last_sdk_generation.as_deref() == Some(generation) => return Ok(false),
++                _ => {
++                    return Err(CodexErr::InvalidRequest(
++                        "SDK Realtime generation is stale".into(),
++                    ));
++                }
++            }
++            guard.last_sdk_generation = Some(generation.to_owned());
++            guard.conversation.take()
++        };
++        if let Some(state) = state {
++            stop_conversation_state(state, RealtimeFanoutTaskStop::Await).await;
++        }
++        Ok(true)
++    }
++
+     #[tracing::instrument(
+         name = "realtime_conversation.running_state",
+         level = "trace",
+@@ -617,6 +755,7 @@ impl RealtimeConversationManager {
+     ) -> CodexResult<RealtimeStartOutput> {
+         let previous_state = {
+             let mut guard = self.state.lock().await;
++            guard.ensure_start_available(start.sdk_generation.is_some())?;
+             guard.conversation.take()
+         };
+         if let Some(state) = previous_state {
+@@ -632,6 +771,7 @@ impl RealtimeConversationManager {
+         mode_instructions: RealtimeModeInstructions,
+     ) -> CodexResult<RealtimeStartOutput> {
+         let RealtimeStart {
++            sdk_generation,
+             api_provider,
+             http_client_factory,
+             realtime_sideband_base_url,
+@@ -669,6 +809,7 @@ impl RealtimeConversationManager {
+         let route_handoffs = Arc::new(RealtimeHandoffAdmission::new());
+         let stop_token = CancellationToken::new();
+         let handoff = RealtimeHandoffState {
++            sdk: sdk_generation.map(|generation| Arc::new(SdkRealtimeState::new(generation))),
+             output_tx: handoff_output_tx,
+             last_output: Arc::new(Mutex::new(None)),
+             stream: Arc::new(Mutex::new(RealtimeHandoffStreamState::default())),
+@@ -690,6 +831,11 @@ impl RealtimeConversationManager {
+         };
+ 
+         let client = RealtimeWebsocketClient::new(api_provider, http_client_factory);
++        let client = if handoff.sdk.is_some() {
++            client.with_bounded_events()
++        } else {
++            client
++        };
+         let client = match realtime_sideband_base_url {
+             Some(base_url) => client.with_webrtc_sideband_base_url(base_url),
+             None => client,
+@@ -817,6 +963,9 @@ impl RealtimeConversationManager {
+             let mut guard = self.state.lock().await;
+             match guard.conversation.as_ref() {
+                 Some(state) if Arc::ptr_eq(&state.realtime_active, realtime_active) => {
++                    if let Some(sdk) = &state.handoff.sdk {
++                        guard.last_sdk_generation = Some(sdk.generation.clone());
++                    }
+                     guard.conversation.take()
+                 }
+                 _ => None,
+@@ -1221,6 +1370,26 @@ impl RealtimeConversationManager {
+         }
+     }
+ 
++    async fn shutdown_legacy(&self) -> CodexResult<()> {
++        let state = {
++            let mut guard = self.state.lock().await;
++            if guard
++                .conversation
++                .as_ref()
++                .is_some_and(|state| state.handoff.sdk.is_some())
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "SDK-owned Realtime must be closed by its owner".into(),
++                ));
++            }
++            guard.conversation.take()
++        };
++        if let Some(state) = state {
++            stop_conversation_state(state, RealtimeFanoutTaskStop::Await).await;
++        }
++        Ok(())
++    }
++
+     pub(crate) async fn shutdown(&self) -> CodexResult<()> {
+         let state = {
+             let mut guard = self.state.lock().await;
+@@ -1238,6 +1407,9 @@ async fn stop_conversation_state(
+     mut state: ConversationState,
+     fanout_task_stop: RealtimeFanoutTaskStop,
+ ) {
++    if let Some(sdk) = &state.handoff.sdk {
++        sdk.active.store(false, Ordering::Release);
++    }
+     state.realtime_active.store(false, Ordering::Relaxed);
+     state.stop_token.cancel();
+     let _ = state.input_task.await;
+@@ -1273,7 +1445,7 @@ pub(crate) async fn handle_start(
+         }
+     };
+ 
+-    if let Err(err) = handle_start_inner(sess, &sub_id, prepared_start).await {
++    if let Err(err) = handle_start_inner(sess, &sub_id, prepared_start, None).await {
+         error!("failed to start realtime conversation: {err}");
+         let message = err.to_string();
+         sess.send_event_raw(Event {
+@@ -1287,6 +1459,30 @@ pub(crate) async fn handle_start(
+     Ok(())
+ }
+ 
++pub(crate) async fn handle_start_sdk(
++    sess: &Arc<Session>,
++    generation: String,
++    mut params: ConversationStartParams,
++) -> CodexResult<()> {
++    if generation.is_empty() {
++        return Err(CodexErr::InvalidRequest(
++            "SDK Realtime generation must not be empty".into(),
++        ));
++    }
++    params.client_managed_handoffs = true;
++    params.backend_reasoning_status = false;
++    let prepared = prepare_realtime_start(sess, params).await?;
++    handle_start_inner(sess, &generation, prepared, Some(generation.clone())).await
++}
++
++pub(crate) async fn handle_close_sdk(sess: &Arc<Session>, generation: String) -> CodexResult<()> {
++    if sess.conversation.shutdown_sdk(&generation).await? {
++        send_realtime_conversation_closed(sess, generation, RealtimeConversationEnd::Requested)
++            .await;
++    }
++    Ok(())
++}
++
+ struct PreparedRealtimeConversationStart {
+     api_provider: ApiProvider,
+     http_client_factory: HttpClientFactory,
+@@ -1662,6 +1858,7 @@ async fn handle_start_inner(
+     sess: &Arc<Session>,
+     sub_id: &str,
+     prepared_start: PreparedRealtimeConversationStart,
++    sdk_generation: Option<String>,
+ ) -> CodexResult<()> {
+     let PreparedRealtimeConversationStart {
+         api_provider,
+@@ -1693,7 +1890,9 @@ async fn handle_start_inner(
+         start: realtime_start_instructions,
+         end: realtime_end_instructions,
+     };
++    let sdk_owned = sdk_generation.is_some();
+     let start = RealtimeStart {
++        sdk_generation,
+         api_provider,
+         http_client_factory,
+         realtime_sideband_base_url,
+@@ -1768,7 +1967,7 @@ async fn handle_start_inner(
+                 }
+                 _ => None,
+             };
+-            if let Some(text) = maybe_routed_text {
++            if let Some(text) = maybe_routed_text.filter(|_| !sdk_owned) {
+                 // The routed text can contain spoken prompts or workspace secrets.
+                 debug!("[realtime-text] realtime conversation text output");
+                 handoff_error = route_handoffs.route(&sess_clone, text).await.err();
+@@ -1863,7 +2062,8 @@ fn realtime_text_from_handoff_request(handoff: &RealtimeHandoffRequested) -> Opt
+         .or_else(|| realtime_transcript_delta_from_handoff(handoff))
+ }
+ 
+-fn realtime_delegation_from_handoff(handoff: &RealtimeHandoffRequested) -> Option<String> {
++/// Prepare native delegation context using the same escaping and bounds as Core admission.
++pub fn realtime_delegation_from_handoff(handoff: &RealtimeHandoffRequested) -> Option<String> {
+     let input = realtime_text_from_handoff_request(handoff)?;
+     Some(wrap_realtime_delegation_input(
+         &input,
+@@ -1987,9 +2187,18 @@ fn spawn_realtime_input_task(
+     tokio::spawn(async move {
+         let events_tx = input.events_tx.clone();
+         let transcript_state = input.events.transcript_state();
++        let stop_token = input.stop_token.clone();
++        let sdk_writer = input
++            .handoff_state
++            .sdk
++            .as_ref()
++            .map(|_| input.writer.clone());
+         let exit = run_realtime_input_task(input, /*pending_outbound*/ None).await;
++        if let Some(writer) = sdk_writer {
++            writer.abort_and_join().await;
++        }
+         if let RealtimeInputTaskExit::TransportLost { err, .. } = exit {
+-            report_realtime_transport_loss(&events_tx, err).await;
++            report_realtime_transport_loss(&events_tx, err, &stop_token).await;
+         }
+         let transcript_tail = transcript_state.take_transcript_tail().await;
+         flush_realtime_transcript_tail(&transcript_tail_flush, &transcript_tail).await;
+@@ -2072,7 +2281,7 @@ async fn run_realtime_input_task(
+             realtime_event = events.next_event() => {
+                 match realtime_event {
+                     Ok(Some(event)) => {
+-                        handle_realtime_server_event(
++                        let handling = handle_realtime_server_event(
+                             event,
+                             &writer,
+                             &events_tx,
+@@ -2080,9 +2289,12 @@ async fn run_realtime_input_task(
+                             session_kind,
+                             &mut output_audio_state,
+                             &mut response_create_queue,
+-                        )
+-                        .await
+-                        .map_err(classify_realtime_input_error)
++                        );
++                        tokio::select! {
++                            biased;
++                            _ = stop_token.cancelled() => Err(RealtimeInputTaskExit::Terminal),
++                            result = handling => result.map_err(classify_realtime_input_error),
++                        }
+                     }
+                     Ok(None) => Err(RealtimeInputTaskExit::Terminal),
+                     Err(err) => Err(RealtimeInputTaskExit::TransportLost {
+@@ -2091,6 +2303,19 @@ async fn run_realtime_input_task(
+                     }),
+                 }
+             }
++            command = async {
++                match &handoff_state.sdk {
++                    Some(sdk) => sdk.commands_rx.recv().await,
++                    None => std::future::pending().await,
++                }
++            } => {
++                let handling = handle_sdk_realtime_command(command, &writer, &handoff_state, &mut response_create_queue);
++                tokio::select! {
++                    biased;
++                    _ = stop_token.cancelled() => Err(RealtimeInputTaskExit::Terminal),
++                    result = handling => result.map_err(classify_realtime_input_error),
++                }
++            }
+             // Text input that should be sent into realtime.
+             text = text_rx.recv() => {
+                 let pending_outbound = text
+@@ -2186,12 +2411,18 @@ async fn send_realtime_pending_outbound(
+     }
+ }
+ 
+-async fn report_realtime_transport_loss(events_tx: &Sender<RealtimeEvent>, err: ApiError) {
++async fn report_realtime_transport_loss(
++    events_tx: &Sender<RealtimeEvent>,
++    err: ApiError,
++    stop_token: &CancellationToken,
++) {
+     let mapped_error = map_api_error(err);
+     error!("realtime stream closed: {mapped_error}");
+-    let _ = events_tx
+-        .send(RealtimeEvent::Error(mapped_error.to_string()))
+-        .await;
++    tokio::select! {
++        biased;
++        _ = stop_token.cancelled() => {},
++        _ = events_tx.send(RealtimeEvent::Error(mapped_error.to_string())) => {},
++    }
+ }
+ 
+ async fn flush_realtime_transcript_tail(
+@@ -2499,6 +2730,80 @@ async fn handle_handoff_output(
+     Ok(())
+ }
+ 
++async fn handle_sdk_realtime_command(
++    command: Result<SdkRealtimeCommand, RecvError>,
++    writer: &RealtimeWebsocketWriter,
++    handoff: &RealtimeHandoffState,
++    responses: &mut RealtimeResponseCreateQueue,
++) -> anyhow::Result<()> {
++    let sdk = handoff
++        .sdk
++        .as_ref()
++        .context("SDK Realtime owner is absent")?;
++    if !sdk.active.load(Ordering::Acquire) {
++        return Ok(());
++    }
++    match command.context("SDK Realtime command channel closed")? {
++        SdkRealtimeCommand::Audio(frame) => writer.send_audio_frame(frame).await?,
++        SdkRealtimeCommand::Text(params) => {
++            writer
++                .send_conversation_item_create(params.text, params.role)
++                .await?;
++            if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
++                responses.request_create(writer, "SDK text").await?;
++            }
++        }
++        SdkRealtimeCommand::Complete { handoff_id, text } => {
++            if sdk.pending.lock().await.remove(&handoff_id) != Some(true) {
++                return Ok(());
++            }
++            writer
++                .send_conversation_function_call_output(handoff_id, text)
++                .await?;
++            if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
++                responses.request_create(writer, "SDK handoff").await?;
++            }
++        }
++        SdkRealtimeCommand::Fail { handoff_id } => {
++            if sdk.pending.lock().await.remove(&handoff_id) != Some(true) {
++                return Ok(());
++            }
++            writer
++                .send_conversation_function_call_output(
++                    handoff_id,
++                    "The delegated task failed.".into(),
++                )
++                .await?;
++            if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
++                responses
++                    .request_create(writer, "SDK handoff failure")
++                    .await?;
++            }
++        }
++        SdkRealtimeCommand::Interrupt { response_id } => {
++            // Native delegation can outlive the frontend function-call response.
++            // An untargeted user interruption always retires those results.
++            if response_id.is_none() {
++                sdk.pending.lock().await.clear();
++            }
++            let target = response_id.or_else(|| responses.sdk_response_id.clone());
++            if let Some(target) = target
++                && responses.sdk_response_id.as_deref() == Some(&target)
++                && responses.sdk_cancelled_response.as_deref() != Some(&target)
++            {
++                responses.sdk_cancelled_response = Some(target.clone());
++                sdk.pending.lock().await.clear();
++                writer
++                    .send_payload(
++                        json!({"type":"response.cancel", "response_id":target}).to_string(),
++                    )
++                    .await?;
++            }
++        }
++    }
++    Ok(())
++}
++
+ async fn handle_realtime_server_event(
+     event: RealtimeEvent,
+     writer: &RealtimeWebsocketWriter,
+@@ -2545,14 +2850,19 @@ async fn handle_realtime_server_event(
+             }
+             false
+         }
+-        RealtimeEvent::ResponseCreated(_) => {
++        RealtimeEvent::ResponseCreated(response) => {
++            response_create_queue.sdk_response_id = response.response_id.clone();
++            response_create_queue.sdk_cancelled_response = None;
+             match session_kind {
+                 RealtimeSessionKind::V1 => {}
+                 RealtimeSessionKind::V2 => response_create_queue.mark_started(),
+             }
+             false
+         }
+-        RealtimeEvent::ResponseCancelled(_) => {
++        RealtimeEvent::ResponseCancelled(response) => {
++            if response.response_id == response_create_queue.sdk_response_id {
++                response_create_queue.sdk_response_id = None;
++            }
+             *output_audio_state = None;
+             match session_kind {
+                 RealtimeSessionKind::V1 => {}
+@@ -2564,7 +2874,10 @@ async fn handle_realtime_server_event(
+             }
+             false
+         }
+-        RealtimeEvent::ResponseDone(_) => {
++        RealtimeEvent::ResponseDone(response) => {
++            if response.response_id == response_create_queue.sdk_response_id {
++                response_create_queue.sdk_response_id = None;
++            }
+             *output_audio_state = None;
+             match session_kind {
+                 RealtimeSessionKind::V1 => {}
+@@ -2577,6 +2890,16 @@ async fn handle_realtime_server_event(
+             false
+         }
+         RealtimeEvent::HandoffRequested(handoff) => {
++            if let Some(sdk) = &handoff_state.sdk {
++                if !sdk.register(&handoff.handoff_id).await? {
++                    return Ok(());
++                }
++                events_tx
++                    .send(event)
++                    .await
++                    .context("SDK Realtime event channel closed")?;
++                return Ok(());
++            }
+             *output_audio_state = None;
+ 
+             match session_kind {
+@@ -2736,8 +3059,13 @@ async fn end_realtime_conversation(
+     sub_id: String,
+     end: RealtimeConversationEnd,
+ ) {
+-    let _ = sess.conversation.shutdown().await;
+-    send_realtime_conversation_closed(sess, sub_id, end).await;
++    match sess.conversation.shutdown_legacy().await {
++        Ok(()) => send_realtime_conversation_closed(sess, sub_id, end).await,
++        Err(error) => {
++            send_conversation_error(sess, sub_id, error.to_string(), CodexErrorInfo::BadRequest)
++                .await
++        }
++    }
+ }
+ 
+ async fn send_realtime_conversation_closed(
+diff --git a/codex-rs/core/src/realtime_conversation/sideband.rs b/codex-rs/core/src/realtime_conversation/sideband.rs
+index d0b835550b073253767a9bae6970ffe2dbd35889..d936d86f5933e282dd14ea76f7caaa543ac94e40 100644
+--- a/codex-rs/core/src/realtime_conversation/sideband.rs
++++ b/codex-rs/core/src/realtime_conversation/sideband.rs
+@@ -103,9 +103,11 @@ pub(super) fn spawn_webrtc_sideband_input_task(
+                         reconnecting,
+                         "failed to connect realtime sideband: {mapped_error}"
+                     );
+-                    let _ = events_tx
+-                        .send(RealtimeEvent::Error(mapped_error.to_string()))
+-                        .await;
++                    tokio::select! {
++                        biased;
++                        _ = stop_token.cancelled() => {},
++                        _ = events_tx.send(RealtimeEvent::Error(mapped_error.to_string())) => {},
++                    }
+                     break;
+                 }
+             };
+@@ -131,6 +133,9 @@ pub(super) fn spawn_webrtc_sideband_input_task(
+                 pending_outbound.take(),
+             )
+             .await;
++            if handoff_state.sdk.is_some() {
++                connection.writer().abort_and_join().await;
++            }
+ 
+             let RealtimeInputTaskExit::TransportLost {
+                 err,
+@@ -143,13 +148,14 @@ pub(super) fn spawn_webrtc_sideband_input_task(
+             if !realtime_active.load(Ordering::Relaxed) || stop_token.is_cancelled() {
+                 break;
+             }
+-            if event_parser != RealtimeEventParser::FramelessBidi
++            if handoff_state.sdk.is_some()
++                || event_parser != RealtimeEventParser::FramelessBidi
+                 || matches!(
+                     &err,
+                     ApiError::Transport(codex_client::TransportError::Policy(_))
+                 )
+             {
+-                report_realtime_transport_loss(&events_tx, err).await;
++                report_realtime_transport_loss(&events_tx, err, &stop_token).await;
+                 break;
+             }
+             if connected_at.elapsed() >= STABLE_CONNECTION_DURATION {
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index e7e8fc03dcc05a3ecdb7d260e8742c6336e85d9d..0ff326fef96a74deb5cd6ea987513f5687e704f5 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -208,6 +208,7 @@ fn classifies_outbound_api_failures_as_transport_loss() {
+ async fn clears_active_handoff_explicitly() {
+     let (tx, _rx) = bounded(1);
+     let state = RealtimeHandoffState {
++        sdk: None,
+         output_tx: tx,
+         last_output: Arc::new(Mutex::new(None)),
+         stream: Arc::new(Mutex::new(Default::default())),
+@@ -356,3 +357,464 @@ fn realtime_headers_include_only_non_default_originator() {
+         );
+     }
+ }
++
++fn sdk_manager(
++    generation: &str,
++) -> (
++    super::RealtimeConversationManager,
++    Arc<super::SdkRealtimeState>,
++) {
++    let manager = super::RealtimeConversationManager::new();
++    let sdk = Arc::new(super::SdkRealtimeState::new(generation.to_owned()));
++    let (audio_tx, _) = bounded(1);
++    let (text_tx, _) = bounded(1);
++    let (output_tx, _) = bounded(1);
++    let handoff = RealtimeHandoffState {
++        sdk: Some(Arc::clone(&sdk)),
++        output_tx,
++        last_output: Arc::new(Mutex::new(None)),
++        stream: Arc::new(Mutex::new(Default::default())),
++        client_managed_handoffs: true,
++        codex_responses_as_items: false,
++        codex_response_item_prefix: None,
++        backend_reasoning_status: false,
++        codex_response_handoff_mode: CodexResponseHandoffMode::Thinking,
++        codex_response_handoff_channel_prefixes: Arc::new(BTreeMap::new()),
++        session_kind: RealtimeSessionKind::V2,
++        event_parser: RealtimeEventParser::RealtimeV2,
++    };
++    manager.state.try_lock().unwrap().conversation = Some(super::ConversationState {
++        audio_tx,
++        text_tx,
++        session_kind: RealtimeSessionKind::V2,
++        handoff,
++        input_task: tokio::spawn(async {}),
++        fanout_task: None,
++        realtime_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++        route_handoffs: Arc::new(super::RealtimeHandoffAdmission::new()),
++        stop_token: tokio_util::sync::CancellationToken::new(),
++    });
++    (manager, sdk)
++}
++
++#[tokio::test]
++async fn sdk_handoff_is_resolved_once_and_never_by_another_generation() {
++    use super::SdkRealtimeCommand;
++    let (manager, sdk) = sdk_manager("voice-1");
++    assert!(sdk.register("call-1").await.unwrap());
++    assert!(!sdk.register("call-1").await.unwrap());
++    assert!(
++        manager
++            .sdk_enqueue(
++                "voice-0",
++                SdkRealtimeCommand::Complete {
++                    handoff_id: "call-1".into(),
++                    text: "wrong".into(),
++                }
++            )
++            .await
++            .is_err()
++    );
++    assert!(sdk.commands_rx.try_recv().is_err());
++    manager
++        .sdk_enqueue(
++            "voice-1",
++            SdkRealtimeCommand::Complete {
++                handoff_id: "call-1".into(),
++                text: "accepted repaired output".into(),
++            },
++        )
++        .await
++        .unwrap();
++    assert!(
++        manager
++            .sdk_enqueue(
++                "voice-1",
++                SdkRealtimeCommand::Fail {
++                    handoff_id: "call-1".into()
++                }
++            )
++            .await
++            .is_err()
++    );
++    assert!(
++        matches!(sdk.commands_rx.try_recv().unwrap(), SdkRealtimeCommand::Complete { text, .. } if text == "accepted repaired output")
++    );
++    assert!(sdk.commands_rx.try_recv().is_err());
++    manager.shutdown_sdk("voice-1").await.unwrap();
++}
++
++#[tokio::test]
++async fn sdk_full_command_queue_does_not_consume_a_handoff() {
++    use super::SdkRealtimeCommand;
++    let (manager, sdk) = sdk_manager("voice-1");
++    for _ in 0..super::HANDOFF_OUT_QUEUE_CAPACITY {
++        manager
++            .sdk_enqueue(
++                "voice-1",
++                SdkRealtimeCommand::Interrupt { response_id: None },
++            )
++            .await
++            .unwrap();
++    }
++    sdk.register("call-1").await.unwrap();
++    assert!(
++        manager
++            .sdk_enqueue(
++                "voice-1",
++                SdkRealtimeCommand::Fail {
++                    handoff_id: "call-1".into()
++                }
++            )
++            .await
++            .is_err()
++    );
++    sdk.commands_rx.recv().await.unwrap();
++    manager
++        .sdk_enqueue(
++            "voice-1",
++            SdkRealtimeCommand::Fail {
++                handoff_id: "call-1".into(),
++            },
++        )
++        .await
++        .unwrap();
++    manager.shutdown_sdk("voice-1").await.unwrap();
++}
++
++#[tokio::test]
++async fn sdk_close_is_idempotent_and_stale_close_cannot_stop_current_owner() {
++    let (manager, sdk) = sdk_manager("voice-2");
++    assert!(manager.shutdown_sdk("voice-1").await.is_err());
++    assert!(manager.running_state().await.is_some());
++    assert!(manager.shutdown_legacy().await.is_err());
++    assert!(manager.running_state().await.is_some());
++    assert!(manager.shutdown_sdk("voice-2").await.unwrap());
++    assert!(!sdk.active.load(std::sync::atomic::Ordering::Acquire));
++    assert!(!manager.shutdown_sdk("voice-2").await.unwrap());
++    assert!(sdk.register("late-call").await.is_err());
++    assert!(
++        manager
++            .sdk_enqueue(
++                "voice-2",
++                super::SdkRealtimeCommand::Interrupt { response_id: None }
++            )
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn sdk_handoff_capacity_preserves_duplicate_detection() {
++    let sdk = super::SdkRealtimeState::new("voice-1".into());
++    for index in 0..super::SDK_HANDOFF_LIMIT {
++        assert!(sdk.register(&format!("call-{index}")).await.unwrap());
++    }
++    assert!(!sdk.register("call-0").await.unwrap());
++    assert!(sdk.register("overflow").await.is_err());
++}
++
++async fn sdk_wire_connection() -> (
++    codex_api::RealtimeWebsocketConnection,
++    tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
++    tokio::task::JoinHandle<()>,
++) {
++    use futures::StreamExt;
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
++    let server = tokio::spawn(async move {
++        let (socket, _) = listener.accept().await.unwrap();
++        let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
++        while let Some(Ok(message)) = websocket.next().await {
++            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
++                tx.send(serde_json::from_str(&text).unwrap()).unwrap();
++            }
++        }
++    });
++    let provider = codex_api::Provider {
++        name: "SDK Realtime test".into(),
++        base_url: format!("http://{address}/v1"),
++        query_params: None,
++        headers: http::HeaderMap::new(),
++        retry: codex_api::RetryConfig {
++            max_attempts: 0,
++            base_delay: std::time::Duration::from_millis(1),
++            retry_429: false,
++            retry_5xx: false,
++            retry_transport: false,
++        },
++        stream_idle_timeout: std::time::Duration::from_secs(2),
++    };
++    let client = codex_api::RealtimeWebsocketClient::new(
++        provider,
++        codex_http_client::HttpClientFactory::new(
++            codex_http_client::OutboundProxyPolicy::ReqwestDefault,
++        ),
++    );
++    let connection = client
++        .connect(
++            codex_api::RealtimeSessionConfig {
++                instructions: String::new(),
++                initial_items: vec![],
++                delegation_ack_filler: None,
++                model: Some("test-model".into()),
++                session_id: None,
++                event_parser: RealtimeEventParser::RealtimeV2,
++                session_mode: codex_api::RealtimeSessionMode::Conversational,
++                output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
++                voice: codex_protocol::protocol::RealtimeVoice::Marin,
++            },
++            http::HeaderMap::new(),
++            http::HeaderMap::new(),
++        )
++        .await
++        .unwrap();
++    (connection, rx, server)
++}
++
++#[tokio::test]
++async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel() {
++    use super::SdkRealtimeCommand;
++    let (connection, mut wire, server) = sdk_wire_connection().await;
++    // Initial session update is unrelated to delegated text acceptance.
++    assert_eq!(wire.recv().await.unwrap()["type"], "session.update");
++    let (manager, sdk) = sdk_manager("voice-1");
++    sdk.register("call-1").await.unwrap();
++    manager
++        .sdk_enqueue(
++            "voice-1",
++            SdkRealtimeCommand::Complete {
++                handoff_id: "call-1".into(),
++                text: "accepted repaired result".into(),
++            },
++        )
++        .await
++        .unwrap();
++    let mut responses = super::RealtimeResponseCreateQueue::default();
++    let handoff = manager
++        .state
++        .lock()
++        .await
++        .conversation
++        .as_ref()
++        .unwrap()
++        .handoff
++        .clone();
++    super::handle_sdk_realtime_command(
++        sdk.commands_rx.recv().await,
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    let output = wire.recv().await.unwrap();
++    assert_eq!(output["type"], "conversation.item.create");
++    assert_eq!(output["item"]["call_id"], "call-1");
++    assert_eq!(output["item"]["output"], "accepted repaired result");
++    assert_eq!(wire.recv().await.unwrap()["type"], "response.create");
++    // A user text item must schedule its own provider response through the queue.
++    responses.active_default_response = false;
++    super::handle_sdk_realtime_command(
++        Ok(SdkRealtimeCommand::Text(ConversationTextParams {
++            text: "next turn".into(),
++            role: ConversationTextRole::User,
++        })),
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    let text = wire.recv().await.unwrap();
++    assert_eq!(text["type"], "conversation.item.create");
++    assert_eq!(text["item"]["content"][0]["text"], "next turn");
++    assert_eq!(wire.recv().await.unwrap()["type"], "response.create");
++    // A finished frontend response can still have delegated native work running.
++    responses.sdk_response_id = None;
++    sdk.register("pending-after-done").await.unwrap();
++    super::handle_sdk_realtime_command(
++        Ok(SdkRealtimeCommand::Interrupt {
++            response_id: Some("stale".into()),
++        }),
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    assert!(sdk.pending.lock().await.contains_key("pending-after-done"));
++    super::handle_sdk_realtime_command(
++        Ok(SdkRealtimeCommand::Interrupt { response_id: None }),
++        &connection.writer(),
++        &handoff,
++        &mut responses,
++    )
++    .await
++    .unwrap();
++    assert!(sdk.pending.lock().await.is_empty());
++    responses.sdk_response_id = Some("new-response".into());
++    for response in ["old-response", "new-response", "new-response"] {
++        super::handle_sdk_realtime_command(
++            Ok(SdkRealtimeCommand::Interrupt {
++                response_id: Some(response.into()),
++            }),
++            &connection.writer(),
++            &handoff,
++            &mut responses,
++        )
++        .await
++        .unwrap();
++    }
++    let cancel = wire.recv().await.unwrap();
++    assert_eq!(cancel["type"], "response.cancel");
++    assert_eq!(cancel["response_id"], "new-response");
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(50), wire.recv())
++            .await
++            .is_err()
++    );
++    manager.shutdown_sdk("voice-1").await.unwrap();
++    connection.close().await.unwrap();
++    server.abort();
++}
++
++#[tokio::test]
++async fn sdk_duplicate_handoff_is_emitted_once_without_steering_ack() {
++    let (connection, mut wire, server) = sdk_wire_connection().await;
++    wire.recv().await.unwrap();
++    let (manager, sdk) = sdk_manager("voice-1");
++    let handoff = manager
++        .state
++        .lock()
++        .await
++        .conversation
++        .as_ref()
++        .unwrap()
++        .handoff
++        .clone();
++    let (events_tx, events_rx) = bounded(2);
++    let mut audio = None;
++    let mut responses = super::RealtimeResponseCreateQueue::default();
++    for _ in 0..2 {
++        super::handle_realtime_server_event(
++            codex_api::RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
++                handoff_id: "call-1".into(),
++                item_id: "item-1".into(),
++                input_transcript: "do work".into(),
++                active_transcript: vec![],
++            }),
++            &connection.writer(),
++            &events_tx,
++            &handoff,
++            RealtimeSessionKind::V2,
++            &mut audio,
++            &mut responses,
++        )
++        .await
++        .unwrap();
++    }
++    assert!(matches!(
++        events_rx.try_recv().unwrap(),
++        codex_api::RealtimeEvent::HandoffRequested(_)
++    ));
++    assert!(events_rx.try_recv().is_err());
++    assert!(sdk.pending.lock().await.contains_key("call-1"));
++    assert!(
++        tokio::time::timeout(std::time::Duration::from_millis(50), wire.recv())
++            .await
++            .is_err()
++    );
++    manager.shutdown_sdk("voice-1").await.unwrap();
++    connection.close().await.unwrap();
++    server.abort();
++}
++
++#[test]
++fn sdk_delegation_input_retains_accumulated_voice_context() {
++    let handoff = RealtimeHandoffRequested {
++        handoff_id: "call-1".into(),
++        item_id: "item-1".into(),
++        input_transcript: "book that appointment".into(),
++        active_transcript: vec![
++            RealtimeTranscriptEntry {
++                role: "user".into(),
++                text: "my doctor is Dr Smith".into(),
++            },
++            RealtimeTranscriptEntry {
++                role: "assistant".into(),
++                text: "Tuesday is available".into(),
++            },
++        ],
++    };
++    let input = crate::prepare_realtime_delegation_input(&handoff).unwrap();
++    assert!(input.contains("book that appointment"));
++    assert!(input.contains("my doctor is Dr Smith"));
++    assert!(input.contains("Tuesday is available"));
++    assert_eq!(input, realtime_delegation_from_handoff(&handoff).unwrap());
++    let empty = RealtimeHandoffRequested {
++        input_transcript: String::new(),
++        active_transcript: vec![],
++        ..handoff
++    };
++    assert_eq!(crate::prepare_realtime_delegation_input(&empty), None);
++}
++
++#[tokio::test]
++async fn sdk_owner_cannot_be_replaced_by_legacy_start() {
++    let (manager, sdk) = sdk_manager("owned");
++    sdk.register("pending-call").await.unwrap();
++    {
++        let mut state = manager.state.lock().await;
++        assert!(state.ensure_start_available(false).is_err());
++        assert!(state.ensure_start_available(true).is_err());
++        assert!(sdk.pending.lock().await.contains_key("pending-call"));
++        // Preserve historical normal-to-normal replacement policy.
++        state.conversation.as_mut().unwrap().handoff.sdk = None;
++        assert!(state.ensure_start_available(false).is_ok());
++        assert!(state.ensure_start_available(true).is_err());
++        state.conversation.as_mut().unwrap().handoff.sdk = Some(Arc::clone(&sdk));
++    }
++    manager.shutdown_sdk("owned").await.unwrap();
++}
++
++#[tokio::test]
++async fn sdk_transport_failure_reporting_unblocks_when_close_cancels_full_queue() {
++    let (tx, _rx) = bounded(1);
++    tx.send(codex_api::RealtimeEvent::Error("previous event".into()))
++        .await
++        .unwrap();
++    let stop = tokio_util::sync::CancellationToken::new();
++    let task_stop = stop.clone();
++    let reporter = tokio::spawn(async move {
++        super::report_realtime_transport_loss(
++            &tx,
++            ApiError::Stream("transport failed".into()),
++            &task_stop,
++        )
++        .await;
++    });
++    tokio::task::yield_now().await;
++    stop.cancel();
++    tokio::time::timeout(std::time::Duration::from_secs(1), reporter)
++        .await
++        .unwrap()
++        .unwrap();
++}
++
++#[tokio::test]
++async fn sdk_close_joins_socket_pump_for_concurrent_callers() {
++    let (connection, mut wire, server) = sdk_wire_connection().await;
++    wire.recv().await.unwrap();
++    let writer = connection.writer();
++    let other = writer.clone();
++    tokio::join!(writer.abort_and_join(), other.abort_and_join());
++    assert!(writer.send_payload("{}".into()).await.is_err());
++    // The peer observes socket teardown before joined close has completed.
++    tokio::time::timeout(std::time::Duration::from_secs(1), server)
++        .await
++        .unwrap()
++        .unwrap();
++    writer.abort_and_join().await;
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index db336da2bc49e1a31c5b611ff84626dadb79d3b0..922fa928f367f7a2adf947dba72689beac88c857 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -508,6 +508,108 @@ pub(super) async fn submission_loop(
+                     clean_background_terminals(&sess).await;
+                     false
+                 }
++                Op::RealtimeConversationStartSdk {
++                    generation,
++                    params,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        crate::realtime_conversation::handle_start_sdk(&sess, generation, params)
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationAudioSdk {
++                    generation,
++                    params,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Audio(
++                                    params.frame,
++                                ),
++                            )
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationTextSdk {
++                    generation,
++                    params,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Text(params),
++                            )
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationCompleteSdk {
++                    generation,
++                    handoff_id,
++                    text,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Complete {
++                                    handoff_id,
++                                    text,
++                                },
++                            )
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationFailSdk {
++                    generation,
++                    handoff_id,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Fail {
++                                    handoff_id,
++                                },
++                            )
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationInterruptSdk {
++                    generation,
++                    response_id,
++                    reply,
++                } => {
++                    let _ = reply.send(
++                        sess.conversation
++                            .sdk_enqueue(
++                                &generation,
++                                crate::realtime_conversation::SdkRealtimeCommand::Interrupt {
++                                    response_id,
++                                },
++                            )
++                            .await,
++                    );
++                    false
++                }
++                Op::RealtimeConversationCloseSdk { generation, reply } => {
++                    let _ = reply.send(
++                        crate::realtime_conversation::handle_close_sdk(&sess, generation).await,
++                    );
++                    false
++                }
+                 Op::RealtimeConversationStart(params) => {
+                     if let Err(err) =
+                         handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 6d9005e4c1b836673af6822a156e30ccf743dcb8..a70babe058ad1dee5dab5d7d4b942b6f8d88b093 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -611,6 +611,55 @@ pub enum Op {
+     /// Use this when callers intentionally want to stop long-lived background shells.
+     CleanBackgroundTerminals,
+ 
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationStartSdk {
++        generation: String,
++        params: ConversationStartParams,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationAudioSdk {
++        generation: String,
++        params: ConversationAudioParams,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationTextSdk {
++        generation: String,
++        params: ConversationTextParams,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationCompleteSdk {
++        generation: String,
++        handoff_id: String,
++        text: String,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationFailSdk {
++        generation: String,
++        handoff_id: String,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationInterruptSdk {
++        generation: String,
++        response_id: Option<String>,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
++    /// SDK-owned Realtime operation, fenced by connection generation.
++    RealtimeConversationCloseSdk {
++        generation: String,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
+     /// Start a realtime conversation stream.
+     RealtimeConversationStart(ConversationStartParams),
+ 
+@@ -944,6 +993,13 @@ impl Op {
+             Self::Interrupt => "interrupt",
+             Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
+             Self::CleanBackgroundTerminals => "clean_background_terminals",
++            Self::RealtimeConversationStartSdk { .. } => "realtime_conversation_start_sdk",
++            Self::RealtimeConversationAudioSdk { .. } => "realtime_conversation_audio_sdk",
++            Self::RealtimeConversationTextSdk { .. } => "realtime_conversation_text_sdk",
++            Self::RealtimeConversationCompleteSdk { .. } => "realtime_conversation_complete_sdk",
++            Self::RealtimeConversationFailSdk { .. } => "realtime_conversation_fail_sdk",
++            Self::RealtimeConversationInterruptSdk { .. } => "realtime_conversation_interrupt_sdk",
++            Self::RealtimeConversationCloseSdk { .. } => "realtime_conversation_close_sdk",
+             Self::RealtimeConversationStart(_) => "realtime_conversation_start",
+             Self::RealtimeConversationAudio(_) => "realtime_conversation_audio",
+             Self::RealtimeConversationText(_) => "realtime_conversation_text",

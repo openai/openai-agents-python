@@ -39,10 +39,11 @@ The built-in provider uses the supported Decisions backend without a model-selec
 
 ## Bind a provider to an Agent
 
-The `decisions` setting is separate from the Agent's generative `model` and `provider`. This example checks a proposed answer before accepting it. A failed check requests one continuation of the same turn.
+The `decisions` setting is separate from the Agent's generative `model` and `provider`. Set `OPENAI_MODEL` to the generative model to use. This example checks a proposed answer before accepting it. A failed check requests one continuation of the same turn.
 
 ```python
 import asyncio
+import os
 
 from agents import Agent, CompletionContext, ContinueTurn, OpenAIDecisions
 
@@ -63,6 +64,7 @@ async def main() -> None:
     async with OpenAIDecisions() as decisions:
         agent = Agent(
             instructions="Help the user troubleshoot their connection.",
+            model=os.environ["OPENAI_MODEL"],
             decisions=decisions,
             before_complete=check_answer,
         )
@@ -83,7 +85,7 @@ Any object implementing `DecisionProvider.get_decision(request)` can replace `Op
 
 Use the same provider through `await decide(question, input=..., provider=...)`, `await agent.decide(...)`, or the callback helpers. `Agent.decide()` is a standalone convenience: it does not open a run or use history.
 
-An explicit `decisions=` on `agent.run()` or `agent.session()` overrides the Agent default for that opening. A helper's `provider=` overrides it for one call. Provider selection is captured when opening starts and stays fixed for that Session. Agent and Session neither serialize nor close borrowed providers. `OpenAIDecisions(client=...)` also leaves a supplied OpenAI client open.
+Provider defaults are captured when opening starts. A callback uses its exact captured Agent profile's provider, then the captured root default. An explicit `decisions=` on `agent.run()` or `agent.session()` overrides those defaults across profiles for that opening. A helper's `provider=` overrides them for one call. Profile changes do not retarget an in-flight decision. Agent and Session neither serialize nor close borrowed providers. `OpenAIDecisions(client=...)` also leaves a supplied OpenAI client open.
 
 ## Choose an explicit generative fallback
 

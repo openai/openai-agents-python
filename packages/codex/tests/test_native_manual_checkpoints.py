@@ -1394,7 +1394,11 @@ async def test_manual_continuation_rejects_reordered_native_receipts_before_io(
         if corruption == "early_receipt":
             receipt = frame["accepted_replies"].pop("call-B")
             frame["reply_order"].remove("call-B")
-            raw["history"].append({"type": "response_item", "payload": receipt})
+            raw["history"].append(
+                receipt
+                if receipt.get("type") == "response_item"
+                else {"type": "response_item", "payload": receipt}
+            )
         else:
             frame["pending_manual"].reverse()
         changed = SessionState.from_json(json.dumps(raw))
