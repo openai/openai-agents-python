@@ -32,7 +32,7 @@ from agents.classic.extensions.experimental.codex.turn_options import (
     coerce_turn_options,
 )
 
-from ._function_tools import FunctionTool, function_tool
+from ._function_tools import _PythonTool, function_tool
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -46,7 +46,7 @@ def codex_tool(
     description: str = "Run an external Codex CLI task in the configured workspace.",
     persist_session: bool = False,
     on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None = None,
-) -> FunctionTool[Any, Any]:
+) -> _PythonTool[Any, object]:
     """Declare external CLI delegation without starting a subprocess.
 
     The application authorizes CLI credentials, executable and workspace through
