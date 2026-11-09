@@ -327,7 +327,11 @@
     {
       "path": "0092-preserve-captured-profile-model-settings.patch",
       "sha256": "dfeefbabe843edd1bee2c2fc93fb771d955daf5b1a500eff7565c737bf1c42eb"
+    },
+    {
+      "path": "0097-provider-owned-request-validation.patch",
+      "sha256": "54574b90d443e0c9eeb2b13d8259d3c6e894bf3f259783547c7d05ed803f77cb"
     }
   ],
-  "result_tree": "f872e1737be0a9cd97c45ea51a322c3ca9b209ba"
+  "result_tree": "788855f352cd44315d9e154996d29cf0cac250b0"
 }
