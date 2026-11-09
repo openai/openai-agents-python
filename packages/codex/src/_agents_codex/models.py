@@ -167,7 +167,7 @@ class ChatCompletionsModel:
                         },
                     }
                 )
-        options = {
+        options: dict[str, Any] = {
             key: request.body[key]
             for key in (
                 "temperature",
