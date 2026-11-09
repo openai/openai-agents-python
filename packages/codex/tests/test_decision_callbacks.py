@@ -614,6 +614,49 @@ async def test_decision_usage_does_not_consume_model_budget(responses):
     assert len(decisions.requests) == len(responses.requests) == 1
 
 
+@pytest.mark.parametrize("inflight", [False, True], ids=["after-timeout", "inflight-result"])
+async def test_expired_function_tool_rejects_decisions(responses, inflight):
+    requests, cancelled, rejected = [], [], []
+
+    class Decisions:
+        async def get_decision(self, request):
+            requests.append(request)
+            if inflight:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append("provider")
+            return DecisionResponse(value=True)
+
+    @function_tool(callback_timeout=0.1, timeout_behavior="error_as_result")
+    async def lookup(context: ToolContext[None]) -> str:
+        """Recover after a tool callback times out."""
+        if not inflight:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append("tool")
+        with pytest.raises(asyncio.CancelledError if inflight else RuntimeError):
+            await context.decide("Ready?", input="Synthetic evidence")
+        rejected.append(True)
+        return "late output"
+
+    responses.respond(function_call("lookup", {}, "expired-tool"))
+    responses.respond(assistant_output("recovered"))
+    agent = Agent(
+        instructions="Use lookup.",
+        tools=[lookup],
+        provider=generative_provider(responses),
+        decisions=Decisions(),
+    )
+    async with timeout(10), agent.session() as session:
+        result = await (await session.submit("Read.")).get_result()
+        assert result.final_output == "recovered"
+    assert cancelled == ["provider" if inflight else "tool"]
+    assert rejected == [True]
+    assert len(requests) == int(inflight)
+
+
 async def test_live_yielded_tool_can_decide_after_native_root_completion(responses):
     from tests.test_native_code_mode import code_call
 

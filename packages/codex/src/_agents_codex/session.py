@@ -8631,6 +8631,7 @@ class Session(Generic[ContextT, OutputT]):
                     and not state.failure.done()
                     and not self._closing
                     and not _native_callback_cancelled(state)
+                    and active()
                 ),
                 provider,
             ):
