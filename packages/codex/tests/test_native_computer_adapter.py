@@ -244,17 +244,22 @@ async def test_mouse_modifiers_allow_positional_only_and_older_drivers(keys):
 
 
 @pytest.mark.parametrize("completed", [False, True])
-async def test_cancelled_sync_factory_joins_issued_future_before_disposal(completed):
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_cancelled_sync_factory_joins_issued_future_before_disposal(completed, wrapped):
     driver, disposed = Driver(), []
     entered, release = threading.Event(), threading.Event()
     future = asyncio.get_running_loop().create_future()
     if completed:
         future.set_result(driver)
 
+    class IssuedAcquisition:
+        def __await__(self):
+            return future.__await__()
+
     def create(_):
         entered.set()
         assert release.wait(5)
-        return future
+        return IssuedAcquisition() if wrapped else future
 
     resources = _ComputerResources()
     task = asyncio.create_task(
@@ -276,6 +281,39 @@ async def test_cancelled_sync_factory_joins_issued_future_before_disposal(comple
         await asyncio.wait_for(task, 5)
     assert disposed == []
     assert driver.calls == []
+    await resources.close()
+    await resources.close()
+    assert disposed == [driver]
+
+
+async def test_cancelled_entered_custom_awaitable_is_joined_once_before_disposal():
+    driver, disposed, awaits = Driver(), [], []
+    entered = asyncio.Event()
+    future = asyncio.get_running_loop().create_future()
+
+    class IssuedAcquisition:
+        def __await__(self):
+            awaits.append(True)
+            entered.set()
+            return future.__await__()
+
+    resources = _ComputerResources()
+    task = asyncio.create_task(
+        invoke(
+            computer_tool(ComputerProvider(lambda _: IssuedAcquisition(), disposed.append)),
+            resources,
+            {"actions": [{"type": "wait"}]},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    future.set_result(driver)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert awaits == [True]
+    assert disposed == driver.calls == []
     await resources.close()
     await resources.close()
     assert disposed == [driver]

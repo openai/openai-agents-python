@@ -223,8 +223,10 @@ class _CapturedComputer(_CapturedFunction):
                             created = value
 
                             async def acquire() -> Computer:
-                                if asyncio.isfuture(value):
-                                    return retain(await asyncio.shield(value))
+                                nonlocal created
+                                if not inspect.iscoroutine(value):
+                                    created = asyncio.ensure_future(value)
+                                    return retain(await asyncio.shield(created))
                                 return retain(await value)
 
                             return acquire()
@@ -234,16 +236,21 @@ class _CapturedComputer(_CapturedFunction):
                         await _call_callback(create_owned, admit)
                     finally:
                         # A worker can return an already-issued acquisition after
-                        # cancellation. Keep its original Future visible even if
+                        # cancellation. Keep its awaitable visible even if
                         # the callback runner closes our unentered wrapper.
-                        if asyncio.isfuture(created) and lease.driver is None:
+                        if (
+                            created is not None
+                            and not inspect.iscoroutine(created)
+                            and lease.driver is None
+                        ):
+                            acquisition = asyncio.ensure_future(created)
                             cancelled: asyncio.CancelledError | None = None
-                            while not created.done():
+                            while not acquisition.done():
                                 try:
-                                    await asyncio.shield(created)
+                                    await asyncio.shield(acquisition)
                                 except asyncio.CancelledError as error:
                                     cancelled = cancelled or error
-                            retain(created.result())
+                            retain(acquisition.result())
                             if cancelled is not None:
                                 raise cancelled
                         elif (
