@@ -8,6 +8,7 @@ import os
 import pickle
 import subprocess
 import sys
+from pathlib import Path
 from typing import get_overloads
 
 import pytest
@@ -116,3 +117,38 @@ async def test_persistent_cli_tool_requires_an_active_native_session_owner() -> 
     binding = declaration._bind(None, None, declaration)
     with pytest.raises(RuntimeError, match="active native Session callback"):
         await binding.callback(None, prompt="Inspect", thread_id=None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Synthetic executable uses a Unix shebang")
+async def test_shared_cli_relocation_keeps_the_existing_bundled_executable_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agents._codex_cli import exec as shared_exec
+    from agents._codex_cli.codex import Codex
+
+    package_root = tmp_path / "installed" / "agents"
+    relocated_module = package_root / "_codex_cli" / "exec.py"
+    relocated_module.parent.mkdir(parents=True)
+    relocated_module.write_text("# Shared CLI module installation location.\n")
+    executable = (
+        package_root / "classic" / "extensions" / "vendor" / "fixture-target" / "codex" / "codex"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_text(
+        f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
+        "print(json.dumps({'type': 'thread.started', 'thread_id': 'bundled-thread'}))\n"
+        "print(json.dumps({'type': 'item.completed', 'item': "
+        "{'id': 'message', 'type': 'agent_message', 'text': 'bundled CLI ran'}}))\n"
+        "print(json.dumps({'type': 'turn.completed', 'usage': "
+        "{'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}))\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.delenv("CODEX_PATH", raising=False)
+    monkeypatch.setattr(shared_exec.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shared_exec, "__file__", str(relocated_module))
+    monkeypatch.setattr(shared_exec, "_platform_target_triple", lambda: "fixture-target")
+
+    assert shared_exec.find_codex_path() == str(executable)
+    result = await Codex().start_thread().run("Inspect the workspace.")
+    assert result.final_response == "bundled CLI ran"

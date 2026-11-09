@@ -284,7 +284,7 @@ def find_codex_path() -> str:
         return which_path
 
     target_triple = _platform_target_triple()
-    vendor_root = Path(__file__).resolve().parent.parent.parent / "vendor"
+    vendor_root = Path(__file__).resolve().parent.parent / "classic" / "extensions" / "vendor"
     arch_root = vendor_root / target_triple
     binary_name = "codex.exe" if sys.platform.startswith("win") else "codex"
     binary_path = arch_root / "codex" / binary_name
