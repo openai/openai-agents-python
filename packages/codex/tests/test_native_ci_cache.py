@@ -494,7 +494,6 @@ def test_native_publication_is_a_global_barrier_for_donor_runs() -> None:
     caller = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
     jobs = caller["jobs"]
     producers = {"produce-linux", "produce-windows", "produce-macos"}
-    early_pr_checks = {"lint-pr", "build-docs-pr"}
 
     def ancestors(name: str) -> set[str]:
         needs = jobs[name].get("needs", [])
@@ -502,8 +501,11 @@ def test_native_publication_is_a_global_barrier_for_donor_runs() -> None:
             needs = [needs]
         return set(needs).union(*(ancestors(parent) for parent in needs))
 
-    for name in jobs.keys() - producers - early_pr_checks - {"changes"}:
-        assert producers <= ancestors(name), name
+    for name in jobs.keys() - producers - {"changes"}:
+        if name.endswith("-pr"):
+            assert "github.event_name == 'pull_request'" in jobs[name]["if"], name
+        else:
+            assert producers <= ancestors(name), name
     for name in producers:
         assert jobs[name]["needs"] == "changes"
     steps = _steps()
@@ -570,6 +572,151 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     for name in ("native-linux", "native-macos"):
         assert _condition(jobs[name]["if"], values) is native
     assert _condition(jobs["native-windows"]["if"], values) is (native and windows == "true")
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos", "windows"])
+@pytest.mark.parametrize(
+    ("event", "native_only", "code", "windows", "result", "expected"),
+    [
+        ("pull_request", False, "true", "true", "success", True),
+        ("pull_request", False, "true", "false", "success", True),
+        ("pull_request", False, "true", "true", "failure", False),
+        ("pull_request", False, "false", "true", "skipped", False),
+        ("pull_request", True, "true", "true", "success", False),
+        ("push", False, "true", "true", "success", False),
+        ("merge_group", False, "true", "true", "success", False),
+        ("workflow_dispatch", False, "true", "true", "success", False),
+    ],
+)
+def test_pr_qualification_uses_only_its_own_published_snapshot(
+    platform: str,
+    event: str,
+    native_only: bool,
+    code: str,
+    windows: str,
+    result: str,
+    expected: bool,
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    qualification = jobs[f"native-{platform}-pr"]
+    trusted = jobs[f"native-{platform}"]
+    producer = f"produce-{platform}"
+    assert qualification["needs"] == ["changes", producer]
+    assert qualification["with"] == trusted["with"]
+    assert qualification["uses"] == trusted["uses"]
+    assert (
+        qualification["with"]["artifact_id"] == "${{ needs." + producer + ".outputs.artifact_id }}"
+    )
+    assert (
+        qualification["with"]["artifact_digest"]
+        == "${{ needs." + producer + ".outputs.artifact_digest }}"
+    )
+    values = {
+        "github.event_name": event,
+        "inputs.native_only": native_only,
+        "needs.changes.result": "success",
+        "needs.changes.outputs.code": code,
+        "needs.changes.outputs.windows": windows,
+        f"needs.{producer}.result": result,
+    }
+    assert _condition(qualification["if"], values) is (
+        expected and (platform != "windows" or windows == "true")
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "platform"),
+    [
+        ("typecheck", "linux"),
+        ("mypy-win32", "linux"),
+        ("tests", "linux"),
+        ("native-macos-sandbox-shards", "macos"),
+        ("tests-windows", "windows"),
+    ],
+)
+def test_sdk_jobs_consume_only_their_matching_qualification(name: str, platform: str) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    trusted, pr = jobs[name], jobs[f"{name}-pr"]
+    for key in ("runs-on", "timeout-minutes", "strategy", "steps"):
+        assert pr.get(key) == trusted.get(key)
+    fields = {"NATIVE_ARTIFACT_ID": "artifact_id", "NATIVE_ARTIFACT_DIGEST": "artifact_digest"}
+    for job, qualifier in ((trusted, f"native-{platform}"), (pr, f"native-{platform}-pr")):
+        expected = ["changes", qualifier] if name == "tests" else qualifier
+        assert job["needs"] == expected
+        assert all(
+            job["env"][key] == "${{ needs." + qualifier + ".outputs." + field + " }}"
+            for key, field in fields.items()
+        )
+        consumer = next(
+            step for step in job["steps"] if step.get("uses") == "./.github/actions/use-native"
+        )
+        assert consumer["with"] == {
+            "artifact-id": "${{ env.NATIVE_ARTIFACT_ID }}",
+            "artifact-digest": "${{ env.NATIVE_ARTIFACT_DIGEST }}",
+        }
+    assert {key: value for key, value in pr["env"].items() if key not in fields} == {
+        key: value for key, value in trusted["env"].items() if key not in fields
+    }
+
+
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ("valid", None),
+        ("input_id", ""),
+        ("input_id", "12,13"),
+        ("input_digest", "malformed"),
+        ("id", 13),
+        ("digest", "sha256:" + "0" * 64),
+        ("name", "native-macOS-ARM64"),
+        ("expired", True),
+        ("workflow_run", {"id": 34}),
+    ],
+)
+def test_qualified_package_download_is_bound_to_upload_outputs(
+    monkeypatch: pytest.MonkeyPatch, change: str, value: object
+) -> None:
+    action = yaml.load(
+        (ROOT / ".github/actions/use-native/action.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    verify, download, *_ = action["runs"]["steps"]
+    assert download["with"]["artifact-ids"] == "${{ inputs.artifact-id }}"
+    assert download["with"]["digest-mismatch"] == "error"
+    assert download["with"]["github-token"] == "${{ github.token }}"
+    metadata = {
+        "id": 12,
+        "name": "native-Linux-X64",
+        "digest": "sha256:" + "a" * 64,
+        "expired": False,
+        "workflow_run": {"id": 33},
+    }
+    monkeypatch.setenv("NATIVE_ARTIFACT_ID", str(value) if change == "input_id" else "12")
+    monkeypatch.setenv(
+        "NATIVE_ARTIFACT_DIGEST", str(value) if change == "input_digest" else "a" * 64
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/repo")
+    monkeypatch.setenv("GITHUB_RUN_ID", "33")
+    monkeypatch.setenv("RUNNER_OS", "Linux")
+    monkeypatch.setenv("RUNNER_ARCH", "X64")
+    if change in metadata:
+        metadata[change] = value
+
+    def lookup(command: list[str], **kwargs: object) -> str:
+        assert not change.startswith("input_")
+        assert command == ["gh", "api", "repos/example/repo/actions/artifacts/12"]
+        return json.dumps(metadata)
+
+    monkeypatch.setattr(subprocess, "check_output", lookup)
+    script = verify["run"].split("\n", 1)[1].removesuffix("PY\n")
+    if change == "valid":
+        exec(compile(script, "verify-qualified-package", "exec"), {})
+    else:
+        with pytest.raises(SystemExit, match="native package|Native package"):
+            exec(compile(script, "verify-qualified-package", "exec"), {})
 
 
 @pytest.mark.parametrize(
@@ -1049,6 +1196,7 @@ def test_manual_native_entrypoint_uses_the_existing_qualified_package_pipeline(
             (ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader
         )
         conditions = {
+            "github.event_name": event,
             "inputs.native_only": False,
             "needs.changes.result": "success",
             "needs.changes.outputs.code": "true",

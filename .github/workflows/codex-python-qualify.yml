@@ -15,6 +15,11 @@ on:
       artifact_digest:
         type: string
         required: true
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build.outputs.artifact_id }}
+      artifact_digest:
+        value: ${{ jobs.build.outputs.artifact_digest }}
 
 permissions:
   contents: read
@@ -23,6 +28,9 @@ permissions:
 jobs:
   build:
     name: Native package (${{ inputs.runner }})
+    outputs:
+      artifact_id: ${{ steps.qualified-package.outputs.artifact-id }}
+      artifact_digest: ${{ steps.qualified-package.outputs.artifact-digest }}
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64"}' ||
@@ -312,6 +320,7 @@ jobs:
           )
           PYTHON
       - name: Share the package and test executor
+        id: qualified-package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-${{ runner.os }}-${{ runner.arch }}

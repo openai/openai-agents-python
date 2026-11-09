@@ -1,11 +1,51 @@
 name: Use the shared native build
 description: Reuse this workflow run's SDK wheel and test executor without compiling Rust.
+inputs:
+  artifact-id:
+    description: The artifact ID returned by native package qualification.
+    required: true
+  artifact-digest:
+    description: The SHA-256 digest returned by native package qualification.
+    required: true
 runs:
   using: composite
   steps:
+    - name: Verify the qualified package's artifact identity
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NATIVE_ARTIFACT_ID: ${{ inputs.artifact-id }}
+        NATIVE_ARTIFACT_DIGEST: ${{ inputs.artifact-digest }}
+      run: |
+        python -I -S - <<'PY'
+        import json
+        import os
+        import re
+        import subprocess
+
+        artifact_id = os.environ["NATIVE_ARTIFACT_ID"]
+        digest = os.environ["NATIVE_ARTIFACT_DIGEST"]
+        if not re.fullmatch(r"[1-9][0-9]*", artifact_id) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise SystemExit("Missing or invalid native package qualification outputs")
+
+        repository = os.environ["GITHUB_REPOSITORY"]
+        artifact = json.loads(subprocess.check_output(
+            ["gh", "api", f"repos/{repository}/actions/artifacts/{artifact_id}"],
+            text=True, timeout=30,
+        ))
+        expected_name = f"native-{os.environ['RUNNER_OS']}-{os.environ['RUNNER_ARCH']}"
+        if (str(artifact.get("id")) != artifact_id
+                or artifact.get("digest") != "sha256:" + digest
+                or artifact.get("expired") is not False
+                or artifact.get("name") != expected_name
+                or str((artifact.get("workflow_run") or {}).get("id")) != os.environ["GITHUB_RUN_ID"]):
+            raise SystemExit("Native package artifact does not match this run's qualification outputs")
+        PY
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
-        name: native-${{ runner.os }}-${{ runner.arch }}
+        artifact-ids: ${{ inputs.artifact-id }}
+        digest-mismatch: error
+        github-token: ${{ github.token }}
         path: ${{ runner.temp }}/agents-native
     - name: Select native artifacts
       shell: bash

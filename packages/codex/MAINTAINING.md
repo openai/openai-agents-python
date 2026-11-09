@@ -96,7 +96,7 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 #### Identify the artifact
 
-Every selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact before any SDK or installed-package qualification starts in that run. Qualification repacks the current Python SDK around the verified native payload, then publishes the existing `native-<OS>-<ARCH>` output. Installed-package, IPC, executable-symbol and receipt checks remain required.
+On pull requests, each selected platform starts installed-package qualification after publishing its own `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact. Push runs publish all selected snapshots before SDK execution or installed-package qualification so the snapshots remain eligible for reuse. Qualification repacks the current Python SDK around the verified native payload and publishes `native-<OS>-<ARCH>`. SDK checks download that run's qualified artifact by ID and verify its SHA-256 digest. Installed-package, IPC, executable-symbol and receipt checks remain required.
 
 #### Check donor eligibility
 

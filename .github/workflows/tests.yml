@@ -470,47 +470,85 @@ jobs:
       native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
+  # Trusted pushes require every native publication before any SDK code runs.
+  # PRs cannot donate artifacts and qualify each platform as soon as its own snapshot is ready.
   native-linux:
+    name: ${{ github.event_name != 'pull_request' && 'native-linux' || 'native-linux (after native publication)' }}
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() && github.event_name != 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
     uses: ./.github/workflows/codex-python-qualify.yml
-    with:
+    with: &native-linux-inputs
       runner: ubuntu-24.04
       artifact_id: ${{ needs.produce-linux.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-linux.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
+  native-linux-pr:
+    name: ${{ github.event_name == 'pull_request' && 'native-linux' || 'native-linux (pull request)' }}
+    needs: [changes, produce-linux]
+    if: >-
+      !inputs.native_only && !cancelled() && github.event_name == 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-linux.result == 'success'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with: *native-linux-inputs
+
   native-windows:
+    name: ${{ github.event_name != 'pull_request' && 'native-windows' || 'native-windows (after native publication)' }}
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() && github.event_name != 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) && needs.changes.outputs.windows == 'true'
     uses: ./.github/workflows/codex-python-qualify.yml
-    with:
+    with: &native-windows-inputs
       runner: windows-latest
       artifact_id: ${{ needs.produce-windows.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-windows.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
+  native-windows-pr:
+    name: ${{ github.event_name == 'pull_request' && 'native-windows' || 'native-windows (pull request)' }}
+    needs: [changes, produce-windows]
+    if: >-
+      !inputs.native_only && !cancelled() && github.event_name == 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-windows.result == 'success' && needs.changes.outputs.windows == 'true'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with: *native-windows-inputs
+
   native-macos:
+    name: ${{ github.event_name != 'pull_request' && 'native-macos' || 'native-macos (after native publication)' }}
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
-      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      !cancelled() && github.event_name != 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
       needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
     uses: ./.github/workflows/codex-python-qualify.yml
-    with:
+    with: &native-macos-inputs
       runner: macos-latest
       artifact_id: ${{ needs.produce-macos.outputs.artifact_id }}
       artifact_digest: ${{ needs.produce-macos.outputs.artifact_digest }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-macos-pr:
+    name: ${{ github.event_name == 'pull_request' && 'native-macos' || 'native-macos (pull request)' }}
+    needs: [changes, produce-macos]
+    if: >-
+      !inputs.native_only && !cancelled() && github.event_name == 'pull_request' &&
+      needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-macos.result == 'success'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with: *native-macos-inputs
 
   lint:
     # Push artifacts can be reused later, so those runs gate SDK execution on native publication.
@@ -571,11 +609,15 @@ jobs:
     steps: *lint-steps
 
   typecheck:
-    if: ${{ !inputs.native_only }}
+    name: ${{ github.event_name != 'pull_request' && 'typecheck' || 'typecheck (after native publication)' }}
+    if: ${{ !inputs.native_only && github.event_name != 'pull_request' }}
     needs: native-linux
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    runs-on: &typecheck-runner ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
-    steps:
+    env:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux.outputs.artifact_digest }}
+    steps: &typecheck-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -602,6 +644,9 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          artifact-id: ${{ env.NATIVE_ARTIFACT_ID }}
+          artifact-digest: ${{ env.NATIVE_ARTIFACT_DIGEST }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -612,12 +657,27 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping typecheck for non-code changes."
 
-  mypy-win32:
-    if: ${{ !inputs.native_only }}
-    needs: native-linux
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+  typecheck-pr:
+    name: ${{ github.event_name == 'pull_request' && 'typecheck' || 'typecheck (pull request)' }}
+    if: ${{ !inputs.native_only && github.event_name == 'pull_request' }}
+    needs: native-linux-pr
+    runs-on: *typecheck-runner
     timeout-minutes: 100
-    steps:
+    env:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux-pr.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux-pr.outputs.artifact_digest }}
+    steps: *typecheck-steps
+
+  mypy-win32:
+    name: ${{ github.event_name != 'pull_request' && 'mypy-win32' || 'mypy-win32 (after native publication)' }}
+    if: ${{ !inputs.native_only && github.event_name != 'pull_request' }}
+    needs: native-linux
+    runs-on: &mypy-win32-runner ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    timeout-minutes: 100
+    env:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux.outputs.artifact_digest }}
+    steps: &mypy-win32-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -644,6 +704,9 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          artifact-id: ${{ env.NATIVE_ARTIFACT_ID }}
+          artifact-digest: ${{ env.NATIVE_ARTIFACT_DIGEST }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -654,16 +717,28 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping Windows mypy for non-code changes."
 
+  mypy-win32-pr:
+    name: ${{ github.event_name == 'pull_request' && 'mypy-win32' || 'mypy-win32 (pull request)' }}
+    if: ${{ !inputs.native_only && github.event_name == 'pull_request' }}
+    needs: native-linux-pr
+    runs-on: *mypy-win32-runner
+    timeout-minutes: 100
+    env:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux-pr.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux-pr.outputs.artifact_digest }}
+    steps: *mypy-win32-steps
+
   tests:
+    name: ${{ github.event_name != 'pull_request' && format('tests ({0})', matrix.python-version) || 'tests (after native publication)' }}
     needs: [changes, native-linux]
     if: >-
-      !inputs.native_only &&
+      !inputs.native_only && github.event_name != 'pull_request' &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.native-linux.result == 'skipped') ||
       (needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success'))
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    runs-on: &tests-runner ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
-    strategy:
+    strategy: &tests-strategy
       fail-fast: false
       matrix:
         python-version:
@@ -675,7 +750,9 @@ jobs:
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
-    steps:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux.outputs.artifact_digest }}
+    steps: &tests-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -695,6 +772,9 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          artifact-id: ${{ env.NATIVE_ARTIFACT_ID }}
+          artifact-digest: ${{ env.NATIVE_ARTIFACT_DIGEST }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -797,12 +877,31 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
-  native-macos-sandbox-shards:
-    if: ${{ !inputs.native_only }}
-    needs: native-macos
-    runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
+  tests-pr:
+    name: ${{ github.event_name == 'pull_request' && format('tests ({0})', matrix.python-version) || 'tests (pull request)' }}
+    needs: [changes, native-linux-pr]
+    if: >-
+      !inputs.native_only && github.event_name == 'pull_request' &&
+      !cancelled() && needs.changes.result == 'success' &&
+      ((needs.changes.outputs.code == 'false' && needs.native-linux-pr.result == 'skipped') ||
+      (needs.changes.outputs.code == 'true' && needs.native-linux-pr.result == 'success'))
+    runs-on: *tests-runner
     timeout-minutes: 100
-    strategy:
+    strategy: *tests-strategy
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+      NATIVE_ARTIFACT_ID: ${{ needs.native-linux-pr.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-linux-pr.outputs.artifact_digest }}
+    steps: *tests-steps
+
+  native-macos-sandbox-shards:
+    name: ${{ github.event_name != 'pull_request' && format('native-macos-sandbox-shards ({0})', matrix.shard) || 'native-macos-sandbox-shards (after native publication)' }}
+    if: ${{ !inputs.native_only && github.event_name != 'pull_request' }}
+    needs: native-macos
+    runs-on: &native-macos-sandbox-shards-runner ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
+    timeout-minutes: 100
+    strategy: &native-macos-sandbox-shards-strategy
       fail-fast: false
       matrix:
         shard: [0, 1]
@@ -812,7 +911,9 @@ jobs:
         -rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
         --max-worker-restart=0
       PYTHONUNBUFFERED: "1"
-    steps:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-macos.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-macos.outputs.artifact_digest }}
+    steps: &native-macos-sandbox-shards-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -830,6 +931,9 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          artifact-id: ${{ env.NATIVE_ARTIFACT_ID }}
+          artifact-digest: ${{ env.NATIVE_ARTIFACT_DIGEST }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -851,23 +955,51 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping native macOS sandbox tests for non-code changes."
 
+  native-macos-sandbox-shards-pr:
+    name: ${{ github.event_name == 'pull_request' && format('native-macos-sandbox-shards ({0})', matrix.shard) || 'native-macos-sandbox-shards (pull request)' }}
+    if: ${{ !inputs.native_only && github.event_name == 'pull_request' }}
+    needs: native-macos-pr
+    runs-on: *native-macos-sandbox-shards-runner
+    timeout-minutes: 100
+    strategy: *native-macos-sandbox-shards-strategy
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: >-
+        -rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+        --max-worker-restart=0
+      PYTHONUNBUFFERED: "1"
+      NATIVE_ARTIFACT_ID: ${{ needs.native-macos-pr.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-macos-pr.outputs.artifact_digest }}
+    steps: *native-macos-sandbox-shards-steps
+
   native-macos-sandbox:
-    # Release readiness consumes this check name.
+    name: ${{ github.event_name != 'pull_request' && 'native-macos-sandbox' || 'native-macos-sandbox (after native publication)' }}
     needs: native-macos-sandbox-shards
-    if: ${{ !inputs.native_only && !cancelled() && needs.native-macos-sandbox-shards.result != 'skipped' }}
+    if: ${{ !inputs.native_only && !cancelled() && github.event_name != 'pull_request' && needs.native-macos-sandbox-shards.result != 'skipped' }}
     runs-on: ubuntu-latest
-    steps:
+    env:
+      SHARDS_RESULT: ${{ needs.native-macos-sandbox-shards.result }}
+    # Release readiness consumes this check name.
+    steps: &macos-shards-result
       - name: Require both macOS shards to pass
-        env:
-          SHARDS_RESULT: ${{ needs.native-macos-sandbox-shards.result }}
         run: test "$SHARDS_RESULT" = success
 
+  native-macos-sandbox-pr:
+    name: ${{ github.event_name == 'pull_request' && 'native-macos-sandbox' || 'native-macos-sandbox (pull request)' }}
+    needs: native-macos-sandbox-shards-pr
+    if: ${{ !inputs.native_only && !cancelled() && github.event_name == 'pull_request' && needs.native-macos-sandbox-shards-pr.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    env:
+      SHARDS_RESULT: ${{ needs.native-macos-sandbox-shards-pr.result }}
+    steps: *macos-shards-result
+
   tests-windows:
-    if: ${{ !inputs.native_only }}
+    name: ${{ github.event_name != 'pull_request' && format('tests-windows ({0})', matrix.python-version) || 'tests-windows (after native publication)' }}
+    if: ${{ !inputs.native_only && github.event_name != 'pull_request' }}
     needs: native-windows
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
+    runs-on: &tests-windows-runner ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
-    strategy:
+    strategy: &tests-windows-strategy
       fail-fast: false
       matrix:
         python-version:
@@ -876,7 +1008,9 @@ jobs:
     env:
       OPENAI_API_KEY: fake-for-tests
       PYTEST_ADDOPTS: "-rA"
-    steps:
+      NATIVE_ARTIFACT_ID: ${{ needs.native-windows.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-windows.outputs.artifact_digest }}
+    steps: &tests-windows-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -896,6 +1030,9 @@ jobs:
       - name: Use the shared native build
         if: steps.changes.outputs.run == 'true'
         uses: ./.github/actions/use-native
+        with:
+          artifact-id: ${{ env.NATIVE_ARTIFACT_ID }}
+          artifact-digest: ${{ env.NATIVE_ARTIFACT_DIGEST }}
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --group dev
@@ -909,6 +1046,20 @@ jobs:
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
+
+  tests-windows-pr:
+    name: ${{ github.event_name == 'pull_request' && format('tests-windows ({0})', matrix.python-version) || 'tests-windows (pull request)' }}
+    if: ${{ !inputs.native_only && github.event_name == 'pull_request' }}
+    needs: native-windows-pr
+    runs-on: *tests-windows-runner
+    timeout-minutes: 100
+    strategy: *tests-windows-strategy
+    env:
+      OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
+      NATIVE_ARTIFACT_ID: ${{ needs.native-windows-pr.outputs.artifact_id }}
+      NATIVE_ARTIFACT_DIGEST: ${{ needs.native-windows-pr.outputs.artifact_digest }}
+    steps: *tests-windows-steps
 
   build-docs:
     name: ${{ github.event_name == 'pull_request' && 'build-docs (after native publication)' || 'build-docs' }}
