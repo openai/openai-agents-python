@@ -264,6 +264,7 @@ impl PreparationSlot {
 
 /// Add only native identities retained by the producing profile, never all candidates.
 fn merge_profile_native_defaults(
+    code_mode_enabled: bool,
     mut ordinary: Vec<ToolName>,
     native: impl IntoIterator<Item = ToolName>,
     candidates: &[ToolName],
@@ -281,6 +282,12 @@ fn merge_profile_native_defaults(
         .collect::<HashSet<_>>();
     let mut native = native
         .into_iter()
+        .chain(
+            code_mode_enabled
+                .then_some([ToolName::plain("exec"), ToolName::plain("wait")])
+                .into_iter()
+                .flatten(),
+        )
         .map(ToolName::with_default_namespace)
         .collect::<Vec<_>>();
     native.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(a.name.cmp(&b.name)));
@@ -2743,6 +2750,9 @@ impl PythonTools {
             call.invocation == invocation,
             "Invalid managed Python invocation nonce"
         );
+        if call.retired || call.sender.is_closed() {
+            return Ok(false);
+        }
         let deadline = call.deadline.clone();
         let mut admit = || -> Result<bool> {
             if entering {
@@ -3312,6 +3322,11 @@ impl PythonTools {
             call.phase != Phase::Parked,
             "parked tool cannot reply from an old owner"
         );
+        // Voice retirement retains closed callback senders as tombstones.
+        // Preserve take_reply eligibility before asynchronous media validation.
+        if call.sender.is_closed() {
+            return Ok(None);
+        }
         Ok(Some(call.media.clone()))
     }
 
@@ -4975,6 +4990,7 @@ impl ToolContributor for PythonContributor {
                                 .map(|tool| tool.canonical_tool_name()),
                         );
                     Some(merge_profile_native_defaults(
+                        self.code_mode_enabled,
                         ordinary,
                         native,
                         candidates,
@@ -5791,6 +5807,7 @@ pub(crate) mod managed_tests {
             ..ToolPolicy::default()
         };
         let actual = merge_profile_native_defaults(
+            false,
             Vec::new(),
             vec![
                 handoff.clone(),
@@ -5815,7 +5832,7 @@ pub(crate) mod managed_tests {
         assert!(!actual.contains(&other));
         assert!(!actual.contains(&exec));
         assert!(
-            merge_profile_native_defaults(Vec::new(), vec![handoff, selected], &[], &policy)
+            merge_profile_native_defaults(false, Vec::new(), vec![handoff, selected], &[], &policy)
                 .is_empty()
         );
     }
@@ -5827,6 +5844,7 @@ pub(crate) mod managed_tests {
         let handoff = ToolName::new(None, "transfer_to_b").with_default_namespace();
         let defaults = vec![b.clone(), a.clone()];
         let actual = merge_profile_native_defaults(
+            false,
             defaults.clone(),
             vec![handoff.clone(), handoff.clone()],
             &[a, b, handoff.clone()],
@@ -5835,6 +5853,74 @@ pub(crate) mod managed_tests {
         assert_eq!(&actual[..2], defaults.as_slice());
         assert_eq!(actual.last(), Some(&handoff));
         assert_eq!(actual.len(), 3);
+    }
+
+    #[test]
+    fn profile_code_mode_defaults_obey_mode_candidates_and_policy() {
+        let exec = ToolName::plain("exec").with_default_namespace();
+        let wait = ToolName::plain("wait").with_default_namespace();
+        let candidates = vec![exec.clone(), wait.clone()];
+        let policy = ToolPolicy {
+            allowed_tools: Some(candidates.clone()),
+            ..ToolPolicy::default()
+        };
+        assert_eq!(
+            merge_profile_native_defaults(true, Vec::new(), Vec::new(), &candidates, &policy),
+            candidates
+        );
+        assert!(
+            merge_profile_native_defaults(false, Vec::new(), Vec::new(), &candidates, &policy)
+                .is_empty()
+        );
+        assert!(
+            merge_profile_native_defaults(true, Vec::new(), Vec::new(), &[], &policy).is_empty()
+        );
+        let policy = ToolPolicy {
+            allowed_tools: Some(vec![exec.clone()]),
+            ..ToolPolicy::default()
+        };
+        assert_eq!(
+            merge_profile_native_defaults(true, Vec::new(), Vec::new(), &candidates, &policy),
+            vec![exec]
+        );
+    }
+
+    #[test]
+    fn automatic_media_peek_keeps_live_sender_and_rejects_closed_retained_reply() {
+        let tools = catalog(
+            ToolPolicy::default(),
+            DynamicToolSpec::Function(function("a")),
+        );
+        let (key, _, receiver) = tools
+            .enqueue(
+                "owner",
+                &tools.snapshot(),
+                0,
+                "turn",
+                "call",
+                json!({}),
+                &ToolCallSource::Direct,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            tools.automatic_reply_media("owner", &key),
+            Ok(Some(None))
+        ));
+        assert!(tools.pending.lock().unwrap().contains_key(&key));
+        assert!(matches!(
+            tools.automatic_reply_media("foreign", &key),
+            Ok(None)
+        ));
+        drop(receiver);
+        assert!(matches!(
+            tools.automatic_reply_media("owner", &key),
+            Ok(None)
+        ));
+        assert!(tools.pending.lock().unwrap().contains_key(&key));
+        assert!(tools.take_reply("owner", &key).unwrap().is_none());
     }
 
     fn admission_thread() -> ExtensionData {

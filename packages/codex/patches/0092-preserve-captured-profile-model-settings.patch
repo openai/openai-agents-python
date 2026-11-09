@@ -1,0 +1,220 @@
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index 1c059a6..52ce6a3 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -706,6 +706,18 @@ pub(crate) struct RealtimeToolsDispatch {
+     receiver: async_channel::Receiver<RealtimeBatchWork>,
+ }
+ impl RealtimeToolsDispatch {
++    #[cfg(test)]
++    pub(crate) fn for_settlement_test(generation: &str) -> Self {
++        let (sender, receiver) = async_channel::bounded(super::SDK_FUNCTION_CALL_LIMIT);
++        Self {
++            root_id: Default::default(),
++            settled: CancellationToken::new(),
++            generation: generation.to_owned(),
++            sender,
++            receiver,
++        }
++    }
++
+     pub(crate) fn bind_root(&self, root: &str) {
+         self.root_id.get_or_init(|| root.to_owned());
+     }
+diff --git a/codex-rs/core/src/session/agent_profile.rs b/codex-rs/core/src/session/agent_profile.rs
+index 4d2dc92..7da9534 100644
+--- a/codex-rs/core/src/session/agent_profile.rs
++++ b/codex-rs/core/src/session/agent_profile.rs
+@@ -909,12 +909,30 @@ for line in sys.stdin:
+                 epoch: 0
+             }
+         );
+-        let second = profile(&context, "b", "b1");
++        let mut second = profile(&context, "b", "b1").as_ref().clone();
++        second.model.invocation_timeout_ms = Some(1234);
++        second.model.request_controls.max_output_tokens = Some(Some(17));
++        let expected_controls = second.model.request_controls.clone();
+         let receipt_b = session
+-            .activate_agent_profile(Some(receipt.clone()), second)
++            .activate_agent_profile(Some(receipt.clone()), Arc::new(second))
+             .await
+             .unwrap();
+         assert_eq!(receipt_b.epoch, 1);
++        {
++            let state = session.state.lock().await;
++            let selected = &state.session_configuration.step_settings;
++            assert_eq!(selected.invocation_timeout_ms, Some(1234));
++            assert_eq!(selected.request_controls, expected_controls);
++        }
++        let future_b = session.new_inject_items_context().await;
++        assert_eq!(
++            future_b.next_step_settings.load().invocation_timeout_ms(),
++            Some(1234)
++        );
++        assert_eq!(
++            future_b.next_step_settings.load().request_controls(),
++            &expected_controls
++        );
+         assert_eq!(
+             session.agent_profile_receipt().await.unwrap(),
+             Some(receipt_b.clone())
+@@ -947,6 +965,14 @@ for line in sys.stdin:
+                 .receipt,
+             receipt_a
+         );
++        assert_eq!(
++            future.next_step_settings.load().invocation_timeout_ms(),
++            None
++        );
++        assert_eq!(
++            future.next_step_settings.load().request_controls(),
++            &Default::default()
++        );
+         let history = session
+             .live_thread()
+             .unwrap()
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 2f7c872..d87b3e6 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1234,6 +1234,8 @@ impl Session {
+         settings.service_tier = selected.service_tier.clone();
+         settings.tool_choice = selected.tool_choice.clone();
+         settings.personality = selected.personality;
++        settings.invocation_timeout_ms = selected.invocation_timeout_ms;
++        settings.request_controls = selected.request_controls.clone();
+         settings.collaboration_mode = selected.collaboration_mode.clone();
+         configuration.step_settings = Arc::new(settings);
+         configuration.agent_profile = source.agent_profile.clone();
+diff --git a/codex-rs/core/src/tools/code_mode/delegate_tests.rs b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+index 79f9d5c..1a8e575 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+@@ -1186,11 +1186,15 @@ struct OwnedCancellationTask {
+     observed_cancel: CancellationToken,
+     return_after_cancel: CancellationToken,
+     publish_primary: bool,
++    realtime: Option<crate::realtime_conversation::RealtimeToolsDispatch>,
+ }
+ impl crate::tasks::SessionTask for OwnedCancellationTask {
+     fn kind(&self) -> crate::state::TaskKind {
+         crate::state::TaskKind::Regular
+     }
++    fn realtime_tools(&self) -> Option<crate::realtime_conversation::RealtimeToolsDispatch> {
++        self.realtime.clone()
++    }
+     fn span_name(&self) -> &'static str {
+         "test.owned_callback_failure"
+     }
+@@ -1257,6 +1261,7 @@ fn owned_task(publish_primary: bool) -> OwnedCancellationTask {
+         observed_cancel: CancellationToken::new(),
+         return_after_cancel: CancellationToken::new(),
+         publish_primary,
++        realtime: None,
+     }
+ }
+ async fn owner_gate_is_held(session: &Arc<crate::session::session::Session>) {
+@@ -1279,9 +1284,16 @@ async fn owner_gate_is_held(session: &Arc<crate::session::session::Session>) {
+ 
+ #[tokio::test]
+ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preserves_primary() {
+-    for prior_primary in [false, true] {
++    for (prior_primary, realtime) in [(false, false), (true, false), (false, true), (true, true)] {
+         let (session, turn, events, records) = owned_spawn_session().await;
+-        let task = owned_task(prior_primary);
++        let mut task = owned_task(prior_primary);
++        let dispatch = realtime.then(|| {
++            crate::realtime_conversation::RealtimeToolsDispatch::for_settlement_test("self-fatal")
++        });
++        if let Some(dispatch) = &dispatch {
++            dispatch.bind_root(&turn.sub_id);
++        }
++        task.realtime = dispatch.clone();
+         session
+             .spawn_task(Arc::clone(&turn), Vec::new(), task.clone())
+             .await;
+@@ -1327,6 +1339,17 @@ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preser
+         session.cancel_code_mode_owner(&turn).await;
+         task.return_after_cancel.cancel();
+         owner_gate_is_held(&session).await;
++        if let Some(dispatch) = &dispatch {
++            assert!(
++                tokio::time::timeout(
++                    std::time::Duration::from_millis(25),
++                    dispatch.wait_settled(),
++                )
++                .await
++                .is_err(),
++                "realtime settlement preceded owned receipt drain"
++            );
++        }
+         release_late.cancel();
+         late_done.cancelled().await;
+         backend.terminate_release.cancel();
+@@ -1372,6 +1395,11 @@ async fn self_cancelled_owned_fatal_settles_without_an_external_abort_and_preser
+         })
+         .await
+         .unwrap();
++        if let Some(dispatch) = &dispatch {
++            tokio::time::timeout(std::time::Duration::from_secs(10), dispatch.wait_settled())
++                .await
++                .expect("self-cancelled owned fatal did not settle its realtime root");
++        }
+     }
+ }
+ 
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 147e74f..f2c2e25 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -147,9 +147,12 @@ pub struct AgentProfileModelSettings {
+     pub service_tier: Option<String>,
+     pub tool_choice: Option<codex_protocol::config_types::ToolChoice>,
+     pub personality: Option<codex_protocol::config_types::Personality>,
+-    #[serde(default)]
++    #[serde(
++        default,
++        skip_serializing_if = "codex_protocol::model_request_controls::ModelRequestControls::is_empty"
++    )]
+     pub request_controls: codex_protocol::model_request_controls::ModelRequestControls,
+-    #[serde(default)]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub invocation_timeout_ms: Option<u32>,
+ }
+ 
+@@ -194,3 +197,35 @@ pub struct AgentProfileBoundaryInput<'a> {
+     pub thread_store: &'a ExtensionData,
+     pub turn_store: &'a ExtensionData,
+ }
++
++#[cfg(test)]
++mod profile_model_settings_tests {
++    use super::AgentProfileModelSettings;
++
++    #[test]
++    fn old_profile_model_shape_preserves_fingerprint_and_new_values_roundtrip() {
++        let old = serde_json::json!({
++            "model": "profile-model", "reasoning_effort": null,
++            "reasoning_summary": null, "service_tier": null,
++            "tool_choice": null, "personality": null
++        });
++        let mut settings: AgentProfileModelSettings = serde_json::from_value(old.clone()).unwrap();
++        assert_eq!(serde_json::to_value(&settings).unwrap(), old);
++        settings.invocation_timeout_ms = Some(1234);
++        settings.request_controls.max_output_tokens = Some(Some(17));
++        settings.request_controls.named_tool_choice = Some(None);
++        let encoded = serde_json::to_value(&settings).unwrap();
++        assert_eq!(encoded["invocation_timeout_ms"], 1234);
++        assert_eq!(encoded["request_controls"]["max_output_tokens"], 17);
++        assert!(
++            encoded["request_controls"]
++                .as_object()
++                .unwrap()
++                .contains_key("named_tool_choice")
++        );
++        assert_eq!(
++            serde_json::from_value::<AgentProfileModelSettings>(encoded).unwrap(),
++            settings
++        );
++    }
++}

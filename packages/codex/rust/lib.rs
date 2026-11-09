@@ -1722,17 +1722,17 @@ impl NativeThread {
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
+            inner
+                .engine
+                .validate_request_controls(&inner.thread, &settings)
+                .await
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
             if agent_profiles::update_active(&inner.thread, Some(&settings), None, None)
                 .await
                 .map_err(py_error)?
             {
                 return Ok(true);
             }
-            inner
-                .engine
-                .validate_request_controls(&inner.thread, &settings)
-                .await
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
             inner
                 .thread
                 .update_thread_settings(settings)
