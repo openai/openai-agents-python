@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import struct
+import zlib
 from contextlib import aclosing
 from typing import Any
 
@@ -24,6 +27,33 @@ _VALID_PNG_DATA_URI = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 )
+
+
+def _streamed_png_data_uri(width: int, height: int, *, rgba: bool) -> str:
+    """Encode repeated scanlines without materializing the full decoded image."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    compressor = zlib.compressobj()
+    encoded = bytearray()
+    row = b"\0" + (b"\0\0\0\xff" * width if rgba else b"\0" * width)
+    for _ in range(height):
+        encoded.extend(compressor.compress(row))
+    encoded.extend(compressor.flush())
+    header = struct.pack(">IIBBBBB", width, height, 8, 6 if rgba else 0, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", bytes(encoded))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
 async def test_native_sip_projection_matches_connection_configuration(
@@ -2160,3 +2190,185 @@ async def test_native_create_ack_allows_unreported_media_fields(
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "rgba", "accepted"),
+    [(20000, 20000, False, False), (3840, 2160, True, True)],
+    ids=["compressed-decoder-bomb", "ordinary-4k-rgba"],
+)
+async def test_native_history_image_decoder_limits_precede_mutation_and_allow_4k(
+    realtime_peer: RealtimePeer, width: int, height: int, rgba: bool, accepted: bool
+) -> None:
+    peer = realtime_peer
+    original = {
+        "id": "image-decoder-original",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Keep unless image validation succeeds"}],
+    }
+    replacement = {
+        "id": "image-decoder-replacement",
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_image", "image_url": _streamed_png_data_uri(width, height, rgba=rgba)}
+        ],
+    }
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-image-decoder-budget-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Validate decoded images before editing.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, original)
+        start = len(peer.frames)
+        cursor = start
+        updating = asyncio.create_task(voice.update_history([replacement]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            assert request["item_id"] == original["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": original})
+            if accepted:
+                deletion = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+                )
+                cursor = peer.frames.index(deletion, cursor) + 1
+                assert deletion["item_id"] == original["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.deleted", "item_id": original["id"]}
+                )
+                creation = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.create", after=cursor
+                )
+                cursor = peer.frames.index(creation, cursor) + 1
+                assert creation["item"] == replacement
+                await observe_item(peer, events, replacement)
+                await updating
+                remaining = replacement
+            else:
+                with pytest.raises(RuntimeError):
+                    await updating
+                assert not any(
+                    frame["type"] in ("conversation.item.delete", "conversation.item.create")
+                    for frame in peer.frames[start:]
+                )
+                remaining = original
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                assert request["item_id"] == remaining["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.retrieved", "item": remaining}
+                )
+                assert await retrieving == [remaining]
+                assert not peer.disconnected.is_set()
+                assert peer.connections == 1
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize("malformed", ["missing_id", "empty_id"])
+async def test_native_malformed_retrieval_keeps_read_receipt_until_matching_late_item(
+    realtime_peer: RealtimePeer, malformed: str
+) -> None:
+    from agents.realtime import RealtimeResponse
+
+    peer = realtime_peer
+    original = {
+        "id": "malformed-read-item",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Late first retrieval payload"}],
+    }
+    fresh = {
+        **original,
+        "content": [{"type": "input_text", "text": "Fresh third retrieval payload"}],
+    }
+    invalid = {key: value for key, value in original.items() if key != "id"}
+    if malformed == "empty_id":
+        invalid["id"] = ""
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-malformed-read-receipt-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep written read receipts isolated.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, original)
+        cursor = len(peer.frames)
+        retrieving = asyncio.create_task(voice.retrieve_conversation_item(original["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            assert request["item_id"] == original["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": invalid})
+            with pytest.raises(RuntimeError):
+                await retrieving
+            with pytest.raises(RuntimeError, match="pending"):
+                await voice.retrieve_conversation_item(original["id"])
+            assert len(peer.frames) == cursor
+            assert not peer.disconnected.is_set()
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": original})
+            # A later ordinary response proves the receipt was processed before the next read.
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "malformed-read-drained"}}
+            )
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "malformed-read-drained"}}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "malformed-read-drained"
+                    and event.status == "done"
+                ):
+                    break
+            again = asyncio.create_task(voice.retrieve_conversation_item(original["id"]))
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                assert request["item_id"] == original["id"]
+                assert not again.done()
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": fresh})
+                assert await again == fresh
+                assert not peer.disconnected.is_set()
+                assert peer.connections == 1
+            finally:
+                if not again.done():
+                    await voice.aclose()
+                await asyncio.gather(again, return_exceptions=True)
+        finally:
+            if not retrieving.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving, return_exceptions=True)
