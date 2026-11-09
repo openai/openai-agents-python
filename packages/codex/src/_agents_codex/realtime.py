@@ -30,6 +30,7 @@ from .realtime_adapter import (
     NativeRealtimeAdapter as NativeRealtimeAdapter,
     NativeRealtimeConnection as NativeRealtimeConnection,
     RealtimeAdapterContext as RealtimeAdapterContext,
+    _clear_adapter_error_frames,
     _RealtimeAdapterDriver,
 )
 from .realtime_guardrails import (
@@ -499,7 +500,11 @@ class RealtimeSession:
         self._mcp_approvals: WeakKeyDictionary[RealtimeHostedMcpApprovalRequested, str] = (
             WeakKeyDictionary()
         )
-        self._settings = _serialize_settings(config.settings or {})
+        try:
+            self._settings = _serialize_settings(config.settings or {})
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
         if config.adapter is not None:
             if not callable(getattr(config.adapter, "connect", None)):
                 raise TypeError("adapter must provide an async connect method")
@@ -860,10 +865,18 @@ class RealtimeSession:
         Cancellation waits for native acceptance to settle before returning.
         Call this outside this session's adapter callbacks.
         """
-        self._check_live()
-        self._check_adapter_operation("update its own Realtime session")
-        payload = _serialize_update(update)
-        await _join(asyncio.create_task(self._call("update", update=payload)))
+        payload: dict[str, Any] | None = None
+        try:
+            self._check_live()
+            self._check_adapter_operation("update its own Realtime session")
+            payload = _serialize_update(update)
+            await _join(asyncio.create_task(self._call("update", update=payload)))
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+        finally:
+            # Completed serializer frames and this active frame can retain MCP secrets.
+            del update, payload
 
     async def approve_hosted_mcp(
         self,

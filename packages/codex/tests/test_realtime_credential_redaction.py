@@ -333,3 +333,102 @@ async def test_successful_webrtc_startup_preserves_public_answer() -> None:
     assert voice.call_id == "synthetic-webrtc-call"
     assert voice._config.transport is transport
     assert transport.offer_sdp == offer
+
+
+@pytest.mark.parametrize("phase", ["native", "cancel", "closed", "invalid-choice", "invalid-json"])
+async def test_failed_update_releases_credentials_without_changing_caller_settings(
+    phase: str,
+) -> None:
+    authorization = "synthetic-update-authorization"
+    header = "synthetic-update-private-header"
+    update: Any = {
+        "hosted_mcp_tools": [
+            {
+                "server_label": "fixture",
+                "server_url": "https://example.invalid",
+                "authorization": authorization,
+                "headers": {"X-Private": header},
+            }
+        ]
+    }
+    failure = (
+        asyncio.CancelledError("update cancelled")
+        if phase == "cancel"
+        else RuntimeError("update rejected")
+    )
+    admitted = False
+
+    async def native_call(operation: str, request: str) -> str:
+        nonlocal admitted
+        assert operation == "realtime_conversation_update_sdk"
+        hosted = json.loads(request)["update"]["hosted_mcp_tools"][0]
+        assert hosted["authorization"] == authorization
+        assert hosted["headers"]["X-Private"] == header
+        admitted = True
+        raise failure
+
+    session = cast(Session[Any, Any], SimpleNamespace(_native=SimpleNamespace(call=native_call)))
+    voice = RealtimeSession(session, config=RealtimeConfig())
+    voice._live = phase != "closed"
+    voice._ready.set_result(None)
+    expected: type[BaseException] = type(failure)
+    if phase == "invalid-choice":
+        update["tool_choice"] = {"type": "function", "name": 42}
+        expected = ValueError
+    elif phase == "invalid-json":
+        update["instructions"] = object()
+        expected = TypeError
+    original = repr(update)
+    with pytest.raises(expected) as caught:
+        await voice.update(update)
+    if phase == "native":
+        assert caught.value is failure
+    assert admitted is (phase in ("native", "cancel"))
+    assert repr(update) == original
+    frames = []
+    tb = caught.value.__traceback__
+    while tb is not None:
+        if "/_agents_codex/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+            frames.append(tb.tb_frame)
+        tb = tb.tb_next
+    assert "update" in {frame.f_code.co_name for frame in frames}
+    for frame in frames:
+        assert all(secret not in repr(frame.f_locals) for secret in (authorization, header))
+
+
+@pytest.mark.parametrize("phase", ["invalid-choice", "invalid-json"])
+async def test_initial_settings_failure_releases_serializer_credentials(phase: str) -> None:
+    authorization = "synthetic-initial-settings-authorization"
+    header = "synthetic-initial-settings-header"
+    settings: Any = {
+        "hosted_mcp_tools": [
+            {
+                "server_label": "fixture",
+                "server_url": "https://example.invalid",
+                "authorization": authorization,
+                "headers": {"X-Private": header},
+            }
+        ]
+    }
+    expected: type[Exception]
+    if phase == "invalid-choice":
+        settings["tool_choice"] = {"type": "function", "name": 42}
+        expected = ValueError
+    else:
+        settings["instructions"] = object()
+        expected = TypeError
+    config = RealtimeConfig(settings=settings)
+    original = repr(settings)
+    with pytest.raises(expected) as caught:
+        RealtimeSession(cast(Session[Any, Any], SimpleNamespace()), config=config)
+    assert config.settings is settings
+    assert repr(settings) == original
+    frames = []
+    tb = caught.value.__traceback__
+    while tb is not None:
+        if "/_agents_codex/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+            frames.append(tb.tb_frame)
+        tb = tb.tb_next
+    assert "serialize_realtime_settings" in {frame.f_code.co_name for frame in frames}
+    for frame in frames:
+        assert all(secret not in repr(frame.f_locals) for secret in (authorization, header))
