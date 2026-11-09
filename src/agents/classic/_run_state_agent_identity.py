@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import threading
+import weakref
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -24,10 +25,27 @@ from .tool import (
     HostedMCPTool,
     LocalShellTool,
     ShellTool,
+    _validate_classic_tools,
 )
 
 
-def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
+def _require_classic_agent(agent: object) -> Agent[Any]:
+    if not isinstance(agent, Agent):
+        raise TypeError(
+            "Classic Runner requires an agents.classic.Agent. "
+            "Use a native Agent's run() or session() methods for native execution."
+        )
+    return agent
+
+
+def _validate_classic_agent_graph(initial_agent: object) -> None:
+    for _agent in _iter_agent_graph(_require_classic_agent(initial_agent), validate_classic=True):
+        pass
+
+
+def _iter_agent_graph(
+    initial_agent: Agent[Any], *, validate_classic: bool = False
+) -> Iterator[Agent[Any]]:
     """Yield agents reachable from the starting agent in breadth-first order."""
     queue: deque[Agent[Any]] = deque([initial_agent])
     seen_agent_ids: set[int] = set()
@@ -38,6 +56,9 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
         if current_id in seen_agent_ids:
             continue
         seen_agent_ids.add(current_id)
+        if validate_classic:
+            _require_classic_agent(current)
+            _validate_classic_tools(current.tools)
         yield current
 
         for handoff_item in current.handoffs:
@@ -54,7 +75,14 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
                     handoff_agent_name = candidate_name
 
                 handoff_ref = getattr(handoff_item, "_agent_ref", None)
-                handoff_agent = handoff_ref() if callable(handoff_ref) else None
+                # Preflight must not invoke arbitrary application callbacks.
+                # Ordinary identity discovery retains its legacy callable support.
+                handoff_agent = (
+                    handoff_ref()
+                    if callable(handoff_ref)
+                    and (not validate_classic or type(handoff_ref) is weakref.ReferenceType)
+                    else None
+                )
                 if handoff_agent is None:
                     # Backward-compatibility fallback for custom legacy handoff objects that store
                     # the target directly on `.agent`. New code should prefer `handoff()` objects.
@@ -65,6 +93,10 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
                             "Using legacy handoff `.agent` fallback while building agent map. "
                             "This compatibility path is not recommended for new code."
                         )
+                if validate_classic and handoff_agent is not None:
+                    _require_classic_agent(handoff_agent)
+                    queue.append(handoff_agent)
+                    continue
                 if handoff_agent_name is None:
                     candidate_name = getattr(handoff_agent, "name", None)
                     handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
@@ -86,6 +118,10 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
                     )
                 else:
                     handoff_agent = handoff_item
+                if validate_classic:
+                    _require_classic_agent(handoff_agent)
+                    queue.append(handoff_agent)
+                    continue
                 candidate_name = getattr(handoff_agent, "name", None)
                 handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
 
@@ -100,7 +136,10 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
                     continue
                 tool_agent = getattr(tool, "_agent_instance", None)
                 tool_agent_name = getattr(tool_agent, "name", None)
-                if tool_agent is not None and tool_agent_name:
+                if tool_agent is not None and validate_classic:
+                    _require_classic_agent(tool_agent)
+                    queue.append(tool_agent)
+                elif tool_agent is not None and tool_agent_name:
                     queue.append(tool_agent)
 
 

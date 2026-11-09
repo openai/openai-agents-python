@@ -95,6 +95,9 @@ async def maybe_filter_model_input(
 
 async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any]) -> list[Handoff]:
     """Return enabled handoffs for the agent."""
+    from .._run_state_agent_identity import _validate_classic_agent_graph
+
+    _validate_classic_agent_graph(agent)
     handoffs = []
     for handoff_item in agent.handoffs:
         if isinstance(handoff_item, Handoff):
@@ -118,7 +121,14 @@ async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any
 
 async def get_all_tools(agent: Agent[Any], context_wrapper: RunContextWrapper[Any]) -> list[Tool]:
     """Fetch all tools available to the agent."""
-    return await agent.get_all_tools(context_wrapper)
+    from .._public_agent import get_public_agent
+    from .._run_state_agent_identity import _validate_classic_agent_graph
+    from ..tool import _validate_classic_tools
+
+    _validate_classic_agent_graph(get_public_agent(agent))
+    tools = await agent.get_all_tools(context_wrapper)
+    _validate_classic_tools(tools)
+    return tools
 
 
 def get_output_schema(agent: Agent[Any]) -> AgentOutputSchemaBase | None:
