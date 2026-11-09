@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import payloads as _implementation
-from agents._codex_cli.payloads import (
+from _agents_shared.codex_cli import payloads as _implementation
+from _agents_shared.codex_cli.payloads import (
     _DictLike as _DictLike,
 )
 

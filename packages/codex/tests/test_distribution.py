@@ -27,7 +27,11 @@ else:
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "src/agents"
-SOURCES = {"agents": SOURCE, "_agents_codex": ROOT / "packages/codex/src/_agents_codex"}
+SOURCES = {
+    "agents": SOURCE,
+    "_agents_codex": ROOT / "packages/codex/src/_agents_codex",
+    "_agents_shared": ROOT / "src/_agents_shared",
+}
 PYTHON_FILES = {
     f"{package}/{path.relative_to(source).as_posix()}": path
     for package, source in SOURCES.items()

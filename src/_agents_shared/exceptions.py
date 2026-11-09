@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .classic.exceptions import RunErrorDetails
+    from agents.classic.exceptions import RunErrorDetails
 
 
 class AgentsException(Exception):

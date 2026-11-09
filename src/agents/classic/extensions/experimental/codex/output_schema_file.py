@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import output_schema_file as _implementation
-from agents._codex_cli.output_schema_file import (
+from _agents_shared.codex_cli import output_schema_file as _implementation
+from _agents_shared.codex_cli.output_schema_file import (
     OutputSchemaFile as OutputSchemaFile,
     _is_plain_json_object as _is_plain_json_object,
     create_output_schema_file as create_output_schema_file,

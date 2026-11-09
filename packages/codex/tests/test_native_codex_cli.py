@@ -180,3 +180,50 @@ async def test_persisted_cli_threads_are_scoped_to_the_invoking_native_session(
     assert "resume" not in arguments[1]
     assert "resume" in arguments[2]
     assert "synthetic-thread" in arguments[2]
+
+
+@pytest.mark.parametrize("mode", ["throw", "reject"])
+async def test_observer_failures_preserve_native_success_and_thread_reuse(
+    tmp_path: Path, responses, mode
+) -> None:
+    calls = tmp_path / "calls.jsonl"
+    path = cli(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            "sys.stdin.read()\n",
+            f"sys.stdin.read()\nopen({str(calls)!r}, 'a').write("
+            "json.dumps(sys.argv[1:]) + '\\n')\n",
+        )
+    )
+    observed = []
+
+    async def rejected():
+        raise RuntimeError("observer failure")
+
+    def observer(event):
+        observed.append(event.type)
+        if mode == "throw":
+            raise RuntimeError("observer failure")
+        return rejected()
+
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        persist_session=True,
+        on_event=observer,
+    )
+    responses.replies.extend(
+        [
+            [function_call("codex", {"prompt": "First", "thread_id": None}, "observer-1")],
+            [assistant_output("first done")],
+            [function_call("codex", {"prompt": "Next", "thread_id": None}, "observer-2")],
+            [assistant_output("next done")],
+        ]
+    )
+    agent = Agent(instructions="Use codex.", provider=provider(responses), tools=[declaration])
+    async with agent.session() as session:
+        assert (await (await session.submit("First")).get_result()).final_output == "first done"
+        assert (await (await session.submit("Next")).get_result()).final_output == "next done"
+    argv = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert "resume" not in argv[0]
+    assert "resume" in argv[1]
+    assert len(observed) == 6

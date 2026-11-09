@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, overload
 
-from agents._shared_exceptions import UserError
+from _agents_shared.exceptions import UserError
 
 from . import _preserve_legacy_module
 from .codex_options import CodexOptions, coerce_codex_options

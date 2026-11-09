@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any
 
-from agents._shared_exceptions import UserError
+from _agents_shared.exceptions import UserError
 
 from . import _preserve_legacy_module
 

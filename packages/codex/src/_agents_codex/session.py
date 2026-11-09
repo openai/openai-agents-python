@@ -2791,7 +2791,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     "agents.enabled": False,
                     "features.goals": goals,
-                    "features.view_image": project_guidance,
+                    **({"features.view_image": True} if project_guidance else {}),
                     "tools.update_plan.enabled": checklist,
                     "mcp_servers": {},
                     "features.non_prefixed_mcp_tool_names": False,

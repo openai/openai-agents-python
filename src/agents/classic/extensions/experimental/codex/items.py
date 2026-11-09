@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import items as _implementation
-from agents._codex_cli.items import (
+from _agents_shared.codex_cli import items as _implementation
+from _agents_shared.codex_cli.items import (
     AgentMessageItem as AgentMessageItem,
     CommandExecutionItem as CommandExecutionItem,
     CommandExecutionStatus as CommandExecutionStatus,

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
         ToolOutputGuardrailResult,
     )
 
-from agents._shared_exceptions import AgentsException as AgentsException, UserError as UserError
+from _agents_shared.exceptions import AgentsException as AgentsException, UserError as UserError
 
 from .util._pretty_print import pretty_print_run_error_details
 

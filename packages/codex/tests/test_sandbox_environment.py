@@ -873,3 +873,45 @@ async def test_native_sandbox_pure_utilities_preserve_behavior() -> None:
 
     assert await transient() == "done"
     assert attempts == 2
+
+
+@pytest.mark.parametrize("mode", ["borrowed", "resume"])
+@pytest.mark.parametrize("mismatch", ["root", "topology", "credentials", "environment"])
+async def test_live_mount_authority_must_match_before_gateway_or_resume(mode, mismatch) -> None:
+    events: list[str] = []
+    client = Client(events)
+    original = Manifest(
+        entries={
+            "data": declaration(access_key_id="old-principal", secret_access_key="synthetic-secret")
+        }
+    )
+    live = await client.create(manifest=original, options=Options())
+    live.state.type = "docker"
+    current = original.model_copy(deep=True)
+    if mismatch == "root":
+        current.root = "/other"
+    elif mismatch == "topology":
+        current.entries.clear()
+    elif mismatch == "credentials":
+        current.entries["data"].access_key_id = "new-principal"
+    else:
+        current.environment.value["AWS_ACCESS_KEY_ID"] = "new-principal"
+    events.clear()
+
+    @asynccontextmanager
+    async def connect(selected):
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    with pytest.raises((MountConfigError, ValueError, RuntimeError)):
+        async with sandbox_environment(
+            client,
+            manifest=current,
+            options=Options(),
+            connect=connect,
+            **(
+                {"session": live} if mode == "borrowed" else {"authorized_resume_state": live.state}
+            ),
+        ):
+            pytest.fail("Mismatched authority opened the gateway")
+    assert events == []

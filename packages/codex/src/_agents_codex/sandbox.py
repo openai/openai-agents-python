@@ -11,10 +11,9 @@ from typing import Any, TypeVar, cast
 
 from pydantic import ValidationError
 
-from agents.classic.apply_diff import apply_diff
-from agents.classic.run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from agents.classic.sandbox._mount_security import (
     _mark_mount_error_data_safe,
+    rebind_manifest_mount_authority,
     redact_mount_error_data_sync,
 )
 from agents.classic.sandbox.entries import Dir, LocalDir, LocalFile
@@ -40,8 +39,14 @@ from agents.classic.sandbox.session.sandbox_client import (
     BaseSandboxClientOptions,
 )
 from agents.classic.sandbox.session.sandbox_session import SandboxSession
-from agents.classic.sandbox.session.sandbox_session_state import SandboxSessionState
-from agents.classic.sandbox.snapshot import (
+
+# Optional provider owners initialize before their shared resource types.
+# isort: split
+from _agents_shared.apply_diff import apply_diff
+from _agents_shared.retry import BackoffStrategy, retry_async
+from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits
+from _agents_shared.sandbox_session_state import SandboxSessionState
+from _agents_shared.snapshot import (
     LocalSnapshot,
     LocalSnapshotSpec,
     NoopSnapshot,
@@ -51,8 +56,9 @@ from agents.classic.sandbox.snapshot import (
     SnapshotBase,
     SnapshotSpec,
 )
-from agents.classic.sandbox.util.retry import BackoffStrategy, retry_async
-from agents.classic.sandbox.util.token_truncation import TruncationPolicy, truncate_text
+from _agents_shared.token_truncation import TruncationPolicy, truncate_text
+
+# isort: split
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .executor import Environment
@@ -94,6 +100,20 @@ def _manifest(value: Manifest) -> Manifest:
 
 
 @redact_mount_error_data_sync
+def _assert_current_mount_authority(state: SandboxSessionState, manifest: Manifest) -> None:
+    rebound = rebind_manifest_mount_authority(
+        state.manifest, manifest, provider_backend_id=state.type
+    )
+    if state.manifest.mount_targets() != rebound.mount_targets() or (
+        state.manifest.mount_targets()
+        and state.manifest.environment.normalized() != manifest.environment.normalized()
+    ):
+        raise MountConfigError(
+            message="Sandbox mount authority must match current trusted configuration"
+        )
+
+
+@redact_mount_error_data_sync
 def sandbox_environment(
     client: BaseSandboxClient[_OptionsT],
     *,
@@ -110,7 +130,7 @@ def sandbox_environment(
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
-    resume. A borrowed session keeps its already prepared manifest. A supplied live
+    resume. A borrowed session must match the current mount authority. A supplied live
     session is borrowed: only its gateway is closed. An authorized_resume_state
     explicitly authorizes all provider identity and snapshot fields, not merely
     their types. Never pass untrusted deserialized state without authorizing those
@@ -139,6 +159,7 @@ def sandbox_environment(
             raise ValueError("session backend must match the configured client")
         if concurrency_limits is not None or archive_limits is not None:
             raise ValueError("configure borrowed session budgets before supplying the session")
+        _assert_current_mount_authority(session.state, captured_manifest)
     if authorized_resume_state is not None:
         if not isinstance(authorized_resume_state, SandboxSessionState):
             raise TypeError(
@@ -148,6 +169,8 @@ def sandbox_environment(
             raise ValueError("resume state backend must match the configured client")
         if authorized_resume_state.manifest.root != captured_manifest.root:
             raise ValueError("resume state workspace root must match current manifest")
+        if not authorized_resume_state.mount_authority_redacted:
+            _assert_current_mount_authority(authorized_resume_state, captured_manifest)
         # Provider identity and snapshot fields require explicit caller authorization.
         # Current configuration, never persisted manifest fields, grants authority.
         authorized_resume_state = authorized_resume_state.model_copy(deep=True)
@@ -188,6 +211,9 @@ def sandbox_environment(
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
                 await selected.start()
+            else:
+                _assert_current_mount_authority(selected.state, captured_manifest)
+                await selected._validate_manifest_application(manifest=captured_manifest)
             yield await owners.enter_async_context(connect(selected))
 
     return source()

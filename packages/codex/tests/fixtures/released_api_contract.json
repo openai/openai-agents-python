@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "641745375078f61d9c4cb9d865f0a8708bf155d2",
+  "baseline_commit": "e721c4a4e3adfd29140f4669ac31d6cfb5eafcfd",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -122,19 +122,19 @@
         "imports": [
           "from collections.abc import Awaitable, Callable, Mapping",
           "from typing import Any",
-          "from ._codex_cli.codex import Codex",
-          "from ._codex_cli.codex_options import CodexOptions",
-          "from ._codex_cli.events import ThreadEvent",
-          "from ._codex_cli.thread_options import ThreadOptions",
-          "from ._codex_cli.turn_options import TurnOptions",
+          "from _agents_shared.codex_cli.codex import Codex",
+          "from _agents_shared.codex_cli.codex_options import CodexOptions",
+          "from _agents_shared.codex_cli.events import ThreadEvent",
+          "from _agents_shared.codex_cli.thread_options import ThreadOptions",
+          "from _agents_shared.codex_cli.turn_options import TurnOptions",
           "from ._function_tools import _PythonTool"
         ],
         "references": {
-          "Codex": "agents._codex_cli.codex.Codex",
-          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
-          "ThreadEvent": "agents._codex_cli.events.ThreadEvent",
-          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions",
-          "TurnOptions": "agents._codex_cli.turn_options.TurnOptions",
+          "Codex": "_agents_shared.codex_cli.codex.Codex",
+          "CodexOptions": "_agents_shared.codex_cli.codex_options.CodexOptions",
+          "ThreadEvent": "_agents_shared.codex_cli.events.ThreadEvent",
+          "ThreadOptions": "_agents_shared.codex_cli.thread_options.ThreadOptions",
+          "TurnOptions": "_agents_shared.codex_cli.turn_options.TurnOptions",
           "_PythonTool": "agents._function_tools._PythonTool"
         }
       },
@@ -866,23 +866,23 @@
           "from collections.abc import Callable, Mapping",
           "from contextlib import AbstractAsyncContextManager",
           "from typing import Any, TypeVar",
-          "from .classic.apply_diff import apply_diff",
-          "from .classic.run_config import SandboxArchiveLimits, SandboxConcurrencyLimits",
           "from .classic.sandbox._mount_security import redact_mount_error_data_sync",
           "from .classic.sandbox.entries import Dir, LocalDir, LocalFile",
           "from .classic.sandbox.entries.mounts import AzureBlobMount, BoxMount, DockerVolumeMountStrategy, FuseMountPattern, GCSMount, InContainerMountStrategy, Mount, MountpointMountPattern, R2Mount, RcloneMountPattern, S3FilesMount, S3FilesMountPattern, S3Mount",
           "from .classic.sandbox.manifest import Manifest",
           "from .classic.sandbox.session.sandbox_client import BaseSandboxClient",
           "from .classic.sandbox.session.sandbox_session import SandboxSession",
-          "from .classic.sandbox.session.sandbox_session_state import SandboxSessionState",
-          "from .classic.sandbox.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
-          "from .classic.sandbox.util.retry import BackoffStrategy, retry_async",
-          "from .classic.sandbox.util.token_truncation import TruncationPolicy, truncate_text",
+          "from _agents_shared.apply_diff import apply_diff",
+          "from _agents_shared.retry import BackoffStrategy, retry_async",
+          "from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits",
+          "from _agents_shared.sandbox_session_state import SandboxSessionState",
+          "from _agents_shared.snapshot import LocalSnapshot, LocalSnapshotSpec, NoopSnapshot, NoopSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec, SnapshotBase, SnapshotSpec",
+          "from _agents_shared.token_truncation import TruncationPolicy, truncate_text",
           "from .executor import Environment"
         ],
         "references": {
           "AzureBlobMount": "agents.classic.sandbox.entries.mounts.AzureBlobMount",
-          "BackoffStrategy": "agents.classic.sandbox.util.retry.BackoffStrategy",
+          "BackoffStrategy": "_agents_shared.retry.BackoffStrategy",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BoxMount": "agents.classic.sandbox.entries.mounts.BoxMount",
           "Dir": "agents.classic.sandbox.entries.Dir",
@@ -893,31 +893,31 @@
           "InContainerMountStrategy": "agents.classic.sandbox.entries.mounts.InContainerMountStrategy",
           "LocalDir": "agents.classic.sandbox.entries.LocalDir",
           "LocalFile": "agents.classic.sandbox.entries.LocalFile",
-          "LocalSnapshot": "agents.classic.sandbox.snapshot.LocalSnapshot",
-          "LocalSnapshotSpec": "agents.classic.sandbox.snapshot.LocalSnapshotSpec",
+          "LocalSnapshot": "_agents_shared.snapshot.LocalSnapshot",
+          "LocalSnapshotSpec": "_agents_shared.snapshot.LocalSnapshotSpec",
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
           "Mount": "agents.classic.sandbox.entries.mounts.Mount",
           "MountpointMountPattern": "agents.classic.sandbox.entries.mounts.MountpointMountPattern",
-          "NoopSnapshot": "agents.classic.sandbox.snapshot.NoopSnapshot",
-          "NoopSnapshotSpec": "agents.classic.sandbox.snapshot.NoopSnapshotSpec",
+          "NoopSnapshot": "_agents_shared.snapshot.NoopSnapshot",
+          "NoopSnapshotSpec": "_agents_shared.snapshot.NoopSnapshotSpec",
           "R2Mount": "agents.classic.sandbox.entries.mounts.R2Mount",
           "RcloneMountPattern": "agents.classic.sandbox.entries.mounts.RcloneMountPattern",
-          "RemoteSnapshot": "agents.classic.sandbox.snapshot.RemoteSnapshot",
-          "RemoteSnapshotSpec": "agents.classic.sandbox.snapshot.RemoteSnapshotSpec",
+          "RemoteSnapshot": "_agents_shared.snapshot.RemoteSnapshot",
+          "RemoteSnapshotSpec": "_agents_shared.snapshot.RemoteSnapshotSpec",
           "S3FilesMount": "agents.classic.sandbox.entries.mounts.S3FilesMount",
           "S3FilesMountPattern": "agents.classic.sandbox.entries.mounts.S3FilesMountPattern",
           "S3Mount": "agents.classic.sandbox.entries.mounts.S3Mount",
-          "SandboxArchiveLimits": "agents.classic.run_config.SandboxArchiveLimits",
-          "SandboxConcurrencyLimits": "agents.classic.run_config.SandboxConcurrencyLimits",
+          "SandboxArchiveLimits": "_agents_shared.sandbox_limits.SandboxArchiveLimits",
+          "SandboxConcurrencyLimits": "_agents_shared.sandbox_limits.SandboxConcurrencyLimits",
           "SandboxSession": "agents.classic.sandbox.session.sandbox_session.SandboxSession",
-          "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
-          "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
-          "SnapshotSpec": "agents.classic.sandbox.snapshot.SnapshotSpec",
-          "TruncationPolicy": "agents.classic.sandbox.util.token_truncation.TruncationPolicy",
-          "apply_diff": "agents.classic.apply_diff.apply_diff",
+          "SandboxSessionState": "_agents_shared.sandbox_session_state.SandboxSessionState",
+          "SnapshotBase": "_agents_shared.snapshot.SnapshotBase",
+          "SnapshotSpec": "_agents_shared.snapshot.SnapshotSpec",
+          "TruncationPolicy": "_agents_shared.token_truncation.TruncationPolicy",
+          "apply_diff": "_agents_shared.apply_diff.apply_diff",
           "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync",
-          "retry_async": "agents.classic.sandbox.util.retry.retry_async",
-          "truncate_text": "agents.classic.sandbox.util.token_truncation.truncate_text"
+          "retry_async": "_agents_shared.retry.retry_async",
+          "truncate_text": "_agents_shared.token_truncation.truncate_text"
         }
       },
       "agents.schema": {
@@ -1601,7 +1601,18 @@
         ],
         "references": {}
       },
-      "agents._codex_cli.codex": {
+      "_agents_shared.apply_diff": {
+        "declarations": [
+          "ApplyDiffMode = Literal['default', 'create']",
+          "def apply_diff(input: str, diff: str, mode: ApplyDiffMode='default') -> str:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Literal"
+        ],
+        "references": {}
+      },
+      "_agents_shared.codex_cli.codex": {
         "declarations": [
           "class _UnsetType:\n    pass",
           "_UNSET = _UnsetType()",
@@ -1616,12 +1627,12 @@
           "from .thread_options import ThreadOptions"
         ],
         "references": {
-          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
-          "Thread": "agents._codex_cli.thread.Thread",
-          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions"
+          "CodexOptions": "_agents_shared.codex_cli.codex_options.CodexOptions",
+          "Thread": "_agents_shared.codex_cli.thread.Thread",
+          "ThreadOptions": "_agents_shared.codex_cli.thread_options.ThreadOptions"
         }
       },
-      "agents._codex_cli.codex_options": {
+      "_agents_shared.codex_cli.codex_options": {
         "declarations": [
           "@dataclass(frozen=True)\nclass CodexOptions:\n    codex_path_override: str | None = None\n    base_url: str | None = None\n    api_key: str | None = None\n    env: Mapping[str, str] | None = None\n    codex_subprocess_stream_limit_bytes: int | None = None"
         ],
@@ -1632,7 +1643,7 @@
         ],
         "references": {}
       },
-      "agents._codex_cli.events": {
+      "_agents_shared.codex_cli.events": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ThreadStartedEvent(_DictLike):\n    thread_id: str\n    type: Literal['thread.started'] = field(default='thread.started', init=False)",
           "@dataclass(frozen=True)\nclass TurnStartedEvent(_DictLike):\n    type: Literal['turn.started'] = field(default='turn.started', init=False)",
@@ -1656,11 +1667,11 @@
           "from .payloads import _DictLike"
         ],
         "references": {
-          "ThreadItem": "agents._codex_cli.items.ThreadItem",
-          "_DictLike": "agents._codex_cli.payloads._DictLike"
+          "ThreadItem": "_agents_shared.codex_cli.items.ThreadItem",
+          "_DictLike": "_agents_shared.codex_cli.payloads._DictLike"
         }
       },
-      "agents._codex_cli.exec": {
+      "_agents_shared.codex_cli.exec": {
         "declarations": [
           "@dataclass(frozen=True)\nclass CodexExecArgs:\n    input: str\n    base_url: str | None = None\n    api_key: str | None = None\n    thread_id: str | None = None\n    images: list[str] | None = None\n    model: str | None = None\n    sandbox_mode: SandboxMode | None = None\n    working_directory: str | None = None\n    additional_directories: list[str] | None = None\n    skip_git_repo_check: bool | None = None\n    output_schema_file: str | None = None\n    model_reasoning_effort: ModelReasoningEffort | None = None\n    signal: asyncio.Event | None = None\n    idle_timeout_seconds: float | None = None\n    network_access_enabled: bool | None = None\n    web_search_mode: WebSearchMode | None = None\n    web_search_enabled: bool | None = None\n    approval_policy: ApprovalMode | None = None",
           "class CodexExec:\n\n    def __init__(self, *, executable_path: str | None=None, env: dict[str, str] | None=None, subprocess_stream_limit_bytes: int | None=None) -> None:\n        pass\n\n    async def run(self, args: CodexExecArgs) -> AsyncGenerator[str, None]:\n        pass"
@@ -1673,13 +1684,13 @@
           "from .thread_options import ApprovalMode, ModelReasoningEffort, SandboxMode, WebSearchMode"
         ],
         "references": {
-          "ApprovalMode": "agents._codex_cli.thread_options.ApprovalMode",
-          "ModelReasoningEffort": "agents._codex_cli.thread_options.ModelReasoningEffort",
-          "SandboxMode": "agents._codex_cli.thread_options.SandboxMode",
-          "WebSearchMode": "agents._codex_cli.thread_options.WebSearchMode"
+          "ApprovalMode": "_agents_shared.codex_cli.thread_options.ApprovalMode",
+          "ModelReasoningEffort": "_agents_shared.codex_cli.thread_options.ModelReasoningEffort",
+          "SandboxMode": "_agents_shared.codex_cli.thread_options.SandboxMode",
+          "WebSearchMode": "_agents_shared.codex_cli.thread_options.WebSearchMode"
         }
       },
-      "agents._codex_cli.items": {
+      "_agents_shared.codex_cli.items": {
         "declarations": [
           "if TYPE_CHECKING:\n    pass\nelse:\n    McpContentBlock = Any",
           "CommandExecutionStatus = Literal['in_progress', 'completed', 'failed']",
@@ -1710,10 +1721,10 @@
           "from mcp.types import ContentBlock as McpContentBlock"
         ],
         "references": {
-          "_DictLike": "agents._codex_cli.payloads._DictLike"
+          "_DictLike": "_agents_shared.codex_cli.payloads._DictLike"
         }
       },
-      "agents._codex_cli.payloads": {
+      "_agents_shared.codex_cli.payloads": {
         "declarations": [
           "class _DictLike:\n\n    def get(self, key: str, default: Any=None) -> Any:\n        pass\n\n    def keys(self) -> Iterable[str]:\n        pass\n\n    def as_dict(self) -> dict[str, Any]:\n        pass"
         ],
@@ -1724,7 +1735,7 @@
         ],
         "references": {}
       },
-      "agents._codex_cli.thread": {
+      "_agents_shared.codex_cli.thread": {
         "declarations": [
           "class TextInput(TypedDict):\n    type: Literal['text']\n    text: str",
           "class LocalImageInput(TypedDict):\n    type: Literal['local_image']\n    path: str",
@@ -1748,16 +1759,16 @@
           "from .turn_options import TurnOptions"
         ],
         "references": {
-          "CodexExec": "agents._codex_cli.exec.CodexExec",
-          "CodexOptions": "agents._codex_cli.codex_options.CodexOptions",
-          "ThreadEvent": "agents._codex_cli.events.ThreadEvent",
-          "ThreadItem": "agents._codex_cli.items.ThreadItem",
-          "ThreadOptions": "agents._codex_cli.thread_options.ThreadOptions",
-          "TurnOptions": "agents._codex_cli.turn_options.TurnOptions",
-          "Usage": "agents._codex_cli.events.Usage"
+          "CodexExec": "_agents_shared.codex_cli.exec.CodexExec",
+          "CodexOptions": "_agents_shared.codex_cli.codex_options.CodexOptions",
+          "ThreadEvent": "_agents_shared.codex_cli.events.ThreadEvent",
+          "ThreadItem": "_agents_shared.codex_cli.items.ThreadItem",
+          "ThreadOptions": "_agents_shared.codex_cli.thread_options.ThreadOptions",
+          "TurnOptions": "_agents_shared.codex_cli.turn_options.TurnOptions",
+          "Usage": "_agents_shared.codex_cli.events.Usage"
         }
       },
-      "agents._codex_cli.thread_options": {
+      "_agents_shared.codex_cli.thread_options": {
         "declarations": [
           "ApprovalMode = Literal['never', 'on-request', 'on-failure', 'untrusted']",
           "SandboxMode = Literal['read-only', 'workspace-write', 'danger-full-access']",
@@ -1773,7 +1784,7 @@
         ],
         "references": {}
       },
-      "agents._codex_cli.turn_options": {
+      "_agents_shared.codex_cli.turn_options": {
         "declarations": [
           "AbortSignal = asyncio.Event",
           "@dataclass(frozen=True)\nclass TurnOptions:\n    output_schema: dict[str, Any] | None = None\n    signal: AbortSignal | None = None\n    idle_timeout_seconds: float | None = None"
@@ -1783,6 +1794,103 @@
           "import asyncio",
           "from dataclasses import dataclass",
           "from typing import Any"
+        ],
+        "references": {}
+      },
+      "_agents_shared.retry": {
+        "declarations": [
+          "P = ParamSpec('P')",
+          "T = TypeVar('T')",
+          "class BackoffStrategy(str, Enum):\n    FIXED = 'fixed'\n    LINEAR = 'linear'\n    EXPONENTIAL = 'exponential'",
+          "DEFAULT_TRANSIENT_RETRY_INTERVAL_S = 0.25",
+          "DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT = 3",
+          "DEFAULT_TRANSIENT_RETRY_BACKOFF = BackoffStrategy.EXPONENTIAL",
+          "def retry_async(*, interval: float=DEFAULT_TRANSIENT_RETRY_INTERVAL_S, max_attempt: int=DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT, backoff: BackoffStrategy=DEFAULT_TRANSIENT_RETRY_BACKOFF, retry_if: Callable[..., bool], on_retry: Callable[..., object] | None=None) -> Callable[[Callable[P, Coroutine[object, object, T]]], Callable[P, Coroutine[object, object, T]]]:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Callable, Coroutine",
+          "from enum import Enum",
+          "from typing import ParamSpec, TypeVar"
+        ],
+        "references": {}
+      },
+      "_agents_shared.sandbox_limits": {
+        "declarations": [
+          "DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4",
+          "DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4",
+          "DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024",
+          "DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024",
+          "DEFAULT_MAX_ARCHIVE_MEMBERS = 100000",
+          "DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES = 16 * 1024 * 1024",
+          "DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES = DEFAULT_MAX_ARCHIVE_INPUT_BYTES + DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES",
+          "DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES = 64 * 1024 * 1024",
+          "DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES = 128 * 1024 * 1024",
+          "@dataclass\nclass SandboxConcurrencyLimits:\n    manifest_entries: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY\n    local_dir_files: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY\n\n    def validate(self) -> None:\n        pass",
+          "@dataclass\nclass SandboxArchiveLimits:\n    max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES\n    max_extracted_bytes: int | None = DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES\n    max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS\n    max_tar_metadata_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES\n    max_tar_stream_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES\n    max_zip_directory_bytes: int | None = DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES\n    max_tar_lzma_memory_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES\n    max_zip_lzma_dictionary_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES\n\n    def validate(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass"
+        ],
+        "references": {}
+      },
+      "_agents_shared.sandbox_session_state": {
+        "declarations": [
+          "SessionStateClass = type['SandboxSessionState']",
+          "class SandboxSessionState(BaseModel):\n    model_config = ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)\n    type: str\n    session_id: uuid.UUID = Field(default_factory=uuid.uuid4)\n    snapshot: SerializeAsAny[SnapshotBase]\n    manifest: Manifest\n    exposed_ports: tuple[int, ...] = Field(default_factory=tuple)\n    snapshot_fingerprint: str | None = None\n    snapshot_fingerprint_version: str | None = None\n    workspace_root_ready: bool = False\n    _subclass_registry: ClassVar[dict[str, SessionStateClass]] = {}\n    _path_grants_require_rebind: tuple[str, ...] = PrivateAttr(default=())\n    _mount_authority_redacted: bool = PrivateAttr(default=False)\n    _mount_authority_rebound: bool = PrivateAttr(default=False)\n\n    @property\n    def path_grants_require_rebind(self) -> tuple[str, ...]:\n        pass\n\n    @property\n    def mount_authority_redacted(self) -> bool:\n        pass\n\n    @property\n    def mount_authority_rebound(self) -> bool:\n        pass\n\n    @classmethod\n    def parse(cls, payload: object) -> SandboxSessionState:\n        pass\n\n    @classmethod\n    def model_validate_json(cls, json_data: str | bytes | bytearray, *, strict: bool | None=None, extra: Literal['allow', 'ignore', 'forbid'] | None=None, context: Any | None=None, by_alias: bool | None=None, by_name: bool | None=None) -> Self:\n        pass\n\n    def rebind_persisted_path_grants(self, trusted_manifest: Manifest | None) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def rebind_persisted_mount_authority(self, trusted_manifest: Manifest | None, *, provider_backend_id: str) -> SandboxSessionState:\n        pass\n\n    @redact_mount_error_data_sync\n    def assert_path_grants_rebound(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import uuid",
+          "from typing import Any, ClassVar, Literal",
+          "from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SerializeAsAny",
+          "from typing_extensions import Self",
+          "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
+          "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.snapshot import SnapshotBase"
+        ],
+        "references": {
+          "Manifest": "agents.classic.sandbox.manifest.Manifest",
+          "SnapshotBase": "agents.classic.sandbox.snapshot.SnapshotBase",
+          "redact_mount_error_data_sync": "agents.classic.sandbox._mount_security.redact_mount_error_data_sync"
+        }
+      },
+      "_agents_shared.snapshot": {
+        "declarations": [
+          "SnapshotClass = type['SnapshotBase']",
+          "class SnapshotBase(BaseModel, abc.ABC):\n    model_config = ConfigDict(frozen=True)\n    type: str\n    id: str\n    _subclass_registry: ClassVar[dict[str, SnapshotClass]] = {}\n\n    @classmethod\n    def parse(cls, payload: object) -> 'SnapshotBase':\n        pass\n\n    @abc.abstractmethod\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    @abc.abstractmethod\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    @abc.abstractmethod\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class LocalSnapshot(SnapshotBase):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class NoopSnapshot(SnapshotBase):\n    type: Literal['noop'] = 'noop'\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class RemoteSnapshot(SnapshotBase):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
+          "class SnapshotSpec(BaseModel, abc.ABC):\n    type: str\n\n    @abc.abstractmethod\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class LocalSnapshotSpec(SnapshotSpec):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class NoopSnapshotSpec(SnapshotSpec):\n    type: Literal['noop'] = 'noop'\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
+          "class RemoteSnapshotSpec(SnapshotSpec):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "import abc",
+          "import io",
+          "from pathlib import Path",
+          "from typing import ClassVar, Literal",
+          "from pydantic import BaseModel, ConfigDict",
+          "from agents.classic.sandbox.session.dependencies import Dependencies"
+        ],
+        "references": {
+          "Dependencies": "agents.classic.sandbox.session.dependencies.Dependencies"
+        }
+      },
+      "_agents_shared.token_truncation": {
+        "declarations": [
+          "TruncationMode = Literal['bytes', 'tokens']",
+          "@dataclass(frozen=True)\nclass TruncationPolicy:\n    mode: TruncationMode\n    limit: int\n\n    @classmethod\n    def bytes(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    @classmethod\n    def tokens(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    def token_budget(self) -> int:\n        pass\n\n    def byte_budget(self) -> int:\n        pass",
+          "def truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass",
+          "from typing import Literal"
         ],
         "references": {}
       },
@@ -2090,8 +2198,7 @@
       },
       "agents.classic.apply_diff": {
         "declarations": [
-          "ApplyDiffMode = Literal['default', 'create']",
-          "def apply_diff(input: str, diff: str, mode: ApplyDiffMode='default') -> str:\n    pass"
+          "ApplyDiffMode = Literal['default', 'create']"
         ],
         "exports": {},
         "imports": [
@@ -2636,15 +2743,6 @@
       },
       "agents.classic.run_config": {
         "declarations": [
-          "DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY = 4",
-          "DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4",
-          "DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024",
-          "DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024",
-          "DEFAULT_MAX_ARCHIVE_MEMBERS = 100000",
-          "DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES = 16 * 1024 * 1024",
-          "DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES = DEFAULT_MAX_ARCHIVE_INPUT_BYTES + DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES",
-          "DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES = 64 * 1024 * 1024",
-          "DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES = 128 * 1024 * 1024",
           "def _default_trace_include_sensitive_data() -> bool:\n    pass",
           "@dataclass\nclass ModelInputData:\n    input: list[TResponseInputItem]\n    instructions: str | None",
           "@dataclass\nclass CallModelData(Generic[TContext]):\n    model_data: ModelInputData\n    agent: Agent[TContext]\n    context: TContext | None",
@@ -2657,8 +2755,6 @@
           "@dataclass\nclass OutputGuardrailBlockedMessageArgs(Generic[TContext]):\n    default_message: str\n    guardrail_name: str\n    agent: Agent[Any]\n    run_context: RunContextWrapper[TContext]",
           "OutputGuardrailBlockedMessageFormatter = Callable[[OutputGuardrailBlockedMessageArgs[Any]], str | None]",
           "@dataclass\nclass ToolExecutionConfig:\n    max_function_tool_concurrency: int | None = None\n    pre_approval_tool_input_guardrails: bool = False",
-          "@dataclass\nclass SandboxConcurrencyLimits:\n    manifest_entries: int | None = DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY\n    local_dir_files: int | None = DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY\n\n    def validate(self) -> None:\n        pass",
-          "@dataclass\nclass SandboxArchiveLimits:\n    max_input_bytes: int | None = DEFAULT_MAX_ARCHIVE_INPUT_BYTES\n    max_extracted_bytes: int | None = DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES\n    max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS\n    max_tar_metadata_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES\n    max_tar_stream_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES\n    max_zip_directory_bytes: int | None = DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES\n    max_tar_lzma_memory_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES\n    max_zip_lzma_dictionary_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES\n\n    def validate(self) -> None:\n        pass",
           "@dataclass\nclass SandboxRunConfig:\n    client: BaseSandboxClient[Any] | None = None\n    options: Any | None = None\n    session: BaseSandboxSession | None = None\n    session_state: SandboxSessionState | None = None\n    manifest: Manifest | None = None\n    snapshot: SnapshotSpec | SnapshotBase | None = None\n    concurrency_limits: SandboxConcurrencyLimits = field(default_factory=SandboxConcurrencyLimits)\n    archive_limits: SandboxArchiveLimits | None = None\n    cwd: str | PurePath | None = None\n    if TYPE_CHECKING:\n\n        def __init__(self, client: BaseSandboxClient[Any] | None=None, options: Any | None=None, session: BaseSandboxSession | None=None, session_state: SandboxSessionState | None=None, manifest: Manifest | dict[str, Any] | None=None, snapshot: SnapshotSpec | SnapshotBase | dict[str, Any] | None=None, concurrency_limits: SandboxConcurrencyLimits | dict[str, Any]=..., archive_limits: SandboxArchiveLimits | dict[str, Any] | None=None, cwd: str | PurePath | None=None) -> None:\n            pass",
           "@dataclass\nclass RunConfig:\n    model: str | Model | None = None\n    model_provider: ModelProvider = field(default_factory=MultiProvider)\n    model_settings: ModelSettings | None = None\n    handoff_input_filter: HandoffInputFilter | None = None\n    nest_handoff_history: bool = False\n    handoff_history_mapper: HandoffHistoryMapper | None = None\n    input_guardrails: list[InputGuardrail[Any]] | None = None\n    output_guardrails: list[OutputGuardrail[Any]] | None = None\n    tracing_disabled: bool = False\n    tracing: TracingConfig | None = None\n    trace_include_sensitive_data: bool = field(default_factory=_default_trace_include_sensitive_data)\n    workflow_name: str = 'Agent workflow'\n    trace_id: str | None = None\n    group_id: str | None = None\n    trace_metadata: dict[str, Any] | None = None\n    session_input_callback: SessionInputCallback | None = None\n    call_model_input_filter: CallModelInputFilter | None = None\n    tool_error_formatter: ToolErrorFormatter | None = None\n    session_settings: SessionSettings | None = None\n    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None\n    sandbox: SandboxRunConfig | None = None\n    tool_execution: ToolExecutionConfig | None = None\n    tool_not_found_behavior: ToolNotFoundBehavior = 'raise_error'\n    tool_name_collision_policy: ToolNameCollisionPolicy = 'warn'\n    output_guardrail_blocked_message: str | OutputGuardrailBlockedMessageFormatter | None = None\n    if TYPE_CHECKING:\n\n        def __init__(self, model: str | Model | None=None, model_provider: ModelProvider=..., model_settings: ModelSettings | dict[str, Any] | None=None, handoff_input_filter: HandoffInputFilter | None=None, nest_handoff_history: bool=False, handoff_history_mapper: HandoffHistoryMapper | None=None, input_guardrails: list[InputGuardrail[Any]] | None=None, output_guardrails: list[OutputGuardrail[Any]] | None=None, tracing_disabled: bool=False, tracing: TracingConfig | None=None, trace_include_sensitive_data: bool=..., workflow_name: str='Agent workflow', trace_id: str | None=None, group_id: str | None=None, trace_metadata: dict[str, Any] | None=None, session_input_callback: SessionInputCallback | None=None, call_model_input_filter: CallModelInputFilter | None=None, tool_error_formatter: ToolErrorFormatter | None=None, session_settings: SessionSettings | dict[str, Any] | None=None, reasoning_item_id_policy: ReasoningItemIdPolicy | None=None, sandbox: SandboxRunConfig | dict[str, Any] | None=None, tool_execution: ToolExecutionConfig | dict[str, Any] | None=None, tool_not_found_behavior: ToolNotFoundBehavior='raise_error', tool_name_collision_policy: ToolNameCollisionPolicy='warn', output_guardrail_blocked_message: str | OutputGuardrailBlockedMessageFormatter | None=None) -> None:\n            pass"
         ],
@@ -2668,6 +2764,7 @@
           "from dataclasses import dataclass, field",
           "from pathlib import PurePath",
           "from typing import TYPE_CHECKING, Any, Generic, Literal",
+          "from _agents_shared.sandbox_limits import DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY as DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY, DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY as DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY, SandboxArchiveLimits as SandboxArchiveLimits, SandboxConcurrencyLimits as SandboxConcurrencyLimits",
           "from .guardrail import InputGuardrail, OutputGuardrail",
           "from .handoffs import HandoffHistoryMapper, HandoffInputFilter",
           "from .items import TResponseInputItem",
@@ -2690,6 +2787,8 @@
           "Agent": "agents.classic.agent.Agent",
           "BaseSandboxClient": "agents.classic.sandbox.session.sandbox_client.BaseSandboxClient",
           "BaseSandboxSession": "agents.classic.sandbox.session.base_sandbox_session.BaseSandboxSession",
+          "DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY": "_agents_shared.sandbox_limits.DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY",
+          "DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY": "_agents_shared.sandbox_limits.DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY",
           "HandoffHistoryMapper": "agents.classic.handoffs.HandoffHistoryMapper",
           "HandoffInputFilter": "agents.classic.handoffs.HandoffInputFilter",
           "InputGuardrail": "agents.classic.guardrail.InputGuardrail",
@@ -2701,6 +2800,8 @@
           "MultiProvider": "agents.classic.models.multi_provider.MultiProvider",
           "OutputGuardrail": "agents.classic.guardrail.OutputGuardrail",
           "RunContextWrapper": "agents.classic.run_context.RunContextWrapper",
+          "SandboxArchiveLimits": "_agents_shared.sandbox_limits.SandboxArchiveLimits",
+          "SandboxConcurrencyLimits": "_agents_shared.sandbox_limits.SandboxConcurrencyLimits",
           "SandboxSessionState": "agents.classic.sandbox.session.sandbox_session_state.SandboxSessionState",
           "SessionInputCallback": "agents.classic.memory.SessionInputCallback",
           "SessionSettings": "agents.classic.memory.SessionSettings",
@@ -3467,9 +3568,9 @@
           "from typing import Any, ClassVar, Literal",
           "from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SerializeAsAny",
           "from typing_extensions import Self",
-          "from .._mount_security import redact_mount_error_data_sync",
-          "from ..manifest import Manifest",
-          "from ..snapshot import SnapshotBase"
+          "from agents.classic.sandbox._mount_security import redact_mount_error_data_sync",
+          "from agents.classic.sandbox.manifest import Manifest",
+          "from agents.classic.sandbox.snapshot import SnapshotBase"
         ],
         "references": {
           "Manifest": "agents.classic.sandbox.manifest.Manifest",
@@ -3498,22 +3599,15 @@
         "declarations": [
           "SnapshotClass = type['SnapshotBase']",
           "class SnapshotBase(BaseModel, abc.ABC):\n    model_config = ConfigDict(frozen=True)\n    type: str\n    id: str\n    _subclass_registry: ClassVar[dict[str, SnapshotClass]] = {}\n\n    @classmethod\n    def parse(cls, payload: object) -> 'SnapshotBase':\n        pass\n\n    @abc.abstractmethod\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    @abc.abstractmethod\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    @abc.abstractmethod\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
-          "class LocalSnapshot(SnapshotBase):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
-          "class NoopSnapshot(SnapshotBase):\n    type: Literal['noop'] = 'noop'\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
-          "class RemoteSnapshot(SnapshotBase):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    async def persist(self, data: io.IOBase, *, dependencies: Dependencies | None=None) -> None:\n        pass\n\n    async def restore(self, *, dependencies: Dependencies | None=None) -> io.IOBase:\n        pass\n\n    async def restorable(self, *, dependencies: Dependencies | None=None) -> bool:\n        pass",
-          "class SnapshotSpec(BaseModel, abc.ABC):\n    type: str\n\n    @abc.abstractmethod\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
-          "class LocalSnapshotSpec(SnapshotSpec):\n    type: Literal['local'] = 'local'\n    base_path: Path\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
-          "class NoopSnapshotSpec(SnapshotSpec):\n    type: Literal['noop'] = 'noop'\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass",
-          "class RemoteSnapshotSpec(SnapshotSpec):\n    type: Literal['remote'] = 'remote'\n    client_dependency_key: str\n\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass"
+          "class SnapshotSpec(BaseModel, abc.ABC):\n    type: str\n\n    @abc.abstractmethod\n    def build(self, snapshot_id: str) -> SnapshotBase:\n        pass"
         ],
         "exports": {},
         "imports": [
           "import abc",
           "import io",
-          "from pathlib import Path",
-          "from typing import ClassVar, Literal",
+          "from typing import ClassVar",
           "from pydantic import BaseModel, ConfigDict",
-          "from .session.dependencies import Dependencies"
+          "from agents.classic.sandbox.session.dependencies import Dependencies"
         ],
         "references": {
           "Dependencies": "agents.classic.sandbox.session.dependencies.Dependencies"
@@ -3534,37 +3628,6 @@
           "from enum import IntEnum",
           "from pydantic import BaseModel, Field",
           "from typing_extensions import Self"
-        ],
-        "references": {}
-      },
-      "agents.classic.sandbox.util.retry": {
-        "declarations": [
-          "P = ParamSpec('P')",
-          "T = TypeVar('T')",
-          "class BackoffStrategy(str, Enum):\n    FIXED = 'fixed'\n    LINEAR = 'linear'\n    EXPONENTIAL = 'exponential'",
-          "DEFAULT_TRANSIENT_RETRY_INTERVAL_S = 0.25",
-          "DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT = 3",
-          "DEFAULT_TRANSIENT_RETRY_BACKOFF = BackoffStrategy.EXPONENTIAL",
-          "def retry_async(*, interval: float=DEFAULT_TRANSIENT_RETRY_INTERVAL_S, max_attempt: int=DEFAULT_TRANSIENT_RETRY_MAX_ATTEMPT, backoff: BackoffStrategy=DEFAULT_TRANSIENT_RETRY_BACKOFF, retry_if: Callable[..., bool], on_retry: Callable[..., object] | None=None) -> Callable[[Callable[P, Coroutine[object, object, T]]], Callable[P, Coroutine[object, object, T]]]:\n    pass"
-        ],
-        "exports": {},
-        "imports": [
-          "from collections.abc import Callable, Coroutine",
-          "from enum import Enum",
-          "from typing import ParamSpec, TypeVar"
-        ],
-        "references": {}
-      },
-      "agents.classic.sandbox.util.token_truncation": {
-        "declarations": [
-          "TruncationMode = Literal['bytes', 'tokens']",
-          "@dataclass(frozen=True)\nclass TruncationPolicy:\n    mode: TruncationMode\n    limit: int\n\n    @classmethod\n    def bytes(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    @classmethod\n    def tokens(cls, limit: int) -> TruncationPolicy:\n        pass\n\n    def token_budget(self) -> int:\n        pass\n\n    def byte_budget(self) -> int:\n        pass",
-          "def truncate_text(content: str, policy: TruncationPolicy) -> str:\n    pass"
-        ],
-        "exports": {},
-        "imports": [
-          "from dataclasses import dataclass",
-          "from typing import Literal"
         ],
         "references": {}
       },

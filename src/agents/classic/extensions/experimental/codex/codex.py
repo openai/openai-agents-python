@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import codex as _implementation
-from agents._codex_cli.codex import (
+from _agents_shared.codex_cli import codex as _implementation
+from _agents_shared.codex_cli.codex import (
     _UNSET as _UNSET,
     Codex as Codex,
     _normalize_env as _normalize_env,

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from agents._shared_exceptions import UserError
+from _agents_shared.exceptions import UserError
 
 from . import _preserve_legacy_module
 

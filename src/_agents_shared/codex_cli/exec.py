@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents._shared_exceptions import UserError
+from _agents_shared.exceptions import UserError
 
 from . import _preserve_legacy_module
 from .thread_options import ApprovalMode, ModelReasoningEffort, SandboxMode, WebSearchMode
@@ -284,7 +284,9 @@ def find_codex_path() -> str:
         return which_path
 
     target_triple = _platform_target_triple()
-    vendor_root = Path(__file__).resolve().parent.parent / "classic" / "extensions" / "vendor"
+    vendor_root = (
+        Path(__file__).resolve().parents[2] / "agents" / "classic" / "extensions" / "vendor"
+    )
     arch_root = vendor_root / target_triple
     binary_name = "codex.exe" if sys.platform.startswith("win") else "codex"
     binary_path = arch_root / "codex" / binary_name

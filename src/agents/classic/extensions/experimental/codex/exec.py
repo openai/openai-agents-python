@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import exec as _implementation
-from agents._codex_cli.exec import (
+from _agents_shared.codex_cli import exec as _implementation
+from _agents_shared.codex_cli.exec import (
     _DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES as _DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES,
     _INTERNAL_ORIGINATOR_ENV as _INTERNAL_ORIGINATOR_ENV,
     _MAX_SUBPROCESS_STREAM_LIMIT_BYTES as _MAX_SUBPROCESS_STREAM_LIMIT_BYTES,

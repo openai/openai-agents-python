@@ -56,15 +56,15 @@ def test_native_codex_declaration_does_not_import_classic() -> None:
     ],
 )
 def test_classic_cli_imports_alias_the_shared_implementation(name: str) -> None:
-    shared = importlib.import_module(f"agents._codex_cli.{name}")
+    shared = importlib.import_module(f"_agents_shared.codex_cli.{name}")
     legacy = importlib.import_module(f"agents.classic.extensions.experimental.codex.{name}")
     assert legacy is shared
 
 
 def test_classic_cli_patch_targets_and_exception_identities(monkeypatch) -> None:
-    from agents._codex_cli.codex import Codex
-    from agents._codex_cli.codex_options import CodexOptions
-    from agents._shared_exceptions import AgentsException, UserError
+    from _agents_shared.codex_cli.codex import Codex
+    from _agents_shared.codex_cli.codex_options import CodexOptions
+    from _agents_shared.exceptions import AgentsException, UserError
     from agents.classic.exceptions import (
         AgentsException as ClassicAgentsException,
         UserError as ClassicUserError,
@@ -124,11 +124,11 @@ async def test_shared_cli_relocation_keeps_the_existing_bundled_executable_layou
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agents._codex_cli import exec as shared_exec
-    from agents._codex_cli.codex import Codex
+    from _agents_shared.codex_cli import exec as shared_exec
+    from _agents_shared.codex_cli.codex import Codex
 
     package_root = tmp_path / "installed" / "agents"
-    relocated_module = package_root / "_codex_cli" / "exec.py"
+    relocated_module = package_root.parent / "_agents_shared" / "codex_cli" / "exec.py"
     relocated_module.parent.mkdir(parents=True)
     relocated_module.write_text("# Shared CLI module installation location.\n")
     executable = (
@@ -152,3 +152,49 @@ async def test_shared_cli_relocation_keeps_the_existing_bundled_executable_layou
     assert shared_exec.find_codex_path() == str(executable)
     result = await Codex().start_thread().run("Inspect the workspace.")
     assert result.final_response == "bundled CLI ran"
+
+
+def test_native_sandbox_import_initializes_shared_resource_types_in_a_fresh_process() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from agents.sandbox import SandboxSession, LocalSnapshot; "
+            "from agents.classic.sandbox.snapshot import LocalSnapshot as Legacy; "
+            "assert LocalSnapshot is Legacy",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("legacy", "shared"),
+    [
+        ("agents.classic.apply_diff", "_agents_shared.apply_diff"),
+        ("agents.classic.sandbox.snapshot", "_agents_shared.snapshot"),
+        ("agents.classic.sandbox.util.retry", "_agents_shared.retry"),
+        ("agents.classic.sandbox.util.token_truncation", "_agents_shared.token_truncation"),
+        (
+            "agents.classic.sandbox.session.sandbox_session_state",
+            "_agents_shared.sandbox_session_state",
+        ),
+    ],
+)
+def test_classic_shared_resource_modules_keep_their_monkeypatch_identity(legacy, shared) -> None:
+    assert importlib.import_module(legacy) is importlib.import_module(shared)
+
+
+def test_shared_sandbox_limits_preserve_classic_class_identity_and_pickle() -> None:
+    from _agents_shared.sandbox_limits import SandboxArchiveLimits, SandboxConcurrencyLimits
+    from agents.classic.run_config import (
+        SandboxArchiveLimits as LegacyArchive,
+        SandboxConcurrencyLimits as LegacyConcurrency,
+    )
+
+    assert LegacyArchive is SandboxArchiveLimits
+    assert LegacyConcurrency is SandboxConcurrencyLimits
+    assert SandboxArchiveLimits.__module__ == "agents.classic.run_config"
+    assert type(pickle.loads(pickle.dumps(SandboxArchiveLimits()))) is LegacyArchive

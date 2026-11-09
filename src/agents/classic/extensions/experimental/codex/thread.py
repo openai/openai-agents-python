@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import thread as _implementation
-from agents._codex_cli.thread import (
+from _agents_shared.codex_cli import thread as _implementation
+from _agents_shared.codex_cli.thread import (
     Input as Input,
     LocalImageInput as LocalImageInput,
     RunResult as RunResult,

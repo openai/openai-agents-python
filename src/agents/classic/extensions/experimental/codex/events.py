@@ -2,8 +2,8 @@
 
 import sys as _sys
 
-from agents._codex_cli import events as _implementation
-from agents._codex_cli.events import (
+from _agents_shared.codex_cli import events as _implementation
+from _agents_shared.codex_cli.events import (
     ItemCompletedEvent as ItemCompletedEvent,
     ItemStartedEvent as ItemStartedEvent,
     ItemUpdatedEvent as ItemUpdatedEvent,

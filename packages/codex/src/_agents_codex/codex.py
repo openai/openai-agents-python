@@ -11,25 +11,25 @@ from dataclasses import dataclass, field
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from agents._codex_cli.codex import Codex
-from agents._codex_cli.codex_options import (
+from _agents_shared.codex_cli.codex import Codex
+from _agents_shared.codex_cli.codex_options import (
     CodexOptions,
     coerce_codex_options,
 )
-from agents._codex_cli.events import (
+from _agents_shared.codex_cli.events import (
     ItemCompletedEvent,
     ThreadErrorEvent,
     ThreadEvent,
     TurnCompletedEvent,
     TurnFailedEvent,
 )
-from agents._codex_cli.items import is_agent_message_item
-from agents._codex_cli.thread import Thread
-from agents._codex_cli.thread_options import (
+from _agents_shared.codex_cli.items import is_agent_message_item
+from _agents_shared.codex_cli.thread import Thread
+from _agents_shared.codex_cli.thread_options import (
     ThreadOptions,
     coerce_thread_options,
 )
-from agents._codex_cli.turn_options import (
+from _agents_shared.codex_cli.turn_options import (
     TurnOptions,
     coerce_turn_options,
 )
@@ -118,9 +118,13 @@ def codex_tool(
         async with aclosing(stream.events):
             async for event in stream.events:
                 if on_event is not None:
-                    observed = on_event(event)
-                    if inspect.isawaitable(observed):
-                        await observed
+                    try:
+                        observed = on_event(event)
+                        if inspect.isawaitable(observed):
+                            await observed
+                    except Exception:
+                        # Observers cannot change CLI success or persistent thread state.
+                        pass
                 if isinstance(event, ItemCompletedEvent) and is_agent_message_item(event.item):
                     response = event.item.text
                 elif isinstance(event, TurnCompletedEvent):
