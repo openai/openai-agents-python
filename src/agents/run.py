@@ -1280,6 +1280,12 @@ class AgentRunner:
                             # After the resumed turn, treat subsequent turns as fresh so
                             # counters and input saving behave normally.
                             is_resumed_state = False
+                            tool_input_guardrail_results.extend(
+                                turn_result.tool_input_guardrail_results
+                            )
+                            tool_output_guardrail_results.extend(
+                                turn_result.tool_output_guardrail_results
+                            )
 
                             if isinstance(turn_result.next_step, NextStepInterruption):
                                 interruption_result_input: str | list[TResponseInputItem] = (
@@ -1287,12 +1293,6 @@ class AgentRunner:
                                 )
                                 append_model_response_if_new(
                                     model_responses, turn_result.model_response
-                                )
-                                tool_input_guardrail_results.extend(
-                                    turn_result.tool_input_guardrail_results
-                                )
-                                tool_output_guardrail_results.extend(
-                                    turn_result.tool_output_guardrail_results
                                 )
                                 processed_response_for_state = resolve_processed_response(
                                     run_state=run_state,
@@ -1329,23 +1329,10 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
-                                if turn_result.has_recovered_tool_outputs:
-                                    tool_input_guardrail_results.extend(
-                                        turn_result.tool_input_guardrail_results
-                                    )
-                                    tool_output_guardrail_results.extend(
-                                        turn_result.tool_output_guardrail_results
-                                    )
                                 continue
 
                             append_model_response_if_new(
                                 model_responses, turn_result.model_response
-                            )
-                            tool_input_guardrail_results.extend(
-                                turn_result.tool_input_guardrail_results
-                            )
-                            tool_output_guardrail_results.extend(
-                                turn_result.tool_output_guardrail_results
                             )
 
                             if isinstance(turn_result.next_step, NextStepFinalOutput):

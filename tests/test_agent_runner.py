@@ -2373,8 +2373,12 @@ async def test_pre_approval_tool_input_guardrails_can_reject_before_pending_appr
     )
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("pre_approval", [False, True])
 @pytest.mark.asyncio
-async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
+async def test_approved_tool_guardrail_results_survive_next_turn(
+    streamed: bool, pre_approval: bool
+) -> None:
     model = ScriptedModel()
     guardrail_runs = 0
     executed = 0
@@ -2383,12 +2387,17 @@ async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
     def count_guardrail(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
         nonlocal guardrail_runs
         guardrail_runs += 1
-        return ToolGuardrailFunctionOutput.allow()
+        return ToolGuardrailFunctionOutput.allow(output_info=guardrail_runs)
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
 
     @function_tool(
         name_override="approval_tool",
         needs_approval=True,
         tool_input_guardrails=[count_guardrail],
+        tool_output_guardrails=[record_output],
     )
     def approval_tool() -> str:
         nonlocal executed
@@ -2403,25 +2412,39 @@ async def test_pre_approval_tool_input_guardrails_rerun_after_resume() -> None:
         ]
     )
     run_config = RunConfig(
-        tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True)
+        tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=pre_approval)
     )
 
-    first = await Runner.run(agent, "hello", run_config=run_config)
+    first = await _run_agent_with_optional_streaming(
+        agent, input="hello", streamed=streamed, run_config=run_config
+    )
     assert len(first.interruptions) == 1
-    assert guardrail_runs == 1
+    assert guardrail_runs == int(pre_approval)
     assert executed == 0
-    assert len(first.tool_input_guardrail_results) == 1
+    assert len(first.tool_input_guardrail_results) == int(pre_approval)
 
     state = first.to_state()
     state.approve(first.interruptions[0])
     restored_state = await RunState.from_string(agent, state.to_string())
 
-    resumed = await Runner.run(agent, restored_state, run_config=run_config)
+    resumed = await _run_agent_with_optional_streaming(
+        agent, input=restored_state, streamed=streamed, run_config=run_config
+    )
 
     assert resumed.final_output == "done"
-    assert guardrail_runs == 2
+    expected_inputs = [1, 2] if pre_approval else [1]
+    assert guardrail_runs == len(expected_inputs)
     assert executed == 1
-    assert len(resumed.tool_input_guardrail_results) == 1
+    assert [r.output.output_info for r in resumed.tool_input_guardrail_results] == expected_inputs
+    assert [r.output.output_info for r in resumed.tool_output_guardrail_results] == ["call_resume"]
+
+    checkpoint = resumed.to_state().to_json()
+    assert [
+        r["output"]["outputInfo"] for r in checkpoint["tool_input_guardrail_results"]
+    ] == expected_inputs
+    assert [r["output"]["outputInfo"] for r in checkpoint["tool_output_guardrail_results"]] == [
+        "call_resume"
+    ]
 
 
 @pytest.mark.asyncio
