@@ -66,7 +66,12 @@ from .realtime_settings import (
     serialize_realtime_session_update as _serialize_update,
     serialize_realtime_settings as _serialize_settings,
 )
-from .realtime_usage import RealtimeUsage, _add_usage, _reported_usage, _usage_snapshot
+from .realtime_usage import (
+    RealtimeUsage as RealtimeUsage,
+    _add_usage,
+    _reported_usage,
+    _usage_snapshot,
+)
 from .voice.workflow import NativeSessionVoiceWorkflow
 
 if TYPE_CHECKING:
@@ -2357,9 +2362,19 @@ class RealtimeSession:
                         received.completed = True
             reported_usage = None
             if name == "ResponseDone" and isinstance(value.get("usage"), dict):
-                reported = _reported_usage(value["usage"])
-                self._usage_totals = _add_usage(self._usage_totals or {}, reported)
-                reported_usage = _usage_snapshot(reported)
+                try:
+                    reported = _reported_usage(value["usage"])
+                    totals = _add_usage(self._usage_totals or {}, reported)
+                    reported_usage = _usage_snapshot(reported)
+                except ValueError as error:
+                    # The public terminal error must not retain rejected provider
+                    # fields in completed validators or this active payload frame.
+                    del payload, value
+                    _clear_adapter_error_frames(error)
+                    error.__traceback__ = None
+                    self._finish(error)
+                    return
+                self._usage_totals = totals
             self._emit(RealtimeResponse(status, value.get("response_id"), reported_usage))
             if name == "ResponseDone":
                 self._start_function_batch(value)
