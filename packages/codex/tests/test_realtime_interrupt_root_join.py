@@ -80,7 +80,7 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
             release_admission.set()
             await root_entered.wait()
             # Native completion precedes the managed Turn's final cleanup.
-            with pytest.raises(TimeoutError):
+            with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(stopping), 0.05)
             assert not voice._functions
             release_a.set()
