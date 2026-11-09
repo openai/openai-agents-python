@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     )
     from .canonical_storage import (
         CustomStorage as CustomStorage,
+        EncryptedSessionStore as EncryptedSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
         SQLiteSessionStore as SQLiteSessionStore,
@@ -230,6 +231,7 @@ _MODULES = {
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
+    "EncryptedSessionStore": ".canonical_storage",
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",

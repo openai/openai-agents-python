@@ -33,3 +33,4 @@ from _agents_codex.canonical_storage import (
     uuid as uuid,
     weakref as weakref,
 )
+from _agents_codex.canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore
