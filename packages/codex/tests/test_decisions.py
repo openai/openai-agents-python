@@ -696,6 +696,7 @@ def assert_no_response_in_sdk_traceback(error, marker):
         "fallback-refusal",
         "fallback-text",
         "fallback-depth",
+        "fallback-deep-malformed",
         "answers-depth",
         "result-depth",
     ],
@@ -720,13 +721,9 @@ async def test_completed_error_tracebacks_discard_provider_payload(
     elif case == "answer-count":
         payload["answers"] = {"secret": marker}
     elif case == "answers-depth":
-        value = marker
-        for _ in range(max(10_000, sys.getrecursionlimit() * 2)):
-            value = [value]
-        payload["answers"] = [value]
+        payload["answers"] = [[marker]]
     elif case == "result-depth":
-        text = "[" * (max(10_000, sys.getrecursionlimit() * 2)) + json.dumps(marker)
-        text += "]" * (max(10_000, sys.getrecursionlimit() * 2))
+        text = json.dumps([marker])
         monkeypatch.setattr(sys.modules["agents._native"], "_decision_result", lambda *args: text)
     elif fallback:
         part = (
@@ -735,12 +732,32 @@ async def test_completed_error_tracebacks_discard_provider_payload(
             else {"type": "output_text", "text": marker}
         )
         if case == "fallback-depth":
-            part["text"] = (
-                "[" * (max(10_000, sys.getrecursionlimit() * 2))
-                + json.dumps(marker)
-                + "]" * (max(10_000, sys.getrecursionlimit() * 2))
-            )
+            part["text"] = json.dumps([marker])
+        elif case == "fallback-deep-malformed":
+            # Exercise the real parser without relying on its recursion limit.
+            part["text"] = "[" * 10_000 + json.dumps(marker)
         payload.update(status="completed", output=[{"content": [part]}])
+
+    if case == "answers-depth":
+        encode = json.dumps
+
+        def fail_answers(value, *args, **kwargs):
+            if value is payload["answers"]:
+                raise RecursionError(marker)
+            return encode(value, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dumps", fail_answers)
+    elif case in ("result-depth", "fallback-depth"):
+        decode = json.loads
+        failed_text = text if case == "result-depth" else part["text"]
+
+        def fail_text(value, *args, **kwargs):
+            # JSON depth limits vary by Python version. Fail this exact boundary.
+            if value == failed_text:
+                raise RecursionError(marker)
+            return decode(value, *args, **kwargs)
+
+        monkeypatch.setattr(json, "loads", fail_text)
 
     class RawPayload(SimpleNamespace):
         def model_dump(self):
@@ -801,13 +818,19 @@ async def test_completed_error_tracebacks_discard_provider_payload(
 
 @pytest.mark.parametrize("bound", [False, True])
 @pytest.mark.parametrize("failure", ["non-json", "depth"])
-async def test_non_json_error_tracebacks_discard_completed_value(bound, failure):
+async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bound, failure):
     marker = "PRIVATE_NON_JSON_RESPONSE_MARKER"
     value = {marker} if failure == "non-json" else marker
-    if failure == "depth":
-        for _ in range(max(10_000, sys.getrecursionlimit() * 2)):
-            value = [value]
     provider = Provider({"response": value})
+    if failure == "depth":
+        encode = json.dumps
+
+        def fail_completed(value, *args, **kwargs):
+            if value is provider.value:
+                raise RecursionError(marker)
+            return encode(value, *args, **kwargs)
+
+        monkeypatch.setattr(json, "dumps", fail_completed)
     recorded = []
 
     async def begin():
