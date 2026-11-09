@@ -34,7 +34,7 @@ Later examples with `await` or `async with` are fragments for an async function 
 
 ## Typed input
 
-Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of `InputText` and `InputImage` dictionaries. These types use the Responses field names:
+Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of content dictionaries. `InputText` supplies text, and `InputImage` supplies an image data URL. These types use the Responses field names:
 
 ```python
 from agents import InputText, UserMessage
@@ -44,9 +44,38 @@ message: UserMessage = {"role": "user", "content": [text]}
 result = await agent.run(message)
 ```
 
-An `InputImage` uses `type="input_image"` and an `image_url` containing a base64 image data URL. Omit `detail` or set it to `"auto"`; other detail values, remote URLs, file IDs and local paths are unsupported. Codex decodes and prepares the image.
+An `InputImage` uses `type="input_image"` and `image_url`. For an inline image, supply a base64 image data URL; Codex decodes and prepares it. With the alpha.7 wheel, omit `detail` or use `"auto"`. A local path is not an image URL.
 
 Do not pass manual results to `Session.submit()`. Reply to the exact live `ActionRequested` with `await request.respond(value)`, using the declared output type. If validation fails, the request remains available, so you can retry while it remains live. Request identity keeps root and child replies separate even if native call IDs match.
+
+### Images and files in development builds
+
+The extended media types require a [build from matching development source](installation.md#preview-availability). The alpha.7 wheel does not include them.
+
+Development builds accept these additional content sources:
+
+| Content type | Source fields | Detail |
+| --- | --- | --- |
+| `InputImage` | `image_url` with an absolute HTTP(S) URL or base64 image data URL. | Omitted, `None`, `"auto"`, `"low"`, `"high"`, or `"original"`, subject to provider and model support for the request representation and detail value. |
+| `InputImageFile` | `file_id` with a provider-owned image ID. | The same detail values as `InputImage`. |
+| `InputFile` | Exactly one of `file_id`, `file_data`, or `file_url`. | `file_data` is canonical base64, optionally in a base64 data URL. `file_url` must use HTTPS. `filename` is optional. |
+
+Import these types from `agents`. A provider ID is an opaque reference, never a host file path. The SDK does not upload a local file for you. Use a provider connection and model that support the chosen source. The native runtime rejects unsupported combinations of request representation, model, and detail rather than silently changing them. For example, inline `detail="low"` is unsupported on models that use detail to size image input.
+
+This fragment sends a provider-owned file ID through your configured `agent`. Replace the fictional ID with one available to the provider and account serving the request:
+
+```python
+from agents import InputFile, UserMessage
+
+attachment: InputFile = {"type": "input_file", "file_id": "your-file-id", "filename": "report.pdf"}
+message: UserMessage = {
+    "role": "user",
+    "content": [{"type": "input_text", "text": "Summarize this report."}, attachment],
+}
+result = await agent.run(message)
+```
+
+Keep source URLs, embedded file data, and IDs out of routine logs. Accepted media can remain in conversation history and saved state.
 
 ## Submit and wait for work
 
