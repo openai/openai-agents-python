@@ -82,7 +82,7 @@ After an accepted `ReplaceArguments`, the SDK validates the replacement again an
 
 ### Return text, images and tool errors
 
-Use `ToolOutput.text(...)` for explicit text, `ToolOutput.image(...)` for an inline image, and `ToolOutput.error(...)` for a failed tool reply. Combine `ToolOutputText` and `ToolOutputImage` items for mixed content:
+Use `ToolOutput.text(...)` for explicit text, `ToolOutput.image(...)` for an image reference, and `ToolOutput.error(...)` for a failed tool reply. Combine `ToolOutputText` and `ToolOutputImage` items for mixed content:
 
 ```python
 from agents import ToolOutput, ToolOutputImage, ToolOutputText, function_tool
@@ -98,7 +98,14 @@ def preview() -> ToolOutput:
     return ToolOutput([ToolOutputText("A one-pixel preview."), ToolOutputImage(image_url)])
 ```
 
-Annotate functions that return these objects with `ToolOutput`, as above. Images require inline base64 image data URLs. Remote URLs, file IDs, and local paths are unsupported.
+Annotate functions that return these objects with `ToolOutput`, as above. For images, pass an inline base64 image data URL, an HTTP or HTTPS URL, or a file ID. Supply exactly one of `image_url` and `file_id`; `detail` can be `"low"`, `"high"`, `"auto"`, or `"original"`:
+
+```python
+remote_reply = ToolOutput.image("https://example.com/preview.png", detail="low")
+uploaded_reply = ToolOutput.image(file_id="file-your-uploaded-image")
+```
+
+These helpers preserve the reference for the model provider. They do not fetch URLs or upload files. Local filesystem paths are unsupported.
 
 `ToolOutput.error(...)` returns a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can declare `output_type=ToolOutput` and submit these values through a live request.
 
