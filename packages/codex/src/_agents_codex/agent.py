@@ -105,8 +105,9 @@ class ModelSettings(TypedDict, total=False, closed=True):
     ``"auto"``. A ``ToolRef`` selects one currently admitted eager leaf and
     requires it without adding authority. ``None`` clears the target to auto.
     New request controls accept ``None`` to clear their SDK override. The response
-    cap is a positive safe integer for ordinary sampling, not internal compaction
-    or reviewers. Request TTL (30m/12h) and retention (in_memory/24h) remain
+    cap uses an unsigned 64-bit integer for ordinary sampling, not internal
+    compaction or reviewers. Providers own numeric ranges and metadata quotas.
+    Request TTL (30m/12h) and retention (in_memory/24h) remain
     independent; omission injects neither default. Providers own model support
     and cache behavior. Known formatting loss fails locally. ``store=True``
     requires API-key authentication.
@@ -156,19 +157,18 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         if value is None:
             continue
         if key == "max_output_tokens":
-            if type(value) is not int or not 1 <= value <= 9_007_199_254_740_991:
-                raise ValueError("max_output_tokens must be a positive safe integer")
+            if type(value) is not int or not 0 <= value <= 18_446_744_073_709_551_615:
+                raise ValueError("max_output_tokens must be an unsigned 64-bit integer")
         elif key == "top_logprobs":
-            if type(value) is not int or not 0 <= value <= 20:
-                raise ValueError("top_logprobs must be an integer between zero and 20")
+            if type(value) is not int or not 0 <= value <= 255:
+                raise ValueError("top_logprobs must be an unsigned 8-bit integer")
         elif key in ("temperature", "top_p"):
-            upper = 2.0 if key == "temperature" else 1.0
-            if (
-                type(value) not in (int, float)
-                or not 0 <= value <= upper
-                or not math.isfinite(value)
-            ):
-                raise ValueError(f"{key} must be finite and between zero and {upper}")
+            try:
+                finite = type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{key} must be a finite 64-bit number")
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
@@ -181,18 +181,10 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
         elif key == "metadata":
-            if (
-                not isinstance(value, Mapping)
-                or len(value) > 16
-                or any(
-                    not isinstance(k, str) or not isinstance(v, str) or len(k) > 64 or len(v) > 512
-                    for k, v in value.items()
-                )
+            if not isinstance(value, Mapping) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
             ):
-                raise ValueError(
-                    "metadata allows at most 16 string pairs, "
-                    "64 characters per key and 512 per value"
-                )
+                raise ValueError("metadata must be a mapping of strings to strings")
             captured[key] = MappingProxyType(dict(value))
         elif key == "tool_choice":
             if isinstance(value, ToolRef):
