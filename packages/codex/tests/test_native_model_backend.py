@@ -19,6 +19,8 @@ from agents import (
     ModelResponse,
     ModelSettings,
     NativeProvider,
+    ToolOutput,
+    ToolOutputText,
     TurnStoppedError,
     function_tool,
 )
@@ -547,3 +549,88 @@ async def test_chat_admitted_text_options_and_logprob_request(source: str) -> No
     assert requests[0]["logprobs"] is True
     assert "top_logprobs" not in requests[0]
     assert all(requests[0][key] == value for key, value in extras.items())
+
+
+@pytest.mark.parametrize(
+    "kind", ["string", "text-parts", "image", "file", "mixed-image", "mixed-file"]
+)
+async def test_chat_tool_output_rejects_media_before_next_client_call(kind: str) -> None:
+    requests = []
+    effects = []
+
+    async def create(raw_request):
+        requests.append(await raw_request.json())
+        return web.json_response(
+            {
+                "id": "chat-tool-output",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls" if len(requests) == 1 else "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_content",
+                                    "type": "function",
+                                    "function": {"name": "content", "arguments": "{}"},
+                                }
+                            ],
+                        }
+                        if len(requests) == 1
+                        else {"role": "assistant", "content": "finished"},
+                    }
+                ],
+            }
+        )
+
+    @function_tool
+    def content() -> ToolOutput | str:
+        effects.append("called")
+        if kind == "string":
+            return "first\n second"
+        if kind == "text-parts":
+            return ToolOutput([ToolOutputText("first\n"), ToolOutputText(" second")])
+        media = (
+            ToolOutput.image("https://example.invalid/synthetic-image.png")
+            if kind.endswith("image")
+            else ToolOutput.file(file_id="file_synthetic")
+        )
+        return (
+            ToolOutput([ToolOutputText("visible text"), *media.content_items])
+            if kind.startswith("mixed")
+            else media
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", create)
+    async with (
+        TestServer(app) as server,
+        AsyncOpenAI(
+            base_url=str(server.make_url("/v1")), api_key="synthetic", max_retries=0
+        ) as client,
+    ):
+        async with NativeProvider(
+            model_backend=ChatCompletionsModel(client, "chat-model")
+        ) as provider:
+            pending = Agent(
+                model="gpt-5.2", instructions="Use content.", tools=[content], provider=provider
+            ).run("Get content.")
+            if kind in ("string", "text-parts"):
+                assert (await pending).final_output == "finished"
+                assert len(requests) == 2
+                assert (
+                    next(
+                        message for message in requests[1]["messages"] if message["role"] == "tool"
+                    )["content"]
+                    == "first\n second"
+                )
+            else:
+                with pytest.raises(ValueError, match="only text tool outputs"):
+                    await pending
+                assert len(requests) == 1
+            assert effects == ["called"]

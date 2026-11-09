@@ -139,11 +139,20 @@ class ChatCompletionsModel:
                 )
             elif kind == "function_call_output":
                 output = item["output"]
+                if not isinstance(output, str):
+                    if not isinstance(output, list) or any(
+                        not isinstance(part, dict)
+                        or part.get("type") != "input_text"
+                        or not isinstance(part.get("text"), str)
+                        for part in output
+                    ):
+                        raise ValueError("ChatCompletionsModel supports only text tool outputs")
+                    output = "".join(part["text"] for part in output)
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": item["call_id"],
-                        "content": output if isinstance(output, str) else json.dumps(output),
+                        "content": output,
                     }
                 )
             elif kind in ("reasoning", "configuration_update"):
