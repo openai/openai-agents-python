@@ -87,6 +87,13 @@ if TYPE_CHECKING:
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
     )
+    from .models import (
+        ChatCompletionsModel as ChatCompletionsModel,
+        ModelProvider as ModelProvider,
+        ModelRequest as ModelRequest,
+        ModelResponse as ModelResponse,
+        NativeModel as NativeModel,
+    )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
         ChildStepContext as ChildStepContext,
@@ -175,6 +182,11 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "ChatCompletionsModel": ".models",
+    "ModelProvider": ".models",
+    "ModelRequest": ".models",
+    "ModelResponse": ".models",
+    "NativeModel": ".models",
     "CompactionContext": ".compaction",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",

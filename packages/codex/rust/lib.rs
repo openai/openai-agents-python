@@ -1898,6 +1898,46 @@ impl NativeThread {
         })
     }
 
+    fn _enable_model_producer(&self, enabled: bool) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Request preparation requires Python tools"))?;
+        tools.enable_model_producer(enabled).map_err(py_error)
+    }
+
+    fn _check_model_producer(&self, request_id: u64) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.check_model_producer(request_id)))
+    }
+
+    #[pyo3(signature = (request_id, data_json=None, error=false))]
+    fn _reply_model_producer(
+        &self,
+        request_id: u64,
+        data_json: Option<&str>,
+        error: bool,
+    ) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.reply_model_producer(request_id, data_json, error)))
+    }
+
     fn _prepare_requests(&self, enabled: bool) -> PyResult<()> {
         let inner = self.current()?;
         let tools = inner

@@ -30,6 +30,7 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "env_headers": None,
         "organization": None,
         "project": None,
+        "model_backend": None,
         "request_max_retries": None,
         "stream_max_retries": None,
         "stream_idle_timeout_ms": None,

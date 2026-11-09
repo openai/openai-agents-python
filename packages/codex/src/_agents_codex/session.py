@@ -2762,6 +2762,8 @@ class Session(Generic[ContextT, OutputT]):
             owned_provider = provider is None
             if provider is None:
                 provider = NativeProvider()
+            if provider.model_backend is not None and native_agents is not None:
+                raise ValueError("model_backend does not yet support native child agents")
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
@@ -2873,7 +2875,9 @@ class Session(Generic[ContextT, OutputT]):
                             "tools.experimental_request_user_input.enabled": False,
                         }
                     )
-                if codex_login is not None:
+                if provider.model_backend is not None:
+                    opening.api_key = "native-model-producer"
+                elif codex_login is not None:
                     opening.api_key = None
                 elif selected is not None:
                     opening.api_key = selected.api_key
@@ -3233,6 +3237,9 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
+                session._model_backend = provider.model_backend
+                if provider.model_backend is not None:
+                    session._native._enable_model_producer(True)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 session._native_options = json.dumps(options)
@@ -3433,6 +3440,7 @@ class Session(Generic[ContextT, OutputT]):
         }
         self._catalog_bindings: dict[tuple[str | None, int], Sequence[Tool[Any]]] = {}
         self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
+        self._model_backend: Any = None
         self._model_api_key: str | None = None
         self._parent_trace: TraceContext | None = None
         self._codex_account: CodexAccount | None = None
@@ -8481,6 +8489,74 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
+        request_id = message["request_id"]
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+        reply: str | None = None
+        failed = True
+
+        def active() -> bool:
+            if self._active is not state or state.stopping or state.failure.done():
+                return False
+            try:
+                self._catalog_for_message(message, message["generation"])
+            except NativeError:
+                return False
+            try:
+                return bool(self._native._check_model_producer(request_id))
+            except RuntimeError:
+                return False
+
+        try:
+            if not active():
+                return
+            if self._model_backend is None:
+                raise NativeError("Native model producer has no current application backend")
+            from .models import ModelRequest, ModelResponse
+
+            request = ModelRequest(
+                deepcopy(message["data"]), self._context, self.id, message["turn_id"]
+            )
+
+            def invoke(request: ModelRequest) -> Any:
+                backend = self._model_backend
+                if not callable(getattr(backend, "complete", None)):
+                    backend = backend.get_model(request.body["model"])
+                value = backend.complete(request)
+                if inspect.isawaitable(value):
+
+                    async def settle() -> str:
+                        result = await value
+                        if not isinstance(result, ModelResponse):
+                            raise TypeError("NativeModel.complete must return ModelResponse")
+                        return result._capture()
+
+                    return settle()
+                if not isinstance(value, ModelResponse):
+                    raise TypeError("NativeModel.complete must return ModelResponse")
+                return value._capture()
+
+            reply = await _call_callback(invoke, active, request)
+            if not active():
+                return
+            failed = False
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            try:
+                accepted = self._native._reply_model_producer(request_id, reply, error=failed)
+                if not accepted and not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+            except RuntimeError:
+                if not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
         guard = _Invocation(self)
@@ -9459,6 +9535,9 @@ class Session(Generic[ContextT, OutputT]):
                             "expired" if message.get("policy_stop") is True else None
                         )
                         state.failure.set_result(_model_failure_error(message))
+                elif kind == "_sdk_model_produce":
+                    task = asyncio.create_task(self._produce_model_response(state, message))
+                    state.add_callback(task)
                 elif kind == "_sdk_prepare_request":
                     task = asyncio.create_task(self._prepare_sampling_request(state, message))
                     state.add_callback(task)

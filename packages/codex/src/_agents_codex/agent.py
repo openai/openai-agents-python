@@ -60,6 +60,7 @@ from .completion import _BeforeComplete
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
+from .models import ModelProvider, NativeModel
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -377,6 +378,7 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    model_backend: NativeModel | ModelProvider | None = field(default=None, repr=False, hash=False)
     request_max_retries: int | None = field(default=None, repr=False)
     stream_max_retries: int | None = field(default=None, repr=False)
     stream_idle_timeout_ms: int | None = field(default=None, repr=False)
@@ -411,6 +413,16 @@ class NativeProvider:
                 raise ValueError("Buffered Responses require API-key authentication")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
                 raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
+        if self.model_backend is not None:
+            if not any(
+                callable(getattr(self.model_backend, name, None))
+                for name in ("complete", "get_model")
+            ):
+                raise TypeError(
+                    "model_backend must implement complete(request) or get_model(model_name)"
+                )
+            if self.supports_websockets is True or self.auth is not None:
+                raise ValueError("model_backend requires HTTP mode without CodexLogin")
         self._capture_routing()
 
     def _capture_routing(self) -> None:
@@ -540,6 +552,8 @@ class NativeProvider:
 
     @property
     def _websockets_enabled(self) -> bool:
+        if self.model_backend is not None:
+            return False
         return (
             self.auth is None
             and self.response_mode == "streaming"

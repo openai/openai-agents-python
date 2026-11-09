@@ -8654,3 +8654,7 @@ pub(crate) mod tests {
         root.join_expiry_cleanup().await.unwrap();
     }
 }
+
+impl Boundary {
+    pub(crate) fn model_producer_tools(&self, thread: &str) -> Option<Arc<crate::python_tools::PythonTools>> { self.context_tools(thread) }
+}
