@@ -2055,6 +2055,55 @@ async def test_input_guardrail_tripwire_reports_results_streamed(run_in_parallel
     assert _result_names(result.input_guardrail_results) == ["passes", "trips"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_input_guardrail_tripwire_snapshot(streamed: bool) -> None:
+    """Both immediate checks finish before the runner consumes the first verdict."""
+
+    cleanup_finished = asyncio.Event()
+
+    async def finish_during_cleanup(ctx, agent, input):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_finished.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel()
+    model.enqueue([get_text_message("hello")])
+    agent = Agent(
+        name="billing",
+        model=model,
+        input_guardrails=[
+            InputGuardrail(guardrail_function=get_sync_guardrail(True), name="order_required"),
+            InputGuardrail(guardrail_function=get_sync_guardrail(False), name="billing_in_scope"),
+            InputGuardrail(guardrail_function=finish_during_cleanup, name="late"),
+        ],
+    )
+
+    if streamed:
+        result = Runner.run_streamed(agent, "Refund request without an order number")
+        with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+            async for _ in result.stream_events():
+                pass
+        assert sorted(_result_names(result.input_guardrail_results)) == [
+            "billing_in_scope",
+            "order_required",
+        ]
+    else:
+        with pytest.raises(InputGuardrailTripwireTriggered) as exc_info:
+            await Runner.run(agent, "Refund request without an order number")
+
+    exc = exc_info.value
+    assert cleanup_finished.is_set()
+    assert exc.guardrail_result.guardrail.get_name() == "order_required"
+    assert exc.run_data is not None
+    assert sorted(_result_names(exc.run_data.input_guardrail_results)) == [
+        "billing_in_scope",
+        "order_required",
+    ]
+
+
 def test_input_guardrail_tripwire_reports_results_sync():
     """Runner.run_sync() matches the async entry points."""
     model = ScriptedModel()
