@@ -409,10 +409,12 @@ async def test_completed_model_validates_whole_output_before_any_tool(later: str
     assert effects == []
 
 
-@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+@pytest.mark.parametrize(
+    "finish_reason", ["length", "content_filter", "function_call", None, "vendor-custom"]
+)
 @pytest.mark.parametrize("refusal", [False, True])
 async def test_chat_unsuccessful_finish_has_no_tool_effect(
-    finish_reason: str, refusal: bool
+    finish_reason: str | None, refusal: bool
 ) -> None:
     from agents import NativeError
 
@@ -432,11 +434,18 @@ async def test_chat_unsuccessful_finish_has_no_tool_effect(
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": finish_reason if first else "stop",
+                        **(
+                            {"finish_reason": finish_reason if first else "stop"}
+                            if finish_reason is not None or not first
+                            else {}
+                        ),
                         "message": {
                             "role": "assistant",
                             "content": "private-partial-answer" if first else "finished",
                             "refusal": private if first and refusal else None,
+                            "function_call": {"name": "echo", "arguments": '{"value":"never"}'}
+                            if first and finish_reason == "function_call"
+                            else None,
                             "tool_calls": [
                                 {
                                     "type": "function",
@@ -444,7 +453,7 @@ async def test_chat_unsuccessful_finish_has_no_tool_effect(
                                     "function": {"name": "echo", "arguments": '{"value":"never"}'},
                                 }
                             ]
-                            if first
+                            if first and finish_reason != "function_call"
                             else None,
                         },
                     }

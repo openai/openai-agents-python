@@ -271,11 +271,11 @@ class ChatCompletionsModel:
         choice = value["choices"][0]
         message = choice["message"]
         if (
-            choice.get("finish_reason") in ("length", "content_filter")
+            choice.get("finish_reason") not in ("stop", "tool_calls")
             and message.get("refusal") is None
         ):
             raise ValueError(
-                f"ChatCompletionsModel cannot complete finish_reason={choice['finish_reason']}"
+                f"ChatCompletionsModel cannot complete finish_reason={choice.get('finish_reason')}"
             )
         output = []
         output_content: list[dict[str, Any]] = []
