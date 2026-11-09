@@ -154,11 +154,17 @@ class OpenAITraceExporter:
             return
         payload = json.dumps({"data": records}, allow_nan=False).encode()
         deadline = monotonic() + self._timeout
+        failed = False
         try:
             await asyncio.wait_for(self._send(payload, dict(self._headers)), timeout=self._timeout)
-        except asyncio.TimeoutError:
-            raise RuntimeError("Native OpenAI trace export failed") from None
-        if monotonic() > deadline:
+        except Exception:
+            # Raw transport and timeout exceptions can retain credentials in
+            # their completed traceback frames, even with suppressed context.
+            # Cancellation remains owned by the caller and is not converted.
+            failed = True
+        if failed or monotonic() > deadline:
+            del self, event, payload, records
+            # Raise after leaving the handler so raw exceptions are not chained.
             raise RuntimeError("Native OpenAI trace export failed") from None
         self._traces[trace_id] = None
         self._traces.move_to_end(trace_id)

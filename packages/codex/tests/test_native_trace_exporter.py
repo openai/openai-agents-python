@@ -50,6 +50,31 @@ def collector(statuses: list[int] | None = None) -> Iterator[tuple[str, list[dic
         worker.join()
 
 
+def assert_sanitized_failure(error, secret):
+    """Inspect exception objects and library frames, including suppressed context."""
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback = current.__traceback__
+        while traceback is not None:
+            module = traceback.tb_frame.f_globals.get("__name__", "")
+            if module.startswith(("_agents_codex", "httpx2", "httpcore2", "asyncio")):
+                for value in traceback.tb_frame.f_locals.values():
+                    # Caller-owned objects are outside this diagnostic boundary.
+                    if isinstance(value, (str, bytes, dict, list, tuple)):
+                        assert secret not in repr(value)
+            traceback = traceback.tb_next
+        pending.extend(
+            item for item in (current.__cause__, current.__context__) if item is not None
+        )
+
+
 def completed_event():
     return {
         "trace_id": "a" * 32,
@@ -91,7 +116,7 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         with pytest.raises(RuntimeError) as failure:
             await exporter.on_trace_event(completed_event())
         assert str(failure.value) == "Native OpenAI trace export failed"
-        assert failure.value.__cause__ is None
+        assert_sanitized_failure(failure.value, "synthetic-private-key")
         assert len(received) == 1
 
 
@@ -225,11 +250,14 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    secret = "synthetic-private-timeout-key"
     exporter = telemetry.OpenAITraceExporter(
-        api_key="synthetic-key", endpoint=endpoint, timeout_ms=900 if cancelled else 50
+        api_key=secret, endpoint=endpoint, timeout_ms=900 if cancelled else 50
     )
+    event = completed_event()
+    event["attributes"]["private_fixture"] = secret
     started = time.monotonic()
-    delivery = asyncio.create_task(exporter.on_trace_event(completed_event()))
+    delivery = asyncio.create_task(exporter.on_trace_event(event))
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
@@ -237,8 +265,9 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             with pytest.raises(asyncio.CancelledError):
                 await delivery
         else:
-            with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+            with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
                 await delivery
+            assert_sanitized_failure(failure.value, secret)
         # The old per-read timeout could succeed after roughly 600 ms of headers.
         assert time.monotonic() - started < 0.4
         await asyncio.wait_for(peer_closed.wait(), 0.3)
