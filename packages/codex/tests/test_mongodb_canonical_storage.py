@@ -1,0 +1,150 @@
+"""MongoDB adapter checks use a real local server when mongod is available."""
+
+import json
+import shutil
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from pymongo import MongoClient
+from pymongo.asynchronous.mongo_client import AsyncMongoClient
+from pymongo.errors import PyMongoError
+
+from agents import Agent, CustomStorage, MongoDBSessionStore, NativeProvider
+from tests.native_fixtures import assistant_output, responses as responses
+
+
+def test_mongodb_adapter_accepts_sync_client_without_connecting_and_rejects_async() -> None:
+    client = MongoClient("mongodb://127.0.0.1:1", connect=False)
+    asynchronous = AsyncMongoClient("mongodb://127.0.0.1:1", connect=False)
+    try:
+        store = MongoDBSessionStore(client, database="synthetic")
+        assert CustomStorage(store).backend is store
+        assert store.collection.write_concern.document == {"j": True, "w": "majority"}
+        assert store.collection.read_concern.document == {"level": "majority"}
+        with pytest.raises(TypeError, match="synchronous"):
+            MongoDBSessionStore(asynchronous, database="synthetic")
+        store.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            store.acquire("thread")
+    finally:
+        client.close()
+
+
+@pytest.fixture
+def mongodb_client(tmp_path: Path, unused_tcp_port):
+    executable = shutil.which("mongod")
+    if executable is None:
+        pytest.skip("mongod is required for real MongoDB adapter checks")
+    directory = tmp_path / "mongodb"
+    directory.mkdir(mode=0o700)
+    process = subprocess.Popen(
+        [
+            executable,
+            "--bind_ip",
+            "127.0.0.1",
+            "--port",
+            str(unused_tcp_port),
+            "--dbpath",
+            str(directory),
+            "--quiet",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    client = MongoClient(
+        f"mongodb://127.0.0.1:{unused_tcp_port}",
+        serverSelectionTimeoutMS=100,
+        socketTimeoutMS=1000,
+        connectTimeoutMS=1000,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                client.admin.command("ping")
+                break
+            except PyMongoError:
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    pytest.fail("Local MongoDB did not become ready")
+                time.sleep(0.01)
+        yield client
+    finally:
+        client.close()
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def snapshot(revision=1, write_id="one"):
+    return json.dumps({"revision": revision, "write_id": write_id, "items": ["saved"]})
+
+
+def test_mongodb_snapshot_cas_reopen_and_competing_owner(mongodb_client) -> None:
+    first = MongoDBSessionStore(mongodb_client, database="synthetic")
+    second = MongoDBSessionStore(mongodb_client, database="synthetic")
+    token = first.acquire("thread")
+    try:
+        assert first.read("thread", token) is None
+        with pytest.raises(RuntimeError, match="already has a writer"):
+            second.acquire("thread")
+        first.commit("thread", token, 0, "one", snapshot())
+        first.commit("thread", token, 0, "one", snapshot())
+        with pytest.raises(RuntimeError, match="revision conflict"):
+            first.commit("thread", token, 0, "other", snapshot(write_id="other"))
+        first.flush("thread", token)
+    finally:
+        first.release("thread", token)
+    successor = second.acquire("thread")
+    try:
+        first.release("thread", token)
+        assert second.read("thread", successor) == snapshot()
+    finally:
+        second.release("thread", successor)
+
+
+def test_mongodb_expired_lease_fences_old_writer_and_retains_snapshot(mongodb_client) -> None:
+    first = MongoDBSessionStore(mongodb_client, database="synthetic", lease_seconds=1)
+    token = first.acquire("thread")
+    first.commit("thread", token, 0, "one", snapshot())
+    first.collection.update_one(
+        {"_id": "thread"}, {"$set": {"lease_until": datetime(2000, 1, 1, tzinfo=timezone.utc)}}
+    )
+    second = MongoDBSessionStore(mongodb_client, database="synthetic")
+    successor = second.acquire("thread")
+    try:
+        with pytest.raises(RuntimeError, match="fenced|stale or closed"):
+            first.commit("thread", token, 1, "two", snapshot(2, "two"))
+        first.release("thread", token)
+        assert second.read("thread", successor) == snapshot()
+    finally:
+        first.release("thread", token)
+        second.release("thread", successor)
+
+
+async def test_mongodb_native_session_restores_canonical_context(mongodb_client, responses) -> None:
+    store = MongoDBSessionStore(mongodb_client, database="synthetic_native")
+    responses.respond(assistant_output("first answer"))
+    responses.respond(assistant_output("second answer"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")
+    try:
+        async with provider:
+            agent = Agent(instructions="Answer.", provider=provider)
+            async with agent.session(storage=CustomStorage(store)) as session:
+                identity = session.id
+                result = await (await session.submit("remember this input")).get_result()
+                assert result.final_output == "first answer"
+            async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
+                assert restored.id == identity
+                result = await (await restored.submit("Continue.")).get_result()
+                assert result.final_output == "second answer"
+        assert len(responses.requests) == 2
+        assert "remember this input" in json.dumps(responses.requests[1])
+        assert "first answer" in json.dumps(responses.requests[1])
+    finally:
+        store.close()

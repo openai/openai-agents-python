@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .canonical_storage import (
         CustomStorage as CustomStorage,
         EncryptedSessionStore as EncryptedSessionStore,
+        MongoDBSessionStore as MongoDBSessionStore,
         RedisSessionStore as RedisSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
@@ -234,6 +235,7 @@ _MODULES = {
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
+    "MongoDBSessionStore": ".canonical_storage",
     "RedisSessionStore": ".canonical_storage",
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
