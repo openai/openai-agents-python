@@ -1,6 +1,10 @@
-"""A captured host MCP roster does not select host command execution."""
+"""A captured host MCP roster does not select host command execution.
+
+Windows transport coverage uses legacy write policy, not strict isolation.
+"""
 
 import json
+import os
 
 import pytest
 
@@ -46,6 +50,7 @@ async def test_host_mcp_with_remote_selection_ignores_ambient_noise(
             cwd=str(peer.root),
             headers={"Authorization": "Bearer " + peer.token},
             tools=["exec_command"],
+            **({"write_policy": "legacy"} if os.name == "nt" else {}),
         )
         async with Agent(
             instructions="Use only current authorities.",
