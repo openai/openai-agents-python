@@ -803,10 +803,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e91ccc6f700d25e89a6992720f4b3640c13b5dff
+index 0000000000000000000000000000000000000000..e850bfbc054af037076acc9382d7c93976914b20
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1175 @@
+@@ -0,0 +1,1206 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -1190,6 +1190,12 @@ index 0000000000000000000000000000000000000000..e91ccc6f700d25e89a6992720f4b3640
 +        previous: Option<Option<&str>>,
 +    ) -> CodexResult<()> {
 +        let id = item_id(item)?.to_owned();
++        let previous = previous.map(|previous| previous.filter(|id| *id != "root"));
++        if previous.flatten() == Some(id.as_str()) {
++            self.mark_order_unknown();
++            self.record_id(&id, false)?;
++            return Ok(());
++        }
 +        let expected_create = self.expected_create(&id);
 +        let contradictory = self.expected_create_previous(&id).is_some_and(|expected| {
 +            expected.as_deref().is_some_and(|expected| {
@@ -1213,7 +1219,7 @@ index 0000000000000000000000000000000000000000..e91ccc6f700d25e89a6992720f4b3640
 +                return Ok(());
 +            };
 +            self.order.remove(old_index);
-+            let index = if previous == Some("root") || previous.is_none() {
++            let index = if previous.is_none() {
 +                (self.boundary.as_deref() == Some("root")).then_some(0)
 +            } else if previous == self.boundary.as_deref() {
 +                Some(0)
@@ -1980,6 +1986,31 @@ index 0000000000000000000000000000000000000000..e91ccc6f700d25e89a6992720f4b3640
 +            }
 +            assert!(state.incomplete);
 +        }
++    }
++    #[test]
++    fn root_position_alias_and_self_predecessor_are_distinct_from_item_identity() {
++        for root in [None, Some("root")] {
++            let mut state = State::default();
++            state
++                .observe_added(&message("first", "first"), Some(root))
++                .unwrap();
++            assert_eq!(state.boundary.as_deref(), Some("root"));
++            assert!(!state.incomplete);
++        }
++        for prior in [false, true] {
++            let mut state = State::default();
++            if prior {
++                state
++                    .observe_added(&message("first", "first"), Some(None))
++                    .unwrap();
++            }
++            state
++                .observe_added(&message("self", "self"), Some(Some("self")))
++                .unwrap();
++            assert!(state.incomplete);
++            assert_ne!(state.boundary.as_deref(), Some("self"));
++        }
++        assert!(!valid_id("root"));
 +    }
 +}
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs

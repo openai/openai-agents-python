@@ -788,8 +788,10 @@ async def test_native_cumulative_history_media_budget_preserves_live_connection(
             await asyncio.gather(retrieving, return_exceptions=True)
 
 
+@pytest.mark.parametrize("ack_predecessor", [None, "root"])
 async def test_native_response_interrupts_create_and_drains_late_ack_without_next_edit(
     realtime_peer: RealtimePeer,
+    ack_predecessor: str | None,
 ) -> None:
     from agents.realtime import RealtimeHistory, RealtimeResponse
 
@@ -1271,9 +1273,11 @@ async def test_native_history_read_timeout_drains_late_receipt_before_same_id_re
 
 
 @pytest.mark.parametrize("unknown_position", ["named", "missing", "done_only"])
+@pytest.mark.parametrize("first_predecessor", [None, "root"])
 async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_order(
     realtime_peer: RealtimePeer,
     unknown_position: str,
+    first_predecessor: str | None,
 ) -> None:
     peer = realtime_peer
 
@@ -1301,7 +1305,7 @@ async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_
         session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
         aclosing(voice.events()) as events,
     ):
-        await observe_item(peer, events, first)
+        await observe_item(peer, events, first, previous_item_id=first_predecessor)
         await observe_item(peer, events, second, previous_item_id=first["id"])
         await observe_item(peer, events, inserted, previous_item_id=first["id"])
         cursor = len(peer.frames)
@@ -1437,8 +1441,10 @@ async def test_native_deleted_item_retrieval_rejects_locally_and_preserves_audit
             await asyncio.gather(deleting, return_exceptions=True)
 
 
+@pytest.mark.parametrize("ack_position", ["other_item", "self"])
 async def test_native_contradictory_create_ack_interrupts_edit_and_preserves_actual_order(
     realtime_peer: RealtimePeer,
+    ack_position: str,
 ) -> None:
     peer = realtime_peer
     old = {
@@ -1479,8 +1485,13 @@ async def test_native_contradictory_create_ack_interrupts_edit_and_preserves_act
             assert creation["item"] == first
             assert creation["previous_item_id"] == "root"
             # The acknowledgement claims a different placement from the written request.
-            await observe_item(peer, events, first, previous_item_id=old["id"])
-            with pytest.raises(RuntimeError, match="position"):
+            await observe_item(
+                peer,
+                events,
+                first,
+                previous_item_id=old["id"] if ack_position == "other_item" else first["id"],
+            )
+            with pytest.raises(RuntimeError):
                 await updating
             with pytest.raises(RuntimeError, match="ordered"):
                 await voice.retrieve_conversation_history()
@@ -1506,3 +1517,62 @@ async def test_native_contradictory_create_ack_interrupts_edit_and_preserves_act
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize("first_observed", [True, False])
+async def test_native_self_predecessor_blocks_ordered_history_but_keeps_direct_retrieval(
+    realtime_peer: RealtimePeer, first_observed: bool
+) -> None:
+    peer = realtime_peer
+    first = {
+        "id": "before-self-predecessor",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Known first item"}],
+    }
+    invalid = {
+        "id": "self-predecessor-item",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Provider item with invalid ordering"}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-self-predecessor-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep ambiguous provider ordering local.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        if not first_observed:
+            await observe_item(peer, events, first)
+        await observe_item(peer, events, invalid, previous_item_id=invalid["id"])
+        cursor = len(peer.frames)
+        with pytest.raises(RuntimeError, match="ordered"):
+            await voice.retrieve_conversation_history()
+        desired = [invalid] if first_observed else [first, invalid]
+        with pytest.raises(RuntimeError, match="ordered"):
+            await voice.update_history(desired)
+        assert len(peer.frames) == cursor
+        assert not peer.disconnected.is_set()
+        retrieving = asyncio.create_task(voice.retrieve_conversation_item(invalid["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            assert request["item_id"] == invalid["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": invalid})
+            assert await retrieving == invalid
+            assert peer.connections == 1
+            assert not peer.disconnected.is_set()
+            assert not peer.socket.closed
+        finally:
+            if not retrieving.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving, return_exceptions=True)

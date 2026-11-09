@@ -1014,7 +1014,7 @@ class RealtimeSession:
             except RuntimeError:
                 raise ValueError("Realtime history exceeds its 8 MiB input limit") from None
             with self._input_admission(size):
-                captured = json.loads(json.dumps(items, default=_realtime_history_mapping))
+                captured = json.loads(json.dumps(list(items), default=_realtime_history_mapping))
                 await _join(asyncio.create_task(self._call("update_history", items=captured)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
