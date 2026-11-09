@@ -462,6 +462,31 @@ async def test_native_correcting_user_message_preserves_following_assistant_audi
     [
         ("system", [{"type": "input_image", "image_url": "data:image/png;base64,AQACAA=="}]),
         ("assistant", [{"type": "input_audio", "audio": "AQACAA=="}]),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "http://example.invalid/synthetic.png"}],
+            id="user-http-image",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/png;base64AQACAA=="}],
+            id="user-malformed-image-data-uri",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/png;base64,%%%"}],
+            id="user-invalid-image-base64",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:text/plain;base64,AQACAA=="}],
+            id="user-unsupported-image-mime",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_audio", "audio": "not-valid-base64!"}],
+            id="user-invalid-audio-base64",
+        ),
     ],
 )
 async def test_native_history_rejects_invalid_role_content_before_mutation(
@@ -1314,3 +1339,71 @@ async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_
             if not retrieving_one.done():
                 await voice.aclose()
             await asyncio.gather(retrieving_one, return_exceptions=True)
+
+
+async def test_native_deleted_item_retrieval_rejects_locally_and_preserves_audit(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeHistory
+
+    peer = realtime_peer
+    item = {
+        "id": "deleted-retrieval-user",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Retain the deletion audit"}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-deleted-retrieval-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Keep deletion audit history.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, item)
+        cursor = len(peer.frames)
+        deleting = asyncio.create_task(voice.delete_conversation_item(item["id"]))
+        try:
+            deletion = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+            )
+            assert deletion["item_id"] == item["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {"type": "conversation.item.deleted", "item_id": item["id"]}
+            )
+            await deleting
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeHistory)
+                    and event.completed
+                    and event.item.kind == "provider_item_deleted"
+                    and event.item.provider_item_id == item["id"]
+                ):
+                    break
+            audit = [
+                entry
+                for entry in voice.history
+                if entry.kind == "provider_item_deleted" and entry.provider_item_id == item["id"]
+            ]
+            assert len(audit) == 1
+            cursor = len(peer.frames)
+            with pytest.raises(RuntimeError):
+                await voice.retrieve_conversation_item(item["id"])
+            assert await voice.retrieve_conversation_history() == []
+            assert not any(
+                frame["type"] == "conversation.item.retrieve" for frame in peer.frames[cursor:]
+            )
+            assert audit[0] in voice.history
+            assert peer.connections == 1
+            assert not peer.disconnected.is_set()
+            assert not peer.socket.closed
+        finally:
+            if not deleting.done():
+                await voice.aclose()
+            await asyncio.gather(deleting, return_exceptions=True)

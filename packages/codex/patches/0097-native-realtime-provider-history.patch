@@ -298,7 +298,7 @@ index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52ee
      let event = connection
          .next_event()
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467eeefde1d8d 100644
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..ef50703e3d228abcfcdadc622e174971a5f29e43 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,5 +1,6 @@
@@ -528,7 +528,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467ee
              command = async {
                  match &handoff_state.sdk {
                      Some(sdk) => sdk.commands_rx.recv().await,
-@@ -4812,8 +4946,63 @@ async fn handle_sdk_realtime_command(
+@@ -4812,8 +4946,61 @@ async fn handle_sdk_realtime_command(
      if !sdk.active.load(Ordering::Acquire) {
          return Ok(());
      }
@@ -552,12 +552,10 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467ee
 +    }
 +    match command {
 +        SdkRealtimeCommand::History(request) => {
-+            let identity = match &request {
-+                provider_history::Request::Update { items, .. } => {
-+                    provider_history::validate_update_ids(items, &sdk.item_deletion.lock().unwrap())
-+                }
-+                _ => Ok(()),
-+            };
++            let identity = provider_history::validate_request_ids(
++                &request,
++                &sdk.item_deletion.lock().unwrap(),
++            );
 +            if let Err(error) = identity {
 +                provider_history::reject(request, error);
 +            } else if sdk.item_deletion.lock().unwrap().deadline().is_some() {
@@ -594,7 +592,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467ee
              if sdk
                  .item_deletion
                  .lock()
-@@ -5399,6 +5588,70 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5399,6 +5586,70 @@ async fn handle_realtime_server_event_with_configuration(
      response_create_queue: &mut RealtimeResponseCreateQueue,
      configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
  ) -> anyhow::Result<()> {
@@ -665,7 +663,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467ee
      if let RealtimeEvent::ConversationItemDeleted { item_id } = &event {
          if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
              sdk.active.load(Ordering::Acquire)
-@@ -5812,7 +6065,8 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5812,7 +6063,8 @@ async fn handle_realtime_server_event_with_configuration(
          | RealtimeEvent::OutputTranscriptDone(_)
          | RealtimeEvent::FunctionCallFinished { .. }
          | RealtimeEvent::FunctionBatchFinished { .. }
@@ -805,13 +803,14 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432e731649d
+index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708b338dffa
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1056 @@
+@@ -0,0 +1,1120 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
++use base64::Engine as _;
 +use serde_json::Value;
 +use std::collections::VecDeque;
 +const LIMIT: usize = 4096;
@@ -872,21 +871,45 @@ index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432
 +        .filter(|id| valid_id(id))
 +        .ok_or_else(|| invalid("Provider history item requires a valid ID"))
 +}
-+pub(super) fn validate_update_ids(
-+    items: &[Value],
++pub(super) fn validate_request_ids(
++    request: &Request,
 +    deletion: &item_deletion::State,
 +) -> CodexResult<()> {
-+    if items
-+        .iter()
-+        .filter_map(|item| item["id"].as_str())
-+        .any(|id| deletion.is_deleted(id))
-+    {
++    let deleted = match request {
++        Request::Item { id, .. } => deletion.is_deleted(id),
++        Request::Update { items, .. } => items
++            .iter()
++            .filter_map(|item| item["id"].as_str())
++            .any(|id| deletion.is_deleted(id)),
++        Request::List { .. } => false,
++    };
++    if deleted {
 +        return Err(invalid(
-+            "Provider history cannot reuse a previously deleted item ID",
++            "Provider history cannot use a previously deleted item ID",
 +        ));
 +    }
 +    Ok(())
 +}
++fn valid_base64(value: &str) -> bool {
++    base64::engine::general_purpose::STANDARD
++        .decode(value)
++        .is_ok()
++}
++fn valid_image_data_uri(value: &str) -> bool {
++    let Some((header, data)) = value.split_once(',') else {
++        return false;
++    };
++    let Some(header) = header.strip_prefix("data:") else {
++        return false;
++    };
++    let Some((mime, encoding)) = header.split_once(';') else {
++        return false;
++    };
++    (mime.eq_ignore_ascii_case("image/png") || mime.eq_ignore_ascii_case("image/jpeg"))
++        && encoding.eq_ignore_ascii_case("base64")
++        && valid_base64(data)
++}
++
 +fn mutable_message(item: &Value) -> bool {
 +    item["type"] == "message"
 +        && matches!(item["role"].as_str(), Some("user" | "assistant" | "system"))
@@ -919,13 +942,17 @@ index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432
 +                    part["text"].as_str().is_none()
 +                }
 +                ("user", Some("input_image")) => {
-+                    part["image_url"].as_str().is_none()
++                    part["image_url"]
++                        .as_str()
++                        .is_none_or(|image| !valid_image_data_uri(image))
 +                        || part.get("detail").is_some_and(|detail| {
 +                            !matches!(detail.as_str(), Some("auto" | "low" | "high"))
 +                        })
 +                }
 +                ("user", Some("input_audio")) => {
-+                    part["audio"].as_str().is_none()
++                    part["audio"]
++                        .as_str()
++                        .is_none_or(|audio| !valid_base64(audio))
 +                        || part
 +                            .get("transcript")
 +                            .is_some_and(|text| text.as_str().is_none())
@@ -1632,14 +1659,26 @@ index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432
 +        ));
 +        assert!(deletion.acknowledge("deleted-tool"));
 +        deletion.finish("deleted-tool", Ok(()));
-+        assert!(
-+            validate_update_ids(
-+                &[message("deleted-tool", "manufactured message")],
-+                &deletion
-+            )
-+            .is_err()
-+        );
-+        assert!(validate_update_ids(&[message("new-message", "new")], &deletion).is_ok());
++        for id in ["deleted-tool", "new-message"] {
++            let (reply, _) = tokio::sync::oneshot::channel();
++            let update = Request::Update {
++                items: vec![message(id, "new")],
++                reply,
++            };
++            assert_eq!(
++                validate_request_ids(&update, &deletion).is_ok(),
++                id == "new-message"
++            );
++            let (reply, _) = tokio::sync::oneshot::channel();
++            let item = Request::Item {
++                id: id.into(),
++                reply,
++            };
++            assert_eq!(
++                validate_request_ids(&item, &deletion).is_ok(),
++                id == "new-message"
++            );
++        }
 +    }
 +
 +    #[tokio::test]
@@ -1863,6 +1902,29 @@ index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432
 +            assert!(state.incomplete);
 +            assert_eq!(state.order.len(), 2);
 +        }
++    }
++    #[test]
++    fn media_creation_requires_realtime_data_shapes() {
++        for image in [
++            "https://example.invalid/picture.png",
++            "data:image/webp;base64,AQID",
++            "data:image/png;base64,invalid!",
++            "data:image/jpeg,AAAA",
++        ] {
++            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":image}]});
++            assert!(creation_item(&item).is_err());
++        }
++        for mime in ["png", "jpeg"] {
++            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":format!("data:image/{mime};base64,AQID")}]});
++            assert!(creation_item(&item).is_ok());
++        }
++        let audio = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"invalid!"}]});
++        assert!(creation_item(&audio).is_err());
++        assert!(
++            edits(&[audio.clone()], &[audio], Some("root"))
++                .unwrap()
++                .is_empty()
++        );
 +    }
 +}
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
