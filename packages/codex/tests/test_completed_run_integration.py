@@ -542,13 +542,24 @@ async def test_real_native_run_holds_original_acquisition_before_open_poll(
         original_input = "Original held input marker."
         future_input = "Independent future input marker."
         agent = Agent(model="gpt-5.2", instructions=original_instructions, provider=original)
+        run_cancellations: list[asyncio.CancelledError] = []
+
+        async def run_original() -> Any:
+            try:
+                return await agent.run(original_input)
+            except asyncio.CancelledError as error:
+                # Python 3.10 Task delivery wraps cancellation without its message.
+                # Capture the SDK's exception before that transport boundary.
+                run_cancellations.append(error)
+                raise
+
         running: asyncio.Task[Any] | None = None
         try:
             if not cancel_before_open:
                 responses.respond(*text_response("held-original", "original answer"))
             with monkeypatch.context() as held:
                 held.setattr(native, "_prepare_run_conversation", held_prepare)
-                running = asyncio.create_task(agent.run(original_input))
+                running = asyncio.create_task(run_original())
                 await entered.wait()
                 assert preparations == [None]
                 assert responses.requests == []  # Opening has not been polled.
@@ -566,9 +577,10 @@ async def test_real_native_run_holds_original_acquisition_before_open_poll(
                     assert not running.done()
                     assert responses.requests == []
                     release.set()
-                    with pytest.raises(asyncio.CancelledError) as cancelled:
+                    with pytest.raises(asyncio.CancelledError):
                         await running
-                    assert cancelled.value.args == ("first held-opening cancellation",)
+                    assert len(run_cancellations) == 1
+                    assert run_cancellations[0].args == ("first held-opening cancellation",)
                     assert responses.requests == []
                 else:
                     release.set()
