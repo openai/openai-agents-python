@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -62,20 +64,29 @@ def _download(url: str, destination: Path, checksum: str) -> Path:
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {destination.name}", file=sys.stderr)
-    with tempfile.NamedTemporaryFile(
-        dir=destination.parent, suffix=".part", delete=False
-    ) as output:
-        temporary = Path(output.name)
+    for attempt in range(1, 4):
         try:
-            with urllib.request.urlopen(url, timeout=60) as response:
-                while chunk := response.read(1024 * 1024):
-                    output.write(chunk)
-            output.close()
-            if _sha256(temporary) != checksum:
-                raise ValueError(f"SHA256 mismatch for {destination.name}")
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, suffix=".part", delete=False
+            ) as output:
+                temporary = Path(output.name)
+                try:
+                    with urllib.request.urlopen(url, timeout=60) as response:
+                        while chunk := response.read(1024 * 1024):
+                            output.write(chunk)
+                    output.close()
+                    if _sha256(temporary) != checksum:
+                        raise ValueError(f"SHA256 mismatch for {destination.name}")
+                    temporary.replace(destination)
+                finally:
+                    output.close()
+                    temporary.unlink(missing_ok=True)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code not in (502, 503, 504) or attempt == 3:
+                raise
+            error.close()
+            time.sleep(attempt)
     return destination
 
 
