@@ -104,7 +104,7 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         return {**common, "summary": raw["summary"], "status": None}
     if kind in {"function_call", "custom_tool_call", "computer_call"}:
         name = "computer" if kind == "computer_call" else raw["name"]
-        if raw.get("namespace"):
+        if kind != "computer_call" and raw.get("namespace"):
             name = f"{raw['namespace']}.{name}"
         return {
             **common,
@@ -346,13 +346,10 @@ def project_history(
                         native=False,
                         recorded_id=bool(payload.get("id")),
                         original_input=(
-                            (
-                                payload
-                                if payload["type"] == "computer_call"
-                                else payload.get("input")
-                            )
-                            if uncertain_calls is not None
-                            and payload["type"] in {"custom_tool_call", "computer_call"}
+                            payload
+                            if payload["type"] == "computer_call"
+                            else payload.get("input")
+                            if uncertain_calls is not None and payload["type"] == "custom_tool_call"
                             else None
                         ),
                     )
@@ -545,7 +542,11 @@ def project_history(
             cursor_ids.add(item_id)
         if item["type"] == "function_call":
             output = occurrence.output
-            if not occurrence.native:
+            computer_call = (
+                isinstance(occurrence.original_input, dict)
+                and occurrence.original_input.get("type") == "computer_call"
+            )
+            if not occurrence.native or computer_call:
                 recorded_turn = turns.get(item["turn_id"])
                 terminal = recorded_turn["status"] if recorded_turn is not None else None
                 item["status"] = (

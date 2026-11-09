@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,96 @@ async def test_computer_local_reopen_requires_screenshot_receipt_without_replay(
         assert (tmp_path / "effects").exists() == (outcome == "applied")
     finally:
         await provider.aclose()
+
+
+async def test_native_close_joins_sync_driver_issued_task_before_disposal(responses):
+    entered, release = threading.Event(), threading.Event()
+    finish = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    order = []
+
+    async def operation():
+        await finish.wait()
+        order.append("operation finished")
+
+    async def issue():
+        return asyncio.create_task(operation())
+
+    class IssuedDriver(Driver):
+        def wait(self):
+            task = asyncio.run_coroutine_threadsafe(issue(), loop).result(5)
+            entered.set()
+            assert release.wait(5)
+            return task
+
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    responses.respond(computer_call(action={"type": "wait"}))
+    agent = Agent(
+        instructions="Use computer.",
+        provider=provider,
+        tools=[
+            computer_tool(
+                ComputerProvider(lambda _: IssuedDriver(), lambda _: order.append("disposed"))
+            )
+        ],
+    )
+    context = agent.session()
+    session = await context.__aenter__()
+    try:
+        await session.submit("wait")
+        assert await asyncio.to_thread(entered.wait, 5)
+        closing = asyncio.create_task(session.aclose())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.sleep(0.05)
+        assert order == []
+        assert not closing.done()
+        finish.set()
+        await asyncio.wait_for(closing, 5)
+        assert order == ["operation finished", "disposed"]
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        finish.set()
+        await context.__aexit__(None, None, None)
+        await provider.aclose()
+
+
+def test_computer_native_completion_without_canonical_output_remains_uncertain():
+    from agents._history import project_history
+
+    original = {
+        "type": "computer_call",
+        "id": "computer-item",
+        "call_id": "computer-id",
+        "actions": [{"type": "wait"}],
+        "pending_safety_checks": CHECKS,
+    }
+    history = [
+        {"type": "turn_context", "payload": {"turn_id": "original-turn"}},
+        {"type": "response_item", "payload": original},
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "original-turn",
+                "item": {
+                    "type": "DynamicToolCall",
+                    "id": "computer-id",
+                    "tool": "computer",
+                    "status": "completed",
+                    "success": True,
+                    "arguments": {"normalized": True},
+                },
+            },
+        },
+    ]
+    uncertain = []
+    _, items = project_history(history, "thread", uncertain_calls=uncertain)
+    assert len(uncertain) == 1
+    assert uncertain[0].arguments == original
+    assert items[0]["arguments"] == {"normalized": True}
+    assert items[0]["status"] == "in_progress"
 
 
 if __name__ == "__main__":
