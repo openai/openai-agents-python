@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "74c1ecef7c73f43fa29f91165014bcbc809c5c4c",
+  "baseline_commit": "515885df0ee9c572bb13670a679fc2a509952e9c",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -146,6 +146,34 @@
         "references": {
           "StopTurn": "agents.native_interception.StopTurn",
           "ToolCallInfo": "agents.tools.ToolCallInfo"
+        }
+      },
+      "agents.computer": {
+        "declarations": [
+          "Button = Literal['left', 'right', 'wheel', 'back', 'forward']",
+          "Environment = Literal['mac', 'windows', 'ubuntu', 'browser']",
+          "class Computer(Protocol):\n\n    def screenshot(self) -> str | Awaitable[str]:\n        pass\n\n    def click(self, x: float, y: float, button: Button) -> None | Awaitable[None]:\n        pass\n\n    def double_click(self, x: float, y: float) -> None | Awaitable[None]:\n        pass\n\n    def scroll(self, x: float, y: float, scroll_x: float, scroll_y: float) -> None | Awaitable[None]:\n        pass\n\n    def type(self, text: str) -> None | Awaitable[None]:\n        pass\n\n    def wait(self) -> None | Awaitable[None]:\n        pass\n\n    def move(self, x: float, y: float) -> None | Awaitable[None]:\n        pass\n\n    def keypress(self, keys: list[str]) -> None | Awaitable[None]:\n        pass\n\n    def drag(self, path: list[tuple[float, float]]) -> None | Awaitable[None]:\n        pass",
+          "@dataclass(frozen=True)\nclass ComputerProvider:\n    create: Callable[[ToolContext[Any]], Computer | Awaitable[Computer]] = field(repr=False)\n    dispose: Callable[[Computer], None | Awaitable[None]] | None = field(default=None, repr=False)",
+          "class ComputerSafetyError(RuntimeError):\n    pass",
+          "def computer_tool(computer: Computer | ComputerProvider, *, tool_type: Literal['computer', 'computer_use_preview']='computer', dimensions: tuple[int, int] | None=None, environment: Environment | None=None, approve: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None, on_safety_check: Callable[[ToolContext[Any], list[dict[str, Any]]], bool | Awaitable[bool]] | None=None) -> FunctionTool[Any, str, Any]:\n    pass"
+        ],
+        "exports": {
+          "Button": "typing.Literal",
+          "Computer": "agents.computer.Computer",
+          "ComputerProvider": "agents.computer.ComputerProvider",
+          "ComputerSafetyError": "agents.computer.ComputerSafetyError",
+          "Environment": "typing.Literal",
+          "computer_tool": "agents.computer.computer_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
+          "from ._function_tools import FunctionTool as FunctionTool, ToolContext as ToolContext"
+        ],
+        "references": {
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "ToolContext": "agents._function_tools.ToolContext"
         }
       },
       "agents.config": {
@@ -1177,9 +1205,9 @@
           "class ImageGenerationMask(TypedDict, total=False):\n    file_id: str\n    image_url: str",
           "class ImageGenerationSvgReasoning(TypedDict, total=False):\n    effort: Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']",
           "class ImageGenerationSvg(TypedDict, total=False):\n    model: str\n    reasoning: ImageGenerationSvgReasoning | None",
-          "@dataclass(frozen=True, kw_only=True)\nclass FileSearch:\n    vector_store_ids: Sequence[str]\n    max_num_results: int | None = None\n    include_search_results: bool = False\n    ranking_options: FileSearchRanking | None = None\n    filters: FileSearchComparisonFilter | FileSearchCompoundFilter | None = None",
-          "@dataclass(frozen=True, kw_only=True)\nclass CodeInterpreter:\n    container: str | CodeInterpreterAutoContainer\n    allowed_callers: Sequence[Literal['direct', 'programmatic']] | None = None",
-          "@dataclass(frozen=True, kw_only=True)\nclass ImageGeneration:\n    model: str | None = None\n    action: Literal['generate', 'edit', 'auto'] | None = None\n    quality: Literal['low', 'medium', 'high', 'xhigh', 'max', 'auto'] | None = None\n    size: str | None = None\n    background: Literal['transparent', 'opaque', 'auto'] | None = None\n    output_format: Literal['png', 'webp', 'jpeg', 'gif', 'svg'] | None = None\n    output_compression: int | None = None\n    moderation: Literal['auto', 'low'] | None = None\n    input_fidelity: Literal['high', 'low'] | None = None\n    input_image_mask: ImageGenerationMask | None = None\n    partial_images: int | None = None\n    complexity: Literal['low', 'medium', 'high'] | None = None\n    frame_count: int | None = None\n    frame_duration_ms: int | None = None\n    svg: ImageGenerationSvg | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass FileSearch:\n    vector_store_ids: Sequence[str]\n    max_num_results: int | None = None\n    include_search_results: bool = False\n    ranking_options: FileSearchRanking | None = None\n    filters: FileSearchComparisonFilter | FileSearchCompoundFilter | None = None\n    provider_data: dict[str, Any] | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass CodeInterpreter:\n    container: str | CodeInterpreterAutoContainer\n    allowed_callers: Sequence[Literal['direct', 'programmatic']] | None = None\n    include_outputs: bool = True\n    provider_data: dict[str, Any] | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass ImageGeneration:\n    model: str | None = None\n    action: Literal['generate', 'edit', 'auto'] | None = None\n    quality: Literal['low', 'medium', 'high', 'xhigh', 'max', 'auto'] | None = None\n    size: str | None = None\n    background: Literal['transparent', 'opaque', 'auto'] | None = None\n    output_format: Literal['png', 'webp', 'jpeg', 'gif', 'svg'] | None = None\n    output_compression: int | None = None\n    moderation: Literal['auto', 'low'] | None = None\n    input_fidelity: Literal['high', 'low'] | None = None\n    input_image_mask: ImageGenerationMask | None = None\n    partial_images: int | None = None\n    complexity: Literal['low', 'medium', 'high'] | None = None\n    frame_count: int | None = None\n    frame_duration_ms: int | None = None\n    svg: ImageGenerationSvg | None = None\n    provider_data: dict[str, Any] | None = None",
           "@dataclass(frozen=True)\nclass ToolRef:\n    name: str\n    namespace: str | None = None",
           "@dataclass(frozen=True)\nclass ToolCallInfo:\n    tool: ToolRef\n    session_id: str\n    turn_id: str\n    call_id: str | None\n    child_id: str | None\n    child_incarnation: str | None\n    role: str | None\n    model: str | None\n    route: Literal['direct', 'code']\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    nested_call_id: str | None = None",
           "@dataclass(frozen=True)\nclass ToolOutputText:\n    text: str",
@@ -1351,6 +1379,9 @@
       "CompactionContext": "agents.compaction.CompactionContext",
       "Completed": "agents.session.Completed",
       "CompletionContext": "agents.completion.CompletionContext",
+      "Computer": "agents.computer.Computer",
+      "ComputerProvider": "agents.computer.ComputerProvider",
+      "ComputerSafetyError": "agents.computer.ComputerSafetyError",
       "ContinueTurn": "agents.completion.ContinueTurn",
       "CustomStorage": "agents.canonical_storage.CustomStorage",
       "Deny": "agents.native_interception.Deny",
@@ -1457,6 +1488,7 @@
       "VerificationProof": "agents.manual.VerificationProof",
       "VerificationRequest": "agents.manual.VerificationRequest",
       "WebSearch": "agents.tools.WebSearch",
+      "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup"
     },
@@ -3612,6 +3644,9 @@
       "CompactionContext",
       "Completed",
       "CompletionContext",
+      "Computer",
+      "ComputerProvider",
+      "ComputerSafetyError",
       "ContinueTurn",
       "CustomStorage",
       "Deny",
@@ -3718,6 +3753,7 @@
       "VerificationProof",
       "VerificationRequest",
       "WebSearch",
+      "computer_tool",
       "function_tool",
       "get_cleanup"
     ],
@@ -3728,6 +3764,7 @@
       "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SessionStoreCleanup as SessionStoreCleanup, SQLiteSessionStore as SQLiteSessionStore",
       "from .compaction import CompactionContext as CompactionContext",
       "from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn",
+      "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
       "from .input import AssistantMessage as AssistantMessage, ImageDetail as ImageDetail, InitialMessage as InitialMessage, InputFile as InputFile, InputImage as InputImage, InputImageFile as InputImageFile, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalRequest as ApprovalRequest, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
