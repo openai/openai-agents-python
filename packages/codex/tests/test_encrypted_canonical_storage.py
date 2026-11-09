@@ -148,3 +148,59 @@ async def test_encrypted_store_native_session_restores_canonical_context(
         assert "SYNTHETIC_PRIVATE" not in encrypted and "first answer" not in encrypted
     finally:
         backend.release(identity, token)
+
+
+@pytest.mark.parametrize(
+    "operation,tamper", [("read", "revision"), ("read", "json"), ("commit", "revision")]
+)
+def test_encrypted_authentication_errors_discard_snapshot_frames_and_context(
+    tmp_path: Path, operation: str, tamper: str
+) -> None:
+    path = tmp_path / "canonical.sqlite"
+    backend = SQLiteSessionStore(path)
+    store = EncryptedSessionStore(backend, encryption_key="synthetic-test-key")
+    token = store.acquire("thread")
+    try:
+        store.commit("thread", token, 0, "write-1", snapshot())
+        original = backend.read("thread", token)
+        assert original is not None
+        if tamper == "revision":
+            envelope = json.loads(original)
+            envelope["revision"] = 2
+            corrupted = json.dumps(envelope)
+        else:
+            corrupted = "SYNTHETIC_PRIVATE_INVALID_JSON"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "UPDATE canonical_threads SET payload=? WHERE id=?", (corrupted, "thread")
+            )
+        with pytest.raises(RuntimeError, match="authentication failed") as caught:
+            if operation == "read":
+                store.read("thread", token)
+            else:
+                store.commit("thread", token, 1, "write-2", snapshot(2, "write-2"))
+        error = caught.value
+        assert error.__context__ is None
+        assert error.__cause__ is None
+        trace = error.__traceback__
+        while trace is not None:
+            frame = trace.tb_frame
+            if frame.f_code.co_filename.endswith("canonical_storage_encrypt.py"):
+                retained = repr(
+                    {
+                        name: value
+                        for name, value in frame.f_locals.items()
+                        if isinstance(value, (str, bytes, dict, list, tuple))
+                    }
+                )
+                assert "SYNTHETIC_PRIVATE" not in retained
+                assert "ciphertext" not in retained
+            trace = trace.tb_next
+        # Failed authentication keeps the writer and original bytes recoverable.
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "UPDATE canonical_threads SET payload=? WHERE id=?", (original, "thread")
+            )
+        assert store.read("thread", token) == snapshot()
+    finally:
+        store.release("thread", token)

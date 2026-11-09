@@ -56,6 +56,10 @@ class EncryptedSessionStore:
         return self._fernet_type(base64.urlsafe_b64encode(derived))
 
     def _decrypt(self, session_id: str, stored: str) -> str:
+        envelope: Any = None
+        document: Any = None
+        payload = b""
+        text = ""
         try:
             envelope = json.loads(stored)
             if envelope["format"] != "agents.canonical.encrypted.v1":
@@ -70,43 +74,59 @@ class EncryptedSessionStore:
                 raise ValueError
             return text
         except Exception:
-            # Do not expose ciphertext, native contents, or cryptographic diagnostics.
-            raise RuntimeError("Encrypted canonical storage authentication failed") from None
+            pass
+        finally:
+            # Failed authentication must not retain data in completed frames.
+            envelope = document = None
+            payload = b""
+            text = stored = ""
+        # Raise outside the handler so raw crypto/parse exceptions are detached.
+        raise RuntimeError("Encrypted canonical storage authentication failed")
 
     def acquire(self, session_id: str) -> str:
         return self.backend.acquire(session_id)
 
     def read(self, session_id: str, token: str) -> str | None:
         stored = self.backend.read(session_id, token)
-        return None if stored is None else self._decrypt(session_id, stored)
+        try:
+            return None if stored is None else self._decrypt(session_id, stored)
+        finally:
+            stored = None
 
     def commit(
         self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str
     ) -> None:
-        document: Any = json.loads(payload)
-        if document["revision"] != expected_revision + 1 or document["write_id"] != write_id:
-            raise RuntimeError("Invalid canonical revision")
-        stored = self.backend.read(session_id, token)
-        if stored is not None:
-            previous = self._decrypt(session_id, stored)
-            if json.loads(previous)["write_id"] == write_id:
-                if previous != payload:
-                    raise RuntimeError("Canonical storage write identifier conflict")
-                # Reuse the accepted envelope after a lost commit acknowledgement.
-                self.backend.commit(session_id, token, expected_revision, write_id, stored)
-                return
-        encrypted = json.dumps(
-            {
-                "format": "agents.canonical.encrypted.v1",
-                "revision": document["revision"],
-                "write_id": write_id,
-                "ciphertext": self._cipher(session_id)
-                .encrypt(payload.encode("utf-8"))
-                .decode("ascii"),
-            },
-            separators=(",", ":"),
-        )
-        self.backend.commit(session_id, token, expected_revision, write_id, encrypted)
+        document: Any = None
+        stored: str | None = None
+        previous = encrypted = ""
+        try:
+            document = json.loads(payload)
+            if document["revision"] != expected_revision + 1 or document["write_id"] != write_id:
+                raise RuntimeError("Invalid canonical revision")
+            stored = self.backend.read(session_id, token)
+            if stored is not None:
+                previous = self._decrypt(session_id, stored)
+                if json.loads(previous)["write_id"] == write_id:
+                    if previous != payload:
+                        raise RuntimeError("Canonical storage write identifier conflict")
+                    # Reuse the accepted envelope after a lost commit acknowledgement.
+                    self.backend.commit(session_id, token, expected_revision, write_id, stored)
+                    return
+            encrypted = json.dumps(
+                {
+                    "format": "agents.canonical.encrypted.v1",
+                    "revision": document["revision"],
+                    "write_id": write_id,
+                    "ciphertext": self._cipher(session_id)
+                    .encrypt(payload.encode("utf-8"))
+                    .decode("ascii"),
+                },
+                separators=(",", ":"),
+            )
+            self.backend.commit(session_id, token, expected_revision, write_id, encrypted)
+        finally:
+            document = stored = None
+            payload = previous = encrypted = ""
 
     def flush(self, session_id: str, token: str) -> None:
         self.backend.flush(session_id, token)
