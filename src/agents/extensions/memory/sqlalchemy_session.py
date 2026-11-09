@@ -45,7 +45,6 @@ from sqlalchemy import (
     delete,
     event,
     insert,
-    literal,
     select,
     text as sql_text,
     update,
@@ -240,9 +239,9 @@ class SQLAlchemySession(SessionABC):
                 nullable=False,
             ),
             Index(
-                f"idx_{messages_table}_session_time",
+                f"idx_{messages_table}_session_id",
                 "session_id",
-                "created_at",
+                "id",
             ),
             sqlite_autoincrement=True,
         )
@@ -375,10 +374,7 @@ class SQLAlchemySession(SessionABC):
             return (
                 select(self._messages.c.message_data)
                 .where(self._messages.c.session_id == self.session_id)
-                .order_by(
-                    self._messages.c.created_at.desc(),
-                    self._messages.c.id.desc(),
-                )
+                .order_by(self._messages.c.id.desc())
                 .limit(row_limit)
             )
 
@@ -387,10 +383,7 @@ class SQLAlchemySession(SessionABC):
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
-                    .order_by(
-                        self._messages.c.created_at.asc(),
-                        self._messages.c.id.asc(),
-                    )
+                    .order_by(self._messages.c.id.asc())
                 )
                 result = await sess.execute(stmt)
                 return await _decode_rows([row[0] for row in result.all()])
@@ -464,9 +457,9 @@ class SQLAlchemySession(SessionABC):
         await self._ensure_tables()
         messages = self._messages
         tail = (
-            select(messages.c.id, messages.c.message_data, messages.c.created_at)
+            select(messages.c.id, messages.c.message_data)
             .where(messages.c.session_id == self.session_id)
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .order_by(messages.c.id.desc())
         )
         async with self._session() as sess:
             # One extra row determines completeness without materializing the prefix.
@@ -500,21 +493,14 @@ class SQLAlchemySession(SessionABC):
                         if list(current.all())[::-1] != expected:
                             return False
                         if prune_prefix is not None:
-                            first = expected[0]
-                            first_timestamp = (
-                                select(messages.c.created_at)
-                                .where(messages.c.id == first.id)
-                                .scalar_subquery()
-                            )
-                            before = (messages.c.created_at < first_timestamp) | (
-                                (messages.c.created_at == first_timestamp)
-                                & (messages.c.id < first.id)
-                            )
                             while True:
                                 prefix = await sess.execute(
                                     select(messages.c.id, messages.c.message_data)
-                                    .where(messages.c.session_id == self.session_id, before)
-                                    .order_by(messages.c.created_at, messages.c.id)
+                                    .where(
+                                        messages.c.session_id == self.session_id,
+                                        messages.c.id < expected[0].id,
+                                    )
+                                    .order_by(messages.c.id)
                                     .limit(limit)
                                     .with_for_update()
                                 )
@@ -538,20 +524,8 @@ class SQLAlchemySession(SessionABC):
                                 )
                                 if len(expired_ids) < limit:
                                     break
-                        # Copy the timestamp in SQL before deleting the source row.
-                        # Python datetime rebinding changes SQLite's stored precision,
-                        # which would sort a later same-second append before its summary.
-                        for output_row in payload:
-                            await sess.execute(
-                                insert(messages).from_select(
-                                    ["session_id", "message_data", "created_at"],
-                                    select(
-                                        literal(self.session_id),
-                                        literal(output_row["message_data"]),
-                                        messages.c.created_at,
-                                    ).where(messages.c.id == expected[-1].id),
-                                )
-                            )
+                        if payload:
+                            await sess.execute(insert(messages), payload)
                         await sess.execute(
                             delete(messages).where(
                                 messages.c.session_id == self.session_id,
@@ -624,10 +598,7 @@ class SQLAlchemySession(SessionABC):
                     tail = (
                         select(self._messages.c.id, self._messages.c.message_data)
                         .where(self._messages.c.session_id == self.session_id)
-                        .order_by(
-                            self._messages.c.created_at.desc(),
-                            self._messages.c.id.desc(),
-                        )
+                        .order_by(self._messages.c.id.desc())
                         .limit(1)
                     )
 

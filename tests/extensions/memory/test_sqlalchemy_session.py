@@ -1045,58 +1045,28 @@ async def test_pop_item_same_timestamp_returns_latest():
     assert _item_ids(remaining) == ["rs_pop_same_ts"]
 
 
-async def test_get_items_orders_by_id_for_ties():
-    """Test that get_items adds id ordering to break timestamp ties."""
-    session_id = "order_by_id_test"
-    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
-
-    await session.add_items(
-        [
-            _make_reasoning_item("rs_first", "..."),
-            _make_message_item("msg_second", "..."),
-        ]
-    )
-
-    real_factory = session._session_factory
-    recorded: list[Any] = []
-
-    @asynccontextmanager
-    async def wrapped_session():
-        async with real_factory() as inner:
-            original_execute = inner.execute
-
-            async def recording_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
-                recorded.append(statement)
-                return await original_execute(statement, *args, **kwargs)
-
-            cast(Any, inner).execute = recording_execute
-            try:
-                yield inner
-            finally:
-                cast(Any, inner).execute = original_execute
-
-    session._session_factory = cast(Any, wrapped_session)
+async def test_backdated_append_remains_the_latest_item():
+    session = SQLAlchemySession.from_url("backdated", url=DB_URL, create_tables=True)
+    items = [_make_message_item(str(number), "turn") for number in range(1, 4)]
     try:
-        retrieved_full = await session.get_items()
-        retrieved_limited = await session.get_items(limit=2)
+        for item in items:
+            await session.add_items([item])
+        # Reproduce the stored wall time of a later append from a different time zone.
+        messages = session._messages
+        async with session.engine.begin() as conn:
+            latest_id = select(messages.c.id).order_by(messages.c.id.desc()).limit(1)
+            await conn.execute(
+                update(messages)
+                .where(messages.c.id == latest_id.scalar_subquery())
+                .values(created_at=datetime(2000, 1, 1))
+            )
+
+        assert await session.get_items() == items
+        assert await session.get_items(limit=1) == items[-1:]
+        assert await session.pop_item() == items[-1]
+        assert await session.get_items() == items[:-1]
     finally:
-        session._session_factory = real_factory
-
-    assert len(recorded) >= 2
-    orderings_full = [str(clause) for clause in recorded[0]._order_by_clause]
-    assert orderings_full == [
-        "agent_messages.created_at ASC",
-        "agent_messages.id ASC",
-    ]
-
-    orderings_limited = [str(clause) for clause in recorded[1]._order_by_clause]
-    assert orderings_limited == [
-        "agent_messages.created_at DESC",
-        "agent_messages.id DESC",
-    ]
-
-    assert _item_ids(retrieved_full) == ["rs_first", "msg_second"]
-    assert _item_ids(retrieved_limited) == ["rs_first", "msg_second"]
+        await session.engine.dispose()
 
 
 async def test_engine_property_from_url():
