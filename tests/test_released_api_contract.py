@@ -151,6 +151,10 @@ def test_released_api_contract_fixture_matches_installed_version() -> None:
     contract = load_api_contract(CONTRACT)
     assert contract["baseline"] == f"v{version('openai-agents')}"
     assert len(contract["baseline_commit"]) == 40
+    if contract["baseline"] == "v0.24.0":
+        parameters = contract["callables"]["OpenAIResponsesCompactionSession"]["parameters"]
+        model = next(parameter for parameter in parameters if parameter["name"] == "model")
+        assert model["default"] == _default_contract("gpt-4.1")
     if contract["baseline"] == "v0.19.4":
         assert contract["baseline_commit"] == "9bfad15ab8297fbb2afe389c983a5cb573eeef56"
         assert all(
@@ -211,6 +215,43 @@ def test_callable_contract_ignores_typing_aliases() -> None:
 
     assert updated["required_top_level_exports"] == ["Callback"]
     assert updated["callables"] == {}
+
+
+def test_release_contract_promotes_only_the_approved_compaction_model_default() -> None:
+    def session_module(default_model: str) -> SimpleNamespace:
+        class OpenAIResponsesCompactionSession:
+            def __init__(self, *, model: str = default_model) -> None:
+                self.model = model
+
+        return SimpleNamespace(
+            __all__=["OpenAIResponsesCompactionSession"],
+            OpenAIResponsesCompactionSession=OpenAIResponsesCompactionSession,
+        )
+
+    name = "OpenAIResponsesCompactionSession"
+    historical = session_module("gpt-4.1")
+    released: dict[str, Any] = {
+        "baseline": "v0.24.0",
+        "baseline_commit": "a" * 40,
+        "required_top_level_exports": [name],
+        "public_modules": ["agents"],
+        "canonical_imports": [],
+        "callables": {name: _callable_contract(historical.OpenAIResponsesCompactionSession)},
+    }
+    candidate = session_module("gpt-6-luna")
+    assert validate_released_api_contract(released, agents_module=historical) == []
+    assert validate_released_api_contract(released, agents_module=session_module("gpt-6.1-terra"))
+    assert validate_released_api_contract(
+        {**released, "baseline": "v0.23.1"}, agents_module=candidate
+    )
+    promoted = build_released_api_contract(
+        released, baseline="v0.25.0", baseline_commit="b" * 40, agents_module=candidate
+    )
+    assert promoted["callables"][name] == _callable_contract(
+        candidate.OpenAIResponsesCompactionSession
+    )
+    assert validate_released_api_contract(promoted, agents_module=historical)
+    assert validate_released_api_contract(released, agents_module=historical) == []
 
 
 def test_constructor_contract_allows_optional_suffixes_only() -> None:

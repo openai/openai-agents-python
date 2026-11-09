@@ -6726,7 +6726,7 @@
           "default": {
             "kind": "literal",
             "type": "builtins.str",
-            "value": "gpt-6-luna"
+            "value": "gpt-4.1"
           },
           "kind": "KEYWORD_ONLY",
           "name": "model"

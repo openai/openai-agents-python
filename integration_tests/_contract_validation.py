@@ -578,9 +578,21 @@ def validate_released_api_contract(
                     f"{released_execution_kind} to {current_execution_kind}"
                 )
         current_parameters = surface._parameter_contract(value)
-        errors.extend(
-            _validate_parameter_contract(name, released["parameters"], current_parameters)
-        )
+        released_parameters = released["parameters"]
+        if name == "OpenAIResponsesCompactionSession" and contract.get("baseline") == "v0.24.0":
+            # Accept the intentional default migration without altering the historical manifest.
+            old_model = {
+                "name": "model",
+                "kind": "KEYWORD_ONLY",
+                "default": surface._default_contract("gpt-4.1"),
+            }
+            new_model = {**old_model, "default": surface._default_contract("gpt-6-luna")}
+            if new_model in current_parameters:
+                released_parameters = [
+                    new_model if parameter == old_model else parameter
+                    for parameter in released_parameters
+                ]
+        errors.extend(_validate_parameter_contract(name, released_parameters, current_parameters))
         current_fields = surface._dataclass_field_contract(value)
         released_fields = released["dataclass_fields"]
         if current_fields[: len(released_fields)] != released_fields:
