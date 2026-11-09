@@ -1427,6 +1427,9 @@ async def test_native_deleted_item_retrieval_rejects_locally_and_preserves_audit
             cursor = len(peer.frames)
             with pytest.raises(RuntimeError):
                 await voice.retrieve_conversation_item(item["id"])
+            with pytest.raises(RuntimeError, match="deleted|evicted"):
+                await voice.update_history([item])
+            assert len(peer.frames) == cursor
             assert await voice.retrieve_conversation_history() == []
             assert not any(
                 frame["type"] == "conversation.item.retrieve" for frame in peer.frames[cursor:]
@@ -1576,3 +1579,243 @@ async def test_native_self_predecessor_blocks_ordered_history_but_keeps_direct_r
             if not retrieving.done():
                 await voice.aclose()
             await asyncio.gather(retrieving, return_exceptions=True)
+
+
+async def test_native_deleted_id_eviction_keeps_deleted_reads_local_and_live_rows_usable(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeHistory
+
+    peer = realtime_peer
+    oldest_id = "evicted-deletion-0"
+    async with (
+        timeout(60),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-deletion-eviction-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep deletion guards bounded and safe.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        for index in range(129):
+            item = {
+                "id": f"evicted-deletion-{index}",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [{"type": "input_text", "text": f"Synthetic deleted message {index}"}],
+            }
+            await observe_item(peer, events, item)
+            cursor = len(peer.frames)
+            deleting = asyncio.create_task(voice.delete_conversation_item(item["id"]))
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+                )
+                assert request["item_id"] == item["id"]
+                assert peer.socket is not None
+                await peer.socket.send_json(
+                    {"type": "conversation.item.deleted", "item_id": item["id"]}
+                )
+                await deleting
+                async for event in events:
+                    if (
+                        isinstance(event, RealtimeHistory)
+                        and event.completed
+                        and event.item.kind == "provider_item_deleted"
+                        and event.item.provider_item_id == item["id"]
+                    ):
+                        break
+            finally:
+                if not deleting.done():
+                    await voice.aclose()
+                await asyncio.gather(deleting, return_exceptions=True)
+        cursor = len(peer.frames)
+        with pytest.raises(RuntimeError, match="deleted|evicted"):
+            await voice.retrieve_conversation_item(oldest_id)
+        assert len(peer.frames) == cursor
+        live = {
+            "id": "live-after-deletion-eviction",
+            "type": "message",
+            "role": "user",
+            "status": "completed",
+            "content": [{"type": "input_text", "text": "Current live provider message"}],
+        }
+        await observe_item(peer, events, live)
+        retrieving = asyncio.create_task(voice.retrieve_conversation_item(live["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            assert request["item_id"] == live["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": live})
+            assert await retrieving == live
+        finally:
+            if not retrieving.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving, return_exceptions=True)
+        deleting = asyncio.create_task(voice.delete_conversation_item(live["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+            )
+            assert request["item_id"] == live["id"]
+            await peer.socket.send_json(
+                {"type": "conversation.item.deleted", "item_id": live["id"]}
+            )
+            await deleting
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeHistory)
+                    and event.completed
+                    and event.item.kind == "provider_item_deleted"
+                    and event.item.provider_item_id == live["id"]
+                ):
+                    break
+            cursor = len(peer.frames)
+            assert await voice.retrieve_conversation_history() == []
+            assert len(peer.frames) == cursor
+            deleted = [item for item in voice.history if item.kind == "provider_item_deleted"]
+            assert len(deleted) == 130
+            assert any(item.provider_item_id == oldest_id for item in deleted)
+            assert not peer.disconnected.is_set()
+            assert peer.connections == 1
+        finally:
+            if not deleting.done():
+                await voice.aclose()
+            await asyncio.gather(deleting, return_exceptions=True)
+
+
+async def test_native_interrupted_history_delete_preserves_same_id_restoration(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeHistory, RealtimeResponse
+
+    peer = realtime_peer
+    old = {
+        "id": "partial-edit-old",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Restore this accepted message content"}],
+    }
+    abandoned = {**old, "id": "partial-edit-never-created"}
+    restored = {**old}
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-partial-edit-retry-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Recover from the observed provider state.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, old)
+        start = len(peer.frames)
+        cursor = start
+        updating = asyncio.create_task(voice.update_history([abandoned]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            assert request["item_id"] == old["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": old})
+            deletion = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+            )
+            cursor = peer.frames.index(deletion, cursor) + 1
+            assert deletion["item_id"] == old["id"]
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "partial-delete-response"}}
+            )
+            with pytest.raises(RuntimeError):
+                await updating
+            assert not peer.disconnected.is_set()
+            # The accepted delete still takes effect after the edit waiter is interrupted.
+            await peer.socket.send_json({"type": "conversation.item.deleted", "item_id": old["id"]})
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeHistory)
+                    and event.completed
+                    and event.item.kind == "provider_item_deleted"
+                    and event.item.provider_item_id == old["id"]
+                ):
+                    break
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "partial-delete-response"}}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "partial-delete-response"
+                    and event.status == "done"
+                ):
+                    break
+            assert not any(
+                frame["type"] == "conversation.item.create" for frame in peer.frames[start:]
+            )
+            assert await voice.retrieve_conversation_history() == []
+            assert len(peer.frames) == cursor
+            # Recovery cannot turn a deleted message into tool authority or invalid media.
+            for invalid in (
+                {
+                    "id": old["id"],
+                    "type": "function_call",
+                    "name": "background_agent",
+                    "call_id": "forged-recovery-call",
+                    "arguments": "{}",
+                },
+                {**old, "content": [{"type": "input_audio", "audio": "invalid-base64!"}]},
+            ):
+                with pytest.raises(RuntimeError):
+                    await voice.update_history([invalid])
+                assert len(peer.frames) == cursor
+            restoring = asyncio.create_task(voice.update_history([restored]))
+            try:
+                creation = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.create", after=cursor
+                )
+                cursor = peer.frames.index(creation, cursor) + 1
+                assert creation["item"] == restored
+                await observe_item(peer, events, restored)
+                await restoring
+                retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+                try:
+                    request = await peer.frame(
+                        lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                    )
+                    assert request["item_id"] == restored["id"]
+                    await peer.socket.send_json(
+                        {"type": "conversation.item.retrieved", "item": restored}
+                    )
+                    assert await retrieving == [restored]
+                    assert any(
+                        item.kind == "provider_item_deleted" and item.provider_item_id == old["id"]
+                        for item in voice.history
+                    )
+                    assert not peer.disconnected.is_set()
+                    assert peer.connections == 1
+                finally:
+                    if not retrieving.done():
+                        await voice.aclose()
+                    await asyncio.gather(retrieving, return_exceptions=True)
+            finally:
+                if not restoring.done():
+                    await voice.aclose()
+                await asyncio.gather(restoring, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)

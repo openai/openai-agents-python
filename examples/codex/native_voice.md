@@ -41,13 +41,32 @@ Import the native types from `agents.realtime`.
 
 Python native execution runs on the server. Your browser handles microphone access, SDP exchange, and playback, using an authenticated application endpoint. Keep long-lived credentials on the server. Browser observations are not permission to execute tools or approve requests. End server ownership when the call ends; closing a browser peer alone does not replace server cleanup.
 
-SIP calls must be accepted and configured before attachment. On your server, call `await session.build_realtime_sip_config(config=RealtimeConfig(...))` to build the call-accept request body from the Session's active Agent. The builder uses the same instructions, tools, handoffs, and settings as voice setup. When `tools` is omitted, it prepares Session-owned MCP tools. It does not accept the call, open voice media, or resolve voice credentials. Send the returned body to the provider's call-accept endpoint, then attach the same Session with `RealtimeConfig(transport=RealtimeSIP(call_id))`. Regenerate the body if you change the Session or its configuration before accepting the call. The builder preserves supported SIP VAD tuning, including `threshold`, `prefix_padding_ms`, and `silence_duration_ms`.
+SIP calls must be accepted and configured before attachment. On your server, call `await session.build_realtime_sip_config(config=RealtimeConfig(...))` to build the call-accept request body from the Session's active Agent. The builder uses the same instructions, tools, handoffs, and settings as voice setup. When `tools` is omitted, it prepares Session-owned MCP tools. It does not accept the call, open voice media, or resolve voice credentials. Send the returned body to the provider's call-accept endpoint, then attach the same Session with the same configuration and a `RealtimeSIP` transport. Regenerate the body if you change the Session or its configuration before accepting the call. The builder preserves supported SIP VAD tuning, including `threshold`, `prefix_padding_ms`, and `silence_duration_ms`.
 
-If you pass an explicit `tools` selection to the builder, pass the same selection in the `RealtimeConfig` used for attachment. The accept body controls the tools advertised to the provider. The attachment selection also limits the tools available to delegated native work. The builder does not save the selection for a later attachment.
+Repeat the builder's `model`, `voice`, `instructions`, `settings`, and `tools` when attaching. These values describe the already accepted call; attachment checks them without sending an initial configuration update. A mismatch rejects attachment. For example, reuse one configuration inside your asynchronous incoming-call handler:
+
+```python
+from dataclasses import replace
+from agents.realtime import RealtimeConfig, RealtimeSIP
+
+config = RealtimeConfig(
+    model="gpt-realtime",
+    voice="alloy",
+    instructions="Answer spoken questions briefly.",
+    settings={"tool_choice": "auto"},
+    tools=(),
+)
+acceptance = await session.build_realtime_sip_config(config=config)
+# Send acceptance to the provider's call-accept endpoint before attaching.
+async with session.realtime(config=replace(config, transport=RealtimeSIP(call_id))) as voice:
+    await serve_call(voice)
+```
+
+Here, `session` is your open Session, `call_id` comes from the verified webhook, and `serve_call` consumes the voice events until the call ends. The empty tool selection excludes the Agent's tools. The accept body controls the tools advertised to the provider. The attachment selection also limits tools available to delegated native work. The builder saves no configuration for a later attachment.
 
 Configure hosted MCP follow-ups on the `RealtimeConfig` used for attachment. The builder rejects `automatically_trigger_response_for_mcp_tool_calls=False`, because the HTTP accept body cannot carry this SDK option.
 
-The [SIP example](native_realtime_sip.py) shows call acceptance, attachment, and history retrieval. It requires a call ID from an incoming-call webhook your application has verified. Do not pass initial `model`, `voice`, or `instructions` overrides when attaching with `RealtimeSIP`. Nonempty client audio is rejected; a commit-only call can control audio already buffered by the provider. An SDK-created WebRTC call has different ownership: closing its native owner also hangs up that created call.
+The [SIP example](native_realtime_sip.py) shows call acceptance, attachment, and history retrieval. It requires a call ID from an incoming-call webhook your application has verified. Nonempty client audio is rejected; a commit-only call can control audio already buffered by the provider. An SDK-created WebRTC call has different ownership: closing its native owner also hangs up that created call.
 
 WebRTC SDP offers are limited to 1 MiB of UTF-8 text. Oversized offers are rejected before credentials are resolved or a connection is opened.
 
@@ -75,7 +94,7 @@ async def serve_webrtc(
             await serve_call(voice)
 ```
 
-For an already accepted SIP call, use the same lifetime and event-consumer pattern with `RealtimeConfig(transport=RealtimeSIP(call_id))`, importing `RealtimeSIP` from `agents.realtime`. Ending that context detaches native control; hang up through the application that owns the provider call.
+For an already accepted SIP call, use the same lifetime and event-consumer pattern. Reuse the acceptance configuration and set its transport with `replace(config, transport=RealtimeSIP(call_id))`, as shown above. Ending that context detaches native control; hang up through the application that owns the provider call.
 
 The retained Realtime runtime remains available under `agents.classic.realtime`. The native entrypoint uses the existing caller Session and canonical native history.
 
@@ -168,9 +187,13 @@ asyncio.run(main(sys.argv[1]))
 
 Canonical history keeps prior transcripts and appends a `provider_item_deleted` entry with its target in `provider_item_id`. Shared Session history, tool outcomes, and approval records remain intact. Deletion cannot retract output already generated or change context a response already consumed. A later voice connection can use retained Session context. This operation prunes the current provider conversation rather than erasing Session history.
 
-Use `await voice.retrieve_conversation_item(provider_item_id)` to retrieve a known provider item with its available media, including an item from before SIP attachment. Retrieval rejects locally deleted IDs. Retrieving an ID absent from the observed history does not add it to that history's order. `await voice.retrieve_conversation_history()` retrieves full items for IDs observed during this connection, in observed order. The result can include audio and image data and can be large. It cannot discover items from before SIP attachment. These requests are separate from the synchronous `voice.history` audit view.
+Use `await voice.retrieve_conversation_item(provider_item_id)` to retrieve a known provider item with its available media, including an item from before SIP attachment. Retrieval rejects IDs still recorded as deleted. Retrieving an ID absent from the observed history does not add it to that history's order. `await voice.retrieve_conversation_history()` retrieves full items for IDs observed during this connection, in observed order. The result can include audio and image data and can be large. It cannot discover items from before SIP attachment. These requests are separate from the synchronous `voice.history` audit view.
 
 Pass an edited list of those provider items to `await voice.update_history(items)` to update the observed portion of the provider conversation. The method supports adding, correcting, removing, and reordering supported system, user, and assistant messages. Keep tool, MCP, and approval items unchanged and in order; messages cannot move across them. Native validation checks the replacement before sending changes and waits for provider acknowledgements. It cannot erase unobserved items or rewrite the Session's audit, background work, or retained context. An interrupted edit or a provider failure after some acknowledgements can leave partial edits. If the connection remains active, retrieve the observed history before retrying.
+
+The connection retains 128 recent deletion receipts. Within this window, you can restore a message removed by an interrupted `update_history()` under its original ID. Supply a supported message after refreshing the observed history. IDs deleted directly with `delete_conversation_item()`, and tool or control identities, remain protected while their receipts are retained. Recovery preserves the canonical deletion audit.
+
+Once the receipt window evicts any deletion, individual item lookup requires a current live provider observation. An arbitrary or unobserved ID, including one from before SIP attachment, then rejects locally. This restriction lasts until a new voice connection. Further pruning and history editing remain available.
 
 Created or changed messages use the provider's role-specific content types: `input_text` for system messages; `input_text`, `input_audio`, or `input_image` for user messages; and `output_text` for assistant messages. For images, pass a PNG or JPEG base64 data URI. Base64-encode audio bytes in the session's input audio format. Existing assistant audio can be retained but cannot be created through this API. Keep existing provider item IDs and give new messages unique IDs.
 

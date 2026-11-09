@@ -298,7 +298,7 @@ index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52ee
      let event = connection
          .next_event()
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa2513a75198 100644
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1122768f3 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,5 +1,6 @@
@@ -453,7 +453,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
 +                .item_deletion
 +                .lock()
 +                .unwrap()
-+                .begin(id.clone(), item_deletion::DeleteReply::new(reply))
++                .begin_history_message(id.clone(), item_deletion::DeleteReply::new(reply))
 +            {
 +                sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
 +                    "Provider item cannot be edited while work is unresolved".into(),
@@ -475,7 +475,36 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
  pub(crate) async fn handle_delete_item_sdk(
      sess: &Arc<Session>,
      generation: String,
-@@ -3731,6 +3843,17 @@ async fn handle_start_inner_with_adapter(
+@@ -3209,11 +3321,12 @@ async fn prepare_realtime_start_with_source(
+                 ));
+             }
+             if params.include_startup_context
+-                || params.prompt.is_some()
+                 || !params.initial_items.is_empty()
+-                || params.model.is_some()
+-                || params.voice.is_some()
+                 || params.delegation_ack_filler.is_some()
++                || (!(sdk_owned && version == RealtimeWsVersion::V2)
++                    && (params.prompt.is_some()
++                        || params.model.is_some()
++                        || params.voice.is_some()))
+             {
+                 return Err(CodexErr::InvalidRequest(
+                     "existing realtime calls do not support session configuration options"
+@@ -3224,6 +3337,12 @@ async fn prepare_realtime_start_with_source(
+         ConversationStartTransport::Websocket => {}
+     }
+     let configured_voice = match (&transport, params.version) {
++        (ConversationStartTransport::ExistingCall { .. }, _)
++            if sdk_owned && version == RealtimeWsVersion::V2 =>
++        {
++            // SDK options describe the accepted call and are checked at readiness.
++            ConfiguredRealtimeVoice::Use
++        }
+         (ConversationStartTransport::ExistingCall { .. }, _)
+         | (ConversationStartTransport::Webrtc { .. }, None) => ConfiguredRealtimeVoice::Ignore,
+         (ConversationStartTransport::Webrtc { .. } | ConversationStartTransport::Websocket, _) => {
+@@ -3731,6 +3850,17 @@ async fn handle_start_inner_with_adapter(
                      {
                          Ok(()) if sdk.active.load(Ordering::Acquire) => {
                              sdk.item_deletion.lock().unwrap().finish(item_id, Ok(()));
@@ -493,7 +522,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
                          }
                          result => {
                              let message = result
-@@ -3749,7 +3872,7 @@ async fn handle_start_inner_with_adapter(
+@@ -3749,7 +3879,7 @@ async fn handle_start_inner_with_adapter(
                      // The existing native call ledger retains exact completion
                      // proof even when its provider call item was deleted/evicted.
                      let settled_output_call =
@@ -502,7 +531,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
                              if item["type"].as_str() == Some("function_call_output") {
                                  if let Some(id) = item["call_id"].as_str() {
                                      sdk.seen
-@@ -4197,12 +4320,23 @@ async fn run_realtime_input_task(
+@@ -4197,12 +4327,23 @@ async fn run_realtime_input_task(
              }
              _ = async {
                  let deadline = handoff_state.sdk.as_ref()
@@ -528,7 +557,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
              command = async {
                  match &handoff_state.sdk {
                      Some(sdk) => sdk.commands_rx.recv().await,
-@@ -4812,8 +4946,61 @@ async fn handle_sdk_realtime_command(
+@@ -4812,8 +4953,61 @@ async fn handle_sdk_realtime_command(
      if !sdk.active.load(Ordering::Acquire) {
          return Ok(());
      }
@@ -592,7 +621,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
              if sdk
                  .item_deletion
                  .lock()
-@@ -5399,6 +5586,70 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5399,6 +5593,70 @@ async fn handle_realtime_server_event_with_configuration(
      response_create_queue: &mut RealtimeResponseCreateQueue,
      configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
  ) -> anyhow::Result<()> {
@@ -663,7 +692,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
      if let RealtimeEvent::ConversationItemDeleted { item_id } = &event {
          if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
              sdk.active.load(Ordering::Acquire)
-@@ -5812,7 +6063,8 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5812,7 +6070,8 @@ async fn handle_realtime_server_event_with_configuration(
          | RealtimeEvent::OutputTranscriptDone(_)
          | RealtimeEvent::FunctionCallFinished { .. }
          | RealtimeEvent::FunctionBatchFinished { .. }
@@ -674,10 +703,45 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa25
          | RealtimeEvent::ConversationItemObserved(_)
          | RealtimeEvent::ConversationItemDeleted { .. }
 diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3ec7dae693 100644
+index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851ad24fedf 100644
 --- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
 +++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-@@ -117,7 +117,7 @@ impl State {
+@@ -34,9 +34,15 @@ struct Item {
+     effect_done: bool,
+ }
+ #[derive(Debug)]
++struct DeletedItem {
++    id: String,
++    recreatable_message: bool,
++}
++#[derive(Debug)]
+ struct Pending {
+     item_id: String,
+     acknowledged: bool,
++    recreatable_message: bool,
+     deadline: tokio::time::Instant,
+     reply: DeleteReply,
+ }
+@@ -44,7 +50,8 @@ struct Pending {
+ pub(super) struct State {
+     items: HashMap<String, Item>,
+     order: VecDeque<String>,
+-    recent_deleted: VecDeque<String>,
++    recent_deleted: VecDeque<DeletedItem>,
++    deleted_ids_evicted: bool,
+     recent_noop_completions: VecDeque<String>,
+     pending: Option<Pending>,
+ }
+@@ -54,7 +61,7 @@ impl State {
+     }
+     fn upsert(&mut self, id: &str, item: Item) -> anyhow::Result<()> {
+         anyhow::ensure!(Self::valid_id(id), "Invalid provider conversation item ID");
+-        if self.recent_deleted.iter().any(|known| known == id) {
++        if self.recent_deleted.iter().any(|known| known.id == id) {
+             return Ok(());
+         }
+         let mut item = item;
+@@ -117,7 +124,7 @@ impl State {
      ) -> anyhow::Result<Option<codex_protocol::protocol::RealtimeConversationItemObservation>> {
          let mut observed = None;
          match event {
@@ -686,20 +750,29 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
                  let id = value["id"].as_str().context("Provider item has no ID")?;
                  let kind = value["type"]
                      .as_str()
-@@ -253,6 +253,12 @@ impl State {
+@@ -253,6 +260,21 @@ impl State {
              })
          }))
      }
 +    pub(super) fn is_deleted(&self, id: &str) -> bool {
-+        self.recent_deleted.iter().any(|known| known == id)
++        self.recent_deleted.iter().any(|known| known.id == id)
++    }
++    pub(super) fn can_retrieve(&self, id: &str) -> bool {
++        !self.is_deleted(id) && (!self.deleted_ids_evicted || self.items.contains_key(id))
++    }
++    pub(super) fn can_recreate_message(&self, id: &str) -> bool {
++        self.recent_deleted
++            .iter()
++            .any(|known| known.id == id && known.recreatable_message)
 +    }
 +    pub(super) fn allow_recreation(&mut self, id: &str) {
-+        self.recent_deleted.retain(|known| known != id);
++        self.recent_deleted
++            .retain(|known| known.id != id || !known.recreatable_message);
 +    }
      pub(super) fn settle_call(&mut self, call_id: &str) {
          for item in self
              .items
-@@ -273,7 +279,9 @@ impl State {
+@@ -273,7 +295,9 @@ impl State {
              ));
          }
          let supported = match item.kind.as_str() {
@@ -710,7 +783,55 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
              "function_call" | "function_call_output" => item.done && item.effect_done,
              "mcp_call" | "mcp_tool_call" | "mcp_list_tools" => item.done && item.effect_done,
              "mcp_approval_response" => item.done && item.approval_request_id.is_some(),
-@@ -352,9 +360,12 @@ mod tests {
+@@ -303,11 +327,25 @@ impl State {
+         self.pending = Some(Pending {
+             item_id: id,
+             acknowledged: false,
++            recreatable_message: false,
+             deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+             reply,
+         });
+         true
+     }
++    pub(super) fn begin_history_message(&mut self, id: String, reply: DeleteReply) -> bool {
++        let recreatable_message = self
++            .items
++            .get(&id)
++            .is_some_and(|item| item.kind == "message");
++        if !self.begin(id, reply) {
++            return false;
++        }
++        if let Some(pending) = &mut self.pending {
++            pending.recreatable_message = recreatable_message;
++        }
++        true
++    }
+     pub(super) fn acknowledge(&mut self, id: &str) -> bool {
+         let Some(pending) = self
+             .pending
+@@ -329,8 +367,12 @@ impl State {
+                 self.order.retain(|known| known != id);
+                 if self.recent_deleted.len() == 128 {
+                     self.recent_deleted.pop_front();
++                    self.deleted_ids_evicted = true;
+                 }
+-                self.recent_deleted.push_back(id.to_owned());
++                self.recent_deleted.push_back(DeletedItem {
++                    id: id.to_owned(),
++                    recreatable_message: pending.recreatable_message,
++                });
+             }
+             pending.reply.finish(result);
+         }
+@@ -343,6 +385,7 @@ impl State {
+         self.items.clear();
+         self.order.clear();
+         self.recent_deleted.clear();
++        self.deleted_ids_evicted = false;
+         self.recent_noop_completions.clear();
+     }
+ }
+@@ -352,9 +395,12 @@ mod tests {
      use super::*;
      fn message(state: &mut State, id: &str, role: &str) {
          state
@@ -726,7 +847,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
              .unwrap();
      }
      fn reply() -> (DeleteReply, tokio::sync::oneshot::Receiver<CodexResult<()>>) {
-@@ -405,9 +416,9 @@ mod tests {
+@@ -405,9 +451,9 @@ mod tests {
          message(&mut state, "instructions", "developer");
          assert!(state.validate("instructions").is_err());
          state
@@ -738,7 +859,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
              .unwrap();
          assert!(state.validate("streaming").is_err());
      }
-@@ -419,9 +430,12 @@ mod tests {
+@@ -419,9 +465,12 @@ mod tests {
              ("result", "function_call_output"),
          ] {
              state
@@ -754,7 +875,21 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
                  .unwrap();
          }
          assert!(state.validate("result").is_err());
-@@ -475,9 +489,9 @@ mod reserved_and_approval_tests {
+@@ -453,6 +502,13 @@ mod tests {
+         }
+         assert!(state.items.is_empty());
+         assert_eq!(state.recent_deleted.len(), 128);
++        assert!(state.deleted_ids_evicted);
++        assert!(!state.can_retrieve("item-0"));
++        assert!(!state.can_retrieve("unobserved-sip-item"));
++        message(&mut state, "still-live", "user");
++        assert!(state.can_retrieve("still-live"));
++        state.retire();
++        assert!(state.can_retrieve("unobserved-sip-item"));
+     }
+ }
+
+@@ -475,9 +531,9 @@ mod reserved_and_approval_tests {
              .unwrap();
          assert!(state.validate("background-item").is_err());
          state.settle_call("background-call");
@@ -766,7 +901,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          assert!(state.validate("background-item").is_ok());
          assert!(state.validate("background-output").is_ok());
      }
-@@ -503,7 +517,10 @@ mod reserved_and_approval_tests {
+@@ -503,7 +559,10 @@ mod reserved_and_approval_tests {
              serde_json::json!({"id":"mcp-item","type":"mcp_call","approval_request_id":"approval","status":"in_progress"}),
          ] {
              state
@@ -778,7 +913,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
                  .unwrap();
          }
          assert!(state.validate("approval").is_err());
-@@ -547,18 +564,18 @@ mod late_output_tests {
+@@ -547,18 +606,18 @@ mod late_output_tests {
          state.finish("silent-item", Ok(()));
          assert!(rx.await.unwrap().is_ok());
          assert!(!state.items.contains_key("silent-item"));
@@ -803,10 +938,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e850bfbc054af037076acc9382d7c93976914b20
+index 0000000000000000000000000000000000000000..a8491a5ac5bd9bcb1adc7731526054d52b74393b
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1206 @@
+@@ -0,0 +1,1208 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -876,16 +1011,18 @@ index 0000000000000000000000000000000000000000..e850bfbc054af037076acc9382d7c939
 +    deletion: &item_deletion::State,
 +) -> CodexResult<()> {
 +    let deleted = match request {
-+        Request::Item { id, .. } => deletion.is_deleted(id),
-+        Request::Update { items, .. } => items
-+            .iter()
-+            .filter_map(|item| item["id"].as_str())
-+            .any(|id| deletion.is_deleted(id)),
++        Request::Item { id, .. } => !deletion.can_retrieve(id),
++        Request::Update { items, .. } => items.iter().any(|item| {
++            item["id"].as_str().is_some_and(|id| {
++                deletion.is_deleted(id)
++                    && (!deletion.can_recreate_message(id) || validate_creation(item).is_err())
++            })
++        }),
 +        Request::List { .. } => false,
 +    };
 +    if deleted {
 +        return Err(invalid(
-+            "Provider history cannot use a previously deleted item ID",
++            "Provider history cannot use a deleted item ID or an unverified ID after deletion receipts were evicted",
 +        ));
 +    }
 +    Ok(())

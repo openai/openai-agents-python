@@ -10,6 +10,7 @@ validation preserves tool calls, results, approvals, and other control items.
 import argparse
 import asyncio
 import os
+from dataclasses import replace
 from urllib.parse import quote
 
 import httpx
@@ -22,20 +23,19 @@ async def main(call_id: str, seconds: float, drop_message_id: str | None) -> Non
     agent = Agent(instructions="Answer the caller concisely and use tools when needed.")
     selected_tools = ()
     async with agent.session() as session:
-        config = await session.build_realtime_sip_config(
-            config=RealtimeConfig(
-                instructions="Help the caller and speak concise answers.", tools=selected_tools
-            )
+        config = RealtimeConfig(
+            instructions="Help the caller and speak concise answers.", tools=selected_tools
         )
+        accept_payload = await session.build_realtime_sip_config(config=config)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"https://api.openai.com/v1/realtime/calls/{quote(call_id, safe='')}/accept",
                 headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
-                json=config,
+                json=accept_payload,
             )
             response.raise_for_status()
         async with session.realtime(
-            config=RealtimeConfig(transport=RealtimeSIP(call_id), tools=selected_tools)
+            config=replace(config, transport=RealtimeSIP(call_id))
         ) as realtime:
 
             async def consume() -> None:

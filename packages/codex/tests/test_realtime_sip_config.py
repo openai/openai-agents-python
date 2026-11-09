@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from _agents_codex.realtime import RealtimeConfig, RealtimeSIP
+from _agents_codex.realtime import RealtimeConfig, RealtimeSession, RealtimeSIP
 from agents import Session
 
 
@@ -124,3 +124,45 @@ async def test_sip_config_rejects_attachment_policy_before_preparing_tools() -> 
             session,
             config=RealtimeConfig(automatically_trigger_response_for_mcp_tool_calls=False),
         )
+
+
+async def test_sip_attachment_forwards_repeated_call_accept_options() -> None:
+    requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def tools(selection: Any) -> tuple[list[Any], None]:
+        assert selection == ()
+        return [], None
+
+    async def call(operation: str, request: str) -> str:
+        params = json.loads(request)
+        requests.append((operation, params))
+        if operation == "realtime_conversation_prepare_sdk":
+            return json.dumps({"generation": params["generation"]})
+        assert operation == "realtime_conversation_activate_sdk"
+        return json.dumps({"call_id": "rtc_repeated_options", "sdp": None})
+
+    session = cast(
+        Session[Any, Any],
+        SimpleNamespace(
+            _realtime_function_tools=tools,
+            _native=SimpleNamespace(call=call),
+        ),
+    )
+    voice = RealtimeSession(
+        session,
+        config=RealtimeConfig(
+            model="fixture-realtime",
+            voice="marin",
+            instructions="Repeated accepted instructions.",
+            tools=(),
+            transport=RealtimeSIP("rtc_repeated_options"),
+        ),
+    )
+    voice._live = True
+    await voice._admit()
+    params = requests[0][1]["params"]
+    assert params["transport"] == {"type": "existing_call", "call_id": "rtc_repeated_options"}
+    assert params["model"] == "fixture-realtime"
+    assert params["voice"] == "marin"
+    assert params["prompt"] == "Repeated accepted instructions."
+    assert voice.call_id == "rtc_repeated_options"

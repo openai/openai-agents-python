@@ -699,12 +699,6 @@ class RealtimeSession:
                 or not config.transport.call_id.strip()
             ):
                 raise ValueError("call_id must be a nonempty string")
-            if any(
-                value is not None for value in (config.model, config.voice, config.instructions)
-            ):
-                raise ValueError(
-                    "SIP call configuration must be supplied before accepting the call"
-                )
         elif config.transport is not None:
             raise TypeError("transport must be RealtimeWebRTC, RealtimeSIP, or None")
         self._generation = uuid4().hex
