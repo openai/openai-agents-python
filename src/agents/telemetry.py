@@ -6,13 +6,10 @@ awaiting shutdown(). Native owns the exporters and the process lifetime.
 
 from __future__ import annotations
 
-from _agents_codex._trace_export import (
-    ConsoleTraceProcessor as ConsoleTraceProcessor,
-    OpenAITraceExporter as OpenAITraceExporter,
-)
 from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
+    ConsoleTraceProcessor as ConsoleTraceProcessor,
     ContextVar as ContextVar,
     Coroutine as Coroutine,
     Event as Event,
@@ -23,6 +20,7 @@ from _agents_codex.telemetry import (
     Literal as Literal,
     Lock as Lock,
     Mapping as Mapping,
+    OpenAITraceExporter as OpenAITraceExporter,
     OtelTlsConfig as OtelTlsConfig,
     OtlpGrpc as OtlpGrpc,
     OtlpHttp as OtlpHttp,

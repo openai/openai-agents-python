@@ -707,10 +707,17 @@ async def test_dynamic_callback_failure_remains_an_exhaustion_failure():
         raise ValueError("synthetic-private-callback-error")
 
     peer = ScriptedResponses(respond)
-    with pytest.raises(AssertionError, match="1 unexpected request"):
+    with pytest.raises(ValueError, match="synthetic-private-callback-error"):
         async with peer:
             status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
             assert status == 500
             assert "synthetic-private-callback-error" not in body
-            with pytest.raises(AssertionError, match="1 unexpected request"):
+            with pytest.raises(ValueError, match="synthetic-private-callback-error"):
                 peer.assert_exhausted()
+
+
+async def test_explicit_empty_scripted_error_body_is_not_defaulted():
+    async with ScriptedResponses(ScriptedResponse([], status=400, error_body={})) as peer:
+        status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+        assert status == 400
+        assert json.loads(body) == {}

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, TextIO
@@ -35,17 +36,44 @@ def _span_id(value: str | None) -> str | None:
     return None if value is None else "span_" + value.rjust(24, "0")
 
 
+@dataclass
+class _TraceState:
+    descriptor: dict[str, Any]
+    root: bool
+    delivered_to: object | None = None
+
+
+def _descriptor(event: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = {
+        key.removeprefix("sdk.metadata."): _plain(value)
+        for key, value in event["attributes"].items()
+        if key.startswith("sdk.metadata.")
+    }
+    metadata["runtime"] = "native"
+    return {
+        "object": "trace",
+        "id": "trace_" + event["trace_id"],
+        "workflow_name": event["name"],
+        "group_id": event["attributes"].get("sdk.group_id"),
+        "metadata": metadata,
+    }
+
+
 class OpenAITraceExporter:
     """Export native lifecycle records to the OpenAI traces-ingest endpoint.
 
     Pass an instance in configure(processors=[...]). Native flush barriers also
     wait for these deliveries. Each completed native span becomes a custom
-    dashboard span with its native attributes, IDs and exact timestamps. The
+    dashboard span with its native attributes, IDs and exact timestamps.
     Install ``openai-agents[tracing]`` to use this HTTP exporter. Each delivery
     awaits one client and its transport cleanup within the existing processor
     worker loop. No client is shared across loops and no background queue or
     Classic span objects are created. Failures are reported by the native
-    processor delivery/flush counters.
+    processor delivery/flush counters. Native-drain batches are delivered as one
+    HTTP request; native acknowledgement waits for that request. Up to 1024 recent
+    trace descriptors are retained, including failed deliveries. The metadata
+    runtime key is reserved for the native marker; other flattened native
+    sdk.metadata attributes are preserved without guessing their JSON types.
     """
 
     def __init__(
@@ -58,118 +86,166 @@ class OpenAITraceExporter:
         timeout_ms: int = 750,
         max_retries: int = 0,
     ) -> None:
+        value = None
+        address = None
         try:
-            address = urlsplit(endpoint)
-            _ = address.port
-        except (TypeError, ValueError):
-            raise ValueError("Invalid trace export endpoint") from None
-        if (
-            address.scheme not in ("http", "https")
-            or not address.hostname
-            or address.username
-            or address.password
-            or address.fragment
-        ):
-            raise ValueError(
-                "Trace endpoint must be an HTTP(S) URL without credentials or fragments"
-            )
-        if (
-            isinstance(timeout_ms, bool)
-            or not isinstance(timeout_ms, int)
-            or not 1 <= timeout_ms <= 900
-        ):
-            raise ValueError("timeout_ms must be an integer from 1 through 900")
-        if (
-            isinstance(max_retries, bool)
-            or not isinstance(max_retries, int)
-            or not 0 <= max_retries <= 3
-        ):
-            raise ValueError("max_retries must be an integer from 0 through 3")
-        try:
-            import httpx2
-        except ImportError:
-            raise ImportError("Install openai-agents[tracing] to use OpenAITraceExporter") from None
-        self._httpx = httpx2
-        self._headers = {"Content-Type": "application/json", "OpenAI-Beta": "traces=v1"}
-        self.set_api_key(api_key)
-        for name, value in (("OpenAI-Organization", organization), ("OpenAI-Project", project)):
-            if value is not None:
-                self._validate_header(value)
-                self._headers[name] = value
-        self._address = address
-        self._timeout = timeout_ms / 1000
-        self._max_retries = max_retries
-        self._traces: OrderedDict[str, None] = OrderedDict()
+            try:
+                address = urlsplit(endpoint)
+                _ = address.port
+            except (TypeError, ValueError):
+                raise ValueError("Invalid trace export endpoint") from None
+            if (
+                address.scheme not in ("http", "https")
+                or not address.hostname
+                or address.username
+                or address.password
+                or address.fragment
+            ):
+                raise ValueError(
+                    "Trace endpoint must be an HTTP(S) URL without credentials or fragments"
+                )
+            if (
+                isinstance(timeout_ms, bool)
+                or not isinstance(timeout_ms, int)
+                or not 1 <= timeout_ms <= 900
+            ):
+                raise ValueError("timeout_ms must be an integer from 1 through 900")
+            if (
+                isinstance(max_retries, bool)
+                or not isinstance(max_retries, int)
+                or not 0 <= max_retries <= 3
+            ):
+                raise ValueError("max_retries must be an integer from 0 through 3")
+            try:
+                import httpx2
+            except ImportError:
+                raise ImportError(
+                    "Install openai-agents[tracing] to use OpenAITraceExporter"
+                ) from None
+            self._httpx = httpx2
+            headers = {"Content-Type": "application/json", "OpenAI-Beta": "traces=v1"}
+            for name, value in (("OpenAI-Organization", organization), ("OpenAI-Project", project)):
+                if value is not None:
+                    self._validate_header(value)
+                    headers[name] = value
+            self._address = address
+            self._timeout = timeout_ms / 1000
+            self._max_retries = max_retries
+            self._credentials = (object(), headers)
+            self.set_api_key(api_key)
+            self._traces: OrderedDict[str, _TraceState] = OrderedDict()
+        finally:
+            del api_key, endpoint, organization, project, value, address
 
     @staticmethod
     def _validate_header(value: str) -> None:
-        if (
-            not isinstance(value, str)
-            or not value
-            or any(ord(char) < 32 or ord(char) > 126 for char in value)
-        ):
+        invalid = False
+        try:
+            invalid = (
+                not isinstance(value, str)
+                or not value
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)
+            )
+        finally:
+            del value
+        if invalid:
             raise ValueError("Trace export headers must be nonempty printable ASCII strings")
 
     def set_api_key(self, api_key: str) -> None:
-        """Replace credentials for subsequent deliveries; never include them in records."""
-        self._validate_header(api_key)
-        self._headers["Authorization"] = "Bearer " + api_key
+        """Replace credentials for later deliveries and resend their trace descriptors."""
+        try:
+            self._validate_header(api_key)
+            # One immutable assignment keeps worker admission coherent with rotation.
+            self._credentials = (
+                object(),
+                {**self._credentials[1], "Authorization": "Bearer " + api_key},
+            )
+        finally:
+            del api_key
+
+    def _prepare_events(
+        self, events: Sequence[Mapping[str, Any]], revision: object
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]]]:
+        states: dict[str, _TraceState] = {}
+        for event in events:
+            trace_id = "trace_" + event["trace_id"]
+            root = event.get("parent_span_id") is None
+            state = self._traces.get(trace_id)
+            if state is None:
+                state = _TraceState(_descriptor(event), root)
+                self._traces[trace_id] = state
+            elif root and not state.root:
+                state.descriptor = _descriptor(event)
+                state.root = True
+                state.delivered_to = None
+            self._traces.move_to_end(trace_id)
+            if len(self._traces) > 1024:
+                self._traces.popitem(last=False)
+            states[trace_id] = state
+        pending = [
+            (trace_id, state, state.descriptor)
+            for trace_id, state in states.items()
+            if state.delivered_to is not revision
+        ]
+        records = [descriptor for _, _, descriptor in pending]
+        for event in events:
+            if event["lifecycle"] == "end":
+                records.append(
+                    {
+                        "object": "trace.span",
+                        "id": _span_id(event["span_id"]),
+                        "trace_id": "trace_" + event["trace_id"],
+                        "parent_id": _span_id(event["parent_span_id"]),
+                        "started_at": _timestamp(event["start_time_unix_nanos"]),
+                        "ended_at": _timestamp(event["end_time_unix_nanos"]),
+                        "span_data": {
+                            "type": "custom",
+                            "name": event["name"],
+                            "data": _plain(event["attributes"]),
+                        },
+                        "error": {
+                            "message": "Native span failed",
+                            "data": {"outcome": event["outcome"]},
+                        }
+                        if event["outcome"] == "error"
+                        else None,
+                    }
+                )
+        return records, pending
 
     async def on_trace_event(self, event: Mapping[str, Any]) -> None:
-        trace_id = "trace_" + event["trace_id"]
+        try:
+            await self.on_trace_events((event,))
+        finally:
+            del self, event
+
+    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:
+        """Deliver one native-owned batch before its records may be acknowledged."""
+        revision, headers = self._credentials
         records: list[dict[str, Any]] = []
-        if trace_id not in self._traces:
-            records.append(
-                {
-                    "object": "trace",
-                    "id": trace_id,
-                    "workflow_name": event["name"],
-                    "group_id": event["attributes"].get("sdk.group_id"),
-                    "metadata": {"runtime": "native"},
-                }
-            )
-        if event["lifecycle"] == "end":
-            records.append(
-                {
-                    "object": "trace.span",
-                    "id": _span_id(event["span_id"]),
-                    "trace_id": trace_id,
-                    "parent_id": _span_id(event["parent_span_id"]),
-                    "started_at": _timestamp(event["start_time_unix_nanos"]),
-                    "ended_at": _timestamp(event["end_time_unix_nanos"]),
-                    "span_data": {
-                        "type": "custom",
-                        "name": event["name"],
-                        "data": _plain(event["attributes"]),
-                    },
-                    "error": {
-                        "message": "Native span failed",
-                        "data": {"outcome": event["outcome"]},
-                    }
-                    if event["outcome"] == "error"
-                    else None,
-                }
-            )
-        if not records:
-            return
-        payload = json.dumps({"data": records}, allow_nan=False).encode()
+        pending: list[tuple[str, _TraceState, dict[str, Any]]] = []
+        payload = b""
         deadline = monotonic() + self._timeout
         failed = False
         try:
-            await asyncio.wait_for(self._send(payload, dict(self._headers)), timeout=self._timeout)
+            records, pending = self._prepare_events(events, revision)
+            if not records:
+                return
+            payload = json.dumps({"data": records}, allow_nan=False).encode()
+            await asyncio.wait_for(
+                self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
+            )
         except Exception:
-            # Raw transport and timeout exceptions can retain credentials in
-            # their completed traceback frames, even with suppressed context.
-            # Cancellation remains owned by the caller and is not converted.
+            # Leave raw timeout/transport handlers before exposing a public error.
+            # Explicit cancellation stays owned by the caller.
             failed = True
         if failed or monotonic() > deadline:
-            del self, event, payload, records
-            # Raise after leaving the handler so raw exceptions are not chained.
+            del self, events, payload, records, pending, headers
             raise RuntimeError("Native OpenAI trace export failed") from None
-        self._traces[trace_id] = None
-        self._traces.move_to_end(trace_id)
-        if len(self._traces) > 1024:
-            self._traces.popitem(last=False)
+        if self._credentials[0] is revision:
+            for trace_id, state, descriptor in pending:
+                if self._traces.get(trace_id) is state and state.descriptor is descriptor:
+                    state.delivered_to = revision
 
     async def _send(self, payload: bytes, headers: dict[str, str]) -> None:
         # Keep the client inside the delivery's timeout and cancellation scope.

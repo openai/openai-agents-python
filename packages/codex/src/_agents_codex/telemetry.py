@@ -10,6 +10,7 @@ import asyncio as asyncio
 import importlib as importlib
 import json as json
 from collections.abc import (
+    Callable as _Callable,
     Coroutine as Coroutine,
     Iterator as Iterator,
     Mapping as Mapping,
@@ -40,6 +41,10 @@ from ._lifecycle import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
+from ._trace_export import (
+    ConsoleTraceProcessor as ConsoleTraceProcessor,
+    OpenAITraceExporter as OpenAITraceExporter,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -650,13 +655,21 @@ class TraceScope:
             "data": {},
         }
         native = _native_tracing()
+        self._outcome = None
+        failed = False
         try:
             assert self._span_handle is not None
             native.end_trace_span(self._span_handle, json.dumps(outcome))
+        except Exception:
+            failed = True
         finally:
+            del outcome
             if self._span_handle is not None:
                 native.release_trace_span(self._span_handle)
                 self._span_handle = None
+        if failed:
+            del self
+            raise RuntimeError("Native trace span end failed") from None
 
 
 def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) -> TraceScope:
@@ -792,6 +805,9 @@ class TraceLifecycleEvent(TypedDict):
 class TraceProcessor(Protocol):
     """Receive immutable native lifecycle snapshots; callbacks may be async.
 
+    A processor may define on_trace_events(events) to consume a native-drain
+    batch instead of individual callbacks. The SDK awaits that callback before
+    acknowledging any event in the batch; failures count against every event.
     This native interface is separate from classic v0 processors. Each event
     runs on a private worker loop and has a one-second delivery budget. At most
     16 workers may remain live, including stalled removed routes. A stalled
@@ -1035,13 +1051,13 @@ class _ProcessorRoute:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.pending: _ProcessorBatch | None = None
 
-    async def _invoke(self, event: TraceLifecycleEvent) -> None:
+    async def _invoke(self, callback: _Callable[..., Any], *args: Any) -> None:
         import inspect
 
         failed = False
         token = _in_processor.set(True)
         try:
-            result = self.processor.on_trace_event(event)
+            result = callback(*args)
             if inspect.isawaitable(result):
                 await result
         except BaseException:
@@ -1055,6 +1071,21 @@ class _ProcessorRoute:
 
     async def _invoke_batch(self, batch: _ProcessorBatch) -> None:
         previous_finished = batch.admitted_at
+        callback = getattr(self.processor, "on_trace_events", None)
+        if callable(callback):
+            success = False
+            if not batch.stopped.is_set() and monotonic() < previous_finished + 1.0:
+                try:
+                    await self._invoke(callback, tuple(item.event for item in batch.deliveries))
+                    success = monotonic() < previous_finished + 1.0 and not batch.stopped.is_set()
+                except Exception:
+                    pass
+            if not success:
+                batch.stopped.set()
+            finished = monotonic()
+            for delivery in batch.deliveries:
+                delivery.result.set_result((success, finished))
+            return
         for delivery in batch.deliveries:
             now = monotonic()
             deadline = previous_finished + 1.0
@@ -1064,7 +1095,7 @@ class _ProcessorRoute:
                 continue
             success = True
             try:
-                await self._invoke(delivery.event)
+                await self._invoke(self.processor.on_trace_event, delivery.event)
             except Exception:
                 success = False
             finished = monotonic()

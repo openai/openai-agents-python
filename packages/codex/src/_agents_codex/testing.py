@@ -148,6 +148,7 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
         self._responses = deque(self._capture_script(script) for script in responses)
         self._requests: list[dict[str, JsonValue]] = []
         self._unexpected = 0
+        self._callback_error: Exception | None = None
         self._lock = Lock()
         self._server: ThreadingHTTPServer | None = None
         self._provider: NativeProvider | None = None
@@ -242,6 +243,8 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
 
         if exc is not None:
             await _close_after_error(exc, close)
+            if self._callback_error is not None:
+                raise self._callback_error from None
         else:
             await _join(asyncio.create_task(close()))
             self.assert_exhausted()
@@ -289,6 +292,8 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     def assert_exhausted(self) -> None:
         """Fail on unused responses or unexpected requests; omit body contents."""
         with self._lock:
+            if self._callback_error is not None:
+                raise self._callback_error
             if self._responses or self._unexpected:
                 raise AssertionError(
                     f"ScriptedResponses: {len(self._responses)} unused response(s), "
@@ -349,14 +354,18 @@ class _Handler(BaseHTTPRequestHandler):
             if callable(items):
                 items = self.peer._capture_script(items(deepcopy(body)))
             assert isinstance(items, ScriptedResponse)
-        except Exception:
+        except Exception as error:
+            with self.peer._lock:
+                if self.peer._callback_error is None:
+                    self.peer._callback_error = error
             self.send_error(500)
             return
         if items.status != 200:
             payload = json.dumps(
                 dict(
-                    items.error_body
-                    or {"error": {"message": "Scripted provider error", "type": "scripted_error"}}
+                    {"error": {"message": "Scripted provider error", "type": "scripted_error"}}
+                    if items.error_body is None
+                    else items.error_body
                 ),
                 allow_nan=False,
             ).encode()

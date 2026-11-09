@@ -20,7 +20,9 @@ from agents.testing import ScriptedResponses, text
 
 
 @contextmanager
-def collector(statuses: list[int] | None = None) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+def collector(
+    statuses: list[int] | None = None, *, delay: float = 0
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
 
@@ -35,6 +37,10 @@ def collector(statuses: list[int] | None = None) -> Iterator[tuple[str, list[dic
                     "payload": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
                 }
             )
+            if delay:
+                import time
+
+                time.sleep(delay)
             self.send_response(replies.pop(0) if replies else 200)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -120,7 +126,10 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         assert len(received) == 1
 
 
-@pytest.mark.parametrize("case_name", ["native_case", "native_deadline_case"])
+@pytest.mark.parametrize(
+    "case_name",
+    ["native_case", "native_deadline_case", "native_outcome_privacy_case", "native_batch_case"],
+)
 def test_real_native_capture_policy_and_openai_export(case_name):
     env = dict(os.environ)
     env.pop("OPENAI_API_KEY", None)
@@ -154,7 +163,14 @@ async def native_case():
         await telemetry.configure(
             processors=[Recorder(), exporter, telemetry.ConsoleTraceProcessor(stream=diagnostics)]
         )
-        with telemetry.trace("allowed", options={"include_sensitive_data": True}):
+        with telemetry.trace(
+            "allowed",
+            options={
+                "include_sensitive_data": True,
+                "metadata": {"tenant": "native-tenant"},
+                "group_id": "native-group",
+            },
+        ):
             telemetry.set_tracing_disabled(True)
             with telemetry.span("suppressed", options={"disabled": False}):
                 pass
@@ -191,6 +207,9 @@ async def native_case():
             if event["name"] == "with-payload" and event["lifecycle"] == "end"
         )
         records = [record for request in received for record in request["payload"]["data"]]
+        root_record = next(record for record in records if record["object"] == "trace")
+        assert root_record["metadata"]["tenant"] == "native-tenant"
+        assert root_record["group_id"] == "native-group"
         assert "must-not-export" not in json.dumps(records)
         assert "with-payload" in diagnostics.getvalue()
         assert "must-not-export" not in diagnostics.getvalue()
@@ -252,7 +271,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
     secret = "synthetic-private-timeout-key"
     exporter = telemetry.OpenAITraceExporter(
-        api_key=secret, endpoint=endpoint, timeout_ms=900 if cancelled else 50
+        api_key=secret, endpoint=endpoint, timeout_ms=900 if cancelled else 200
     )
     event = completed_event()
     event["attributes"]["private_fixture"] = secret
@@ -333,7 +352,7 @@ async def native_deadline_case():
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
     try:
         exporter = telemetry.OpenAITraceExporter(
-            api_key="synthetic-key", endpoint=endpoint, timeout_ms=50
+            api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
         await telemetry.configure(processors=[exporter])
         with telemetry.trace("deadline-first"):
@@ -356,3 +375,222 @@ async def native_deadline_case():
         await server.wait_closed()
         if handlers:
             await asyncio.wait_for(asyncio.gather(*handlers), 1)
+
+
+async def test_failed_root_descriptor_metadata_and_rotation_survive_delivery():
+    root = {
+        **completed_event(),
+        "name": "root-workflow",
+        "lifecycle": "start",
+        "parent_span_id": None,
+        "attributes": {
+            "sdk.group_id": "root-group",
+            "sdk.metadata.tenant": "synthetic-tenant",
+            "sdk.metadata.literal": "true",
+        },
+    }
+    child = {**completed_event(), "name": "child-span"}
+    with collector([503, 200, 200]) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-old-key", endpoint=endpoint)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_event(root)
+        await exporter.on_trace_event(child)
+        exporter.set_api_key("synthetic-new-key")
+        await exporter.on_trace_event(child)
+    for request in received[1:]:
+        trace = request["payload"]["data"][0]
+        assert trace["object"] == "trace"
+        assert trace["workflow_name"] == "root-workflow"
+        assert trace["group_id"] == "root-group"
+        assert trace["metadata"] == {
+            "runtime": "native",
+            "tenant": "synthetic-tenant",
+            "literal": "true",
+        }
+    assert received[-1]["headers"]["Authorization"] == "Bearer synthetic-new-key"
+
+
+async def test_batch_delivery_preserves_order_and_bounded_descriptor_lifetime():
+    events = [
+        {**completed_event(), "span_id": f"{index:016x}", "name": f"span-{index}"}
+        for index in range(30)
+    ]
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        await exporter.on_trace_events(events)
+        assert len(received) == 1
+        records = received[0]["payload"]["data"]
+        assert [row["span_data"]["name"] for row in records if row["object"] == "trace.span"] == [
+            f"span-{index}" for index in range(30)
+        ]
+        roots = [
+            {
+                **completed_event(),
+                "lifecycle": "start",
+                "parent_span_id": None,
+                "trace_id": f"{index:032x}",
+            }
+            for index in range(1100)
+        ]
+        await exporter.on_trace_events(roots)
+        assert len(exporter._traces) == 1024
+
+
+async def test_credential_rotation_during_old_delivery_resends_root():
+    import asyncio
+    from threading import Event
+
+    entered = Event()
+    release = Event()
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            received.append(
+                {
+                    "headers": dict(self.headers),
+                    "payload": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+                }
+            )
+            if len(received) == 1:
+                entered.set()
+                release.wait(2)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    worker.start()
+    task = None
+    try:
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-old-key", endpoint=f"http://127.0.0.1:{server.server_port}/ingest"
+        )
+        root = {
+            **completed_event(),
+            "name": "root-workflow",
+            "lifecycle": "start",
+            "parent_span_id": None,
+        }
+        task = asyncio.create_task(exporter.on_trace_event(root))
+        assert await asyncio.to_thread(entered.wait, 1)
+        exporter.set_api_key("synthetic-new-key")
+        release.set()
+        await task
+        await exporter.on_trace_event(completed_event())
+        assert received[0]["headers"]["Authorization"] == "Bearer synthetic-old-key"
+        assert received[1]["headers"]["Authorization"] == "Bearer synthetic-new-key"
+        assert received[1]["payload"]["data"][0]["workflow_name"] == "root-workflow"
+    finally:
+        release.set()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        server.shutdown()
+        server.server_close()
+        worker.join()
+
+
+async def native_outcome_privacy_case():
+    events = []
+
+    class Recorder:
+        def on_trace_event(self, event):
+            events.append(event)
+
+    await telemetry.configure(processors=[Recorder()])
+    secret = "synthetic-private-outcome"
+    scope = telemetry.span("bounded-outcome")
+    with pytest.raises(RuntimeError, match="Native trace span end failed") as failure:
+        with scope:
+            scope.set_outcome(status="ok", data={"private": secret * 300})
+    assert_sanitized_failure(failure.value, secret)
+    assert scope._outcome is None
+    await telemetry.force_flush()
+    assert secret not in repr(events)
+    await telemetry.shutdown()
+
+
+async def native_batch_case():
+    import time
+
+    with collector(delay=0.5) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        await telemetry.configure(processors=[exporter])
+        with telemetry.trace("batched-workflow"):
+            for index in range(20):
+                with telemetry.span(f"batched-{index}"):
+                    pass
+        started = time.monotonic()
+        result = await telemetry.force_flush()
+        elapsed = time.monotonic() - started
+        assert result.status == "success"
+        records = [record for request in received for record in request["payload"]["data"]]
+        spans = [record for record in records if record["object"] == "trace.span"]
+        assert len(spans) == 21
+        assert [row["span_data"]["name"] for row in spans] == [
+            f"batched-{index}" for index in range(20)
+        ] + ["batched-workflow"]
+        assert len(received) <= 3
+        assert elapsed < 4
+        print(
+            json.dumps(
+                {
+                    "native_completed_spans": len(spans),
+                    "http_requests": len(received),
+                    "flush_seconds": round(elapsed, 3),
+                    "flush_status": result.status,
+                }
+            )
+        )
+        await telemetry.shutdown()
+
+
+def test_missing_tracing_extra_releases_constructor_credentials(tmp_path):
+    import inspect
+    import shutil
+    from pathlib import Path
+
+    import typing_extensions
+
+    shutil.copyfile(inspect.getfile(typing_extensions), tmp_path / "typing_extensions.py")
+    root = Path(__file__).resolve().parents[3]
+    script = """
+import sys
+sys.path[:0] = PATHS
+from agents import telemetry
+try:
+ telemetry.OpenAITraceExporter(api_key='synthetic-private-missing-extra')
+except ImportError as error:
+ assert str(error) == 'Install openai-agents[tracing] to use OpenAITraceExporter'
+ tb = error.__traceback__
+ while tb:
+  if tb.tb_frame.f_globals.get('__name__') == '_agents_codex._trace_export':
+   assert 'synthetic-private-missing-extra' not in repr(tb.tb_frame.f_locals)
+  tb=tb.tb_next
+else:
+ raise AssertionError('Missing tracing extra accepted')
+""".replace("PATHS", repr([str(root / "src"), str(root / "packages/codex/src"), str(tmp_path)]))
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", script], text=True, capture_output=True, timeout=10
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.asyncio
+async def test_invalid_batch_serialization_does_not_retain_credential_headers():
+    secret = "synthetic-invalid-batch-private-key"
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key=secret, endpoint=endpoint)
+        event = completed_event()
+        event["attributes"] = {"invalid_json": object()}
+        try:
+            await exporter.on_trace_events((event,))
+        except RuntimeError as error:
+            assert_sanitized_failure(error, secret)
+        else:
+            pytest.fail("invalid batch was accepted")
+        assert not received

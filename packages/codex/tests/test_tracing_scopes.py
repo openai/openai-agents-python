@@ -442,8 +442,9 @@ async def test_processor_invocation_suppresses_detached_scopes_and_bare_operatio
             operation.close()
             assert runtime_telemetry._processor_task is None
 
-    route = runtime_telemetry._ProcessorRoute(Processor())
-    await route._invoke({})  # type: ignore[typeddict-item]
+    processor = Processor()
+    route = runtime_telemetry._ProcessorRoute(processor)
+    await route._invoke(processor.on_trace_event, {})
     with telemetry.trace("application") as scope:
         assert not scope.context.disabled
 
