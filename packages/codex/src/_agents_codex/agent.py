@@ -1451,7 +1451,8 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
-            options["observation_retention"] = observation_retention
+            if observation_retention != "bounded":
+                options["observation_retention"] = observation_retention
             if max_function_concurrency is not None:
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
@@ -1704,7 +1705,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
-                options["observation_retention"] = observation_retention
+                if observation_retention != "bounded":
+                    options["observation_retention"] = observation_retention
                 if max_function_concurrency is not None:
                     options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:

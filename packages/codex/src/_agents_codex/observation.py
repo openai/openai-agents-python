@@ -371,10 +371,12 @@ class _ObservationBuffer:
                 return event
         return None
 
-    def _mark_gap(self) -> None:
+    def _mark_gap(self, *, forward: bool = True) -> None:
         if self.closed:
             return
         self.sequence += 1
+        if forward and self.repair_parent is not None:
+            self.repair_parent[0]._mark_gap()
         if self.retention == "all":
             self.records.append(
                 (
@@ -421,7 +423,8 @@ class _ObservationBuffer:
                 }
             size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
         if self.retention == "bounded" and (size > 65_536 or image_size > 16 * 1024 * 1024):
-            self._mark_gap()
+            # The parent receives the full event below; this eviction is local.
+            self._mark_gap(forward=False)
         else:
             self.sequence += 1
             self.records.append((event, size, image_size))

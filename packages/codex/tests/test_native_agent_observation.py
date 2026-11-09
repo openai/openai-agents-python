@@ -987,3 +987,58 @@ async def test_native_turn_replays_retained_source_gap(responses) -> None:
         session._observations._mark_gap()
         events = [event async for event in turn.events()]
         assert any(isinstance(event, EventGap) for event in events)
+
+
+async def test_repair_source_gap_reaches_public_parent_turn_events(responses, monkeypatch) -> None:
+    from pydantic import Field
+
+    from _agents_codex.observation import _ObservationBuffer
+    from agents import PromptedOutput
+
+    class Report(BaseModel):
+        label: str = Field(min_length=2)
+
+    append = _ObservationBuffer.append
+
+    def append_with_source_loss(buffer, event):
+        retained = append(buffer, event)
+        if isinstance(event, TurnStarted) and buffer.repair_parent is not None:
+            # Inject source loss after the real correction publishes its start.
+            buffer._mark_gap()
+        return retained
+
+    monkeypatch.setattr(_ObservationBuffer, "append", append_with_source_loss)
+    responses.respond(*text_response("invalid", '{"label":"x"}'))
+    responses.respond(*text_response("corrected", '{"label":"corrected"}'))
+    async with Agent(
+        instructions="Answer.", provider=provider(responses), output_type=PromptedOutput(Report, 1)
+    ).session(observation_retention="all") as session:
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == Report(label="corrected")
+        events = [event async for event in turn.events()]
+        gaps = [event for event in events if isinstance(event, EventGap)]
+        assert len(gaps) == 1
+        assert gaps[0].session_id == session.id and gaps[0].sequence > 1
+        assert len([event for event in events if isinstance(event, TurnStarted)]) == 2
+        assert [event async for event in turn.events()] == events
+
+
+async def test_repair_local_eviction_does_not_report_loss_in_parent_log() -> None:
+    from _agents_codex.observation import _ObservationBuffer
+
+    parent = _ObservationBuffer("parent", retention="all")
+    repair = _ObservationBuffer("repair")
+    repair.repair_parent = (parent, "root")
+    repair.append(
+        OutputTextDelta(
+            session_id="repair",
+            submission_id="correction",
+            turn_id="repair-turn",
+            item_id="text",
+            delta="x" * 70_000,
+        )
+    )
+    parent.finish("closed")
+    events = await collect(EventStream(parent, after=0))
+    assert [event.type for event in events] == ["output_text_delta", "session_ended"]
+    assert isinstance(events[0], OutputTextDelta) and events[0].delta == "x" * 70_000
