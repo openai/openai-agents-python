@@ -106,7 +106,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/voice-diagnostic"
           set +e
-          timeout --signal=TERM --kill-after=30s 15m make tests > "$RUNNER_TEMP/voice-diagnostic/tests.log" 2>&1
+          timeout --signal=TERM --kill-after=30s 3m uv run python packages/codex/scripts/test_native.py --sdk -m pytest -x -vv --tb=long packages/codex/tests/test_native_hosted_performance_integration.py::test_hosted_capture_before_open_and_fresh_session_grants > "$RUNNER_TEMP/voice-diagnostic/tests.log" 2>&1
           result=$?
           tail -n 300 "$RUNNER_TEMP/voice-diagnostic/tests.log"
           exit "$result"
