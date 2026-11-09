@@ -702,18 +702,31 @@ async def test_scripted_http_error_and_identifiers_are_served_without_native_moc
         assert json.loads(body)["error"]["message"] == "synthetic rejection"
 
 
-async def test_dynamic_callback_failure_remains_an_exhaustion_failure():
+@pytest.mark.parametrize("error_type", [ValueError, asyncio.CancelledError])
+async def test_dynamic_callback_failure_remains_an_exhaustion_failure(error_type):
+    failure = error_type("synthetic-private-callback-error")
+    later_calls = []
+
     def respond(_body):
-        raise ValueError("synthetic-private-callback-error")
+        raise failure
+
+    def later(_body):
+        later_calls.append(_body)
+        return [text("must not be consumed")]
 
     peer = ScriptedResponses(respond)
-    with pytest.raises(ValueError, match="synthetic-private-callback-error"):
+    peer.append(later)
+    with pytest.raises(error_type, match="synthetic-private-callback-error") as raised:
         async with peer:
             status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
             assert status == 400
             assert "synthetic-private-callback-error" not in body
-            with pytest.raises(ValueError, match="synthetic-private-callback-error"):
+            status, _, _ = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+            assert status == 400
+            assert later_calls == []
+            with pytest.raises(error_type, match="synthetic-private-callback-error"):
                 peer.assert_exhausted()
+    assert raised.value is failure
 
 
 async def test_explicit_empty_scripted_error_body_is_not_defaulted():

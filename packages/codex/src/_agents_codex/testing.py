@@ -152,7 +152,7 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
         self._responses = deque(self._capture_script(script) for script in responses)
         self._requests: list[dict[str, JsonValue]] = []
         self._unexpected = 0
-        self._callback_error: Exception | None = None
+        self._callback_error: BaseException | None = None
         self._lock = Lock()
         self._condition = _Condition(self._lock)
         self._callback_running = False
@@ -372,7 +372,7 @@ class _Handler(BaseHTTPRequestHandler):
             if callable(items):
                 items = self.peer._capture_script(items(deepcopy(body)))
             assert isinstance(items, ScriptedResponse)
-        except Exception as error:
+        except BaseException as error:
             with self.peer._condition:
                 if self.peer._callback_error is None:
                     self.peer._callback_error = error
