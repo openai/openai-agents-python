@@ -43,7 +43,9 @@ class CompletionContext(Generic[ContextT]):
     or ``StopTurn`` to abort by policy. The callback runs after a successful
     model step that would end the turn, before the turn or native child is
     reported complete. It does not run for provider errors, cancellation,
-    compaction, or the internal prompted-output repair agent.
+    compaction, or the internal prompted-output repair agent. Repaired text
+    passes through this same original callback before output-type conversion;
+    ContinueTurn resumes the original turn, not the formatting agent.
 
     ``text`` is the proposed assistant text, before output-type conversion;
     it is ``None`` when the model produced no final text. Already streamed text

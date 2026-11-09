@@ -778,6 +778,9 @@ class _Submission:
     last_assistant_had_blank_final: bool = False
     policy_stop: Literal["requested", "expired"] | None = None
     repairing: bool = False
+    repair_attempt_count: int = 0
+    # A one-element tuple distinguishes an accepted None from no accepted value.
+    accepted_output: tuple[Any] | None = None
     before_step: _BeforeStep[Any] | None = None
     prepare_request: _PrepareRequest | None = None
     preparation_index: int = 0
@@ -6205,8 +6208,8 @@ class Session(Generic[ContextT, OutputT]):
                     else terminal.get("last_agent_message") or ""
                 )
                 # Preserve single validation and its established error ordering
-                # unless correction is explicitly enabled. A correction can
-                # start only after all original callbacks and usage have settled.
+                # unless correction is enabled. Completion-gated correction has
+                # already settled; ungated correction starts after callback/usage drain.
                 if not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
                 assert usage_request is not None
@@ -6221,10 +6224,14 @@ class Session(Generic[ContextT, OutputT]):
                     if state.cleanup_error is not None:
                         raise state.cleanup_error
                     invalid = False
-                    try:
-                        output = self._validate_traced_output(state, text)
-                    except OutputValidationError:
-                        invalid = True
+                    if state.accepted_output is not None:
+                        (output,) = state.accepted_output
+                        state.accepted_output = None
+                    else:
+                        try:
+                            output = self._validate_traced_output(state, text)
+                        except OutputValidationError:
+                            invalid = True
                     if invalid:
                         # Leave the validation exception context before running
                         # other work or surfacing a different native failure.
@@ -6454,8 +6461,12 @@ class Session(Generic[ContextT, OutputT]):
         ) and (
             isinstance(error, asyncio.CancelledError)
             or state.policy_stop == "requested"
-            and state.failure.done()
-            and error is state.failure.result()
+            and (
+                state.failure.done()
+                and error is state.failure.result()
+                or state.graceful_requested
+                and not state.failure.done()
+            )
         ):
             if state.cleanup_error is None:
                 stopped = TurnStoppedError(
@@ -6510,7 +6521,23 @@ class Session(Generic[ContextT, OutputT]):
             return state.output.validate(text)
 
     async def _repair_output(self, state: _Submission, text: str) -> Any:
-        """Correct only invalid final text under the still-active root owner."""
+        """Correct invalid final text when no application completion gate is active."""
+        issues: tuple[OutputValidationIssue, ...] = ()
+        while state.repair_attempt_count < state.output.max_retries:
+            corrected = await self._repair_output_once(state, text)
+            if corrected is None:
+                raise asyncio.CancelledError()
+            text = corrected
+            try:
+                return self._validate_traced_output(state, text)
+            except OutputValidationError as error:
+                issues = error.issues
+        # Never expose validator inputs through an attached exception context.
+        raise OutputValidationError(text, issues)
+
+    async def _repair_output_once(self, state: _Submission, text: str) -> str | None:
+        """Own one correction; None means a graceful stop prevented admission."""
+        state.repair_attempt_count += 1
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
         provider = self._opening_agent.provider or self._owned_provider
@@ -6546,102 +6573,93 @@ class Session(Generic[ContextT, OutputT]):
             transform_context=self._opening_agent.transform_context,
             before_compact=self._opening_agent.before_compact,
         )
-        issues: tuple[OutputValidationIssue, ...] = ()
-        for _ in range(state.output.max_retries):
-            # The original native turn has already settled. Its owner can
-            # still request a graceful stop before another correction starts.
+        # The original owner may still hold its completion receipt. A graceful
+        # stop prevents any new correction from starting in either path.
+        if state.graceful_requested:
+            return None
+        if state.failure.done():
+            raise state.failure.result()
+        # A previous Turn may have left a failed repair close. Retire that
+        # exact owner before another repair can replace it.
+        if self._repair_session is not None:
+            await self._repair_session.aclose()
+            self._repair_session = None
+        repair = await Session[ContextT, str]._open(
+            declaration,
+            context=self._context,
+            _captured_api_key=self._model_api_key,
+            _expected_codex_login_binding=self._codex_login_binding,
+            parent_trace=state.parent_trace,
+        )
+        self._repair_session = repair
+        repair._trace_context = state.tracing.context if state.tracing is not None else None
+        repair._context_transform_purpose = "output_repair"
+        repair._observations.repair_parent = (self._observations, handle.submission_id)
+        repair._rate_limit_parent = self
+        try:
             if state.graceful_requested:
-                raise asyncio.CancelledError()
+                await repair.aclose()
+                return None
             if state.failure.done():
                 raise state.failure.result()
-            # A previous Turn may have left a failed repair close. Retire that
-            # exact owner before another repair can replace it.
-            if self._repair_session is not None:
-                await self._repair_session.aclose()
-                self._repair_session = None
-            repair = await Session[ContextT, str]._open(
-                declaration,
-                context=self._context,
-                _captured_api_key=self._model_api_key,
-                _expected_codex_login_binding=self._codex_login_binding,
-                parent_trace=state.parent_trace,
-            )
-            self._repair_session = repair
-            repair._trace_context = state.tracing.context if state.tracing is not None else None
-            repair._context_transform_purpose = "output_repair"
-            repair._observations.repair_parent = (self._observations, handle.submission_id)
-            repair._rate_limit_parent = self
+            # No repair work can have started before this local check.
+            # _start reaches its identical check without yielding.
+            repair._check_open()
+            rejected = False
             try:
-                if state.graceful_requested:
-                    raise asyncio.CancelledError()
-                if state.failure.done():
-                    raise state.failure.result()
-                # No repair work can have started before this local check.
-                # _start reaches its identical check without yielding.
-                repair._check_open()
-                rejected = False
                 try:
-                    try:
-                        attempt = await repair._start(
-                            _native_input(
-                                json.dumps({"schema": state.output.schema, "invalid_output": text})
-                            ),
-                            _prepare_spec(str),
-                            budget=state.budget,
-                        )
-                    except NativeError as error:
-                        rejected = error._effects == "not_started"
-                        raise
-                    repair_result = asyncio.create_task(attempt.get_result())
-                    try:
-                        await asyncio.wait(
-                            (repair_result, state.failure), return_when=asyncio.FIRST_COMPLETED
-                        )
-                        if state.failure.done():
-                            raise state.failure.result()
-                        result = repair_result.result()
-                    except BaseException as error:
-                        # Waiting is passive. This producer, not the waiter,
-                        # owns cancellation and joins only its exact attempt.
-                        await _close_after_error(error, attempt.cancel)
-                        raise
-                    finally:
-                        cancel_once(repair_result)
-                        await asyncio.gather(repair_result, return_exceptions=True)
+                    attempt = await repair._start(
+                        _native_input(
+                            json.dumps({"schema": state.output.schema, "invalid_output": text})
+                        ),
+                        _prepare_spec(str),
+                        budget=state.budget,
+                    )
+                except NativeError as error:
+                    rejected = error._effects == "not_started"
+                    raise
+                repair_result = asyncio.create_task(attempt.get_result())
+                try:
+                    await asyncio.wait(
+                        (repair_result, state.failure), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if state.failure.done():
+                        raise state.failure.result()
+                    result = repair_result.result()
+                except BaseException as error:
+                    # Waiting is passive. This producer, not the waiter,
+                    # owns cancellation and joins only its exact attempt.
+                    await _close_after_error(error, attempt.cancel)
+                    raise
                 finally:
-                    if not rejected:
-                        if repair._broken:
-                            self._repair_receipts_incomplete = True
-                        else:
-                            try:
-                                recorded = json.loads(
-                                    await repair._native.read_thread_history(None)
-                                )
-                                turns, items = project_history(recorded, repair.id)
-                                for turn in turns:
-                                    turn["parent_session_id"] = self.id
-                                    turn["parent_turn_id"] = handle.turn_id
-                                self._repair_turns.extend(turns)
-                                self._repair_items.extend(items)
-                            except BaseException:
-                                # Preserve uncertainty even if a later repair succeeds.
-                                self._repair_receipts_incomplete = True
-                                raise
-            except BaseException as error:
-                await _close_after_error(error, repair.aclose)
-                raise
-            else:
-                await repair.aclose()
+                    cancel_once(repair_result)
+                    await asyncio.gather(repair_result, return_exceptions=True)
             finally:
-                if repair._closed and repair._environment_lease is None:
-                    self._repair_session = None
-            text = result.final_output
-            try:
-                return self._validate_traced_output(state, text)
-            except OutputValidationError as error:
-                issues = error.issues
-        # Never expose validator inputs through an attached exception context.
-        raise OutputValidationError(text, issues)
+                if not rejected:
+                    if repair._broken:
+                        self._repair_receipts_incomplete = True
+                    else:
+                        try:
+                            recorded = json.loads(await repair._native.read_thread_history(None))
+                            turns, items = project_history(recorded, repair.id)
+                            for turn in turns:
+                                turn["parent_session_id"] = self.id
+                                turn["parent_turn_id"] = handle.turn_id
+                            self._repair_turns.extend(turns)
+                            self._repair_items.extend(items)
+                        except BaseException:
+                            # Preserve uncertainty even if a later repair succeeds.
+                            self._repair_receipts_incomplete = True
+                            raise
+        except BaseException as error:
+            await _close_after_error(error, repair.aclose)
+            raise
+        else:
+            await repair.aclose()
+        finally:
+            if repair._closed and repair._environment_lease is None:
+                self._repair_session = None
+        return cast(str, result.final_output)
 
     def _finish_failed_observations(self) -> None:
         """Close a failed stream after every already-known owner has settled."""
@@ -7304,7 +7322,14 @@ class Session(Generic[ContextT, OutputT]):
             if not active():
                 return
             callback, request = prepare()
-            result = await self._call_decision_callback(state, message, callback, active, request)
+            if isinstance(request, CompletionContext):
+                result = await self._call_completion_callback(
+                    state, message, callback, active, request
+                )
+            else:
+                result = await self._call_decision_callback(
+                    state, message, callback, active, request
+                )
             if not active():
                 return
             reply(result)
@@ -7411,6 +7436,55 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _call_completion_callback(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        request: CompletionContext[ContextT],
+    ) -> Any:
+        if (
+            not isinstance(state, _Submission)
+            or not state.output.max_retries
+            or state.unsampled_steering
+        ):
+            return await self._call_decision_callback(state, message, callback, active, request)
+        # Every native proposal owns a fresh acceptance. ContinueTurn must never
+        # leave a tentative result for a later proposal or terminal settlement.
+        state.accepted_output = None
+        while True:
+            decision = await self._call_decision_callback(state, message, callback, active, request)
+            if not active():
+                return decision
+            if decision is not None:
+                if isinstance(decision, ContinueTurn) and state.graceful_requested:
+                    return StopTurn("Graceful stop requested")
+                return decision
+            text = request.text or ""
+            invalid = False
+            issues: tuple[OutputValidationIssue, ...] = ()
+            try:
+                output = self._validate_traced_output(state, text)
+            except OutputValidationError as error:
+                invalid = True
+                issues = error.issues
+            if not invalid:
+                state.accepted_output = (output,)
+                return None
+            if state.graceful_requested:
+                return StopTurn("Graceful stop requested")
+            if state.repair_attempt_count >= state.output.max_retries:
+                raise OutputValidationError(text, issues)
+            state.repairing = True
+            try:
+                corrected = await self._repair_output_once(state, text)
+            finally:
+                state.repairing = False
+            if corrected is None:
+                return StopTurn("Graceful stop requested")
+            request = replace(request, text=corrected)
+
     async def _before_complete(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span(
             "completion callback", "callback", message.get("tracing_context")
@@ -7442,7 +7516,10 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     state.policy_stop = "requested"
                     state.stopping = True
-                    state.failure.set_result(NativeError("Turn stopped by policy"))
+                    # A caller's graceful stop is an owned cancellation, not
+                    # an application callback failure returned to that caller.
+                    if not isinstance(state, _Submission) or not state.graceful_requested:
+                        state.failure.set_result(NativeError("Turn stopped by policy"))
                 return
             instructions = None
             if decision is not None:
