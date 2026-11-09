@@ -77,6 +77,7 @@ async def test_hosted_capture_before_open_and_fresh_session_grants(
         "results": [],
     }
     async with timeout(40), http_peer() as peer:
+        peer.finite_http_response = True
         peer.respond(completed(raw), assistant_output("first complete"))
         peer.respond(assistant_output("fresh complete"))
         borrowed = NativeProvider(
