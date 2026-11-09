@@ -208,6 +208,7 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     ) = field(default=None, repr=False)
     namespace: str | None = None
     namespace_description: str | None = None
+    finish_turn: bool = False
 
     def __post_init__(self) -> None:
         if self.namespace is not None and (
@@ -221,6 +222,8 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
                 raise ValueError("FunctionTool namespace_description requires namespace")
         if self.namespace is not None and self._bind is None:
             raise ValueError("FunctionTool namespaces require a registered Python callback")
+        if not isinstance(self.finish_turn, bool):
+            raise TypeError("FunctionTool finish_turn must be a bool")
         if not isinstance(self.defer_loading, bool):
             raise TypeError("FunctionTool defer_loading must be a bool")
         if not isinstance(self.input_type, type) or not issubclass(self.input_type, BaseModel):
@@ -413,6 +416,7 @@ def function_tool(
     *,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -423,6 +427,7 @@ def function_tool(
     *,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _PythonTool[object, object]: ...
 
 
@@ -439,6 +444,7 @@ def function_tool(
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -455,6 +461,7 @@ def function_tool(
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -471,6 +478,7 @@ def function_tool(
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -487,6 +495,7 @@ def function_tool(
     timeout_error_function: _TimeoutFormatter[Any] | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -503,6 +512,7 @@ def function_tool(
     timeout_error_function: _TimeoutFormatter[object] | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -521,6 +531,7 @@ def function_tool(
     | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -544,6 +555,7 @@ def function_tool(
     | None = None,
     namespace: str | None = None,
     namespace_description: str | None = None,
+    finish_turn: bool = False,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -648,6 +660,7 @@ def function_tool(
                 before=declaration.before,
                 after=declaration.after,
                 namespace=declaration.namespace,
+                finish_turn=declaration.finish_turn,
             )
 
         return FunctionTool(
@@ -661,6 +674,7 @@ def function_tool(
             before=before,
             after=after,
             defer_loading=defer_loading,
+            finish_turn=finish_turn,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             namespace=namespace,

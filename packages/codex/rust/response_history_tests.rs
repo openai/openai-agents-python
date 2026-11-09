@@ -302,16 +302,19 @@ async fn failed_observation_append_joins_held_tool_and_preserves_fatal() {
         let started = crate::ops::submit_replaceable(&state, json!({
             "input":[UserInput::Text {text:"hold the tool and reject the terminal".into(),text_elements:vec![]}]
         })).await.unwrap();
-        let key: PendingKey = loop {
+        let (key, invocation): (PendingKey, u64) = loop {
             let event = state.next_session_event().await.unwrap();
             assert_ne!(event["msg"]["type"], "_sdk_model_generation_failed");
             if event["msg"]["type"] == "dynamic_tool_call_request" {
-                break serde_json::from_value(event["msg"].clone()).unwrap();
+                break (
+                    serde_json::from_value(event["msg"].clone()).unwrap(),
+                    event["msg"]["_sdk_invocation"].as_u64().unwrap(),
+                );
             }
         };
         let owner = state.id.to_string();
         tools.check_pending(&owner, &key).unwrap();
-        tools.enter(&owner, &key).unwrap();
+        assert!(tools.admit_callback(&owner, &key, invocation, true).unwrap());
         let store = engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
         assert!(!store.fail_appends.load(Ordering::SeqCst));
         assert_eq!(store.failed_response_observation_appends.load(Ordering::SeqCst), 0);

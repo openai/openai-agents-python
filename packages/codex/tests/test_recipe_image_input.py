@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import OutputValidationError
+from agents import NativeError, OutputValidationError
 from agents.testing import ScriptedResponses, text
 from examples.codex.recipes.image_input import image_agent, image_message, write_synthetic_png
 from tests._asyncio import timeout
@@ -111,11 +111,18 @@ async def test_invalid_settled_image_result_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "reference", ["https://example.com/image.png", "/tmp/image.png", "file_synthetic"]
+    ("reference", "error", "message"),
+    [
+        ("https://example.com/image.png", NativeError, "cannot preserve provider image references"),
+        ("/tmp/image.png", ValueError, "absolute HTTP\\(S\\) or image data URL"),
+        ("file_synthetic", ValueError, "absolute HTTP\\(S\\) or image data URL"),
+    ],
 )
-async def test_unsupported_image_references_fail_before_model_request(reference: str) -> None:
+async def test_unsupported_image_references_fail_before_model_request(
+    reference: str, error: type[Exception], message: str
+) -> None:
     async with ScriptedResponses() as peer, timeout(20):
-        with pytest.raises(ValueError, match="base64 image data URL"):
+        with pytest.raises(error, match=message):
             await image_agent(peer.provider).run(
                 {
                     "role": "user",

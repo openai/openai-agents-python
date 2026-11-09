@@ -81,7 +81,7 @@ async def test_native_settings_patch_keeps_omitted_values_and_clears_tier():
     "settings",
     [
         {"unknown": "value"},
-        {"temperature": 0.2},
+        {"temperature": "invalid"},
         {"reasoning_effort": None},
         {"reasoning_summary": None},
         {"reasoning_effort": 2},

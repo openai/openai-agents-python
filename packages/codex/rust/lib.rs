@@ -16,6 +16,7 @@ mod engine;
 mod environment;
 mod extensions;
 mod goals;
+mod initial_messages;
 mod live;
 mod local_reconciliation;
 mod local_sandbox;
@@ -100,6 +101,13 @@ impl NativeChildTurn {
     fn turn_id(&self) -> String {
         self.turn.turn_id.clone()
     }
+    fn _tool_completion(&self) -> PyResult<Option<String>> {
+        self.turn
+            .tool_completion()
+            .map(|value| serde_json::to_string(&value).map_err(py_error))
+            .transpose()
+    }
+
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let turn = self.turn.clone();
         async_bridge::future_into_py(py, async move {
@@ -293,7 +301,7 @@ impl Engine {
         options_json: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
-        let options = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
+        let options: options::ThreadOptions = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
             .map_err(py_error)?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
@@ -361,24 +369,35 @@ impl Engine {
         })
     }
 
+    #[pyo3(signature = (options_json, specs_json, initial_messages_json=None))]
     fn _start_initial_replaceable_thread<'py>(
         &self,
         py: Python<'py>,
         options_json: &str,
         specs_json: &str,
+        initial_messages_json: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let lease = self
             .managed_lease
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
-        let options = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
+        let options: options::ThreadOptions = config::decode(serde_json::from_str(options_json).map_err(py_error)?)
             .map_err(py_error)?;
+        let initial_messages = initial_messages_json
+            .map(initial_messages::Batch::capture)
+            .transpose()
+            .map_err(py_error)?;
+        if initial_messages.is_some() && !options.permits_initial_config() {
+            return Err(PyValueError::new_err(
+                "initial messages require a fresh root without history or reserved identity",
+            ));
+        }
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
         async_bridge::future_factory_into_py(py, move || async move {
             let _context_operation = inner.operation(false).map_err(py_error)?;
             let thread = inner
-                .start_with_tools(options, None, Some(specs), true)
+                .start_with_initial_messages(options, None, Some(specs), true, initial_messages)
                 .await
                 .map_err(py_error)?;
             if let Some(lease) = lease {
@@ -971,37 +990,22 @@ impl NativeThread {
     // Recheck after caller-owned checkpoint storage has settled, immediately
     // before invoking the Python effect. A raw native interrupt may have raced it.
     #[pyo3(signature = (request_json, *, entering=false))]
-    fn _check_python_tool(&self, request_json: &str, entering: bool) -> PyResult<()> {
+    fn _check_python_tool(&self, request_json: &str, entering: bool) -> PyResult<bool> {
         let request: serde_json::Value = serde_json::from_str(request_json).map_err(py_error)?;
         let inner = self.current()?;
-        let key: python_tools::PendingKey =
-            serde_json::from_value(request.clone()).map_err(py_error)?;
-        if key.reply.thread != inner.id.to_string() {
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .and_then(|tools| tools.owner(&inner.id.to_string(), &key))
-                .ok_or_else(|| py_error("Expired or invalid managed Python tool request"))?;
-            if entering {
-                return Err(py_error(
-                    "Native children cannot park or enter SDK manual approvals",
-                ));
-            }
-            return tools
-                .check_pending(&key.reply.thread, &key)
-                .map_err(py_error);
+        let key: python_tools::PendingKey = serde_json::from_value(request.clone()).map_err(py_error)?;
+        let invocation = request.get("_sdk_invocation").and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| py_error("Invalid managed Python invocation nonce"))?;
+        let root = inner.thread.thread_extension_data().get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("managed tool owner is unavailable"))?;
+        let tools = root.owner(&inner.id.to_string(), &key)
+            .ok_or_else(|| py_error("Expired or invalid managed Python tool request"))?;
+        if entering && key.reply.thread != inner.id.to_string() {
+            return Err(py_error("Native children cannot park or enter SDK manual approvals"));
         }
-        checkpoint::check_capture(&inner, &request).map_err(py_error)?;
-        if entering {
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .ok_or_else(|| py_error("effect entry requires managed tools"))?;
-            tools.enter(&inner.id.to_string(), &key).map_err(py_error)?;
-        }
-        Ok(())
+        let admitted = tools.admit_callback(&key.reply.thread, &key, invocation, entering).map_err(py_error)?;
+        if entering && !admitted { return Err(py_error("Expired managed Python effect entry")); }
+        Ok(admitted)
     }
 
     fn _capture_decision<'py>(
@@ -1609,6 +1613,11 @@ impl NativeThread {
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
             inner
+                .engine
+                .validate_request_controls(&inner.thread, &settings)
+                .await
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            inner
                 .thread
                 .update_thread_settings(settings)
                 .await
@@ -1656,20 +1665,26 @@ impl NativeThread {
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             // Once publication begins, any error can conceal changed native history.
+            // Consuming the fresh initializer's batch forbids replay after uncertainty.
+            let initial_messages = inner.initial_messages.lock().map_err(py_error)?.take();
             application_instructions::publish_with_files(&inner.thread, instructions, files)
                 .await
                 .map_err(py_error)?;
+            if let Some(batch) = initial_messages {
+                batch.publish(&inner.thread).await.map_err(py_error)?;
+            }
             Ok(true)
         })
     }
 
-    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new()))]
+    #[pyo3(signature = (generation, specs_json, manual_slots=Vec::new(), terminal_slots=Vec::new()))]
     fn _replace_tools<'py>(
         &self,
         py: Python<'py>,
         generation: u64,
         specs_json: &str,
         manual_slots: Vec<usize>,
+        terminal_slots: Vec<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let specs = serde_json::from_str(specs_json).map_err(py_error)?;
         let inner = self.current()?;
@@ -1682,7 +1697,13 @@ impl NativeThread {
                 .get::<python_tools::PythonTools>()
                 .ok_or_else(|| py_error("replace_tools requires a replaceable tool session"))?;
             tools
-                .replace(&inner.thread, generation, specs, &manual_slots)
+                .replace_terminal(
+                    &inner.thread,
+                    generation,
+                    specs,
+                    &manual_slots,
+                    &terminal_slots,
+                )
                 .await
                 .map_err(py_error)
         })
@@ -1827,6 +1848,34 @@ impl NativeThread {
                 thread,
                 instance,
             )
+            .map_err(py_error)
+    }
+
+    #[pyo3(signature = (id, decision_json, thread=None, instance=None, *, error=false))]
+    fn _reply_tool_completion(
+        &self,
+        id: u64,
+        decision_json: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Terminal tool callback owner unavailable"))?;
+        let decision = if error {
+            Err(())
+        } else {
+            Ok(serde_json::from_str(
+                decision_json.ok_or_else(|| py_error("Missing terminal decision"))?,
+            )
+            .map_err(py_error)?)
+        };
+        tools
+            .reply_tool_completion(id, decision, thread, instance)
             .map_err(py_error)
     }
 
@@ -2121,6 +2170,26 @@ impl NativeThread {
             }
             let response: codex_protocol::dynamic_tools::DynamicToolResponse =
                 serde_json::from_str(&response_json).map_err(py_error)?;
+            let restored_model = tools
+                .restored_media_model(&grant.key, &response)
+                .map_err(py_error)?;
+            let native_media = tools.native_media(&grant.key);
+            inner
+                .engine
+                .validate_tool_files(
+                    &grant.key.reply.thread,
+                    &grant.key.turn,
+                    tools.is_reentry(&grant.key),
+                    restored_model.as_deref(),
+                    native_media.as_ref(),
+                    &response,
+                )
+                .await
+                .map_err(py_error)?;
+            // The asynchronous metadata lookup cannot revive an expired grant.
+            if !tools.check_manual(&grant.key.reply.thread, &grant) {
+                return Ok(false);
+            }
             if inner.engine.local_checklist_store.is_some() {
                 let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
                     .map_err(py_error)?;
@@ -2186,6 +2255,24 @@ impl NativeThread {
                         let Some(child_tools) = tools.owner(&inner.id.to_string(), &request) else {
                             return Ok(false);
                         };
+                        let Some(native_media) = child_tools
+                            .automatic_reply_media(&request.reply.thread, &request)
+                            .map_err(py_error)?
+                        else {
+                            return Ok(false);
+                        };
+                        inner
+                            .engine
+                            .validate_tool_files(
+                                &request.reply.thread,
+                                &request.turn,
+                                false,
+                                None,
+                                native_media.as_ref(),
+                                &response,
+                            )
+                            .await
+                            .map_err(py_error)?;
                         let Some(sender) = child_tools
                             .take_reply(&request.reply.thread, &request)
                             .map_err(py_error)?
@@ -2217,7 +2304,28 @@ impl NativeThread {
                         }
                         return Ok(sender.send(response).is_ok());
                     }
+                    let Some(native_media) = tools
+                        .automatic_reply_media(&inner.id.to_string(), &request)
+                        .map_err(py_error)?
+                    else {
+                        return Ok(false);
+                    };
                     let reentry = tools.is_reentry(&request);
+                    let restored_model = tools
+                        .restored_media_model(&request, &response)
+                        .map_err(py_error)?;
+                    inner
+                        .engine
+                        .validate_tool_files(
+                            &request.reply.thread,
+                            &request.turn,
+                            reentry,
+                            restored_model.as_deref(),
+                            native_media.as_ref(),
+                            &response,
+                        )
+                        .await
+                        .map_err(py_error)?;
                     let Some(sender) = tools
                         .take_reply(&inner.id.to_string(), &request)
                         .map_err(py_error)?

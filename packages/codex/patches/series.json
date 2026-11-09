@@ -301,9 +301,13 @@
       "sha256": "dbb4d10ce9a81028bf2d09a7d478b73805b337d74c328df567e68b373e2fb422"
     },
     {
+      "path": "0090-native-session-media-history.patch",
+      "sha256": "17c3e90f5903457e5b4b377186640c92b5c2152a4c4286ee6670157d124d06fa"
+    },
+    {
       "path": "0068-decisions.patch",
-      "sha256": "9e19132b355b1b54b54ba07f5c3a8b5f35f044b679cd691eedffe5d3c9457053"
+      "sha256": "f1f0c77aaee2ac1f616b732c58903cf537107399bc3c66132b4e217786818514"
     }
   ],
-  "result_tree": "c7bf7055efa7c07c5473fa13eded2f5e465582bd"
+  "result_tree": "49f8af470cff9481f50e9a655e55c3d137e1da82"
 }

@@ -25,6 +25,11 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "supports_websockets": False,
         "auth": None,
         "response_mode": sys.argv[1],
+        "query_params": None,
+        "headers": None,
+        "env_headers": None,
+        "organization": None,
+        "project": None,
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected

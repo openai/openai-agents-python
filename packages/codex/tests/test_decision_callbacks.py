@@ -23,8 +23,10 @@ from agents import (
     NativeError,
     OpenAIDecisions,
     OutputValidationError,
+    PromptedOutput,
     RunBudget,
     ToolContext,
+    ToolRef,
     TurnStoppedError,
     function_tool,
 )
@@ -234,6 +236,75 @@ async def test_binding_reaches_step_tool_and_completion_without_changing_context
     assert not original.requests
     assert "private-decision-question" not in saved.to_json()
     assert len(responses.requests) == 3
+
+
+async def test_terminal_tool_completion_keeps_decisions_owner_without_text_repair(responses):
+    class Final(BaseModel):
+        value: int
+
+    original, selected = [RecordingProvider(name) for name in ("original", "selected")]
+    context = {"tenant": "fixture"}
+    completions = []
+
+    @function_tool(finish_turn=True)
+    def finish() -> dict[str, int]:
+        return {"value": 7}
+
+    async def complete(candidate):
+        assert candidate.context is context
+        assert candidate.text is None
+        assert candidate.tool_call is not None
+        assert candidate.tool_call.tool == ToolRef("finish")
+        assert candidate.final_output == Final(value=7)
+        if completions:
+            # An earlier candidate cannot borrow this candidate's fresh scope.
+            with pytest.raises(RuntimeError, match="live callback"):
+                await completions[0].decide("Stale", input="evidence")
+        completions.append(candidate)
+        assert await candidate.decide("Approve tool result?", input="value=7")
+        if candidate.continuation_count == 0:
+            return ContinueTurn("Call finish again.")
+        return None
+
+    responses.respond(function_call("finish", {}, "first-finish"))
+    responses.respond(function_call("finish", {}, "accepted-finish"))
+    agent = Agent(
+        instructions="Use finish.",
+        tools=[finish],
+        provider=generative_provider(responses),
+        decisions=original,
+        output_type=PromptedOutput(Final, max_retries=2),
+        before_complete=complete,
+    )
+    async with timeout(20), agent.session(context=context, decisions=selected) as session:
+        turn = await session.submit("Finish.")
+        result = await turn.get_result()
+        history = [entry async for entry in session.turns()]
+        with pytest.raises(RuntimeError, match="live callback"):
+            await completions[-1].decide("Stale", input="evidence")
+    assert result.final_output == Final(value=7)
+    assert result.tool_call is not None and result.tool_call.call_id == "accepted-finish"
+    assert result.repair_attempts == ()
+    assert result.thread_usage is not None
+    assert result.thread_usage.total_token_usage.total_tokens == 48
+    assert result.thread_usage.last_token_usage.total_tokens == 14
+    assert history[-1]["usage"]["total_tokens"] == 48
+    decision_responses = [
+        response
+        for response in history[-1]["responses"]
+        if response.get("upstream_request_id") in {"req-selected-1", "req-selected-2"}
+    ]
+    assert [response["upstream_request_id"] for response in decision_responses] == [
+        "req-selected-1",
+        "req-selected-2",
+    ]
+    assert all(response["response_id"] is None for response in decision_responses)
+    assert all(response["turn_id"] == turn.turn_id for response in decision_responses)
+    assert [candidate.continuation_count for candidate in completions] == [0, 1]
+    assert {candidate.turn_id for candidate in completions} == {turn.turn_id}
+    assert len(selected.requests) == 2 and not original.requests
+    assert [request.input for request in selected.requests] == ["value=7", "value=7"]
+    assert len(responses.requests) == 2
 
 
 @pytest.mark.parametrize(

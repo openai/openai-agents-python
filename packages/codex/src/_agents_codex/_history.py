@@ -19,6 +19,7 @@ from .history import (
     RecordedTurn as RecordedTurn,
 )
 from .recovery import UncertainCall as UncertainCall, _uncertain_call as _uncertain_call
+from .response_facts import RecordedResponseFact, _response_fact_record
 from .turn_receipt import _project_turn_receipt as _project_turn_receipt
 
 
@@ -84,7 +85,9 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
     common = {"id": item_id, "turn_id": turn_id, "type": kind}
     if kind == "message" and raw.get("role") in {"user", "assistant"}:
         role = raw["role"]
-        accepted = {"output_text"} if role == "assistant" else {"input_text", "input_image"}
+        accepted = (
+            {"output_text"} if role == "assistant" else {"input_text", "input_image", "input_file"}
+        )
         content = [part for part in raw["content"] if part["type"] in accepted]
         return {
             **common,
@@ -159,6 +162,7 @@ def project_history(
     latest_calls: dict[tuple[str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
     responses: list[tuple[str, RecordedResponse]] = []
+    response_facts: list[RecordedResponseFact] = []
     current_turn: str | None = None
     aborted_turn: str | None = None
     turn_order: list[str] = []
@@ -243,6 +247,10 @@ def project_history(
                 receipt_turn_id = payload.get("turn_id")
                 if isinstance(receipt_turn_id, str) and receipt_turn_id in turns:
                     turns[receipt_turn_id].pop("receipt", None)
+        elif kind == "response_fact_record":
+            fact = _response_fact_record(payload)
+            if fact is not None:
+                response_facts.append(fact)
         elif kind == "response_observation_record":
             response: RecordedResponse = {
                 "id": payload["id"],
@@ -255,6 +263,8 @@ def project_history(
             }
             if payload.get("incomplete_reason") is not None:
                 response["incomplete_reason"] = payload["incomplete_reason"]
+            if isinstance(payload.get("upstream_request_id"), str):
+                response["upstream_request_id"] = payload["upstream_request_id"]
             responses.append((kind, response))
         elif kind == "token_usage_record":
             usage[payload["turn_id"]] = _usage(payload["turn_token_usage"])
@@ -396,6 +406,12 @@ def project_history(
     for turn_id, turn in turns.items():
         if turn_id in usage:
             turn["usage"] = usage[turn_id]
+    projected_fact_ids: set[str] = set()
+    for fact in response_facts:
+        fact_turn = turns.get(fact["turn_id"])
+        if fact_turn is not None and fact["id"] not in projected_fact_ids:
+            fact_turn.setdefault("response_facts", []).append(fact)
+            projected_fact_ids.add(fact["id"])
     observed_ids = {
         response["id"] for kind, response in responses if kind == "response_observation_record"
     }

@@ -252,7 +252,8 @@ impl NativeDecisionCall {
             let result = response
                 .commit(
                     ResponseObservation {
-                        response_id: metadata.request_id,
+                        response_id: None,
+                        upstream_request_id: metadata.request_id,
                         status: ResponseObservationStatus::Completed,
                         incomplete_reason: None,
                         usage: observed,

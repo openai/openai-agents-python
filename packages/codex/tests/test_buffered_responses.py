@@ -770,3 +770,35 @@ async def test_restore_uses_current_provider_response_mode(
                 assert result.thread_usage is not None
                 assert result.thread_usage.total_token_usage.total_tokens == 28
         await disconnected(peer.transports)
+
+
+async def test_buffered_local_compaction_preserves_transport_and_next_turn() -> None:
+    async with timeout(30), json_peer() as peer:
+        peer.json_replies.extend(
+            [
+                json_response("Remember alpha.", "before-compact", "before-item"),
+                json_response("Native summary: alpha.", "local-compact", "summary-item"),
+                json_response("alpha", "after-compact", "after-item"),
+            ]
+        )
+        async with provider(peer) as owner:
+            async with Agent(
+                model="gpt-5.2", instructions="Answer.", provider=owner
+            ).session() as session:
+                assert (
+                    await (await session.submit("Remember alpha.")).get_result()
+                ).final_output == "Remember alpha."
+                await session.compact()
+                state = await session.save_state()
+                assert any(record["type"] == "compacted" for record in state.history)
+                assert (
+                    await (await session.submit("What label?")).get_result()
+                ).final_output == "alpha"
+        # JSONPeer only routes /v1/responses. The middle request therefore ran
+        # local model compaction, not the remote /responses/compact endpoint.
+        assert len(peer.requests) == 3
+        assert not peer.json_replies
+        assert all(request["stream"] is False for request in peer.requests)
+        assert all("stream_options" not in request for request in peer.requests)
+        assert "CONTEXT CHECKPOINT COMPACTION" in json.dumps(peer.requests[1]["input"])
+    assert "Native summary: alpha." in json.dumps(peer.requests[2]["input"])

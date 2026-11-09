@@ -202,7 +202,7 @@ from .tool_planning import (
     _select_function_tool_runs_for_resume,
     _validate_unresolved_function_calls,
 )
-from .turn_preparation import get_handoffs, get_output_schema
+from .turn_preparation import get_all_tools, get_handoffs, get_output_schema
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
 
@@ -591,12 +591,15 @@ async def execute_handoffs(
             ]
         )
 
+    from .._run_state_agent_identity import _validate_classic_agent_graph
+
     actual_handoff = run_handoffs[0]
     with handoff_span(from_agent=public_agent.name) as span_handoff:
         handoff = actual_handoff.handoff
         if handoff._agent_ref is not None:
             target_agent = handoff._agent_ref()
             if target_agent is not None:
+                _validate_classic_agent_graph(target_agent)
                 register_agent_tool_configuration(target_agent)
         context_wrapper._mark_tool_invocation_executed(
             actual_handoff.tool_call,
@@ -630,6 +633,7 @@ async def execute_handoffs(
                 tool_input_guardrail_results=list(tool_input_guardrail_results or []),
                 tool_output_guardrail_results=list(tool_output_guardrail_results or []),
             )
+        _validate_classic_agent_graph(new_agent)
         register_agent_tool_configuration(new_agent)
         span_handoff.span_data.to_agent = new_agent.name
         if multiple_handoffs:
@@ -2276,7 +2280,7 @@ async def resolve_interrupted_turn(
 
     available_handoffs = await get_handoffs(execution_agent, context_wrapper)
     with execution_agent._use_mcp_handoff_snapshot(available_handoffs):
-        current_tool_inventory = await execution_agent.get_all_tools(context_wrapper)
+        current_tool_inventory = await get_all_tools(execution_agent, context_wrapper)
     resolved_tools, resolved_handoffs = resolve_tool_name_collisions(
         current_tool_inventory,
         available_handoffs,

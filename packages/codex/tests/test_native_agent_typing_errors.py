@@ -159,7 +159,7 @@ if TYPE_CHECKING:
             session.events(turn)  # pyright: ignore[reportCallIssue]
             turn.get_result(1)  # pyright: ignore[reportCallIssue]
             await session.update(model=123)  # pyright: ignore[reportCallIssue, reportArgumentType]
-            await session.update(model_settings={"temperature": 0.2})  # pyright: ignore[reportCallIssue, reportArgumentType]
+            await session.update(model_settings={"temperature": "hot"})  # pyright: ignore[reportCallIssue, reportArgumentType]
             await session.update(model_settings={"reasoning_effort": None})  # pyright: ignore[reportCallIssue, reportArgumentType]
             await session.update(instructions=123)  # pyright: ignore[reportCallIssue, reportArgumentType]
             await session.submit("input", tools=[unrelated_context])  # pyright: ignore[reportArgumentType]

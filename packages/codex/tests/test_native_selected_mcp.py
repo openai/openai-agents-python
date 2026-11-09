@@ -669,9 +669,10 @@ async def test_selected_mcp_retains_timeout_policy_and_borrowed_connection(
         finally:
             release.set()
 
-        # Closing the timed-out Session leaves the application-owned connection usable.
+        # The recovery call proves connection reuse under a normal callback budget.
         assert await client.list_tools()
-        async with agent.session(context=context) as session:
+        recovery = replace(agent, tools=[replace(configured, callback_timeout=10.0)])
+        async with recovery.session(context=context) as session:
             assert (await (await session.submit("Read again")).get_result()).final_output == "done"
         assert hooks == ["before", "before", "after"]
         assert peer.label in tool_output(responses.requests[-1], "selected-success")

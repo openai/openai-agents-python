@@ -115,6 +115,7 @@ def test_package_root_has_one_public_surface():
         "thread_usage",
         "state",
         "repair_attempts",
+        "tool_call",
     ]
 
 

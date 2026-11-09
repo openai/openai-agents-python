@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .native_interception import StopTurn as StopTurn
+from .tools import ToolCallInfo as ToolCallInfo
 
 ContextT = TypeVar("ContextT")
 _DecisionT = TypeVar("_DecisionT")
@@ -69,6 +70,8 @@ class CompletionContext(Generic[ContextT]):
     subagent_id: str | None
     model: str
     continuation_count: int
+    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    final_output: Any = field(default=None, kw_only=True, repr=False)
 
     @overload
     async def decide(

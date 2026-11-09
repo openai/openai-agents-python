@@ -22,6 +22,7 @@ from _agents_codex.mcp import (
     MCPGetPromptResult as MCPGetPromptResult,
     MCPListResourcesResult as MCPListResourcesResult,
     MCPListResourceTemplatesResult as MCPListResourceTemplatesResult,
+    MCPMetadataContext as MCPMetadataContext,
     MCPPrompt as MCPPrompt,
     MCPPromptArgument as MCPPromptArgument,
     MCPPromptAudioContent as MCPPromptAudioContent,

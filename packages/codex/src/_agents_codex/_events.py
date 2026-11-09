@@ -296,7 +296,17 @@ class NativeInputText(TypedDict):
 
 class NativeInputImage(TypedDict):
     type: Literal["inputImage"]
-    imageUrl: str
+    imageUrl: NotRequired[str]
+    fileId: NotRequired[str]
+    detail: NotRequired[Literal["auto", "low", "high", "original"] | None]
+
+
+class NativeInputFile(TypedDict):
+    type: Literal["inputFile"]
+    file_id: NotRequired[str]
+    file_data: NotRequired[str]
+    file_url: NotRequired[str]
+    filename: NotRequired[str]
 
 
 class NativeInputAudio(TypedDict):
@@ -305,7 +315,7 @@ class NativeInputAudio(TypedDict):
 
 
 class FunctionCallResponse(TypedDict):
-    contentItems: list[NativeInputText | NativeInputImage | NativeInputAudio]
+    contentItems: list[NativeInputText | NativeInputImage | NativeInputFile | NativeInputAudio]
     success: bool
 
 
@@ -479,7 +489,17 @@ class InputText(TypedDict):
 
 class InputImage(TypedDict):
     type: Literal["input_image"]
-    image_url: str
+    image_url: NotRequired[str]
+    file_id: NotRequired[str]
+    detail: NotRequired[Literal["auto", "low", "high", "original"] | None]
+
+
+class InputFile(TypedDict):
+    type: Literal["input_file"]
+    file_id: NotRequired[str]
+    file_data: NotRequired[str]
+    file_url: NotRequired[str]
+    filename: NotRequired[str]
 
 
 class SummaryText(TypedDict):
@@ -611,7 +631,7 @@ class FunctionCallOutputItem(TypedDict):
     turn_id: str
     call_id: str
     status: FunctionCallStatus
-    output: str | list[InputText | InputImage] | None
+    output: str | list[InputText | InputImage | InputFile] | None
     error: str | None
     reconciliation: NotRequired[Literal["applied", "not_applied"]]
 
@@ -735,7 +755,7 @@ class UserMessageItem(TypedDict):
     role: Literal["user"]
     status: Literal["completed"]
     phase: None
-    content: list[InputText | InputImage]
+    content: list[InputText | InputImage | InputFile]
 
 
 SessionItem = _PublicTypeAliasType(
