@@ -332,9 +332,11 @@ robot_agent = pirate_agent.clone(
 Supplying a list of tools doesn't always mean the LLM will use a tool. You can force tool use by setting [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice]. Valid values are:
 
 1. `auto`, which allows the LLM to decide whether or not to use a tool.
-2. `required`, which requires the LLM to use a tool (but it can intelligently decide which tool).
+2. `required`, which requires the LLM to use a tool and lets it choose among the available tools.
 3. `none`, which requires the LLM to _not_ use a tool.
 4. Setting a specific string e.g. `my_tool`, which requires the LLM to use that specific tool.
+
+For a read-only request, expose only read-only tools. For example, if a user asks for a ticket's status and the only available tools add a comment or close the ticket, `required` can cause the first tool call to change the ticket. `Agent.reset_tool_choice` takes effect only after the agent has used a tool. Use `auto` when the model should also be able to answer without calling a tool.
 
 When you are using OpenAI Responses tool search, named tool choices are more limited: you cannot target bare namespace names or deferred-only tools with `tool_choice`, and `tool_choice="tool_search"` does not target [`ToolSearchTool`][agents.tool.ToolSearchTool]. In those cases, prefer `auto` or `required`. See [Hosted tool search](tools.md#hosted-tool-search) for the Responses-specific constraints.
 
