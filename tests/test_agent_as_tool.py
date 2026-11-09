@@ -27,8 +27,10 @@ from agents import (
     Runner,
     RunResult,
     RunResultStreaming,
+    RunState,
     Session,
     SessionSettings,
+    Tool,
     ToolApprovalItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -53,11 +55,143 @@ from agents.tool_context import ToolContext
 from tests.mcp.helpers import FakeMCPServer
 from tests.mcp.model_compat import create_mcp_error
 from tests.test_responses import get_function_tool_call, get_text_message
-from tests.utils.hitl import make_function_tool_call
+from tests.utils.hitl import make_function_tool_call, make_state_with_interruptions
 
 
 class BoolCtx(BaseModel):
     enable_tools: bool
+
+
+class _CaptureDelegationContext(RunHooks[Any]):
+    def __init__(self, delegate: FunctionTool):
+        self.delegate = delegate
+        self.context: ToolContext[Any] | None = None
+
+    async def on_tool_start(
+        self, context: RunContextWrapper[Any], agent: Agent, tool: Tool
+    ) -> None:
+        if tool is self.delegate:
+            assert isinstance(context, ToolContext)
+            self.context = context
+
+
+@pytest.mark.parametrize("approve", [True, False], ids=["approve", "reject"])
+@pytest.mark.parametrize("via_middle", [False, True], ids=["direct", "through_middle"])
+@pytest.mark.asyncio
+async def test_agent_as_tool_tool_context_decision_survives_parent_checkpoint(
+    approve: bool,
+    via_middle: bool,
+) -> None:
+    reservations: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def reserve_room(room: str) -> str:
+        reservations.append(room)
+        return f"Reserved {room}"
+
+    worker = Agent(
+        name="Worker",
+        model=ScriptedModel(
+            [[get_function_tool_call("reserve_room", '{"room":"Cedar"}', "inner")]]
+        ),
+        tools=[reserve_room],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    delegate = worker.as_tool("reservations", "Reserve meeting rooms")
+    if via_middle:
+
+        @function_tool
+        def finish() -> str:
+            return "Finished"
+
+        # Call IDs belong to a run. The middle agent can reuse the worker's ID.
+        middle = Agent(
+            name="Middle",
+            model=ScriptedModel(
+                [
+                    [get_function_tool_call("reservations", '{"input":"Reserve Cedar"}', "middle")],
+                    [get_function_tool_call("finish", "{}", "inner")],
+                ]
+            ),
+            tools=[delegate, finish],
+            tool_use_behavior={"stop_at_tool_names": ["finish"]},
+        )
+        delegate = middle.as_tool("reservations", "Delegate reservations")
+    coordinator = Agent(
+        name="Coordinator",
+        model=ScriptedModel(
+            [[get_function_tool_call("reservations", '{"input":"Reserve Cedar"}', "outer")]]
+        ),
+        tools=[delegate],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    hooks = _CaptureDelegationContext(delegate)
+    paused = await Runner.run(coordinator, "Reserve Cedar", hooks=hooks)
+    (approval,) = paused.interruptions
+    context = hooks.context
+    assert context is not None
+    assert approval.tool_name == "reserve_room"
+    if approve:
+        context.approve_tool(approval)
+    else:
+        context.reject_tool(approval, rejection_message="Reservation denied")
+
+    resumed = await Runner.run(coordinator, paused.to_state())
+    assert resumed.interruptions == []
+    assert reservations == (["Cedar"] if approve else [])
+    expected_worker_output = "Reserved Cedar" if approve else "Reservation denied"
+    assert resumed.final_output == ("Finished" if via_middle else expected_worker_output)
+
+
+@pytest.mark.asyncio
+async def test_tool_context_distinguishes_sibling_agent_approvals_after_first_decision() -> None:
+    executed: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def confirm(ctx: ToolContext) -> str:
+        assert ctx.agent is not None
+        executed.append(ctx.agent.name)
+        return "Confirmed"
+
+    workers = [
+        Agent(
+            name=name,
+            model=ScriptedModel([[get_function_tool_call("confirm", "{}", "shared")]]),
+            tools=[confirm],
+            tool_use_behavior="stop_on_first_tool",
+        ).as_tool(name, "Confirm")
+        for name in ("alice", "bob")
+    ]
+    group = Agent(
+        name="Group",
+        model=ScriptedModel(
+            [
+                [
+                    get_function_tool_call(worker.name, '{"input":"go"}', worker.name)
+                    for worker in workers
+                ]
+            ]
+        ),
+        tools=workers,
+        tool_use_behavior="stop_on_first_tool",
+    )
+    delegate = group.as_tool("group", "Ask both workers")
+    parent = Agent(
+        name="Parent",
+        model=ScriptedModel([[get_function_tool_call("group", '{"input":"go"}', "parent")]]),
+        tools=[delegate],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    hooks = _CaptureDelegationContext(delegate)
+    paused = await Runner.run(parent, "go", hooks=hooks)
+    items = {item.agent.name: item for item in paused.interruptions}
+    assert set(items) == {"alice", "bob"}
+    assert hooks.context is not None
+    hooks.context.approve_tool(items["alice"])
+    hooks.context.reject_tool(items["bob"])
+    resumed = await Runner.run(parent, paused.to_state())
+    assert resumed.interruptions == []
+    assert executed == ["alice"]
 
 
 @pytest.mark.asyncio
@@ -1485,16 +1619,12 @@ async def test_agent_as_tool_rejected_nested_approval_resumes_run(
     inner_call = make_function_tool_call("inner_tool", call_id="inner-1")
     approval_item = ToolApprovalItem(agent=agent, raw_item=inner_call)
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
             self.final_output = None
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
     class DummyResumedResult:
@@ -1502,14 +1632,7 @@ async def test_agent_as_tool_rejected_nested_approval_resumes_run(
             self.interruptions: list[ToolApprovalItem] = []
             self.final_output = "rejected"
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=tool_call.name,
-        tool_call_id=tool_call.call_id,
-        tool_arguments=tool_call.arguments,
-        tool_call=tool_call,
-    )
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [approval_item])
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
     tool_context.reject_tool(approval_item)
@@ -1653,16 +1776,12 @@ async def test_agent_as_tool_wrapped_hosted_mcp_exact_decision_resumes_run(
         tool_name="lookup_account",
     )
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
             self.final_output = None
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
     class DummyResumedResult:
@@ -1670,14 +1789,7 @@ async def test_agent_as_tool_wrapped_hosted_mcp_exact_decision_resumes_run(
             self.interruptions: list[ToolApprovalItem] = []
             self.final_output = "rejected"
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=tool_call.name,
-        tool_call_id=tool_call.call_id,
-        tool_arguments=tool_call.arguments,
-        tool_call=tool_call,
-    )
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [approval_item])
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
     tool_context.reject_tool(approval_item, rejection_message="exact denial")
@@ -1735,16 +1847,12 @@ async def test_agent_as_tool_namespaced_nested_always_approve_stays_permanent(
     )
     approval_item = ToolApprovalItem(agent=agent, raw_item=inner_call)
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
             self.final_output = None
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
     class DummyResumedResult:
@@ -1752,14 +1860,7 @@ async def test_agent_as_tool_namespaced_nested_always_approve_stays_permanent(
             self.interruptions: list[ToolApprovalItem] = []
             self.final_output = "approved"
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=tool_call.name,
-        tool_call_id=tool_call.call_id,
-        tool_arguments=tool_call.arguments,
-        tool_call=tool_call,
-    )
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [approval_item])
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
     tool_context.approve_tool(approval_item, always_approve=True)
@@ -1814,24 +1915,13 @@ def test_agent_as_tool_tool_context_ambiguous_approval_identity_fails_closed(
     )
     tool_context._tool_invocation_status(current_call)  # noqa: SLF001
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         interruptions = [nested_approval]
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=outer_call.name,
-        tool_call_id=outer_call.call_id,
-        tool_arguments=outer_call.arguments,
-        tool_call=outer_call,
-    )
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [nested_approval])
     record_agent_tool_run_result(
         outer_call,
         cast(Any, DummyPendingResult()),
@@ -1852,8 +1942,9 @@ def test_agent_as_tool_tool_context_ambiguous_approval_identity_fails_closed(
         )
         is None
     )
+    assert resume_state._context is not None
     assert (
-        nested_context.get_approval_status(
+        resume_state._context.get_approval_status(
             "sensitive",
             "shared",
             existing_pending=nested_approval,
@@ -1980,16 +2071,12 @@ async def test_agent_as_tool_hosted_mcp_nested_sticky_decision_stays_scoped(
         ),
     )
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
             self.final_output = None
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
     class DummyResumedResult:
@@ -1997,14 +2084,7 @@ async def test_agent_as_tool_hosted_mcp_nested_sticky_decision_stays_scoped(
             self.interruptions: list[ToolApprovalItem] = []
             self.final_output = "resumed"
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=tool_call.name,
-        tool_call_id=tool_call.call_id,
-        tool_arguments=tool_call.arguments,
-        tool_call=tool_call,
-    )
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [approval_item])
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
     if legacy_sticky:
@@ -2126,16 +2206,12 @@ async def test_agent_as_tool_deferred_legacy_nested_approval_requires_fresh_deci
         tool_lookup_key=("deferred_top_level", "get_weather"),
     )
 
-    class DummyState:
-        def __init__(self, nested_context: ToolContext) -> None:
-            self._context = nested_context
-
     class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
             self.final_output = None
 
-        def to_state(self) -> DummyState:
+        def to_state(self) -> RunState:
             return resume_state
 
     class DummyResumedResult:
@@ -2143,19 +2219,12 @@ async def test_agent_as_tool_deferred_legacy_nested_approval_requires_fresh_deci
             self.interruptions: list[ToolApprovalItem] = []
             self.final_output = "approved"
 
-    nested_context = ToolContext(
-        context=None,
-        tool_name=tool_call.name,
-        tool_call_id=tool_call.call_id,
-        tool_arguments=tool_call.arguments,
-        tool_call=tool_call,
-    )
     tool_context._approvals["get_weather.get_weather"] = _ApprovalRecord(
         approved=True,
         rejected=[],
     )
     tool_context._allow_legacy_approval_binding_reconstruction = True
-    resume_state = DummyState(nested_context)
+    resume_state = make_state_with_interruptions(agent, [approval_item])
     pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
 
