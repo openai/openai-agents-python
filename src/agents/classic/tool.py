@@ -9,7 +9,7 @@ import json
 import math
 import typing
 import weakref
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import FunctionType, UnionType
@@ -1679,6 +1679,20 @@ Tool = (
     | ProgrammaticToolCallingTool
 )
 """A tool that can be used in an agent."""
+
+
+_CLASSIC_TOOL_TYPES = tuple(
+    typing.get_origin(tool_type) or tool_type for tool_type in typing.get_args(Tool)
+)
+
+
+def _validate_classic_tools(tools: Sequence[object]) -> None:
+    for tool in tools:
+        if not isinstance(tool, _CLASSIC_TOOL_TYPES):
+            raise TypeError(
+                "Classic Runner requires Classic tool declarations. "
+                "Use agents.classic tools with Classic Agent, or native tools with native Agent."
+            )
 
 
 def tool_namespace(

@@ -2243,9 +2243,8 @@ impl NativeThread {
                         let Some(child_tools) = tools.owner(&inner.id.to_string(), &request) else {
                             return Ok(false);
                         };
-                        let native_media = child_tools.native_media(&request);
-                        let Some(sender) = child_tools
-                            .take_reply(&request.reply.thread, &request)
+                        let Some(native_media) = child_tools
+                            .automatic_reply_media(&request.reply.thread, &request)
                             .map_err(py_error)?
                         else {
                             return Ok(false);
@@ -2262,6 +2261,12 @@ impl NativeThread {
                             )
                             .await
                             .map_err(py_error)?;
+                        let Some(sender) = child_tools
+                            .take_reply(&request.reply.thread, &request)
+                            .map_err(py_error)?
+                        else {
+                            return Ok(false);
+                        };
                         // Child results use the same canonical receipt gate;
                         // they never enter an SDK manual continuation.
                         if inner.engine.local_checklist_store.is_some() {
@@ -2287,17 +2292,16 @@ impl NativeThread {
                         }
                         return Ok(sender.send(response).is_ok());
                     }
-                    let reentry = tools.is_reentry(&request);
-                    let restored_model = tools
-                        .restored_media_model(&request, &response)
-                        .map_err(py_error)?;
-                    let native_media = tools.native_media(&request);
-                    let Some(sender) = tools
-                        .take_reply(&inner.id.to_string(), &request)
+                    let Some(native_media) = tools
+                        .automatic_reply_media(&inner.id.to_string(), &request)
                         .map_err(py_error)?
                     else {
                         return Ok(false);
                     };
+                    let reentry = tools.is_reentry(&request);
+                    let restored_model = tools
+                        .restored_media_model(&request, &response)
+                        .map_err(py_error)?;
                     inner
                         .engine
                         .validate_tool_files(
@@ -2310,6 +2314,12 @@ impl NativeThread {
                         )
                         .await
                         .map_err(py_error)?;
+                    let Some(sender) = tools
+                        .take_reply(&inner.id.to_string(), &request)
+                        .map_err(py_error)?
+                    else {
+                        return Ok(false);
+                    };
                     if inner
                         .engine
                         .store

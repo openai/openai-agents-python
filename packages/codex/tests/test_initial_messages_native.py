@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore
+from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
 
 SEEDS = [
@@ -41,6 +42,26 @@ async def test_initial_messages_portable_round_trip_has_no_turn_or_request(respo
         async with agent.session(state=state) as restored:
             assert messages(await restored.model_context()) == initial
             assert [turn async for turn in restored.turns()] == []
+        assert responses.requests == []
+
+
+async def test_large_initial_messages_preserve_order_and_duplicate_content(responses):
+    seeds = [
+        {"role": "assistant" if index % 2 == 0 else "user", "content": f"seed-{index % 7}"}
+        for index in range(1000)
+    ]
+    async with (
+        timeout(30),
+        NativeProvider(base_url=responses.url, api_key="synthetic-large-seeds") as provider,
+    ):
+        agent = Agent(instructions="Keep the conversation.", provider=provider)
+        async with agent.session(initial_messages=seeds) as session:
+            initial = messages(await session.model_context())
+            assert [(item["role"], item["content"][0]["text"]) for item in initial] == [
+                (seed["role"], seed["content"]) for seed in seeds
+            ]
+            assert len({item["id"] for item in initial}) == len(seeds)
+            assert [turn async for turn in session.turns()] == []
         assert responses.requests == []
 
 

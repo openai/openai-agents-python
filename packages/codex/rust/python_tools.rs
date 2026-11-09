@@ -2387,6 +2387,31 @@ impl PythonTools {
             .and_then(|call| call.media.clone())
     }
 
+    /// Check automatic reply eligibility without releasing Core's waiting sender.
+    /// The outer option distinguishes a retired reply from a live no-media call.
+    pub(crate) fn automatic_reply_media(
+        &self,
+        owner: &str,
+        key: &PendingKey,
+    ) -> Result<Option<Option<NativeMediaContext>>> {
+        if key.reply.thread != owner || key.reply.instance != self.instance {
+            return Ok(None);
+        }
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get(key) else {
+            return Ok(None);
+        };
+        ensure!(
+            call.manual_request.is_none(),
+            "Manual tool replies require their native grant"
+        );
+        ensure!(
+            call.phase != Phase::Parked,
+            "parked tool cannot reply from an old owner"
+        );
+        Ok(Some(call.media.clone()))
+    }
+
     // Take the live sender only once. The binding retains it while its writer
     // commits the real result; a failed commit cannot be mistaken for success.
     pub(crate) fn take_reply(

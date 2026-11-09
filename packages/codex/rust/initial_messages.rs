@@ -6,6 +6,7 @@ use codex_protocol::ResponseItemId;
 use codex_protocol::models::{ContentItem, ResponseItem};
 use codex_protocol::protocol::EventMsg;
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub(crate) struct Batch(Vec<ResponseItem>);
 
@@ -150,9 +151,10 @@ impl Batch {
             .inject_response_items_for_initialization(self.0.clone())
             .await?;
         let requested_ids: Vec<_> = self.0.iter().map(ResponseItem::id).collect();
+        let requested_id_set: HashSet<_> = requested_ids.iter().copied().collect();
         let prepared_requested_ids: Vec<_> = prepared
             .iter()
-            .filter(|item| requested_ids.contains(&item.id()))
+            .filter(|item| requested_id_set.contains(&item.id()))
             .map(ResponseItem::id)
             .collect();
         ensure!(
@@ -177,9 +179,10 @@ fn confirm<'a>(
     actual: impl IntoIterator<Item = &'a ResponseItem>,
     expected: &[ResponseItem],
 ) -> Result<()> {
+    let expected_ids: HashSet<_> = expected.iter().map(ResponseItem::id).collect();
     let actual: Vec<_> = actual
         .into_iter()
-        .filter(|item| expected.iter().any(|expected| item.id() == expected.id()))
+        .filter(|item| expected_ids.contains(&item.id()))
         .collect();
     ensure!(
         actual.len() == expected.len(),

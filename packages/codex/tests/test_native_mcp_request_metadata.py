@@ -287,9 +287,9 @@ async def test_metadata_restore_uses_fresh_declaration_without_replaying_effect(
         if r.get("message", {}).get("method") == "tools/call"
     ]
     assert observed == ["old", "current"]
-    assert [c["_meta"]["app/owner"] for c in calls] == [
-        "old-metadata-5911",
-        "current-metadata-5911",
+    assert sorted((c["_meta"]["callId"], c["_meta"]["app/owner"]) for c in calls) == [
+        ("new-call", "current-metadata-5911"),
+        ("old-call", "old-metadata-5911"),
     ]
 
 
