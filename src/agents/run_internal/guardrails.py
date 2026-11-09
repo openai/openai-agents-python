@@ -52,6 +52,20 @@ async def run_single_output_guardrail(
         return result
 
 
+def _unreported_input_guardrail_results(
+    tasks: list[asyncio.Task[InputGuardrailResult]], recorded: list[InputGuardrailResult]
+) -> list[InputGuardrailResult]:
+    """Collect successful siblings that as_completed has not yielded yet."""
+    recorded_ids = {id(result) for result in recorded}
+    missing = []
+    for task in tasks:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            result = task.result()
+            if id(result) not in recorded_ids:
+                missing.append(result)
+    return missing
+
+
 async def run_input_guardrails_with_queue(
     agent: Agent[Any],
     guardrails: list[InputGuardrail[TContext]],
@@ -77,6 +91,12 @@ async def run_input_guardrails_with_queue(
                 result
             ]
             if result.output.tripwire_triggered:
+                streamed_result.input_guardrail_results = (
+                    streamed_result.input_guardrail_results
+                    + _unreported_input_guardrail_results(
+                        guardrail_tasks, streamed_result.input_guardrail_results
+                    )
+                )
                 streamed_result._triggered_input_guardrail_result = result
                 queue.put_nowait(result)
                 for t in guardrail_tasks:
@@ -146,6 +166,10 @@ async def run_input_guardrails(
             result = await done
             if result.output.tripwire_triggered:
                 record(result)
+                for sibling in _unreported_input_guardrail_results(
+                    guardrail_tasks, guardrail_results
+                ):
+                    record(sibling)
                 for t in guardrail_tasks:
                     t.cancel()
                 await asyncio.gather(*guardrail_tasks, return_exceptions=True)
