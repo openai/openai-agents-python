@@ -127,6 +127,31 @@ async def test_builtin_uses_shared_compiler_and_real_http(decision_peer):
     assert not decision_peer.client.is_closed()
 
 
+@pytest.mark.parametrize(
+    "choices,expected",
+    [
+        ([False, "unknown"], "unknown"),
+        (["unknown", False], False),
+        ([True, "unknown"], "unknown"),
+        (["unknown", True], True),
+    ],
+)
+async def test_builtin_boolean_choices_use_decisions_without_fallback(
+    decision_peer, choices, expected
+):
+    async with OpenAIDecisions(client=decision_peer.client) as decisions:
+        result = await decisions.decide(
+            "Choose the exact value.", input="Evidence", choices=choices
+        )
+    assert result == expected
+    assert type(result) is type(expected)
+    assert len(decision_peer.requests) == 1
+    path, body = decision_peer.requests[0]
+    assert path == "/decisions"
+    assert len(body["questions"]) == 1
+    assert len(body["questions"][0]["choices"]) == 2
+
+
 @pytest.mark.parametrize("mode,reason", [("refusal", "refusal"), ("invalid", "invalid_response")])
 async def test_builtin_errors_retain_completed_metadata(decision_peer, mode, reason):
     decision_peer.mode = mode

@@ -1,9 +1,9 @@
 diff --git a/codex-rs/codex-api/src/decisions.rs b/codex-rs/codex-api/src/decisions.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..35f2241f252beec71c52e63286a61fbe4111702f
+index 0000000000000000000000000000000000000000..36ea2c81226d7a7cc264846d06440890c61730bc
 --- /dev/null
 +++ b/codex-rs/codex-api/src/decisions.rs
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,647 @@
 +//! Convert one bounded output schema into Decisions questions and a JSON value.
 +//!
 +//! The SDK owns transport, provider selection, typed validation and execution.
@@ -377,11 +377,9 @@ index 0000000000000000000000000000000000000000..35f2241f252beec71c52e63286a61fbe
 +    {
 +        let mut values = Vec::new();
 +        for branch in branches {
-+            let branch_values = if branch["type"] == "boolean" {
-+                vec![json!(true), json!(false)]
-+            } else {
-+                finite_values(branch)?
-+            };
++            let branch_values = finite_values(branch).or_else(|| {
++                (branch["type"] == "boolean").then(|| vec![json!(true), json!(false)])
++            })?;
 +            // Union branches must be finite scalar schemas, with no hidden constraints.
 +            for value in branch_values {
 +                if !scalar_matches(branch, &value) {
@@ -655,10 +653,10 @@ index 0000000000000000000000000000000000000000..35f2241f252beec71c52e63286a61fbe
 +mod tests;
 diff --git a/codex-rs/codex-api/src/decisions/tests.rs b/codex-rs/codex-api/src/decisions/tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6d63fe6b51d30544c8e49a8f5dece9723d75103
+index 0000000000000000000000000000000000000000..c85f9b88f50d2a5a324aeeea1925fb4ef3f1af05
 --- /dev/null
 +++ b/codex-rs/codex-api/src/decisions/tests.rs
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,233 @@
 +use super::*;
 +
 +fn object(properties: Value) -> Value {
@@ -773,6 +771,7 @@ index 0000000000000000000000000000000000000000..f6d63fe6b51d30544c8e49a8f5dece97
 +#[test]
 +fn uses_probability_threshold_for_boolean_only() {
 +    let plan = DecisionSchema::compile(&json!({"type":"boolean"}), "Is it ready?").unwrap();
++    assert_eq!(plan.questions()[0]["type"], "predicate");
 +    for (probability, expected) in [(0.49, false), (0.5, true), (1.0, true)] {
 +        assert_eq!(
 +            plan.decode(&[predicate(&plan.questions()[0], probability)])
@@ -824,6 +823,72 @@ index 0000000000000000000000000000000000000000..f6d63fe6b51d30544c8e49a8f5dece97
 +        DecisionSchema::compile(&object(json!({"status":{"const":"fixed"}})), "Evaluate.").unwrap();
 +    assert!(plan.questions().is_empty());
 +    assert_eq!(plan.decode(&[]).unwrap(), json!({"status":"fixed"}));
++}
++
++#[test]
++fn constrained_boolean_union_branches_preserve_their_finite_values() {
++    for keyword in ["anyOf", "oneOf"] {
++        for selected in [false, true] {
++            for constraint in [json!({"const":selected}), json!({"enum":[selected]})] {
++                let mut branch = json!({"type":"boolean"});
++                branch
++                    .as_object_mut()
++                    .unwrap()
++                    .extend(constraint.as_object().unwrap().clone());
++                let schema = json!({keyword:[branch,{"type":"string","const":"unknown"}]});
++                let plan = DecisionSchema::compile(&schema, "Choose the exact value.").unwrap();
++                let questions = plan.questions();
++                assert_eq!(questions.len(), 1);
++                assert_eq!(questions[0]["type"], "choice");
++                assert_eq!(questions[0]["choices"].as_array().unwrap().len(), 2);
++                assert_eq!(
++                    plan.decode(&[choice(&questions[0], 0)]).unwrap(),
++                    json!(selected)
++                );
++                assert_eq!(
++                    plan.decode(&[choice(&questions[0], 1)]).unwrap(),
++                    json!("unknown")
++                );
++            }
++        }
++        let schema = json!({keyword:[{"type":"boolean"},{"type":"string","const":"unknown"}]});
++        let plan = DecisionSchema::compile(&schema, "Choose the exact value.").unwrap();
++        let questions = plan.questions();
++        assert_eq!(questions[0]["choices"].as_array().unwrap().len(), 3);
++        for (index, expected) in [json!(true), json!(false), json!("unknown")]
++            .into_iter()
++            .enumerate()
++        {
++            assert_eq!(
++                plan.decode(&[choice(&questions[0], index)]).unwrap(),
++                expected
++            );
++        }
++    }
++}
++
++#[test]
++fn boolean_union_constraints_keep_rejecting_invalid_or_ambiguous_branches() {
++    for branch in [
++        json!({"type":"boolean","enum":"invalid"}),
++        json!({"type":"boolean","enum":[false,"invalid"]}),
++        json!({"type":"boolean","const":"invalid"}),
++        json!({"type":"boolean","const":false,"not":{"const":true}}),
++    ] {
++        for keyword in ["anyOf", "oneOf"] {
++            let schema = json!({keyword:[branch,{"type":"string","const":"unknown"}]});
++            assert!(DecisionSchema::compile(&schema, "Choose.").is_none());
++        }
++    }
++    assert!(
++        DecisionSchema::compile(
++            &json!({"oneOf":[
++                {"type":"boolean","const":false},{"type":"boolean","enum":[false]}
++            ]}),
++            "Choose."
++        )
++        .is_none()
++    );
 +}
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
 index ce0ed21cec52b9ebd98ed82711cf7eafc83000af..83c2a35e9811700bfecb857ae2554967c7d626e7 100644
