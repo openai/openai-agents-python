@@ -273,7 +273,9 @@ Use `Tool[Application]` to annotate collections that mix supported tool declarat
 
 `ToolOutput.text(value)`, `ToolOutput.image(image_url)` and `ToolOutput.error(message)` construct native tool results. For mixed content, pass a list of `ToolOutputText` and `ToolOutputImage` items to `ToolOutput`. In `0.24.0-alpha.7`, images must be inline base64 image data URLs; remote URLs, file IDs, and local paths are unsupported. `ToolOutput.error(...)` returns an explicit failed tool result (`success=False`), which differs from raising a Python exception. See [tool values](tools.md#inspect-or-change-tool-values).
 
-Matching development builds also support provider image IDs and optional image `detail` through `ToolOutput.image(file_id=..., detail=...)` or `ToolOutputImage`. `ToolOutput.file(...)` and `ToolOutputFile` accept exactly one of `file_id`, base64 `file_data`, or HTTPS `file_url`, with optional `filename`. Mixed results can include `ToolOutputFile` items. See [tool-result media](tools.md#return-text-images-and-tool-errors) for source validation, model limits, and an example. These additions are absent from the alpha.7 wheel.
+Matching development builds also support HTTP(S) image URLs, provider image IDs, and optional image `detail` through `ToolOutput.image(...)` or `ToolOutputImage`. Supply exactly one of `image_url` and `file_id`. Optional `detail` accepts `None`, `"low"`, `"high"`, `"auto"`, or `"original"`. HTTP(S) URLs and image file IDs require API-key authentication and a compatible standard Responses model; `CodexLogin` and Responses Lite do not support these references. The helpers do not fetch URLs or upload files. Local filesystem paths are unsupported.
+
+`ToolOutput.file(...)` and `ToolOutputFile` accept exactly one of `file_id`, base64 `file_data`, or HTTPS `file_url`, with optional `filename`. Mixed results can include `ToolOutputFile` items. See [tool-result media](tools.md#return-text-images-and-tool-errors) for source validation, model limits, and examples. These additions are absent from the alpha.7 wheel.
 
 ### ToolContext
 
@@ -532,7 +534,7 @@ A dictionary with `type="input_text"` and `text`.
 
 A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`, for the original preview profile.
 
-Matching development builds also accept absolute HTTP(S) image URLs and `detail` values of `None`, `"low"`, `"high"`, or `"original"`, subject to native model support. `InputImageFile` uses a provider-owned image `file_id`. `InputFile` uses exactly one of `file_id`, `file_data`, or HTTPS `file_url`. These types can appear in `UserMessage.content`; see [development image and file input](sessions.md#images-and-files-in-development-builds) for validation and provider limits. These additions do not establish alpha.7 wheel availability.
+Matching development builds also accept absolute HTTP(S) image URLs and `detail` values of `None`, `"low"`, `"high"`, or `"original"`, subject to native model support. HTTP(S) URLs have the same [route and model limits as image results](tools.md#return-text-images-and-tool-errors). The distinct `InputImageFile` type uses a provider-owned image `file_id`. `InputFile` uses exactly one of `file_id`, `file_data`, or HTTPS `file_url`. These types can appear in `UserMessage.content`; see [development image and file input](sessions.md#images-and-files-in-development-builds) for validation and provider limits. These additions do not establish alpha.7 wheel availability.
 
 ## Existing MCP clients
 

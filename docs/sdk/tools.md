@@ -82,7 +82,7 @@ After an accepted `ReplaceArguments`, the SDK validates the replacement again an
 
 ### Return text, images and tool errors
 
-Use `ToolOutput.text(...)` for explicit text, `ToolOutput.image(...)` for an inline image, and `ToolOutput.error(...)` for a failed tool reply. Combine `ToolOutputText` and `ToolOutputImage` items for mixed content:
+Use `ToolOutput.text(...)` for explicit text, `ToolOutput.image(...)` for an image reference, and `ToolOutput.error(...)` for a failed tool reply. Combine `ToolOutputText` and `ToolOutputImage` items for mixed content:
 
 ```python
 from agents import ToolOutput, ToolOutputImage, ToolOutputText, function_tool
@@ -100,7 +100,16 @@ def preview() -> ToolOutput:
 
 Annotate functions that return these objects with `ToolOutput`, as above. In `0.24.0-alpha.7`, images require inline base64 image data URLs; remote URLs, file IDs, and local paths are unsupported.
 
-Matching development builds also accept provider-owned image IDs with `ToolOutput.image(file_id=..., detail=...)` or `ToolOutputImage(file_id=..., detail=...)`. `detail` accepts `None`, `"auto"`, `"low"`, `"high"`, or `"original"`, subject to the current model's image support. Known combinations that would lose detail fail rather than silently changing the image. These additions require a [matching development build](versions.md).
+Matching development builds also accept HTTP or HTTPS image URLs and provider-owned image IDs with `ToolOutput.image(...)` or `ToolOutputImage(...)`. Supply exactly one of `image_url` and `file_id`. Optional `detail` accepts `None`, `"auto"`, `"low"`, `"high"`, or `"original"`, subject to the current model's image support. Known combinations that would lose detail fail rather than silently changing the image. These additions require a [matching development build](versions.md).
+
+HTTP(S) URLs and file IDs require API-key authentication and a compatible model that uses standard Responses. Set `Agent.model` explicitly; the current default model uses Responses Lite. `CodexLogin` and Responses Lite do not support these references. Use inline base64 image data URLs on those routes, subject to the model's image and detail support. See [provider configuration](configuration.md#provider-connection).
+
+```python
+remote_reply = ToolOutput.image("https://example.com/preview.png", detail="low")
+uploaded_reply = ToolOutput.image(file_id="file-your-uploaded-image")
+```
+
+These helpers preserve the reference without fetching URLs or uploading files. The native runtime checks the current route, model, and detail before publishing the result. Local filesystem paths are unsupported.
 
 Development builds add `ToolOutput.file(...)` and `ToolOutputFile(...)`. Supply exactly one of `file_id`, canonical base64 `file_data`, or HTTPS `file_url`, with an optional `filename`. Base64 data can include a base64 data-URL prefix. The SDK does not read or upload local files for these declarations. Use a provider and model that support the selected media sources.
 

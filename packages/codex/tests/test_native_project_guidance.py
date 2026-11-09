@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, Environment
+from agents.observation import TurnStarted
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
 
@@ -78,8 +79,14 @@ async def test_native_agents_preserves_root_project_guidance(
             model="gpt-5.5",
             tools=[NativeAgents()],
             provider=provider(responses),
-        ).session(environment=declaration(executor), project_guidance=project_guidance) as session:
+        ).session(
+            environment=declaration(executor),
+            project_guidance=project_guidance,
+            observation_retention="all",
+        ) as session:
             assert (await (await session.submit("Answer.")).get_result()).final_output == "done"
+        retained = [event async for event in session.events()]
+        assert sum(isinstance(event, TurnStarted) for event in retained) == 1
         names = {tool.get("name") for tool in responses.requests[0]["tools"]}
         assert ("view_image" in names) is project_guidance
         assert "exec_command" in names

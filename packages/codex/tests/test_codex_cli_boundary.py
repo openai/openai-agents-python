@@ -95,7 +95,11 @@ def test_classic_cli_patch_targets_and_exception_identities(monkeypatch) -> None
 def test_project_guidance_is_appended_to_public_session_signatures() -> None:
     for declaration in [Agent.session, *get_overloads(Agent.session)]:
         parameters = list(inspect.signature(declaration).parameters)
-        assert parameters[-2:] == ["max_function_concurrency", "project_guidance"]
+        assert parameters[-3:] == [
+            "max_function_concurrency",
+            "observation_retention",
+            "project_guidance",
+        ]
 
 
 @pytest.mark.parametrize(
