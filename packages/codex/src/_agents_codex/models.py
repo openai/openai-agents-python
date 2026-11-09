@@ -117,20 +117,24 @@ class ChatCompletionsModel:
                         raise ValueError(
                             "ChatCompletionsModel received unsupported message content"
                         )
-                messages.append({"role": item["role"], "content": content})
+                if (
+                    item["role"] == "assistant"
+                    and messages
+                    and messages[-1].get("role") == "assistant"
+                ):
+                    messages[-1]["content"] = [*(messages[-1].get("content") or []), *content]
+                else:
+                    messages.append({"role": item["role"], "content": content})
             elif kind == "function_call":
                 if item.get("namespace") not in (None, "functions"):
                     raise ValueError("ChatCompletionsModel supports the default function namespace")
-                messages.append(
+                if not messages or messages[-1].get("role") != "assistant":
+                    messages.append({"role": "assistant", "tool_calls": []})
+                messages[-1].setdefault("tool_calls", []).append(
                     {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "id": item["call_id"],
-                                "type": "function",
-                                "function": {"name": item["name"], "arguments": item["arguments"]},
-                            }
-                        ],
+                        "id": item["call_id"],
+                        "type": "function",
+                        "function": {"name": item["name"], "arguments": item["arguments"]},
                     }
                 )
             elif kind == "function_call_output":

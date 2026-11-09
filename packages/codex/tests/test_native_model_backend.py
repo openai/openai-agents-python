@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Awaitable
 
@@ -76,21 +77,57 @@ async def test_custom_model_core_executes_tool_and_supplies_result_to_next_respo
 
 
 @pytest.mark.parametrize("native_model", [None, "fixture-chat-standard"])
-async def test_chat_client_adapter_stays_inside_native_tool_loop(native_model: str | None) -> None:
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_chat_client_adapter_stays_inside_native_tool_loop(
+    native_model: str | None, parallel: bool
+) -> None:
     seen = []
+    effects = []
 
     async def create(raw_request):
         request = await raw_request.json()
         seen.append(request)
+        pending = set()
+        for history in request["messages"]:
+            if history["role"] == "tool":
+                assert history["tool_call_id"] in pending
+                pending.remove(history["tool_call_id"])
+            else:
+                if pending:
+                    return web.json_response(
+                        {
+                            "error": {
+                                "message": "Missing tool outputs before next Chat message",
+                                "type": "invalid_request_error",
+                            }
+                        },
+                        status=400,
+                    )
+                pending.update(call["id"] for call in history.get("tool_calls", []))
+        assert not pending
         if len(seen) == 1:
             message = {
-                "content": None,
+                "content": "Calling echo twice." if parallel else None,
                 "tool_calls": [
                     {
                         "type": "function",
                         "id": "call_echo",
                         "function": {"name": "echo", "arguments": '{"value":"from-tool"}'},
-                    }
+                    },
+                    *(
+                        [
+                            {
+                                "type": "function",
+                                "id": "call_echo_two",
+                                "function": {
+                                    "name": "echo",
+                                    "arguments": '{"value":"second-tool"}',
+                                },
+                            }
+                        ]
+                        if parallel
+                        else []
+                    ),
                 ],
             }
         else:
@@ -118,6 +155,7 @@ async def test_chat_client_adapter_stays_inside_native_tool_loop(native_model: s
 
     @function_tool
     def echo(value: str) -> str:
+        effects.append(value)
         return value
 
     app = web.Application()
@@ -134,6 +172,15 @@ async def test_chat_client_adapter_stays_inside_native_tool_loop(native_model: s
                 ).run("Call echo.")
     assert result.final_output == "native chat finished"
     assert len(seen) == 2
+    assert sorted(effects) == (["from-tool", "second-tool"] if parallel else ["from-tool"])
+    if parallel:
+        assistants = [message for message in seen[1]["messages"] if message["role"] == "assistant"]
+        assert len(assistants) == 1
+        assert [call["id"] for call in assistants[0]["tool_calls"]] == [
+            "call_echo",
+            "call_echo_two",
+        ]
+        assert "Calling echo twice." in json.dumps(assistants[0]["content"])
     assert seen[0]["model"] == "chat-model"
     assert seen[0]["stream"] is False
 
