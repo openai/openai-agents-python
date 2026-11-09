@@ -902,6 +902,18 @@ index e2da8fdae1e6cfbac62eeda44bb8a46bff4aec9e..692bb689ea920ddb5abcc14d77f61830
  pub(crate) mod endpoint;
  pub(crate) mod error;
  pub(crate) mod files;
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 29a81a8139d2a2132aed8717bee5a1939ad565b6..e8dbd78c98e14bc27209b20a7d53927b9e9dda4c 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1888,6 +1888,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+                     thread_id: Some(parent_thread_id),
+                     thread_settings: ThreadSettingsSnapshot {
+                         request_controls: Default::default(),
++                        invocation_timeout_ms: None,
+                         tool_choice: None,
+                         disabled_plugin_ids: Vec::new(),
+                         model: "parent-only-model".to_string(),
 diff --git a/codex-rs/core/src/auxiliary_response.rs b/codex-rs/core/src/auxiliary_response.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..579b75b4c1f38a5eff6b8a23fc66aeb859236739
@@ -998,6 +1010,18 @@ index 0000000000000000000000000000000000000000..579b75b4c1f38a5eff6b8a23fc66aeb8
 +        );
 +    }
 +}
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 9d31ca78fa394c91c046bbd78c3d0ab90a6cb7ce..25b5a0aa933058ee9f88c19093811aa9c44193ec 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1607,6 +1607,7 @@ async fn summarize_memories_returns_empty_for_empty_input() {
+ fn terminal_observation(response_id: &str) -> ResponseEvent {
+     ResponseEvent::ResponseObserved(codex_protocol::protocol::ResponseObservation {
+         response_id: Some(response_id.to_owned()),
++        upstream_request_id: None,
+         status: codex_protocol::protocol::ResponseObservationStatus::Completed,
+         incomplete_reason: None,
+         usage: None,
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
 index b62d90a66a8329cf8b149738c5f18e3867762896..f2be6e1db31167dc23071955d4b29a4905e95a84 100644
 --- a/codex-rs/core/src/codex_thread.rs
