@@ -5267,7 +5267,7 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     tracing_context = state.tracing.context
                 new_input = invocation not in state.manual_inputs
-                if new_input:
+                if new_input and not isinstance(entry, _CapturedApproval):
                     with (
                         _clear_current(),
                         _owned_span("manual input validation", "validation", tracing_context),
@@ -5283,7 +5283,11 @@ class Session(Generic[ContextT, OutputT]):
                     state.manual_inputs[invocation] = arguments
                 # Cache validation, never grant authority. Every cursor receives
                 # its own value and we check the native grant on every exposure.
-                arguments = deepcopy(state.manual_inputs[invocation])
+                arguments = deepcopy(
+                    state.manual_inputs.get(invocation)
+                    if isinstance(entry, _CapturedApproval)
+                    else state.manual_inputs[invocation]
+                )
                 if (
                     state.stopping
                     or state.failure.done()
@@ -5432,7 +5436,40 @@ class Session(Generic[ContextT, OutputT]):
         request: ApprovalRequested[Any],
         message: dict[str, Any],
     ) -> None:
+        scope = _Invocation(self)
+        token = _invocation.set(scope)
+        permit: asyncio.Semaphore | None = None
+        acquired = False
+
+        def admit() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and not self._closing
+                and self._native._check_manual_tool(request._grant)
+            )
+
         try:
+            if self._max_function_concurrency is not None:
+                if state.function_admission is None:
+                    state.function_admission = asyncio.Semaphore(self._max_function_concurrency)
+                permit = state.function_admission
+                await permit.acquire()
+                acquired = True
+            if not admit():
+                return
+            if request._invocation not in state.manual_inputs:
+                with (
+                    _clear_current(),
+                    _owned_span("manual input validation", "validation", request._tracing_context),
+                ):
+                    arguments = entry.input_adapter.validate_python(message["arguments"])
+                if not admit():
+                    return
+                state.manual_inputs[request._invocation] = arguments
+            arguments = deepcopy(state.manual_inputs[request._invocation])
+            object.__setattr__(request, "arguments", arguments)
+            object.__setattr__(request, "_effective_arguments", deepcopy(arguments))
             function = entry.function
             if "_sdk_effective_arguments" in message:
                 object.__setattr__(
@@ -5454,14 +5491,6 @@ class Session(Generic[ContextT, OutputT]):
                 call=request.call,
             )
 
-            def admit() -> bool:
-                return (
-                    not state.stopping
-                    and not state.failure.done()
-                    and not self._closing
-                    and self._native._check_manual_tool(request._grant)
-                )
-
             if not admit():
                 return
             prepared_input = message.get("_sdk_effective_arguments", message["arguments"])
@@ -5477,6 +5506,7 @@ class Session(Generic[ContextT, OutputT]):
                 if not admit():
                     return
                 if isinstance(decision, Deny):
+                    scope.active = False
                     await self._decide_approval(request, False, reason=decision.reason)
                     return
                 if isinstance(decision, ReplaceArguments):
@@ -5512,6 +5542,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
                 )
                 if cached is not None:
+                    scope.active = False
                     await self._decide_approval(request, cached[0], reason=cached[1])
                     return
                 policy = entry.declaration.needs_approval
@@ -5525,6 +5556,7 @@ class Session(Generic[ContextT, OutputT]):
             if not admit():
                 return
             if not required:
+                scope.active = False
                 await self._decide_approval(request, True)
                 return
             if self._fail_unhandled_questions:
@@ -5542,6 +5574,11 @@ class Session(Generic[ContextT, OutputT]):
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
         finally:
+            if acquired:
+                assert permit is not None
+                permit.release()
+            scope.active = False
+            _invocation.reset(token)
             if isinstance(state, _Submission):
                 state.changed.set()
             self._observations.notify()

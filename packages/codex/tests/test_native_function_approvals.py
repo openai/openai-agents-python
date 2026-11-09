@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from pydantic import BaseModel, field_validator
@@ -22,6 +23,8 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
+from agents.observation import ToolFinished, ToolStarted
+from agents.voice import NativeSessionVoiceWorkflow
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -435,3 +438,178 @@ async def test_approval_preserves_terminal_callback_without_an_extra_model_step(
         await request.approve()
         assert (await turn.get_result()).final_output == "finished-A"
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("mode", ["approved", "automatic", "rejected"])
+async def test_managed_execution_observations_are_balanced(responses, mode):
+    effects = []
+
+    @function_tool(needs_approval=(lambda _context: False) if mode == "automatic" else True)
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    responses.respond(function_call("risky", {"value": "A"}, "observed-approval"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if mode != "automatic":
+            request = await next_request(session.interactions(), risky)
+            assert effects == []
+            if mode == "approved":
+                await request.approve()
+            else:
+                await request.reject("denied")
+        assert (await turn.get_result()).final_output == "done"
+        facts = [
+            type(event)
+            async for event in turn.events()
+            if isinstance(event, (ToolStarted, ToolFinished))
+            and event.call_id == "observed-approval"
+        ]
+        # Python observes callback execution, so rejection has no execution facts.
+        assert facts == ([] if mode == "rejected" else [ToolStarted, ToolFinished])
+        assert effects == ([] if mode == "rejected" else ["A"])
+
+
+@pytest.mark.parametrize("explicit_tools", [False, True])
+async def test_voice_workflow_managed_approval_tool_ceiling(responses, explicit_tools):
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    responses.respond(function_call("risky", {"value": "A"}, "voice-workflow"))
+    responses.respond(assistant_output("spoken output"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        workflow = NativeSessionVoiceWorkflow(session, tools=(risky,) if explicit_tools else None)
+
+        async def speak():
+            return [text async for text in workflow.run("begin")]
+
+        output = asyncio.create_task(speak())
+        try:
+            request = await next_request(session.interactions(), risky)
+            assert effects == []
+            await request.approve()
+            assert await output == ["spoken output"]
+            assert effects == ["A"]
+        finally:
+            output.cancel()
+            await asyncio.gather(output, return_exceptions=True)
+
+
+@pytest.mark.parametrize("phase", ["predicate", "before"])
+async def test_managed_preparation_rejects_callback_self_close(responses, phase):
+    prevented = []
+
+    async def check_close(_context):
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="close its own Session"):
+            await session.aclose()
+        prevented.append(phase)
+
+    async def predicate(context):
+        await check_close(context)
+        return False
+
+    async def before(context):
+        await check_close(context)
+        return Allow()
+
+    @function_tool(
+        needs_approval=predicate if phase == "predicate" else (lambda _: False),
+        before=before if phase == "before" else None,
+        run_before_approval=phase == "before",
+    )
+    def risky(value: str) -> str:
+        return value
+
+    responses.respond(function_call("risky", {"value": "A"}, "self-close"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        assert (await (await session.submit("begin")).get_result()).final_output == "done"
+        assert prevented == ([phase, phase] if phase == "before" else [phase])
+
+
+class AdmissionInput(BaseModel):
+    value: int
+    validated: ClassVar[list[int]] = []
+
+    @field_validator("value")
+    @classmethod
+    def record(cls, value):
+        cls.validated.append(value)
+        return value
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+async def test_managed_preparation_shares_function_admission_and_releases_before_approval(
+    responses, limit
+):
+    from tests.test_native_function_concurrency import queued
+
+    AdmissionInput.validated = []
+    before, policies, effects = [], [], []
+    entered, release, all_prepared = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def guard(context):
+        before.append(context.original_arguments["payload"]["value"])
+        if len(before) == limit:
+            entered.set()
+        await release.wait()
+        return Allow()
+
+    def predicate(context):
+        policies.append(context.effective_arguments["payload"].value)
+        if len(policies) == 3:
+            all_prepared.set()
+        return True
+
+    @function_tool(needs_approval=predicate, before=guard, run_before_approval=True)
+    def risky(payload: AdmissionInput) -> str:
+        effects.append(payload.value)
+        return str(payload.value)
+
+    responses.respond(
+        *[function_call("risky", {"payload": {"value": i}}, f"admission-{i}") for i in range(3)]
+    )
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(instructions="Use risky.", tools=[risky], provider=provider(responses)).session(
+            max_function_concurrency=limit
+        ) as session,
+    ):
+        turn = await session.submit("begin")
+        await entered.wait()
+        await queued(session, 3)
+        assert len(before) == limit
+        assert AdmissionInput.validated == before
+        assert policies == [] and effects == []
+        release.set()
+        await all_prepared.wait()
+        assert sorted(policies) == [0, 1, 2] and effects == []
+        interactions = session.interactions()
+        for _ in range(3):
+            request = await next_request(interactions, risky)
+            await request.approve()
+        assert (await turn.get_result()).final_output == "done"
+        assert sorted(effects) == [0, 1, 2]
