@@ -48,6 +48,8 @@ from agents import (
     OpenAIProvider,
     RunConfig,
     Runner,
+    RunState,
+    TResponseInputItem,
     __version__,
     function_tool,
     generation_span,
@@ -168,6 +170,60 @@ async def test_runner_replays_openai_conversation_assistant_history(
         {"role": "user", "content": "What is my name?"},
     ]
     assert history[1]["id"] == "msg_assistant"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_runner_replays_checkpoint_assistant_text() -> None:
+    requests: list[list[dict[str, Any]]] = []
+
+    @function_tool(needs_approval=True)
+    def record_receipt() -> str:
+        return "Recorded."
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content)["messages"])
+        completion = _minimal_chat_completion("Done.")
+        if len(requests) == 1:
+            completion.choices[0].message = ChatCompletionMessage(
+                role="assistant",
+                tool_calls=[
+                    ChatCompletionMessageFunctionToolCall(
+                        id="call_1",
+                        type="function",
+                        function=Function(name="record_receipt", arguments="{}"),
+                    )
+                ],
+            )
+            completion.choices[0].finish_reason = "tool_calls"
+        return httpx2.Response(200, json=completion.model_dump())
+
+    async with AsyncOpenAI(
+        api_key="test-placeholder",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        agent = Agent(
+            name="test", model=OpenAIChatCompletionsModel("fake", client), tools=[record_receipt]
+        )
+        history: list[TResponseInputItem] = [
+            {"role": "user", "content": "Record a receipt."},
+            {"role": "assistant", "content": "I will record it."},
+        ]
+        config = RunConfig(tracing_disabled=True)
+        paused = await Runner.run(agent, history, run_config=config)
+        original = paused.to_state()
+        restored = await RunState.from_string(agent, original.to_string())
+
+        for state in (original, restored):
+            state.approve(state.get_interruptions()[0])
+            result = await Runner.run(agent, state, run_config=config)
+            assert result.final_output == "Done."
+
+    initial, in_memory, round_trip = requests
+    assert in_memory[:2] == initial == history
+    assert in_memory[2]["tool_calls"][0]["id"] == "call_1"
+    assert in_memory[3]["tool_call_id"] == "call_1"
+    assert round_trip == in_memory
 
 
 async def _run_chat_completions_model_with_custom_base_url(
