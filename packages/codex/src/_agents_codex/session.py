@@ -6644,7 +6644,9 @@ class Session(Generic[ContextT, OutputT]):
         """Correct only invalid final text under the still-active root owner."""
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
-        provider = self._opening_agent.provider or self._owned_provider
+        provider = self._opening_agent.provider
+        if provider is None:
+            provider = self._owned_provider
         assert provider is not None
         assert self._model_api_key is not None or self._codex_login_binding is not None
         history = json.loads(await self._native.read_thread_history(None))
@@ -7119,7 +7121,7 @@ class Session(Generic[ContextT, OutputT]):
             if not state.completion.done():
                 terminal = state.terminal.result() if state.terminal.done() else None
                 failure = state.failure.result() if state.failure.done() else state.cleanup_error
-                if state.policy_stop and failure is not None and state.cleanup_error is not None:
+                if failure is not None and state.cleanup_error is not None:
                     _retain_cleanup_error(
                         failure, state.cleanup_error, _error_contexts(failure.__context__)
                     )
@@ -7372,8 +7374,10 @@ class Session(Generic[ContextT, OutputT]):
                 return
             failed = False
         except BaseException as error:
-            if not state.failure.done():
+            if not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
         finally:
             guard.active = False
             _invocation.reset(token)
@@ -7851,8 +7855,10 @@ class Session(Generic[ContextT, OutputT]):
                 refs.add(search)
             selected_json = _native_tool_refs(tuple(refs & candidates))
         except BaseException as error:
-            if not state.failure.done():
+            if not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
         finally:
             guard.active = False
             _invocation.reset(token)
