@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agents import Agent, NativeError, TurnStoppedError, function_tool
+from agents import Agent, LocalStorage, NativeError, SessionState, TurnStoppedError, function_tool
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -17,6 +18,81 @@ from tests.native_fixtures import (
     responses as responses,
 )
 from tests.test_native_agent import provider
+
+
+async def test_local_storage_user_history_preserves_repeated_prompts_after_reopen(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    responses.respond(assistant_output("First answer"))
+    responses.respond(assistant_output("Second answer"))
+    agent = Agent(instructions="Answer.", provider=provider(responses))
+    storage = LocalStorage(tmp_path / "history")
+    async with timeout(30):
+        async with agent.session(storage=storage) as session:
+            turn_ids = []
+            for _ in range(2):
+                handle = await session.submit("Same synthetic prompt")
+                await handle.get_result()
+                turn_ids.append(handle.turn_id)
+            items = [item async for item in session.items()]
+            users = [item for item in items if item["type"] == "message" and item["role"] == "user"]
+            assert [item["turn_id"] for item in users] == turn_ids
+            assert [item["content"] for item in users] == [
+                [{"type": "input_text", "text": "Same synthetic prompt"}]
+            ] * 2
+            session_id = session.id
+        async with agent.session(storage=storage, resume=session_id) as reopened:
+            assert [item async for item in reopened.items()] == items
+        assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("reported", [None, 0, 4])
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_recorded_cache_write_unknowns_survive_restore_without_changing_live_totals(
+    responses: ResponsesFixture, reported: int | None, mixed: bool
+) -> None:
+    reports = iter([4, reported] if mixed else [reported])
+
+    async def report_usage(event: dict[str, Any]) -> None:
+        if event["type"] == "response.completed":
+            count = next(reports)
+            event["response"]["usage"] = {
+                "input_tokens": 11,
+                "input_tokens_details": {
+                    "cached_tokens": 0,
+                    **({"cache_write_tokens": count} if count is not None else {}),
+                },
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 14,
+            }
+
+    @function_tool
+    def lookup() -> str:
+        return "resolved"
+
+    responses.before_event = report_usage
+    if mixed:
+        responses.respond(function_call("lookup", {}, "lookup-once"))
+    responses.respond(assistant_output("Answer"))
+    agent = Agent(instructions="Answer.", tools=[lookup], provider=provider(responses))
+    async with timeout(30):
+        async with agent.session() as session:
+            result = await (await session.submit("Synthetic prompt")).get_result()
+            assert result.thread_usage is not None
+            total = (4 if mixed else 0) + (reported or 0)
+            assert result.thread_usage.total_token_usage.cache_write_input_tokens == total
+            turns = [turn async for turn in session.turns()]
+            [turn] = turns
+            assert turn["usage"] is not None
+            assert turn["usage"]["input_tokens_details"].get("cache_write_tokens") == (
+                None if reported is None else total
+            )
+            assert turn["usage"]["input_tokens"] == (22 if mixed else 11)
+            state = SessionState.from_json((await session.save_state()).to_json())
+        async with agent.session(state=state) as restored:
+            assert [turn async for turn in restored.turns()] == turns
+        assert len(responses.requests) == (2 if mixed else 1)
 
 
 @pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])

@@ -16,6 +16,107 @@ def response(kind, **fields):
     return {"type": "response_item", "payload": {"type": kind, **fields}}
 
 
+def accepted_user(identity, turn="t1", order=0, text="Same prompt"):
+    record = response(
+        "message",
+        id=identity,
+        role="user",
+        content=[{"type": "input_text", "text": text}],
+        internal_chat_message_metadata_passthrough={
+            "turn_id": turn,
+            "content_item_kinds": ["user.text"],
+        },
+    )
+    record["metadata"] = {"user_input_order": order}
+    return record
+
+
+def native_user(identity, turn="t1", text="Same prompt", kind="item_completed"):
+    return event(
+        kind,
+        turn,
+        item={"type": "UserMessage", "id": identity, "content": [{"type": "text", "text": text}]},
+    )
+
+
+def test_accepted_user_occurrences_pair_with_native_items_without_text_deduplication():
+    history = [
+        event("task_started"),
+        accepted_user("raw-1"),
+        native_user("native-1", text="Native content"),
+        accepted_user("raw-steer", order=1),
+        native_user("native-1"),  # A repeated completion cannot consume steering.
+        native_user("native-steer", kind="item_started"),
+        native_user("native-steer"),
+        event("task_complete"),
+        event("task_started", "t2"),
+        accepted_user("raw-2", "t2"),
+        native_user("native-2", "t2"),
+        event("task_complete", "t2"),
+    ]
+    _, items = project_history(history, "root")
+    assert [item["id"] for item in items] == ["native-1", "native-steer", "native-2"]
+    assert items[0]["content"] == [{"type": "input_text", "text": "Native content"}]
+    assert project_history(copy.deepcopy(history), "root")[1] == items
+
+
+@pytest.mark.parametrize("boundary", ["compacted", "session_meta", "ContextCompaction", "turn"])
+def test_user_pairing_does_not_cross_history_boundaries(boundary):
+    history = [event("task_started"), accepted_user("raw")]
+    if boundary == "turn":
+        history.extend([event("task_complete"), event("task_started", "t2")])
+    elif boundary == "ContextCompaction":
+        history.append(event("item_completed", item={"type": boundary, "id": "compaction"}))
+    else:
+        history.append({"type": boundary, "payload": {}})
+    history.append(native_user("native", "t2" if boundary == "turn" else "t1"))
+    _, items = project_history(history, "root")
+    assert [item["id"] for item in items if item.get("role") == "user"] == ["raw", "native"]
+
+
+@pytest.mark.parametrize("missing", ["metadata", "turn_id", "content_item_kinds", "order"])
+def test_legacy_and_contextual_user_records_remain_separate(missing):
+    raw = accepted_user("raw")
+    if missing == "metadata":
+        raw.pop("metadata")
+    elif missing == "order":
+        raw["metadata"]["user_input_order"] = -1
+    else:
+        raw["payload"]["internal_chat_message_metadata_passthrough"].pop(missing)
+    _, items = project_history([event("task_started"), raw, native_user("native")], "root")
+    assert [item["id"] for item in items] == ["raw", "native"]
+
+
+def test_accepted_image_input_uses_native_content_and_keeps_raw_only_inputs():
+    raw = accepted_user("raw-image")
+    raw["payload"]["content"] = [{"type": "input_image", "image_url": "image://accepted"}]
+    raw["payload"]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] = [
+        "user.image"
+    ]
+    native = native_user("native-image")
+    native["payload"]["item"]["content"] = [{"type": "image", "image_url": "image://native"}]
+    _, items = project_history(
+        [event("task_started"), raw, native, accepted_user("raw-only", order=1)], "root"
+    )
+    assert [item["id"] for item in items] == ["native-image", "raw-only"]
+    assert items[0]["content"] == [{"type": "input_image", "image_url": "image://native"}]
+
+
+def test_rollback_clears_pending_user_pairing():
+    _, items = project_history(
+        [
+            event("task_started"),
+            accepted_user("raw"),
+            event("thread_rolled_back", num_turns=1),
+            event("task_started"),
+            native_user("native"),
+            accepted_user("later-raw", order=1),
+        ],
+        "root",
+    )
+    assert [item["id"] for item in items] == ["native", "later-raw"]
+
+
 def test_recorded_items_and_usage_survive_inherited_turn_history():
     history = [
         event("task_started", "parent-turn", started_at=100),
