@@ -147,11 +147,19 @@ async def test_runner_reasoning_is_omitted_from_export_but_preserved_for_replay(
         await client.close()
 
 
-@pytest.mark.parametrize("custom_endpoint", [False, True])
-def test_export_filter_preserves_user_tool_and_custom_export_data(captured_export, custom_endpoint):
+@pytest.mark.parametrize(
+    ("endpoint", "custom_endpoint"),
+    [
+        (BackendSpanExporter._OPENAI_TRACING_INGEST_ENDPOINT, False),
+        ("https://api.openai.com:443/v1/traces/ingest/?source=test", False),
+        ("https://trace.example/ingest", True),
+    ],
+)
+def test_export_filter_preserves_user_tool_and_custom_export_data(
+    captured_export, endpoint, custom_endpoint
+):
     exporter, payloads = captured_export
-    if custom_endpoint:
-        exporter.endpoint = "https://trace.example/ingest"
+    exporter.endpoint = endpoint
     user_data = {"type": "thinking", "thinking": "user supplied", "reasoning": "tool supplied"}
     assistant = {
         "role": "assistant",
@@ -166,6 +174,7 @@ def test_export_filter_preserves_user_tool_and_custom_export_data(captured_expor
     data = GenerationSpanData(
         input=[{"role": "user", "content": [user_data]}, assistant],
         output=[assistant],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
         usage={"input_tokens": 1, "output_tokens": 2, "reasoning_tokens": 1},
     )
     span = SpanImpl(
@@ -182,6 +191,10 @@ def test_export_filter_preserves_user_tool_and_custom_export_data(captured_expor
     assert ("PRIVATE_REASONING_SENTINEL" in json.dumps(sent)) is custom_endpoint
     assert ("PRIVATE_THINKING_SENTINEL" in json.dumps(sent)) is custom_endpoint
     assert ("PRIVATE_INLINE_SENTINEL" in json.dumps(sent)) is custom_endpoint
+    if custom_endpoint:
+        assert sent["tools"] == data.tools
+    else:
+        assert "tools" not in sent
     assert sent["input"][0]["content"] == [user_data]
     assert sent["output"][0]["tool_calls"] == assistant["tool_calls"]
     assert "reasoning_tokens" in json.dumps(sent["usage"])

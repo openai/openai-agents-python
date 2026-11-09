@@ -448,23 +448,26 @@ async def test_any_llm_chat_only_forwards_parallel_tool_calls_with_converted_too
     )
     handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
 
-    await model.get_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
-        tools=tools,
-        output_schema=None,
-        handoffs=handoffs,
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-        prompt=None,
-    )
+    with trace("any-llm-offered-tools"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+            tools=tools,
+            output_schema=None,
+            handoffs=handoffs,
+            tracing=ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
 
     expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
     call = provider.chat_calls[0]
     assert call["parallel_tool_calls"] is expected_parallel_tool_calls
     assert (call["tools"] is not None) is (tool_source != "none")
+    (generation,) = [span for span in fetch_ordered_spans() if span.span_data.type == "generation"]
+    assert generation.span_data.tools == call["tools"]
 
 
 @pytest.mark.allow_call_model_methods

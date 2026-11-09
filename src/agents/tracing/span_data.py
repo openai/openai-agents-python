@@ -169,7 +169,7 @@ class FunctionSpanData(SpanData):
 class GenerationSpanData(SpanData):
     """
     Represents a Generation Span in the trace.
-    Includes input, output, model, model configuration, and usage.
+    Includes input, output, model, model configuration, usage, and optional tool definitions.
     """
 
     __slots__ = (
@@ -178,6 +178,7 @@ class GenerationSpanData(SpanData):
         "model",
         "model_config",
         "usage",
+        "tools",
     )
 
     def __init__(
@@ -187,12 +188,14 @@ class GenerationSpanData(SpanData):
         model: str | None = None,
         model_config: Mapping[str, Any] | None = None,
         usage: dict[str, Any] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
     ):
         self.input = input
         self.output = output
         self.model = model
         self.model_config = model_config
         self.usage = usage
+        self.tools = tools
 
     @property
     def type(self) -> str:
@@ -206,6 +209,7 @@ class GenerationSpanData(SpanData):
             "model": self.model,
             "model_config": self.model_config,
             "usage": self.usage,
+            **({"tools": self.tools} if self.tools is not None else {}),
         }
 
 

@@ -39,7 +39,7 @@ from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
 from ._openai_retry import get_openai_retry_advice
 from ._retry_runtime import should_disable_provider_managed_retries
-from ._trace import model_config_for_trace, populate_generation_span
+from ._trace import model_config_for_trace, populate_generation_span, record_generation_tools
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -648,6 +648,7 @@ class OpenAIChatCompletionsModel(Model):
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
         converted_tools = _to_dump_compatible(converted_tools)
+        record_generation_tools(span, tracing, converted_tools)
         tools_param = converted_tools if converted_tools else omit
         # Chat Completions rejects parallel_tool_calls unless tools are present, so derive it
         # from the converted list, which also covers handoff-only turns.

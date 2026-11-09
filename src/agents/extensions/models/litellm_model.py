@@ -45,7 +45,11 @@ from ...logger import log_model_action_debug, logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
 from ...models._retry_runtime import should_disable_provider_managed_retries
-from ...models._trace import model_config_for_trace, populate_generation_span
+from ...models._trace import (
+    model_config_for_trace,
+    populate_generation_span,
+    record_generation_tools,
+)
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -564,6 +568,7 @@ class LitellmModel(Model):
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
         converted_tools = _to_dump_compatible(converted_tools)
+        record_generation_tools(span, tracing, converted_tools)
         parallel_tool_calls = model_settings.parallel_tool_calls if converted_tools else None
 
         if _debug.DONT_LOG_MODEL_DATA:

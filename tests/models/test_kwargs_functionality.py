@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 import httpx2
@@ -11,7 +12,7 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 
-from agents import Agent, function_tool, handoff
+from agents import Agent, function_tool, handoff, trace
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
 from agents.models._retry_runtime import provider_managed_retries_disabled
@@ -19,6 +20,7 @@ from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.retry import ModelRetryAdviceRequest, ModelRetrySettings
 from agents.tool import Tool
+from tests.testing_processor import fetch_ordered_spans
 
 
 @pytest.mark.allow_call_model_methods
@@ -81,6 +83,10 @@ async def test_litellm_only_forwards_parallel_tool_calls_with_converted_tools(
 
     async def fake_acompletion(model, messages=None, **kwargs):
         captured.update(kwargs)
+        captured["tools"] = deepcopy(kwargs["tools"])
+        # LiteLLM's Fireworks adapter removes strict in place while translating functions.
+        for definition in kwargs["tools"] or []:
+            definition["function"].pop("strict", None)
         message = Message(role="assistant", content="test response")
         return ModelResponse(choices=[Choices(index=0, message=message)], usage=Usage(0, 0, 0))
 
@@ -93,21 +99,24 @@ async def test_litellm_only_forwards_parallel_tool_calls_with_converted_tools(
     )
     handoffs = [handoff(Agent(name="handoff"))] if tool_source == "handoff" else []
 
-    await LitellmModel(model="test-model").get_response(
-        system_instructions=None,
-        input="test input",
-        model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
-        tools=tools,
-        output_schema=None,
-        handoffs=handoffs,
-        tracing=ModelTracing.DISABLED,
-        previous_response_id=None,
-        conversation_id=None,
-    )
+    with trace("litellm-offered-tools"):
+        await LitellmModel(model="test-model").get_response(
+            system_instructions=None,
+            input="test input",
+            model_settings=ModelSettings(parallel_tool_calls=parallel_tool_calls),
+            tools=tools,
+            output_schema=None,
+            handoffs=handoffs,
+            tracing=ModelTracing.ENABLED,
+            previous_response_id=None,
+            conversation_id=None,
+        )
 
     expected_parallel_tool_calls = parallel_tool_calls if tool_source != "none" else None
     assert captured["parallel_tool_calls"] is expected_parallel_tool_calls
     assert (captured["tools"] is not None) is (tool_source != "none")
+    (generation,) = [span for span in fetch_ordered_spans() if span.span_data.type == "generation"]
+    assert generation.span_data.tools == captured["tools"]
 
 
 @pytest.mark.allow_call_model_methods

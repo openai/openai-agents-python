@@ -332,7 +332,14 @@ class BackendSpanExporter(TracingExporter):
         return True
 
     def _should_sanitize_for_openai_tracing_api(self) -> bool:
-        return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
+        endpoint = httpx2.URL(self.endpoint)
+        hosted = httpx2.URL(self._OPENAI_TRACING_INGEST_ENDPOINT)
+        return (
+            endpoint.scheme == hosted.scheme
+            and endpoint.host.rstrip(".") == hosted.host
+            and endpoint.port == hosted.port
+            and endpoint.path.rstrip("/") == hosted.path
+        )
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
         """Omit reasoning from generation data and enforce traces ingest field limits.
@@ -345,6 +352,12 @@ class BackendSpanExporter(TracingExporter):
 
         sanitized_span_data = span_data
         did_mutate = False
+
+        # Custom processors can use the offered schemas. Keep the hosted ingest payload compatible.
+        if span_data.get("type") == "generation" and "tools" in span_data:
+            sanitized_span_data = dict(span_data)
+            del sanitized_span_data["tools"]
+            did_mutate = True
 
         for field_name in ("input", "output"):
             if field_name not in span_data:
