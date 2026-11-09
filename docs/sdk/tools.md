@@ -9,6 +9,7 @@ Examples with `await` or `async with` are fragments for an async function. [Conf
 | What you need | Start here |
 | --- | --- |
 | Call a Python function | [Python functions](#python-functions) |
+| Operate an application-supplied computer | [Computer tools](#computer-tools) |
 | Search the web through the native provider | [Native web search](#native-web-search) |
 | Search uploaded files, run provider code, or generate images | [Provider-hosted tools](#provider-hosted-tools) |
 | Give a function application data | [Application context](#application-context) |
@@ -210,6 +211,47 @@ For Code Interpreter, supply an existing container ID or an auto-container confi
 These passive streams report gaps if a reader falls behind. They retain at most 16 MiB of base64 per preview and 32 MiB across retained previews. Oversized previews also produce gaps; missed previews cannot be recovered from history. Read `Session.items()` for the final image, including images too large for a completion observation. Final tool items also retain provider fields in `provider_data`, including failure details and image metadata. These items and text annotations survive saved-state restore. Restoring history does not grant tool access: declare the tools again in the current Agent to use them in later turns.
 
 Runnable examples for [file search, Code Interpreter, and images](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/codex/hosted_tools) show each tool separately.
+
+## Computer tools
+
+These computer APIs require a source build from this branch. Use `computer_tool()` to connect an application-supplied computer driver. This fragment assumes an existing `driver` implementing `Computer` and the provider configuration described at the start of this page:
+
+```python
+from agents import Agent, computer_tool
+
+agent = Agent(
+    instructions="Use the computer to complete the task.",
+    tools=[computer_tool(driver)],
+)
+result = await agent.run("Read the current screen.")
+```
+
+The driver implements the public `Computer` interface: click, double-click, scroll, type, wait, move, keypress, drag, and screenshot. `screenshot()` returns a nonempty base64 PNG string. The SDK executes a call's actions in order and sends the final screenshot to the provider. If the last action takes a screenshot, the SDK reuses that result.
+
+
+Driver methods can be synchronous or asynchronous. Coordinates are numbers, `keys` is a list of key names, and `path` is a list of coordinate pairs. Mouse methods can also accept keyword-only `keys` for held modifiers.
+
+| Action | Method |
+| --- | --- |
+| Screenshot | `screenshot()` |
+| Click | `click(x, y, button)` |
+| Double click | `double_click(x, y)` |
+| Scroll | `scroll(x, y, scroll_x, scroll_y)` |
+| Type | `type(text)` |
+| Wait | `wait()` |
+| Move | `move(x, y)` |
+| Keypress | `keypress(keys)` |
+| Drag | `drag(path)` |
+
+Passing a driver borrows it; your application closes it. For Session ownership, pass a provider with `create(context)` and `dispose(driver)` callbacks. The Session calls `create` when its first permitted call needs a driver and reuses that declaration's driver across turns and child calls. Each Session calls `create` independently. The SDK calls `dispose` once after all callbacks finish, including after cancellation or failure. Cancellation joins running work before disposal and prevents queued actions from starting. It cannot undo actions that already ran.
+
+Import `ComputerProvider` from `agents` and use `ComputerProvider(create=create_computer, dispose=close_computer)` as the first argument to `computer_tool()` for an owned driver. Both callbacks can return awaitables. Synchronous driver methods run in workers; cancellation waits for them to finish.
+
+Set `approve(context, actions)` to review each call before SDK acquisition or device actions. When supplied, it must return literal `True` to permit the call. Set `on_safety_check(context, checks)` to ask your application to approve the provider's pending safety checks. The policy receives the full check objects and must return literal `True` after application approval. A missing or refused policy raises `ComputerSafetyError` before SDK acquisition or device actions. Calls without pending checks do not invoke this policy. The example above therefore refuses calls that need safety confirmation until you supply this policy.
+
+The default declaration uses `computer`. For preview, set `tool_type="computer_use_preview"`, `dimensions=(width, height)`, and `environment="browser"`, `"mac"`, `"windows"`, or `"ubuntu"`. Nonempty `actions` take precedence over a legacy single `action`. A call with neither requests a screenshot. Use `ToolRef("computer")` to select this declaration by name.
+
+These live callbacks do not create a durable approval to resume after a restart. Saved state carries no driver or permission grant; restore with the current trusted declaration. Unknown effects require explicit reconciliation. A computer reconciliation result must contain an actual `computer_screenshot` and all full original safety checks approved by your application, for either outcome. Text-only function receipts cannot settle a computer call.
 
 ## Connect MCP tools
 
