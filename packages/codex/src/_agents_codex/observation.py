@@ -342,7 +342,7 @@ class _ObservationBuffer:
     def __init__(
         self, session_id: str, *, retention: Literal["bounded", "all"] = "bounded"
     ) -> None:
-        self.retention = retention
+        self.retention: Literal["bounded", "all"] = retention
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
         self.records: deque[tuple[Observation, int, int]] = deque()
