@@ -2,10 +2,12 @@
 
     PYTHONPATH=. python -m examples.codex.recipes.image_input
 
-The sample creates its own PNG; it never fetches a URL. InputImage accepts an
-inline base64 image URL with detail="auto", not a path, remote URL, file ID or PDF. Scripted tests
-prove request shape and final validation, not live image understanding. A live run should report red. There
-is no partial typed output; use final_output after the Turn settles.
+The sample creates its own PNG and uses inline base64 image data with detail="auto".
+It never fetches a URL. In matching development builds, HTTP(S) image URLs and
+provider file IDs require an API-key provider and a compatible standard Responses
+model; see docs/sdk/sessions.md.
+Scripted tests check request shape and final validation. A live run should report
+red. There is no partial typed output; use final_output after the Turn settles.
 """
 
 import asyncio

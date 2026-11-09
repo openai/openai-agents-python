@@ -3463,7 +3463,7 @@ fn create_checkpoint_engine<'py>(
             let checkpoint: checkpoint::Checkpoint =
                 serde_json::from_value(payload).map_err(py_error)?;
             checkpoint
-                .initial_managed_model(specs.as_deref())
+                .initial_managed_models(specs.as_deref())
                 .map_err(py_error)
         })
         .transpose()?

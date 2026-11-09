@@ -279,3 +279,53 @@ async def test_handoff_uses_leaf_captured_model_request_controls(responses) -> N
         assert request["metadata"] == {"workflow": "captured-leaf"}
         assert request["tool_choice"] == "required"
         assert [tool["name"] for tool in function_declarations(request)] == ["selected"]
+
+
+@pytest.mark.parametrize("graph", [False, True])
+@pytest.mark.parametrize("selection", ["omitted", "explicit", "empty"])
+async def test_handoff_graph_preserves_selected_fixed_runtime_grants(
+    responses, tmp_path, monkeypatch, graph, selection
+):
+    from agents import Checklist, FileSearch, NativeAgents, WebSearch
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import trust
+    from tests.test_native_executor_tools import declaration
+
+    fixed = [
+        NativeAgents(),
+        Checklist(),
+        WebSearch(),
+        FileSearch(vector_store_ids=["vs_synthetic"]),
+    ]
+    target = Agent(name="B", instructions="Answer.", tools=fixed)
+    source = Agent(
+        name="A",
+        instructions="Answer.",
+        model="gpt-5.5",
+        tools=fixed,
+        handoffs=[target] if graph else [],
+        provider=provider(responses),
+    )
+    responses.respond(assistant_output("done"))
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as executor:
+        trust(executor, tmp_path, monkeypatch)
+        async with source.session(environment=declaration(executor)) as session:
+            tools = None if selection == "omitted" else fixed if selection == "explicit" else []
+            turn = await session.submit("Answer.", tools=tools)
+            assert (await turn.get_result()).final_output == "done"
+    names = set()
+    for tool in responses.requests[0]["tools"]:
+        if tool["type"] == "namespace":
+            names.update((tool["name"], entry["name"]) for entry in tool["tools"])
+        else:
+            names.add((None, tool.get("name", tool["type"])))
+    expected = {
+        ("collaboration", "spawn_agent"),
+        (None, "update_plan"),
+        ("web", "run"),
+        (None, "file_search"),
+    }
+    if selection == "empty":
+        assert names.isdisjoint(expected)
+    else:
+        assert expected <= names

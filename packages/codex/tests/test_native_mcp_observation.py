@@ -519,3 +519,63 @@ async def test_child_mcp_projection_requires_exact_owner(boundary: str) -> None:
     assert len(events) == 1
     assert isinstance(events[0], ToolStarted)
     assert events[0].submission_id == state.handle.submission_id
+
+
+@pytest.mark.parametrize("share_on_root", [False, True])
+async def test_handoff_mcp_events_use_issuing_step_bindings(responses, share_on_root):
+    peer = Peer(names=("search",))
+    async with timeout(20), peer.serve() as url, provider(responses) as client:
+        descriptor = HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
+        target = Agent(name="B", instructions="Search.", tools=[descriptor])
+        source = Agent(
+            name="A",
+            instructions="Route to B.",
+            model="gpt-5.5",
+            provider=client,
+            tools=[descriptor] if share_on_root else [],
+            handoffs=[target],
+        )
+        responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+        responses.respond(mcp_call("search", "mcp__records", "lookup-B"))
+        responses.respond(assistant_output("done"))
+        async with source.session() as session:
+            turn = await session.submit("Begin")
+            assert (await turn.get_result()).final_output == "done"
+            events = [
+                event
+                async for event in turn.events()
+                if isinstance(event, (ToolStarted, ToolFinished)) and event.family == "mcp"
+            ]
+            assert len(peer.calls) == 1
+            assert [(event.type, event.call_id) for event in events] == [
+                ("tool_started", "lookup-B"),
+                ("tool_finished", "lookup-B"),
+            ]
+
+
+async def test_handoff_mcp_form_remains_owned_by_issuing_call(responses):
+    from agents import FormRequest, PendingRequests
+    from tests.test_native_scoped_policies import AskingPeer, selected
+
+    peer = AskingPeer()
+    async with timeout(20), peer.serve() as url, provider(responses) as client:
+        descriptor = HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
+        target = Agent(name="B", instructions="Search.", tools=[descriptor])
+        source = Agent(
+            name="A",
+            instructions="Route to B.",
+            model="gpt-5.5",
+            provider=client,
+            handoffs=[target],
+        )
+        responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+        responses.respond(selected("lookup-B", "ordinary"))
+        responses.respond(assistant_output("done"))
+        async with source.session() as session:
+            turn = await session.submit("Begin")
+            pending = await turn.wait_for_request_or_result()
+            assert isinstance(pending, PendingRequests)
+            assert isinstance(pending.requests[0], FormRequest)
+            await pending.requests[0].respond({"answer": "approved"})
+            assert (await turn.get_result()).final_output == "done"
+            assert peer.answers[0]["result"]["action"] == "accept"
