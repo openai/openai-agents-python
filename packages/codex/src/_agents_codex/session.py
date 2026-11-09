@@ -6042,9 +6042,8 @@ class Session(Generic[ContextT, OutputT]):
                 ),
             )
             if input is not None:
-                issued = _root_turn(
-                    self, None, uuid4().hex, state.completion, state.observation_after
-                )
+                # A queued root has no observation window until its own dispatch.
+                issued = _root_turn(self, None, uuid4().hex, state.completion, -1)
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
@@ -7410,6 +7409,9 @@ class Session(Generic[ContextT, OutputT]):
                         request["start"] = {"final_output_json_schema": state.output.schema}
                     if state.writable_roots is not None:
                         request["writable_roots"] = state.writable_roots
+                    state.observation_after = self._observations.sequence
+                    object.__setattr__(state.issued, "_observation_after", state.observation_after)
+                    self._observations.notify()
                     if state.realtime_tool is not None:
                         receipt = json.loads(
                             await self._native._submit_realtime_tools(json.dumps(request))

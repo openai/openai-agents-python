@@ -473,12 +473,7 @@ class EventStream(AsyncIterator[Observation]):
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
         self._buffer = buffer
-        # Bounded readers preserve their Session-global loss notification.
-        self._after = (
-            max(after, getattr(_turn, "_observation_after", 0))
-            if buffer.retention == "all"
-            else after
-        )
+        self._after = after
         self._closed = False
         self._reading = False
         self._turn = _turn
@@ -500,6 +495,16 @@ class EventStream(AsyncIterator[Observation]):
         try:
             while not self._closed:
                 signal = self._buffer.changed
+                if self._buffer.retention == "all" and self._turn is not None:
+                    # Queued roots have no observation window until dispatch. Read
+                    # the live floor after every wake, including pre-opened readers.
+                    floor = getattr(self._turn, "_observation_after", 0)
+                    if floor < 0:
+                        if self._buffer.closed or self._turn._root_result_ready():
+                            break
+                        await signal.wait()
+                        continue
+                    self._after = max(self._after, floor)
                 records = self._buffer.records
                 oldest = records[0][0].sequence if records else self._buffer.sequence + 1
                 if self._after < oldest - 1:
