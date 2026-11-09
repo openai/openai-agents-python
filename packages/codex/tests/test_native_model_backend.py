@@ -17,6 +17,7 @@ from agents import (
     ChatCompletionsModel,
     ModelRequest,
     ModelResponse,
+    ModelSettings,
     NativeProvider,
     TurnStoppedError,
     function_tool,
@@ -315,7 +316,13 @@ async def test_chat_completed_response_preserves_native_facts_and_controls(refus
             Agent(
                 model="gpt-5.2",
                 instructions="Preserve this exact instruction.",
-                model_settings={"verbosity": "high", "top_logprobs": 1},
+                model_settings={
+                    "verbosity": "high",
+                    "top_logprobs": 1,
+                    "service_tier": "flex",
+                    "prompt_cache_retention": "24h",
+                    "prompt_cache_ttl": "12h",
+                },
                 tools=[echo],
                 provider=provider,
             ).session() as session,
@@ -345,6 +352,9 @@ async def test_chat_completed_response_preserves_native_facts_and_controls(refus
     ] == captured_instructions[0]
     assert "Preserve this exact instruction." in json.dumps(captured_instructions[0])
     assert requests[0]["verbosity"] == "high"
+    assert requests[0]["service_tier"] == "flex"
+    assert requests[0]["prompt_cache_retention"] == "24h"
+    assert requests[0]["prompt_cache_options"] == {"ttl": "12h"}
     assert requests[0]["logprobs"] is True
     assert requests[0]["top_logprobs"] == 1
 
@@ -395,3 +405,145 @@ async def test_completed_model_validates_whole_output_before_any_tool(later: str
             "provider_refusal" if later == "refusal" else "undecodable_output_item"
         )
     assert effects == []
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+@pytest.mark.parametrize("refusal", [False, True])
+async def test_chat_unsuccessful_finish_has_no_tool_effect(
+    finish_reason: str, refusal: bool
+) -> None:
+    from agents import NativeError
+
+    requests = []
+    effects = []
+    private = "private-terminal-refusal"
+
+    async def respond(http: web.Request) -> web.Response:
+        requests.append(await http.json())
+        first = len(requests) == 1
+        return web.json_response(
+            {
+                "id": f"chat_terminal_{len(requests)}",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": finish_reason if first else "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "private-partial-answer" if first else "finished",
+                            "refusal": private if first and refusal else None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "id": "never",
+                                    "function": {"name": "echo", "arguments": '{"value":"never"}'},
+                                }
+                            ]
+                            if first
+                            else None,
+                        },
+                    }
+                ],
+            }
+        )
+
+    @function_tool
+    def echo(value: str) -> str:
+        effects.append(value)
+        return value
+
+    application = web.Application()
+    application.router.add_post("/v1/chat/completions", respond)
+    async with (
+        timeout(30),
+        TestServer(application) as server,
+        AsyncOpenAI(api_key="synthetic-key", base_url=str(server.make_url("/v1"))) as client,
+    ):
+        async with (
+            NativeProvider(model_backend=ChatCompletionsModel(client, "chat-model")) as provider,
+            Agent(
+                model="gpt-5.2", instructions="Answer.", tools=[echo], provider=provider
+            ).session() as session,
+        ):
+            turn = await session.submit("answer")
+            with pytest.raises((ValueError, NativeError)) as caught:
+                await turn.get_result()
+            assert "private-partial-answer" not in str(caught.value)
+            recorded = [row async for row in session.turns()][0]
+            assert recorded["status"] in ("failed", "cancelled")
+            if refusal:
+                assert recorded["status"] == "failed"
+                assert isinstance(caught.value, NativeError)
+                assert caught.value.response_integrity_reason == "provider_refusal"
+                assert any(
+                    row["fact"]["kind"] == "refusal" and row["fact"]["text"] == private
+                    for row in recorded["response_facts"]
+                )
+            else:
+                assert f"finish_reason={finish_reason}" in str(caught.value)
+    assert effects == []
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("source", ["include", "extra_body"])
+async def test_chat_admitted_text_options_and_logprob_request(source: str) -> None:
+    requests = []
+    token = {"token": "ok", "bytes": [111, 107], "logprob": -0.5, "top_logprobs": []}
+    extras = {
+        "seed": 7,
+        "stop": ["stop-marker"],
+        "logit_bias": {"42": -1},
+        "user": "synthetic-user",
+        "safety_identifier": "synthetic-safe",
+        "prediction": {"type": "content", "content": "ok"},
+    }
+
+    async def respond(http: web.Request) -> web.Response:
+        body = await http.json()
+        requests.append(body)
+        return web.json_response(
+            {
+                "id": "chat_options",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {"content": [token]} if body.get("logprobs") else None,
+                    }
+                ],
+            }
+        )
+
+    application = web.Application()
+    application.router.add_post("/v1/chat/completions", respond)
+    settings: ModelSettings = {
+        "extra_body": {**extras, **({"logprobs": True} if source == "extra_body" else {})}
+    }
+    if source == "include":
+        settings["include"] = ["message.output_text.logprobs"]
+    async with (
+        timeout(30),
+        TestServer(application) as server,
+        AsyncOpenAI(api_key="synthetic-key", base_url=str(server.make_url("/v1"))) as client,
+    ):
+        async with (
+            NativeProvider(model_backend=ChatCompletionsModel(client, "chat-model")) as provider,
+            Agent(
+                model="gpt-5.2", instructions="Answer.", model_settings=settings, provider=provider
+            ).session() as session,
+        ):
+            assert (await (await session.submit("answer")).get_result()).final_output == "ok"
+            recorded = [row async for row in session.turns()][0]
+            # Core requires top_logprobs opt-in before persisting sensitive probabilities.
+            assert recorded.get("response_facts", []) == []
+    assert len(requests) == 1
+    assert requests[0]["logprobs"] is True
+    assert "top_logprobs" not in requests[0]
+    assert all(requests[0][key] == value for key, value in extras.items())

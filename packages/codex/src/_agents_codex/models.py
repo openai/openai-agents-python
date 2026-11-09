@@ -182,6 +182,16 @@ class ChatCompletionsModel:
                 "store",
                 "frequency_penalty",
                 "presence_penalty",
+                "service_tier",
+                "prompt_cache_retention",
+                "prompt_cache_options",
+                "seed",
+                "stop",
+                "logit_bias",
+                "user",
+                "safety_identifier",
+                "prediction",
+                "logprobs",
             )
             if key in request.body
         }
@@ -199,9 +209,12 @@ class ChatCompletionsModel:
         reasoning = request.body.get("reasoning") or {}
         if reasoning.get("effort") is not None:
             options["reasoning_effort"] = reasoning["effort"]
-        if "top_logprobs" in request.body:
+        if "top_logprobs" in request.body or "message.output_text.logprobs" in (
+            request.body.get("include") or []
+        ):
             options["logprobs"] = True
-            options["top_logprobs"] = request.body["top_logprobs"]
+            if "top_logprobs" in request.body:
+                options["top_logprobs"] = request.body["top_logprobs"]
         if any(key in request.body for key in ("prompt", "truncation", "context_management")):
             raise ValueError(
                 "Responses-only request controls require a Responses provider or custom NativeModel"
@@ -222,7 +235,15 @@ class ChatCompletionsModel:
         value = response.model_dump() if hasattr(response, "model_dump") else response
         if not isinstance(value, dict) or len(value.get("choices", [])) != 1:
             raise ValueError("ChatCompletionsModel requires exactly one response choice")
-        message = value["choices"][0]["message"]
+        choice = value["choices"][0]
+        message = choice["message"]
+        if (
+            choice.get("finish_reason") in ("length", "content_filter")
+            and message.get("refusal") is None
+        ):
+            raise ValueError(
+                f"ChatCompletionsModel cannot complete finish_reason={choice['finish_reason']}"
+            )
         output = []
         output_content: list[dict[str, Any]] = []
         if message.get("content") is not None:
