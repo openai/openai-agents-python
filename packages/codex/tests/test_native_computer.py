@@ -61,6 +61,7 @@ async def test_computer_native_wire_and_acknowledged_continuation(responses, too
     provider = NativeProvider(base_url=responses.url, api_key="synthetic")
     agent = Agent(
         instructions="Use the computer.",
+        model="gpt-5",
         provider=provider,
         tools=[tool],
         model_settings={"tool_choice": choice},
