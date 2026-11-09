@@ -9107,11 +9107,8 @@ class Session(Generic[ContextT, OutputT]):
                         server,
                         tools=tuple(
                             name
-                            for name in server.tools
-                            if ToolRef(
-                                server.tool(name).name, server.tool(name).namespace or "functions"
-                            )
-                            in selected
+                            for name, ref in zip(server.tools, _tool_names((server,)), strict=True)
+                            if ToolRef(**ref) in selected
                         ),
                     )
                     for server in source_bindings
