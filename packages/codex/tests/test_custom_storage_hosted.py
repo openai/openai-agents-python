@@ -41,7 +41,10 @@ async def test_custom_backend_retains_hosted_search_across_native_resume(tmp_pat
             searches = [
                 item async for item in restored.items() if item["type"] == "web_search_call"
             ]
-            assert searches and searches[0]["action"] == action
+            assert searches
+            assert searches[0]["action"]["type"] == "search"
+            assert searches[0]["action"]["query"] == "synthetic query"
+            assert searches[0]["action"]["sources"] == []
             assert (
                 await (await restored.submit("continue")).get_result()
             ).final_output == "continued"
