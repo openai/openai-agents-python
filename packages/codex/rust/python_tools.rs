@@ -3903,6 +3903,9 @@ impl TurnLifecycleContributor for PythonContributor {
                     _ => None,
                 },
             };
+            let source = tools
+                .source_metadata(Some(input.step_store))
+                .map_err(|e| e.to_string())?;
             let owner = tools
                 .admission_ready(input.turn_id)
                 .map_err(|e| e.to_string())?;
@@ -3923,13 +3926,18 @@ impl TurnLifecycleContributor for PythonContributor {
                     ],
                     |reply| PreparationReply::ToolCompletion { reply, stop },
                     |id| {
-                        json!({"id":input.turn_id,"msg":{
+                        let mut request = json!({"id":input.turn_id,"msg":{
                             "type":"_sdk_tool_completion", "turn_id":input.turn_id,
                             "thread":input.thread_store.level_id(),"instance":tools.instance,
                             "step_id":id,"model":input.model,"text":text,"call_id":call_id,
                             "name":name,"namespace":namespace,"generation":step.generation.id,
                             "slot":key.reply.slot, "invocation":invocation,
-                        }})
+                        }});
+                        request["msg"]
+                            .as_object_mut()
+                            .expect("constructed callback object")
+                            .extend(source.clone());
+                        request
                     },
                     |decision| {
                         decision.map_err(|_| anyhow::anyhow!("Terminal tool validation failed"))

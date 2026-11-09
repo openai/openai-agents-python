@@ -8610,9 +8610,9 @@ class Session(Generic[ContextT, OutputT]):
 
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal
-            if message["generation"] != self._catalog.generation:
-                raise NativeError("Expired terminal tool generation")
-            entry = self._catalog.tools[message["slot"]]
+            catalog = self._catalog_for_message(message, message["generation"])
+            source_agent = self._agent_for_message(message)
+            entry = catalog.tools[message["slot"]]
             declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
             if (
                 not declared.finish_turn
@@ -8632,6 +8632,13 @@ class Session(Generic[ContextT, OutputT]):
             text = message["text"]
             if not isinstance(text, str):
                 raise OutputValidationError("")
+            if (
+                self._profiles
+                and isinstance(state, _Submission)
+                and not state.output_override
+                and state.realtime_tool is None
+            ):
+                state.output = self._profiles[message["profile_id"]].output
             output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
             value, wire = output.terminal_value(text)
             # JSON persistence must never silently accept NaN or Infinity.
@@ -8650,9 +8657,7 @@ class Session(Generic[ContextT, OutputT]):
                 model=message["model"],
                 route="direct",
             )
-            callback = (
-                self._opening_agent.before_complete if self._opening_agent is not None else None
-            )
+            callback = source_agent.before_complete
             if callback is not None:
                 decision = await _call_callback(
                     callback,
