@@ -11,6 +11,7 @@ mod canonical_storage;
 mod checkpoint;
 mod config;
 mod context;
+mod canonical_history;
 mod engine;
 mod environment;
 mod extensions;
@@ -869,6 +870,25 @@ impl NativeThread {
             })));
             owner.lock().map_err(py_error)?.context_change = Arc::downgrade(&change);
             Ok(ContextChange { inner: change })
+        })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn _canonical_history<'py>(&self, py: Python<'py>, limit: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _transact_history<'py>(&self, py: Python<'py>, expected_revision: String, keep: usize, items_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let items = serde_json::from_str(items_json)
+            .map_err(|_| py_error("Invalid canonical history items"))?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::replace(&inner, expected_revision, keep, items).await.map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
         })
     }
 

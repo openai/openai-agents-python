@@ -335,7 +335,11 @@
     {
       "path": "0068-sdk-managed-execution-lifecycle.patch",
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
+    },
+    {
+      "path": "0170-canonical-history-transactions.patch",
+      "sha256": "09cbf1fb14cf94c476a53f30e6c7061ca329f6b13e686f4981cd2864405ca78d"
     }
   ],
-  "result_tree": "c885d57cc6e4c78292ca6f40132fee6bf1ae5b50"
+  "result_tree": "d97e9ef025e37c6db39b30c84178332e142f1863"
 }
