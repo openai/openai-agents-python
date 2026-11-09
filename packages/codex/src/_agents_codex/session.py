@@ -9015,14 +9015,31 @@ class Session(Generic[ContextT, OutputT]):
             if self._profiles:
                 # Profiles share these captured runtime grants. Ordinary and MCP
                 # defaults remain scoped to the issuing profile's catalog.
-                defaults.update(
-                    _fixed_tool_refs(
-                        source_agent.tools,
-                        source_agent.programmatic_tool_calling,
-                        self._executor,
-                        self._native_agents,
-                    )
+                fixed = _fixed_tool_refs(
+                    source_agent.tools,
+                    source_agent.programmatic_tool_calling,
+                    self._executor,
+                    self._native_agents,
                 )
+                # Idle subsets narrow only the current root profile's defaults.
+                if (
+                    isinstance(state, _Submission)
+                    and state.operation_refs is None
+                    and self._default_tools is not None
+                    and self._profile_current == (message["profile_id"], message["profile_epoch"])
+                ):
+                    fixed.intersection_update(
+                        ToolRef(ref.name, ref.namespace or "functions")
+                        for ref in _selected_tool_refs(
+                            self._default_tools,
+                            (),
+                            (),
+                            programmatic_tool_calling=source_agent.programmatic_tool_calling,
+                            environment=self._executor,
+                            native_agents=self._native_agents,
+                        )
+                    )
+                defaults.update(fixed)
             if selection is None:
                 refs = defaults
             else:
