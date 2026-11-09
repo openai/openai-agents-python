@@ -301,6 +301,72 @@ async def test_invalid_completed_decision_keeps_model_usage_separate(responses, 
     assert len(responses.requests) == 1
 
 
+@pytest.mark.parametrize("cancel_turn", [False, True])
+async def test_overlapping_decisions_join_cleanup_and_preserve_outcome(responses, cancel_turn):
+    both_entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, cancelling, cleaned = set(), set(), set()
+    expected_cleanup = {"first", "second"} if cancel_turn else {"second"}
+    problem = LookupError("synthetic sibling failure")
+
+    class OverlappingProvider:
+        async def get_decision(self, request):
+            entered.add(request.input)
+            if len(entered) == 2:
+                both_entered.set()
+            await both_entered.wait()
+            if request.input == "first" and not cancel_turn:
+                raise problem
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelling.add(request.input)
+                if cancelling == expected_cleanup:
+                    cleaning.set()
+                await release.wait()
+                cleaned.add(request.input)
+                if not cancel_turn:
+                    raise RuntimeError("synthetic cleanup failure") from None
+            return DecisionResponse(value=True, usage=USAGE)
+
+    async def complete(context):
+        await asyncio.gather(
+            context.decide("Check", input="first"),
+            context.decide("Check", input="second"),
+        )
+        raise AssertionError("Stopped callback continued after gather")
+
+    responses.respond(assistant_output("Candidate."))
+    agent = Agent(
+        instructions="Answer.",
+        provider=generative_provider(responses),
+        decisions=OverlappingProvider(),
+        before_complete=complete,
+    )
+    async with timeout(20), agent.session() as session:
+        turn = await session.submit("Start.")
+        result = asyncio.create_task(turn.get_result())
+        stopping = None
+        try:
+            await both_entered.wait()
+            if cancel_turn:
+                stopping = asyncio.create_task(turn.cancel())
+            await cleaning.wait()
+            assert not result.done()
+            if stopping is not None:
+                assert not stopping.done()
+        finally:
+            release.set()
+        if stopping is not None:
+            await stopping
+        with pytest.raises(TurnStoppedError if cancel_turn else LookupError) as failure:
+            await result
+        if not cancel_turn:
+            assert failure.value is problem
+        assert entered == {"first", "second"}
+        assert cleaned == expected_cleanup
+    assert len(responses.requests) == 1
+
+
 @pytest.mark.parametrize("close_session", [False, True])
 async def test_cancel_joins_provider_cleanup_without_charging_model_usage(responses, close_session):
     entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()

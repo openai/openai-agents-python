@@ -78,9 +78,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Await each call directly in that callback's task. Calls from another task or after the callback returns are rejected, including calls started with `asyncio.gather()`, `asyncio.create_task()`, or `TaskGroup`.
+`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Use `asyncio.gather()` to overlap decisions on the live callback's event loop. On callback exit or cancellation, expect the SDK to cancel pending calls and wait for provider cleanup before settling the callback.
 
-Decision usage stays separate from Agent model usage and run budgets. When tracing is configured and enabled, a `decision.usage` child span records safe token counts and request metadata. Missing usage stays unknown. Disabled tracing creates no recording sink; custom providers can still inspect `DecisionResponse.usage`. Cancellation joins started work. The helper does not append its question or answer to the conversation.
+Decision usage stays separate from Agent model usage and run budgets. When tracing is configured and enabled, a `decision.usage` child span records safe token counts and request metadata. Missing usage stays unknown. Disabled tracing creates no recording sink; custom providers can still inspect `DecisionResponse.usage`. The helper does not append its question or answer to the conversation.
 
 Completion feedback does enter the conversation. Already streamed text remains visible and recorded. See [completion checks](../../docs/sdk/configuration.md#check-a-proposed-completion) for timing and continuation limits.
 

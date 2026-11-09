@@ -9037,7 +9037,7 @@ class Session(Generic[ContextT, OutputT]):
                 profile_provider = self._agent_for_message(message).decisions
                 if profile_provider is not None:
                     provider = profile_provider
-            with _bind_decisions(
+            async with _bind_decisions(
                 args[0],
                 lambda: (
                     not state.stopping

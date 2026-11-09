@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, cast
 
-from ._lifecycle import _close_after_error
+from ._compat import cancel_once
+from ._lifecycle import _close_after_error, _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .schema import OutputValidationError, _prepare_output, _PreparedOutput
 from .telemetry import TraceOptions, TraceScope, _owned_span, current_context
@@ -91,14 +92,15 @@ class _DecisionScope:
     owner: object
     active: Callable[[], bool]
     provider: DecisionProvider | None
-    task: asyncio.Task[Any] | None
+    task: asyncio.Task[Any]
     live: bool = True
+    pending: set[asyncio.Task[Any]] = field(default_factory=set)
 
     def check(self, owner: object, *, after_await: bool = False) -> None:
         if (
             owner is not self.owner
             or not self.live
-            or self.task is not asyncio.current_task()
+            or self.task.get_loop() is not asyncio.get_running_loop()
             or not self.active()
         ):
             if after_await:
@@ -111,19 +113,40 @@ _decision_scope: ContextVar[_DecisionScope | None] = ContextVar(
 )
 
 
-@contextmanager
-def _bind_decisions(
+async def _cancel_decisions(tasks: tuple[asyncio.Task[Any], ...]) -> None:
+    for task in tasks:
+        cancel_once(task)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    for task in tasks:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            raise error
+
+
+@asynccontextmanager
+async def _bind_decisions(
     owner: object,
     active: Callable[[], bool],
     provider: DecisionProvider | None,
-) -> Iterator[None]:
-    scope = _DecisionScope(owner, active, provider, asyncio.current_task())
+) -> AsyncIterator[None]:
+    callback_task = asyncio.current_task()
+    assert callback_task is not None
+    scope = _DecisionScope(owner, active, provider, callback_task)
     token = _decision_scope.set(scope)
+    failure: BaseException | None = None
     try:
         yield
+    except BaseException as error:
+        failure = error
+        raise
     finally:
         scope.live = False
         _decision_scope.reset(token)
+        pending = tuple(task for task in scope.pending if not task.done())
+        if pending:
+            if failure is None:
+                await _join(asyncio.create_task(_cancel_decisions(pending)))
+            else:
+                await _close_after_error(failure, lambda: _cancel_decisions(pending))
 
 
 def _check_provider(provider: DecisionProvider | None) -> DecisionProvider:
@@ -147,7 +170,7 @@ async def _bound_decide(
     if scope is None:
         raise RuntimeError("decide() requires its exact live callback owner")
     scope.check(owner)
-    return await _decide(
+    operation = _decide(
         question,
         input=input,
         provider=_check_provider(provider if provider is not None else scope.provider),
@@ -155,6 +178,25 @@ async def _bound_decide(
         output_type=output_type,
         scope=scope,
     )
+    if scope.task is asyncio.current_task():
+        return await operation
+
+    # Own the decision itself so cleanup never cancels an application task.
+    task = asyncio.create_task(operation)
+    scope.pending.add(task)
+    try:
+        try:
+            await asyncio.wait((task,))
+        except asyncio.CancelledError as error:
+            await _close_after_error(error, lambda: _cancel_decisions((task,)))
+            raise
+        # Retrieve any error even if the callback closed before this task resumed.
+        if not task.cancelled():
+            task.exception()
+        scope.check(owner, after_await=True)
+        return task.result()
+    finally:
+        scope.pending.discard(task)
 
 
 def _choice_key(value: Any) -> tuple[str, Any]:

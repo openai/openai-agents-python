@@ -209,7 +209,7 @@ async def test_choices_preserve_json_scalar_identity(value):
 @pytest.mark.parametrize("owner", contexts())
 async def test_bound_contexts_use_captured_default_and_expire(owner):
     provider, override = Provider(True), Provider(False)
-    with _bind_decisions(owner, lambda: True, provider):
+    async with _bind_decisions(owner, lambda: True, provider):
         assert await owner.decide("Allowed?", input="Evidence") is True
         assert await owner.decide("Allowed?", input="Evidence", provider=override) is False
     with pytest.raises(RuntimeError, match="exact live callback"):
@@ -217,16 +217,27 @@ async def test_bound_contexts_use_captured_default_and_expire(owner):
     assert len(provider.requests) == len(override.requests) == 1
 
 
-async def test_bound_calls_reject_other_owners_and_child_tasks():
+async def test_bound_calls_overlap_and_keep_callback_ownership():
     owner, other = contexts()[:2]
-    provider = Provider(True)
-    with _bind_decisions(owner, lambda: True, provider):
+    provider, override = Provider(True), Provider(False)
+    release = asyncio.Event()
+
+    async def use_expired_scope():
+        await release.wait()
+        await owner.decide("Expired?", input="Evidence")
+
+    async with _bind_decisions(owner, lambda: True, provider):
         with pytest.raises(RuntimeError, match="exact live callback"):
             await other.decide("Allowed?", input="Evidence")
-        with pytest.raises(RuntimeError, match="exact live callback"):
-            await asyncio.create_task(owner.decide("Allowed?", input="Evidence"))
-        assert await owner.decide("Allowed?", input="Evidence") is True
-    assert len(provider.requests) == 1
+        assert await asyncio.gather(
+            owner.decide("Allowed?", input="Evidence"),
+            owner.decide("Allowed?", input="Evidence", provider=override),
+        ) == [True, False]
+        late = asyncio.create_task(use_expired_scope())
+    release.set()
+    with pytest.raises(RuntimeError, match="exact live callback"):
+        await late
+    assert len(provider.requests) == len(override.requests) == 1
 
 
 async def test_callback_cancellation_joins_provider_cleanup():
@@ -243,7 +254,7 @@ async def test_callback_cancellation_joins_provider_cleanup():
                 await release.wait()
 
     async def callback():
-        with _bind_decisions(owner, lambda: True, Blocking()):
+        async with _bind_decisions(owner, lambda: True, Blocking()):
             await owner.decide("Allowed?", input="Evidence")
 
     pending = asyncio.create_task(callback())
@@ -406,7 +417,7 @@ async def test_generated_raw_response_boundary_sanitizes_malformed_200(compiler,
                 )
             elif entry == "bound":
                 owner = contexts()[1]
-                with _bind_decisions(owner, lambda: True, provider):
+                async with _bind_decisions(owner, lambda: True, provider):
                     await owner.decide("Allowed?", input="Evidence")
             else:
                 await Agent(instructions="Assess.", decisions=provider).decide(
@@ -631,7 +642,7 @@ async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bo
     with pytest.raises(DecisionError) as caught:
         if bound:
             owner = contexts()[1]
-            with _bind_decisions(owner, lambda: True, provider):
+            async with _bind_decisions(owner, lambda: True, provider):
                 await owner.decide("Allowed?", input="Evidence")
         else:
             await Agent(instructions="Assess.", decisions=provider).decide(

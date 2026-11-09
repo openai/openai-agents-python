@@ -271,7 +271,7 @@ class ChildStepContext(Generic[_ContextT_co]):
 
         Input is explicit. The callback's captured provider is the default;
         provider overrides it for this call. Completed usage is recorded before
-        local validation. Calls outside the callback or from detached tasks fail.
+        local validation. For overlapping decisions, await ``asyncio.gather()`` in this callback.
         """
         from .decisions import _bound_decide
 
