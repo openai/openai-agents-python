@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from contextlib import aclosing
 from typing import Any
 
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig
+from agents.realtime import RealtimeConfig, RealtimeResponse
 from tests._asyncio import timeout
 from tests.test_native_realtime import realtime_peer as realtime_peer
 from tests.test_native_realtime_manual_audio import SendHookAdapter
@@ -101,6 +102,62 @@ async def test_explicit_response_does_not_append_or_commit_input(realtime_peer):
         await owner.request_response()
         await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
         assert [frame["type"] for frame in peer.frames[start:]] == ["response.create"]
+
+
+async def test_response_overrides_follow_the_coalesced_request_once(realtime_peer):
+    peer = realtime_peer
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-response-options",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Respond to accepted input.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as owner,
+        aclosing(owner.events()) as events,
+    ):
+        assert peer.socket is not None
+        await peer.socket.send_json({"type": "response.created", "response": {"id": "active"}})
+        async for event in events:
+            if isinstance(event, RealtimeResponse) and event.response_id == "active":
+                assert event.status == "created"
+                break
+
+        start = len(peer.frames)
+        invalid: Any = {"tools": []}
+        with pytest.raises(ValueError, match="unknown field"):
+            await owner.request_response(invalid)
+        await owner.request_response({"instructions": "Superseded request."})
+        await owner.request_response(
+            {
+                "instructions": "Greet the caller.",
+                "output_modality": "text",
+                "max_output_tokens": 40,
+            }
+        )
+        await owner.send_message("Queue fence", trigger_response=False)
+        fence = await peer.frame(
+            lambda frame: frame["type"] == "conversation.item.create", after=start
+        )
+        start = peer.frames.index(fence, start) + 1
+        assert not any(frame["type"] == "response.create" for frame in peer.frames[:start])
+
+        await peer.socket.send_json({"type": "response.done", "response": {"id": "active"}})
+        configured = await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+        assert configured["response"] == {
+            "instructions": "Greet the caller.",
+            "output_modalities": ["text"],
+            "max_output_tokens": 40,
+        }
+        await peer.socket.send_json({"type": "response.created", "response": {"id": "configured"}})
+        await peer.socket.send_json({"type": "response.done", "response": {"id": "configured"}})
+        await owner.request_response()
+        default = await peer.frame(
+            lambda frame: frame["type"] == "response.create",
+            after=peer.frames.index(configured, start) + 1,
+        )
+        assert "response" not in default
 
 
 async def test_invalid_message_and_response_flag_have_no_wire_effects(realtime_peer):

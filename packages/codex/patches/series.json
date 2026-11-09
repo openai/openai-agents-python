@@ -343,7 +343,11 @@
     {
       "path": "0097-native-realtime-provider-history.patch",
       "sha256": "55f95b76ac5d49ddc840ed582f9c28770cd20e3693e4f152f141193e8fa5dad8"
+    },
+    {
+      "path": "0098-native-realtime-response-options.patch",
+      "sha256": "a6305497e7ab25cce8a4a54e3484e24ef1a3685bc808aa1310e334470774e036"
     }
   ],
-  "result_tree": "bab27b3c2e0b22a48df5667860784815265056e7"
+  "result_tree": "a1ac099b1112c58d04d812a5a947331321a4b9d8"
 }
