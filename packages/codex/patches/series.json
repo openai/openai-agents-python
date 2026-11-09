@@ -337,9 +337,13 @@
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
     },
     {
+      "path": "0100-native-hosted-option-fidelity.patch",
+      "sha256": "c06cdc7449e3767e439c349e2253546e15e2fa1b97b7f2d048fb3e429cd632a6"
+    },
+    {
       "path": "0101-native-request-extensions.patch",
       "sha256": "fc28e524a2b71b3501d232cad8a2a3e420f8463f719c2415b89ab853b9beaa68"
     }
   ],
-  "result_tree": "46c0f21dab8ec75f9967056d92db179aa1474c8a"
+  "result_tree": "587f9a4526b94ef33421a9d3dc28698ade83f6b0"
 }
