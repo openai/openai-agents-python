@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from types import SimpleNamespace
+from collections import UserDict
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -153,8 +154,9 @@ async def test_history_rejection_drops_media_from_sdk_traceback(
 
 
 @pytest.mark.parametrize("text", ["a" * (2 * 1024 * 1024 + 1), "\x00" * 350_000])
+@pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])
 async def test_history_input_budget_rejects_before_json_copy(
-    text: str, monkeypatch: pytest.MonkeyPatch
+    text: str, mapping: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     voice, requests = owner()
 
@@ -164,7 +166,14 @@ async def test_history_input_budget_rejects_before_json_copy(
     monkeypatch.setattr("_agents_codex.realtime.json.dumps", unexpected)
     with pytest.raises(ValueError, match="8 MiB"):
         await voice.update_history(
-            [{"id": "oversized-history", "content": [{"type": "input_text", "text": text}]}]
+            [
+                mapping(
+                    {
+                        "id": "oversized-history",
+                        "content": [mapping({"type": "input_text", "text": text})],
+                    }
+                )
+            ]
         )
     assert requests == []
 
@@ -185,7 +194,9 @@ async def test_history_input_budget_counts_nested_json_tuples_before_copy(
     assert requests == []
 
 
+@pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])
 async def test_cancelled_history_retains_aggregate_input_budget_until_native_settles(
+    mapping: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     voice, _ = owner()
@@ -199,7 +210,7 @@ async def test_cancelled_history_retains_aggregate_input_budget_until_native_set
         return "{}"
 
     monkeypatch.setattr(voice._session._native, "call", call)
-    items = [{"id": "large-history", "content": [{"text": "a" * 1_100_000}]}]
+    items = (mapping({"id": "large-history", "content": (mapping({"text": "a" * 1_100_000}),)}),)
     async with timeout(5):
         updating = asyncio.create_task(voice.update_history(items))
         try:
@@ -217,3 +228,35 @@ async def test_cancelled_history_retains_aggregate_input_budget_until_native_set
         assert accepted == ["realtime_conversation_update_history_sdk"]
         await voice.update_history(items)
         assert accepted == ["realtime_conversation_update_history_sdk"] * 2
+
+
+@pytest.mark.parametrize("mapping", [MappingProxyType, UserDict])
+async def test_history_captures_declared_nested_mapping_inputs(mapping: Any) -> None:
+    voice, requests = owner()
+    content = {"type": "input_text", "text": "Original mapping text"}
+    nested = mapping(content)
+    row = mapping(
+        {"id": "mapping-message", "type": "message", "role": "user", "content": (nested,)}
+    )
+    updating = asyncio.create_task(voice.update_history((row,)))
+    await asyncio.sleep(0)
+    content["text"] = "Mutated after admission"
+    if isinstance(nested, UserDict):
+        nested["text"] = "Mutated after admission"
+    await updating
+    assert requests == [
+        (
+            "realtime_conversation_update_history_sdk",
+            {
+                "generation": voice._generation,
+                "items": [
+                    {
+                        "id": "mapping-message",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Original mapping text"}],
+                    }
+                ],
+            },
+        )
+    ]

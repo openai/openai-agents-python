@@ -298,7 +298,7 @@ index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52ee
      let event = connection
          .next_event()
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..ef50703e3d228abcfcdadc622e174971a5f29e43 100644
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..cc35acc7e35d15ee36359ad92279aa2513a75198 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,5 +1,6 @@
@@ -615,7 +615,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..ef50703e3d228abcfcdadc622e174971
 +                        .as_ref()
 +                        .map(|previous| previous.as_deref()),
 +                )?;
-+                Some(history.created(item))
++                Some(history.created(item, previous_item_id.is_some()))
 +            }
 +            RealtimeEvent::FunctionCallRequested(call) => {
 +                sdk.history.lock().unwrap().observe_id(&call.item_id)?;
@@ -803,10 +803,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708b338dffa
+index 0000000000000000000000000000000000000000..e91ccc6f700d25e89a6992720f4b3640c13b5dff
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1120 @@
+@@ -0,0 +1,1175 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -1190,6 +1190,15 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +        previous: Option<Option<&str>>,
 +    ) -> CodexResult<()> {
 +        let id = item_id(item)?.to_owned();
++        let expected_create = self.expected_create(&id);
++        let contradictory = self.expected_create_previous(&id).is_some_and(|expected| {
++            expected.as_deref().is_some_and(|expected| {
++                previous.is_some_and(|actual| actual.unwrap_or("root") != expected)
++            })
++        });
++        if (previous.is_none() && !expected_create) || contradictory {
++            self.mark_order_unknown();
++        }
 +        if self.order.is_empty() {
 +            if let Some(previous) = previous {
 +                if previous.is_some_and(|id| !valid_id(id)) {
@@ -1198,7 +1207,7 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +                self.boundary = Some(previous.unwrap_or("root").to_owned());
 +            }
 +        }
-+        self.observe_id(&id)?;
++        self.record_id(&id, previous.is_some() || expected_create)?;
 +        if let Some(previous) = previous {
 +            let Some(old_index) = self.order.iter().position(|known| known == &id) else {
 +                return Ok(());
@@ -1231,12 +1240,31 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +        }
 +        Ok(())
 +    }
++    fn expected_create_previous(&self, id: &str) -> Option<&Option<String>> {
++        self.pending
++            .as_ref()
++            .and_then(|pending| match &pending.waiting {
++                Some(Action::Create { item, previous }) if item["id"].as_str() == Some(id) => {
++                    Some(previous)
++                }
++                _ => None,
++            })
++    }
 +    fn expected_create(&self, id: &str) -> bool {
-+        self.pending.as_ref().is_some_and(|pending| {
-+            matches!(&pending.waiting, Some(Action::Create { item, .. }) if item["id"].as_str() == Some(id))
-+        })
++        self.expected_create_previous(id).is_some()
++    }
++    fn mark_order_unknown(&mut self) {
++        self.incomplete = true;
++        if self.editing() {
++            self.interrupt(invalid(
++                "Provider conversation position is unknown or contradictory",
++            ));
++        }
 +    }
 +    pub(super) fn observe_id(&mut self, id: &str) -> CodexResult<()> {
++        self.record_id(id, false)
++    }
++    fn record_id(&mut self, id: &str, positioned: bool) -> CodexResult<()> {
 +        if !valid_id(id) {
 +            return Err(invalid("Invalid provider item ID"));
 +        }
@@ -1247,6 +1275,9 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +            ));
 +        }
 +        if !self.order.contains(&id) {
++            if !positioned && !self.expected_create(&id) {
++                self.mark_order_unknown();
++            }
 +            if self.order.len() == LIMIT {
 +                self.incomplete = true;
 +            } else {
@@ -1333,7 +1364,11 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +        pending.waiting = None;
 +        self.advance()
 +    }
-+    pub(super) fn created(&mut self, item: &Value) -> CodexResult<Option<Action>> {
++    pub(super) fn created(
++        &mut self,
++        item: &Value,
++        position_observed: bool,
++    ) -> CodexResult<Option<Action>> {
 +        let id = item_id(item)?.to_owned();
 +        let Some(pending) = self.pending.as_mut() else {
 +            return Ok(None);
@@ -1348,22 +1383,24 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +        if item_id(expected)? != id {
 +            return Ok(None);
 +        }
-+        let previous = previous.clone();
-+        self.order.retain(|known| known != &id);
-+        let index = if previous.is_none() {
-+            self.order.len()
-+        } else if previous.as_deref() == Some("root") {
-+            0
-+        } else if self.boundary.as_ref() == previous.as_ref() {
-+            0
-+        } else {
-+            self.order
-+                .iter()
-+                .position(|known| Some(known) == previous.as_ref())
-+                .ok_or_else(|| invalid("Provider history anchor disappeared"))?
-+                + 1
-+        };
-+        self.order.insert(index, id);
++        if !position_observed {
++            let previous = previous.clone();
++            self.order.retain(|known| known != &id);
++            let index = if previous.is_none() {
++                self.order.len()
++            } else if previous.as_deref() == Some("root") {
++                0
++            } else if self.boundary.as_ref() == previous.as_ref() {
++                0
++            } else {
++                self.order
++                    .iter()
++                    .position(|known| Some(known) == previous.as_ref())
++                    .ok_or_else(|| invalid("Provider history anchor disappeared"))?
++                    + 1
++            };
++            self.order.insert(index, id);
++        }
 +        pending.waiting = None;
 +        self.advance()
 +    }
@@ -1538,8 +1575,8 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +            matches!(state.advance().unwrap(),Some(Action::Create {item,previous}) if item==new && previous.as_deref()==Some("first"))
 +        );
 +        assert!(receipt.try_recv().is_err());
-+        state.observe_added(&new, Some(None)).unwrap();
-+        state.created(&new).unwrap();
++        state.observe_added(&new, Some(Some("first"))).unwrap();
++        state.created(&new, true).unwrap();
 +        assert!(receipt.await.unwrap().is_ok());
 +        assert_eq!(state.order, vec!["first", "new"]);
 +    }
@@ -1771,8 +1808,12 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +    #[tokio::test]
 +    async fn cumulative_snapshot_storage_is_bounded_and_failure_releases_waiter() {
 +        let mut state = State::default();
-+        state.observe_id("one").unwrap();
-+        state.observe_id("two").unwrap();
++        state
++            .observe_added(&message("one", "one"), Some(None))
++            .unwrap();
++        state
++            .observe_added(&message("two", "two"), Some(Some("one")))
++            .unwrap();
 +        let (reply, receipt) = tokio::sync::oneshot::channel();
 +        state.start(Request::List { reply }).unwrap();
 +        let media = |id| json!({"id":id,"type":"message","role":"user","content":[{"type":"input_audio","audio":"A".repeat(1_100_000)}]});
@@ -1808,7 +1849,7 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +        assert!(state.deadline().is_some());
 +        assert!(!state.expire_read());
 +        state.observe_added(&new, Some(None)).unwrap();
-+        state.created(&new).unwrap();
++        state.created(&new, true).unwrap();
 +        assert!(!state.busy());
 +        assert_eq!(state.order, vec!["new", "old"]);
 +    }
@@ -1886,7 +1927,7 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +            .observe_added(&message("c", "c"), Some(Some("a")))
 +            .unwrap();
 +        assert_eq!(state.order, vec!["a", "c", "b"]);
-+        assert!(!state.incomplete);
++        assert!(state.incomplete);
 +    }
 +    #[test]
 +    fn unresolved_predecessor_or_hidden_prefix_gap_blocks_ordered_operations() {
@@ -1925,6 +1966,20 @@ index 0000000000000000000000000000000000000000..16e655bbc995a30e76160d81eb49e708
 +                .unwrap()
 +                .is_empty()
 +        );
++    }
++    #[test]
++    fn absent_position_marks_unsolicited_observations_incomplete() {
++        for added in [false, true] {
++            let mut state = State::default();
++            if added {
++                state
++                    .observe_added(&message("unknown", "unknown"), None)
++                    .unwrap();
++            } else {
++                state.observe_id("unknown").unwrap();
++            }
++            assert!(state.incomplete);
++        }
 +    }
 +}
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs

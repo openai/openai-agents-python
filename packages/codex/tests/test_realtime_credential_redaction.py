@@ -501,3 +501,64 @@ async def test_public_sip_builder_releases_config_from_exception_frames(
     assert wrapper_seen
     assert config.settings is not None
     assert config.settings["hosted_mcp_tools"][0]["authorization"] == authorization
+
+
+async def test_connection_tool_selection_failure_releases_original_config() -> None:
+    from _agents_codex.realtime import RealtimeWebRTC
+    from agents import function_tool
+
+    @function_tool
+    async def uncaptured_tool(key: str) -> str:
+        return key
+
+    secret = "synthetic-tool-selection-api-key"
+    authorization = "synthetic-tool-selection-authorization"
+    offer = "v=0\r\ns=synthetic-private-tool-selection-offer\r\n"
+    failure = ValueError("Selected tool is outside the captured source")
+
+    async def tools(selection: Any) -> tuple[None, None]:
+        assert selection == (uncaptured_tool,)
+        raise failure
+
+    session = cast(
+        Session[Any, Any],
+        SimpleNamespace(_realtime_function_tools=tools),
+    )
+    config = RealtimeConfig(
+        api_key=secret,
+        tools=(uncaptured_tool,),
+        transport=RealtimeWebRTC(offer),
+        settings={
+            "hosted_mcp_tools": [
+                {
+                    "server_label": "fixture",
+                    "server_url": "https://example.invalid",
+                    "authorization": authorization,
+                }
+            ]
+        },
+    )
+    voice = RealtimeSession(session, config=config)
+    voice._live = True
+    with pytest.raises(ValueError, match="outside the captured source") as caught:
+        await voice._admit()
+    assert caught.value is failure
+    helper_seen = False
+    traceback = caught.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if "/_agents_codex/" in frame.f_code.co_filename.replace("\\", "/"):
+            assert all(value is not config for value in frame.f_locals.values())
+            assert all(
+                value not in repr(frame.f_locals) for value in (secret, authorization, offer)
+            )
+            if frame.f_code.co_name == "_prepare_realtime_params":
+                helper_seen = True
+                assert "config" not in frame.f_locals
+        traceback = traceback.tb_next
+    assert helper_seen
+    assert voice._config.api_key is None
+    assert voice._config.settings is None
+    assert voice._config.transport is None
+    assert config.settings is not None
+    assert config.settings["hosted_mcp_tools"][0]["authorization"] == authorization

@@ -138,36 +138,39 @@ async def _prepare_realtime_params(
     transport: dict[str, Any],
 ) -> dict[str, Any]:
     """Project the same captured native source for connection and call acceptance."""
-    function_tools, selection_id = await session._realtime_function_tools(tools)
-    params: dict[str, Any] = {
-        "settings": settings,
-        "function_tools": function_tools,
-        "expected_selection_id": selection_id,
-        "hosted_mcp_auto_response": config.automatically_trigger_response_for_mcp_tool_calls,
-        "params": {
-            "client_managed_handoffs": True,
-            "delegation_ack_filler": None,
-            "flush_transcript_tail_on_session_end": True,
-            "codex_responses_as_items": False,
-            "codex_response_item_prefix": None,
-            "codex_response_handoff_mode": "thinking",
-            "backend_reasoning_status": False,
-            "codex_response_handoff_channel_prefixes": None,
-            "model": config.model,
-            "output_modality": "audio",
-            "include_startup_context": False,
-            "initial_items": [],
-            "realtime_start_instructions": None,
-            "realtime_end_instructions": None,
-            "realtime_session_id": None,
-            "transport": transport,
-            "version": "v2",
-            "voice": config.voice,
-        },
-    }
-    if config.instructions is not None:
-        params["params"]["prompt"] = config.instructions
-    return params
+    try:
+        function_tools, selection_id = await session._realtime_function_tools(tools)
+        params: dict[str, Any] = {
+            "settings": settings,
+            "function_tools": function_tools,
+            "expected_selection_id": selection_id,
+            "hosted_mcp_auto_response": config.automatically_trigger_response_for_mcp_tool_calls,
+            "params": {
+                "client_managed_handoffs": True,
+                "delegation_ack_filler": None,
+                "flush_transcript_tail_on_session_end": True,
+                "codex_responses_as_items": False,
+                "codex_response_item_prefix": None,
+                "codex_response_handoff_mode": "thinking",
+                "backend_reasoning_status": False,
+                "codex_response_handoff_channel_prefixes": None,
+                "model": config.model,
+                "output_modality": "audio",
+                "include_startup_context": False,
+                "initial_items": [],
+                "realtime_start_instructions": None,
+                "realtime_end_instructions": None,
+                "realtime_session_id": None,
+                "transport": transport,
+                "version": "v2",
+                "voice": config.voice,
+            },
+        }
+        if config.instructions is not None:
+            params["params"]["prompt"] = config.instructions
+        return params
+    finally:
+        del config
 
 
 async def _build_realtime_sip_config(
@@ -451,7 +454,7 @@ def _hosted_mcp_schema_size(
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     if isinstance(value, str):
         size += _hosted_mcp_string_size(value, limit - size, json_text)
-    elif isinstance(value, dict):
+    elif isinstance(value, Mapping):
         for key, child in value.items():
             size += 128
             size += _hosted_mcp_string_size(key, limit - size, json_text)
@@ -462,6 +465,13 @@ def _hosted_mcp_schema_size(
     if size > limit:
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     return size
+
+
+def _realtime_history_mapping(value: object) -> dict[str, Any]:
+    """Normalize declared Mapping values after their input budget is reserved."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError("Realtime history values must be JSON values")
 
 
 def _hosted_mcp_catalog_size(
@@ -1004,7 +1014,7 @@ class RealtimeSession:
             except RuntimeError:
                 raise ValueError("Realtime history exceeds its 8 MiB input limit") from None
             with self._input_admission(size):
-                captured = json.loads(json.dumps(items))
+                captured = json.loads(json.dumps(items, default=_realtime_history_mapping))
                 await _join(asyncio.create_task(self._call("update_history", items=captured)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
