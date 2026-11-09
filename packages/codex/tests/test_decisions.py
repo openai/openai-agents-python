@@ -1,15 +1,16 @@
-"""Typed decision calls without a native model run."""
+"""Direct application schemas, callback lifetime and generated Decisions transport."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import sys
-from dataclasses import FrozenInstanceError
 from types import MethodType, SimpleNamespace
-from typing import Literal
+from typing import Annotated, Literal
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from _agents_codex.decisions import _bind_decisions
@@ -48,83 +49,8 @@ class Provider:
 
 
 class Assessment(BaseModel):
-    category: Literal["accept", "review"] = Field(description="Use review for missing evidence")
-    approved: bool = Field(description="The customer has verified their identity")
-
-
-async def test_default_boolean_and_explicit_input_reach_swappable_provider():
-    provider = Provider({"response": True})
-    assert (
-        await Agent(instructions="Answer").decide(
-            "Is this allowed?", input="Evidence", provider=provider
-        )
-        is True
-    )
-    request = provider.requests[0]
-    assert request.question == "Is this allowed?"
-    assert request.input == "Evidence"
-    assert request.output_schema["properties"]["response"]["type"] == "boolean"
-    assert request.output_schema["additionalProperties"] is False
-
-
-async def test_choices_and_pydantic_output_reuse_existing_schema_validation():
-    choices = Provider({"response": "technical"})
-    assert (
-        await Agent(instructions="Answer").decide(
-            "Select a specialist", input=[], choices=["billing", "technical"], provider=choices
-        )
-        == "technical"
-    )
-    assert choices.requests[0].input == []
-    assert choices.requests[0].output_schema["properties"]["response"]["enum"] == [
-        "billing",
-        "technical",
-    ]
-    provider = Provider({"category": "review", "approved": False})
-    assert await Agent(instructions="Answer").decide(
-        "Assess", input="Evidence", output_type=Assessment, provider=provider
-    ) == Assessment(category="review", approved=False)
-    schema = provider.requests[0].output_schema
-    assert (
-        schema["properties"]["approved"]["description"]
-        == "The customer has verified their identity"
-    )
-    assert schema["required"] == ["category", "approved"]
-    provider.value = {"category": "invented", "approved": True}
-    with pytest.raises(OutputValidationError):
-        await Agent(instructions="Answer").decide(
-            "Assess", input="Evidence", output_type=Assessment, provider=provider
-        )
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"question": ""},
-        {"choices": []},
-        {"choices": ["one", "one"]},
-        {"choices": ["one"], "output_type": Assessment},
-        {"input": {"arbitrary": "json"}},
-    ],
-)
-async def test_invalid_requests_fail_before_provider_work(options):
-    provider = Provider(None)
-    values = {"question": "Question", "input": "Evidence", **options}
-    with pytest.raises((TypeError, ValueError)):
-        await Agent(instructions="Answer").decide(provider=provider, **values)
-    assert not provider.requests
-
-
-async def test_agent_default_and_per_call_override_do_not_start_an_agent_run():
-    first, second = Provider({"response": True}), Provider({"response": False})
-    agent = Agent(instructions="Answer", decisions=first)
-    assert await agent.decide("Allowed?", input="evidence") is True
-    assert await agent.decide("Allowed?", input="evidence", provider=second) is False
-    assert agent.decisions is first and agent.model is None
-    with pytest.raises(FrozenInstanceError):
-        agent.decisions = second
-    with pytest.raises(ValueError, match="Configure decisions"):
-        await Agent(instructions="Answer").decide("Allowed?", input="evidence")
+    category: Literal["accept", "review"]
+    approved: bool
 
 
 def contexts():
@@ -153,504 +79,6 @@ def contexts():
             ),
         ),
     ]
-
-
-@pytest.mark.parametrize("owner", contexts())
-async def test_bound_contexts_record_before_validation_and_reject_expiry(owner):
-    recorded = []
-    live = True
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    provider = Provider({"response": "invalid"})
-    with _bind_decisions(owner, lambda: live, begin, provider):
-        with pytest.raises(OutputValidationError):
-            await owner.decide("Allowed?", input="evidence")
-        assert recorded[0].usage == USAGE
-        assert recorded[0].request_id == "req_test"
-        live = False
-        with pytest.raises(RuntimeError, match="exact live callback"):
-            await owner.decide("Allowed?", input="evidence")
-    with pytest.raises(RuntimeError, match="exact live callback"):
-        await owner.decide("Allowed?", input="evidence")
-    assert len(provider.requests) == 1
-
-
-async def test_bound_known_failure_records_once_and_never_falls_back():
-    owner = contexts()[1]
-    recorded = []
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    failure = DecisionError("refusal", usage=USAGE, request_id="refused", model="custom")
-    provider = Provider(failure)
-    with _bind_decisions(owner, lambda: True, begin, provider):
-        with pytest.raises(DecisionError) as caught:
-            await owner.decide("Allowed?", input="evidence")
-    assert caught.value is failure
-    assert recorded == [
-        DecisionResponse(value=None, usage=USAGE, request_id="refused", model="custom")
-    ]
-
-
-async def test_bound_calls_require_current_task_and_capture_before_dispatch():
-    owner, other = contexts()[:2]
-    provider = Provider({"response": True})
-    captures = []
-
-    async def begin():
-        captures.append("capture")
-
-        async def record(response):
-            captures.append("record")
-
-        return record
-
-    with _bind_decisions(owner, lambda: True, begin, provider):
-        with pytest.raises(RuntimeError, match="exact live callback"):
-            await other.decide("Question", input="evidence")
-        with pytest.raises(RuntimeError, match="exact live callback"):
-            await asyncio.create_task(owner.decide("Question", input="evidence"))
-        assert await owner.decide("Question", input="evidence") is True
-    assert captures == ["capture", "record"]
-    assert len(provider.requests) == 1
-
-
-async def test_cancelling_bound_call_joins_provider_cleanup_without_manufactured_completion():
-    owner = contexts()[1]
-    started, retired = asyncio.Event(), asyncio.Event()
-    recorded = []
-
-    class Blocking:
-        async def get_decision(self, request):
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                await asyncio.sleep(0)
-                retired.set()
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    async def callback():
-        with _bind_decisions(owner, lambda: True, begin, Blocking()):
-            await owner.decide("Question", input="evidence")
-
-    task = asyncio.create_task(callback())
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert retired.is_set()
-    assert recorded == []
-
-
-class Client:
-    def __init__(self, data):
-        self.data = data
-        self.requests = []
-        self.closed = False
-
-    async def post(self, path, *, cast_to, body):
-        self.requests.append((path, body))
-        return SimpleNamespace(model_dump=lambda: self.data, _request_id="req_openai")
-
-    async def close(self):
-        self.closed = True
-
-
-@pytest.fixture
-def compiler(monkeypatch):
-    # These adapter tests isolate HTTP selection/metadata from the pure native
-    # compiler, whose real artifact has dedicated compiler/integration tests.
-    state = {"supported": True, "error": None, "schemas": []}
-
-    def questions(schema, question):
-        state["schemas"].append(json.loads(schema))
-        return json.dumps(
-            {
-                "supported": state["supported"],
-                "questions": [{"type": "predicate", "name": "field_1", "instructions": question}]
-                if state["supported"]
-                else [],
-            }
-        )
-
-    def result(schema, question, answers):
-        if state["error"]:
-            raise ValueError(state["error"])
-        return json.dumps({"response": json.loads(answers)[0]["probability"] >= 0.5})
-
-    monkeypatch.setitem(
-        sys.modules,
-        "agents._native",
-        SimpleNamespace(
-            _decision_questions=questions,
-            _decision_result=result,
-        ),
-    )
-    return state
-
-
-async def test_openai_adapter_uses_fixed_backend_and_keeps_borrowed_client_open(compiler):
-    client = Client(
-        {
-            "model": "luna-resolved",
-            "answers": [{"probability": 0.8}],
-            "usage": {
-                "input_tokens": 7,
-                "output_tokens": 3,
-                "total_tokens": 10,
-            },
-        }
-    )
-    async with OpenAIDecisions(client=client) as provider:
-        response = await provider.get_decision(
-            DecisionRequest(
-                question="Allowed?",
-                input="evidence",
-                output_schema={"type": "boolean"},
-            )
-        )
-    assert response == DecisionResponse(
-        value={"response": True},
-        usage=TokenUsage(7, 0, 0, 3, 0, 10),
-        request_id="req_openai",
-        model="luna-resolved",
-    )
-    assert client.requests[0][0] == "/decisions"
-    assert client.requests[0][1]["model"] == "gpt-6-luna"
-    assert not client.closed
-    with pytest.raises(RuntimeError, match="closed"):
-        await Agent(instructions="Answer", decisions=provider).decide("Allowed?", input="evidence")
-
-
-async def test_openai_fallback_is_selected_before_inference_only(compiler):
-    compiler["supported"] = False
-    client = Client(
-        {
-            "model": "generation",
-            "status": "completed",
-            "output": [{"content": [{"type": "output_text", "text": '{"response":"accepted"}'}]}],
-        }
-    )
-    async with OpenAIDecisions(client=client) as no_fallback:
-        with pytest.raises(ValueError, match="Unsupported Decisions output schema"):
-            await Agent(instructions="Answer", decisions=no_fallback).decide(
-                "Answer", input="evidence", output_type=str
-            )
-    assert not client.requests
-    async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
-        assert (
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Answer", input="evidence", output_type=str
-            )
-            == "accepted"
-        )
-    assert len(client.requests) == 1
-    path, body = client.requests[0]
-    assert path == "/responses" and body["model"] == "generation"
-    assert body["text"]["format"]["schema"]["properties"]["response"]["type"] == "string"
-
-
-@pytest.mark.parametrize(
-    "reason,message",
-    [
-        ("refusal", "Decisions refused a question"),
-        ("invalid_response", "invalid Decisions answer"),
-    ],
-)
-async def test_openai_completed_errors_keep_metadata_without_raw_answers(compiler, reason, message):
-    compiler["error"] = message
-    client = Client(
-        {
-            "model": "luna-resolved",
-            "answers": [{"secret": "DO_NOT_EXPOSE"}],
-            "usage": {
-                "input_tokens": 7,
-                "output_tokens": 3,
-                "total_tokens": 10,
-            },
-        }
-    )
-    async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
-        with pytest.raises(DecisionError) as caught:
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Allowed?", input="evidence"
-            )
-    error = caught.value
-    assert error.reason == reason and error.usage.total_tokens == 10
-    assert error.request_id == "req_openai" and error.model == "luna-resolved"
-    assert "DO_NOT_EXPOSE" not in str(error)
-    assert error.__context__ is None
-    assert len(client.requests) == 1 and client.requests[0][0] == "/decisions"
-
-
-async def test_invalid_usage_remains_unknown_and_transport_failure_is_not_a_completion(compiler):
-    client = Client(
-        {
-            "answers": [{"probability": 1}],
-            "usage": {
-                "input_tokens": -1,
-                "output_tokens": 1,
-                "total_tokens": 0,
-            },
-        }
-    )
-    provider = OpenAIDecisions(client=client)
-    response = await provider.get_decision(
-        DecisionRequest(question="Allowed?", input="", output_schema={"type": "boolean"})
-    )
-    assert response.usage is None
-
-    async def fail(*args, **kwargs):
-        raise OSError("transport failed")
-
-    client.post = fail
-    with pytest.raises(OSError, match="transport failed"):
-        await Agent(instructions="Answer", decisions=provider).decide("Allowed?", input="evidence")
-
-
-@pytest.mark.parametrize("entry", ["session", "run", "run_sync"])
-@pytest.mark.parametrize("override", [False, True])
-async def test_openings_capture_provider_precedence_without_native_acquisition(
-    monkeypatch, entry, override
-):
-    import _agents_codex.session as implementation
-
-    first, second = Provider({"response": True}), Provider({"response": False})
-    captured = []
-    resolve = implementation._capture_decisions
-
-    class Captured(Exception):
-        pass
-
-    def capture(default, selected):
-        captured.append(resolve(default, selected))
-        raise Captured
-
-    monkeypatch.setattr(implementation, "_capture_decisions", capture)
-    agent = Agent(instructions="Answer", decisions=first)
-    options = {"decisions": second} if override else {}
-    with pytest.raises(Captured):
-        if entry == "session":
-            async with agent.session(**options):
-                pytest.fail("Unexpected native opening")
-        elif entry == "run":
-            await agent.run("Evidence", **options)
-        else:
-            await asyncio.to_thread(agent.run_sync, "Evidence", **options)
-    assert captured == [second if override else first]
-    assert agent.decisions is first
-
-
-@pytest.mark.parametrize("sync_wrapper", [False, True])
-async def test_existing_callback_executor_binds_decision_scope_to_actual_callback(sync_wrapper):
-    from agents import Session
-
-    owner = contexts()[1]
-    first, override = Provider({"response": True}), Provider({"response": False})
-    session = object.__new__(Session)
-    session._decisions_provider = first
-    recorded = []
-
-    async def begin(state, message):
-        assert message == {"step_id": 7}
-
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    session._begin_decision_response = begin
-
-    async def body(ctx):
-        assert await ctx.decide("Allowed?", input="evidence") is True
-        return await ctx.decide("Allowed?", input="evidence", provider=override)
-
-    callback = (lambda ctx: body(ctx)) if sync_wrapper else body
-    assert (
-        await session._call_decision_callback(
-            object(),
-            {"step_id": 7},
-            callback,
-            lambda: True,
-            owner,
-        )
-        is False
-    )
-    assert [response.model for response in recorded] == ["custom", "custom"]
-    with pytest.raises(RuntimeError, match="exact live callback"):
-        await owner.decide("Allowed?", input="evidence", provider=first)
-
-
-async def test_owned_client_is_created_lazily_and_closed(compiler, monkeypatch):
-    import openai
-
-    created = []
-    client = Client({"answers": [{"probability": 1}]})
-
-    def make_client():
-        created.append(client)
-        return client
-
-    monkeypatch.setattr(openai, "AsyncOpenAI", make_client)
-    provider = OpenAIDecisions()
-    assert not created
-    async with provider:
-        assert (
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Allowed?", input="evidence"
-            )
-            is True
-        )
-    assert created == [client] and client.closed
-
-
-async def test_public_raw_post_preserves_actual_openai_request_id(compiler):
-    import httpx2
-    import openai
-
-    requests = []
-
-    async def respond(request):
-        requests.append(request)
-        return httpx2.Response(
-            200,
-            headers={"x-request-id": "req_actual"},
-            json={
-                "model": "luna-resolved",
-                "answers": [{"probability": 0.8}],
-                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
-            },
-        )
-
-    async with openai.AsyncOpenAI(
-        api_key="synthetic-decision-key",
-        base_url="https://example.invalid/v1",
-        http_client=openai.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond)),
-    ) as client:
-        async with OpenAIDecisions(client=client) as provider:
-            result = await provider.get_decision(
-                DecisionRequest(
-                    question="Allowed?",
-                    input="evidence",
-                    output_schema={"type": "boolean"},
-                )
-            )
-        assert not client.is_closed()
-    assert result.request_id == "req_actual"
-    assert result.usage == TokenUsage(7, 0, 0, 3, 0, 10)
-    assert requests[0].headers["Authorization"] == "Bearer synthetic-decision-key"
-    assert requests[0].url.path == "/v1/decisions"
-    assert json.loads(requests[0].content)["model"] == "gpt-6-luna"
-
-
-async def test_expired_capture_prevents_provider_dispatch():
-    owner = contexts()[1]
-    live = True
-    provider = Provider({"response": True})
-
-    async def begin():
-        nonlocal live
-        live = False
-
-        async def record(response):
-            pytest.fail("No completed response exists")
-
-        return record
-
-    with _bind_decisions(owner, lambda: live, begin, provider):
-        with pytest.raises(asyncio.CancelledError):
-            await owner.decide("Allowed?", input="Evidence")
-    assert not provider.requests
-
-
-@pytest.mark.parametrize("failure", [False, True])
-async def test_late_response_records_known_usage_then_discards_revoked_callback(failure):
-    owner = contexts()[1]
-    live = True
-    recorded = []
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    class LateProvider:
-        async def get_decision(self, request):
-            nonlocal live
-            live = False
-            if failure:
-                raise DecisionError("refusal", usage=USAGE)
-            return DecisionResponse(value={"response": True}, usage=USAGE)
-
-    with _bind_decisions(owner, lambda: live, begin, LateProvider()):
-        with pytest.raises(asyncio.CancelledError):
-            await owner.decide("Allowed?", input="Evidence")
-    assert len(recorded) == 1 and recorded[0].usage == USAGE
-
-
-@pytest.mark.parametrize("status", [None, "incomplete", "failed", "cancelled"])
-async def test_fallback_requires_completed_status_even_when_partial_json_is_valid(compiler, status):
-    compiler["supported"] = False
-    client = Client(
-        {
-            "status": status,
-            "output": [{"content": [{"type": "output_text", "text": '{"response":"partial"}'}]}],
-        }
-    )
-    async with OpenAIDecisions(client=client, fallback_model="generation") as provider:
-        with pytest.raises(DecisionError) as caught:
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Answer", input="Evidence", output_type=str
-            )
-    assert caught.value.reason == "invalid_response"
-    assert len(client.requests) == 1 and client.requests[0][0] == "/responses"
-
-
-@pytest.mark.parametrize("value", [False, 0, "0", "false", 7, None])
-async def test_choices_preserve_json_scalar_identity(value):
-    provider = Provider({"response": value})
-    result = await Agent(instructions="Answer").decide(
-        "Select", input="Evidence", choices=[False, 0, "0", "false", 7, None], provider=provider
-    )
-    assert result == value and type(result) is type(value)
-
-
-@pytest.mark.parametrize("choices", [[1, 1.0], [0, -0.0]])
-async def test_choices_reject_duplicate_json_numbers_before_provider_work(choices):
-    provider = Provider(None)
-    with pytest.raises(ValueError, match="distinct"):
-        await Agent(instructions="Answer").decide(
-            "Select", input="Evidence", choices=choices, provider=provider
-        )
-    assert not provider.requests
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), {"not", "json"}])
-async def test_non_json_provider_output_is_a_safe_completed_error(value):
-    provider = Provider({"response": value})
-    with pytest.raises(DecisionError) as caught:
-        await Agent(instructions="Answer").decide("Allowed?", input="Evidence", provider=provider)
-    error = caught.value
-    assert error.reason == "invalid_response"
-    assert error.usage == USAGE and error.request_id == "req_test" and error.model == "custom"
-    assert error.__context__ is None
-    assert len(provider.requests) == 1
 
 
 def assert_no_response_in_sdk_traceback(error, marker):
@@ -685,281 +113,365 @@ def assert_no_response_in_sdk_traceback(error, marker):
     assert frames
 
 
-@pytest.mark.parametrize("entry", ["raw", "agent-provider", "agent-override", "agent", "bound"])
+async def test_application_schema_and_value_reach_swappable_provider():
+    provider = Provider(True)
+    agent = Agent(instructions="Answer.", decisions=provider)
+    assert await agent.decide("Allowed?", input="Evidence") is True
+    assert provider.requests[0].output_schema == {"type": "boolean"}
+    assert provider.requests[0].input == "Evidence"
+    choice = Provider("review")
+    assert (
+        await agent.decide("Select", input=[], choices=["accept", "review"], provider=choice)
+        == "review"
+    )
+    assert choice.requests[0].output_schema["enum"] == ["accept", "review"]
+    model = Provider({"category": "review", "approved": False})
+    assert await agent.decide(
+        "Assess", input="Evidence", output_type=Assessment, provider=model
+    ) == Assessment(category="review", approved=False)
+    assert model.requests[0].output_schema["required"] == ["category", "approved"]
+    assert model.requests[0].output_schema["additionalProperties"] is False
+    scalar = Provider(0.75)
+    assert (
+        await agent.decide(
+            "Score",
+            input="Evidence",
+            output_type=Annotated[float, Field(ge=0, le=1)],
+            provider=scalar,
+        )
+        == 0.75
+    )
+    assert scalar.requests[0].output_schema["type"] == "number"
+
+
+@pytest.mark.parametrize("value", ["yes", 1, {}, None, {"response": True}])
+async def test_boolean_schema_rejects_coercion_and_transport_wrappers(value):
+    with pytest.raises(OutputValidationError):
+        await Agent(instructions="Assess.", decisions=Provider(value)).decide(
+            "Allowed?", input="Evidence"
+        )
+
+
+@pytest.mark.parametrize("value", [{}, {"allow": "yes"}, {"allow": True, "extra": 1}])
+async def test_required_defaulted_fields_cannot_be_fabricated(value):
+    class Gate(BaseModel):
+        allow: bool = True
+
+    provider = Provider(value)
+    with pytest.raises(OutputValidationError):
+        await Agent(instructions="Assess.", decisions=provider).decide(
+            "Allowed?", input="Evidence", output_type=Gate
+        )
+    schema = provider.requests[0].output_schema
+    assert schema["required"] == ["allow"] and "default" not in schema["properties"]["allow"]
+
+
 @pytest.mark.parametrize(
-    "case",
+    "options",
     [
-        "envelope",
-        "refusal",
-        "answers",
-        "answer-count",
-        "fallback-refusal",
-        "fallback-text",
-        "fallback-depth",
-        "fallback-deep-malformed",
-        "answers-depth",
-        "result-depth",
+        {"question": ""},
+        {"choices": []},
+        {"choices": [1, 1.0]},
+        {"choices": ["a"], "output_type": Assessment},
+        {"input": {"arbitrary": "json"}},
+        {"input": [{"role": "user", "content": float("nan")}]},
     ],
 )
-async def test_completed_error_tracebacks_discard_provider_payload(
-    compiler, monkeypatch, entry, case
-):
-    marker = "PRIVATE_DECISION_PAYLOAD_MARKER"
-    fallback = case.startswith("fallback-")
-    compiler["supported"] = not fallback
-    if case == "refusal":
-        compiler["error"] = "Decisions refused a question"
-    elif case == "answers":
-        compiler["error"] = "Invalid answer " + marker
-    payload = {
-        "model": "resolved-model",
-        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
-        "answers": [{"secret": marker}],
-    }
-    if case == "envelope":
-        payload = [marker]
-    elif case == "answer-count":
-        payload["answers"] = {"secret": marker}
-    elif case == "answers-depth":
-        payload["answers"] = [[marker]]
-    elif case == "result-depth":
-        text = json.dumps([marker])
-        monkeypatch.setattr(sys.modules["agents._native"], "_decision_result", lambda *args: text)
-    elif fallback:
-        part = (
-            {"type": "refusal", "refusal": marker}
-            if case == "fallback-refusal"
-            else {"type": "output_text", "text": marker}
-        )
-        if case == "fallback-depth":
-            part["text"] = json.dumps([marker])
-        elif case == "fallback-deep-malformed":
-            # Exercise the real parser without relying on its recursion limit.
-            part["text"] = "[" * 10_000 + json.dumps(marker)
-        payload.update(status="completed", output=[{"content": [part]}])
+async def test_invalid_requests_fail_before_provider_work(options):
+    provider = Provider(None)
+    arguments = {"question": "Assess", "input": "Evidence", **options}
+    with pytest.raises((TypeError, ValueError)):
+        await Agent(instructions="Assess.", decisions=provider).decide(**arguments)
+    assert not provider.requests
 
-    if case == "answers-depth":
-        encode = json.dumps
 
-        def fail_answers(value, *args, **kwargs):
-            if value is payload["answers"]:
-                raise RecursionError(marker)
-            return encode(value, *args, **kwargs)
-
-        monkeypatch.setattr(json, "dumps", fail_answers)
-    elif case in ("result-depth", "fallback-depth"):
-        decode = json.loads
-        failed_text = text if case == "result-depth" else part["text"]
-
-        def fail_text(value, *args, **kwargs):
-            # JSON depth limits vary by Python version. Fail this exact boundary.
-            if value == failed_text:
-                raise RecursionError(marker)
-            return decode(value, *args, **kwargs)
-
-        monkeypatch.setattr(json, "loads", fail_text)
-
-    class RawPayload(SimpleNamespace):
-        def model_dump(self):
-            return self.data
-
-    requests = []
-
-    class PayloadClient:
-        async def post(self, *args, **kwargs):
-            requests.append(args[0])
-            # A real bound dump method also retains its receiver's payload.
-            return RawPayload(data=payload, _request_id="req_private")
-
-    provider = OpenAIDecisions(
-        client=PayloadClient(), fallback_model="generation" if fallback else None
+@pytest.mark.parametrize("value", [False, 0, "0", "false", 7, None])
+async def test_choices_preserve_json_scalar_identity(value):
+    result = await Agent(instructions="Select.", decisions=Provider(value)).decide(
+        "Select", input="Evidence", choices=[False, 0, "0", "false", 7, None]
     )
-    recorded = []
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-
-        return record
-
-    with pytest.raises(DecisionError) as caught:
-        if entry == "raw":
-            await provider.get_decision(
-                DecisionRequest(
-                    question="Allowed?", input="evidence", output_schema={"type": "boolean"}
-                )
-            )
-        elif entry == "agent-provider":
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Allowed?", input="evidence"
-            )
-        elif entry == "agent-override":
-            await Agent(instructions="Answer").decide(
-                "Allowed?", input="evidence", provider=provider
-            )
-        elif entry == "agent":
-            await Agent(instructions="Answer", decisions=provider).decide(
-                "Allowed?", input="evidence"
-            )
-        else:
-            owner = contexts()[1]
-            with _bind_decisions(owner, lambda: True, begin, provider):
-                await owner.decide("Allowed?", input="evidence")
-    error = caught.value
-    assert error.reason == ("refusal" if case.endswith("refusal") else "invalid_response")
-    assert error.request_id == "req_private"
-    assert error.model == (None if case == "envelope" else "resolved-model")
-    expected_usage = None if case == "envelope" else TokenUsage(7, 0, 0, 3, 0, 10)
-    assert error.usage == expected_usage
-    assert recorded == ([error._response()] if entry == "bound" else [])
-    assert requests == (["/responses"] if fallback else ["/decisions"])
-    assert_no_response_in_sdk_traceback(error, marker)
+    assert result == value and type(result) is type(value)
 
 
-@pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("failure", ["non-json", "depth"])
-async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bound, failure):
-    marker = "PRIVATE_NON_JSON_RESPONSE_MARKER"
-    value = {marker} if failure == "non-json" else marker
-    provider = Provider({"response": value})
-    if failure == "depth":
-        encode = json.dumps
+@pytest.mark.parametrize("owner", contexts())
+async def test_bound_contexts_use_captured_default_and_expire(owner):
+    provider, override = Provider(True), Provider(False)
+    with _bind_decisions(owner, lambda: True, provider):
+        assert await owner.decide("Allowed?", input="Evidence") is True
+        assert await owner.decide("Allowed?", input="Evidence", provider=override) is False
+    with pytest.raises(RuntimeError, match="exact live callback"):
+        await owner.decide("Allowed?", input="Evidence")
+    assert len(provider.requests) == len(override.requests) == 1
 
-        def fail_completed(value, *args, **kwargs):
-            if value is provider.value:
-                raise RecursionError(marker)
-            return encode(value, *args, **kwargs)
 
-        monkeypatch.setattr(json, "dumps", fail_completed)
-    recorded = []
-
-    async def begin():
-        async def record(response):
-            # The usage sink consumes metadata, without retaining response content.
-            recorded.append((response.usage, response.request_id, response.model))
-
-        return record
-
-    with pytest.raises(DecisionError) as caught:
-        if bound:
-            owner = contexts()[1]
-            with _bind_decisions(owner, lambda: True, begin, provider):
-                await owner.decide("Allowed?", input="evidence")
-        else:
-            await Agent(instructions="Answer").decide(
-                "Allowed?", input="evidence", provider=provider
-            )
-    assert caught.value.reason == "invalid_response"
-    assert caught.value.usage == USAGE
-    assert caught.value.request_id == "req_test" and caught.value.model == "custom"
-    assert recorded == ([(USAGE, "req_test", "custom")] if bound else [])
+async def test_bound_calls_reject_other_owners_and_child_tasks():
+    owner, other = contexts()[:2]
+    provider = Provider(True)
+    with _bind_decisions(owner, lambda: True, provider):
+        with pytest.raises(RuntimeError, match="exact live callback"):
+            await other.decide("Allowed?", input="Evidence")
+        with pytest.raises(RuntimeError, match="exact live callback"):
+            await asyncio.create_task(owner.decide("Allowed?", input="Evidence"))
+        assert await owner.decide("Allowed?", input="Evidence") is True
     assert len(provider.requests) == 1
-    assert_no_response_in_sdk_traceback(caught.value, marker)
+
+
+async def test_callback_cancellation_joins_provider_cleanup():
+    owner = contexts()[1]
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Blocking:
+        async def get_decision(self, request):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleaning.set()
+                await release.wait()
+
+    async def callback():
+        with _bind_decisions(owner, lambda: True, Blocking()):
+            await owner.decide("Allowed?", input="Evidence")
+
+    pending = asyncio.create_task(callback())
+    await entered.wait()
+    pending.cancel()
+    try:
+        await cleaning.wait()
+        assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), object()])
+async def test_non_json_provider_output_is_sanitized(value):
+    with pytest.raises(DecisionError) as caught:
+        await Agent(instructions="Assess.", decisions=Provider(value)).decide(
+            "Allowed?", input="Evidence"
+        )
+    assert caught.value.reason == "invalid_response" and caught.value.usage == USAGE
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+class Client:
+    def __init__(self, data):
+        self.data = data
+        self.requests = []
+        self.closed = False
+        self.decisions = SimpleNamespace(with_raw_response=SimpleNamespace(create=self.create))
+
+    async def create(self, **body):
+        self.requests.append(body)
+        return SimpleNamespace(
+            headers={"x-request-id": "req_openai"},
+            http_response=SimpleNamespace(json=lambda: self.data),
+        )
+
+    async def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def compiler(monkeypatch):
+    state = {"supported": True, "error": None, "schemas": []}
+
+    def questions(schema, question):
+        state["schemas"].append(json.loads(schema))
+        return json.dumps(
+            {
+                "supported": state["supported"],
+                "questions": [{"type": "predicate", "name": "allowed", "instructions": question}],
+            }
+        )
+
+    def result(schema, question, answers):
+        if state["error"]:
+            raise ValueError(state["error"])
+        return json.dumps(json.loads(answers)[0]["probability"] >= 0.5)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "agents._native",
+        SimpleNamespace(_decision_questions=questions, _decision_result=result),
+    )
+    return state
+
+
+def completed():
+    return {
+        "model": "luna-resolved",
+        "answers": [{"probability": 0.8}],
+        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+    }
+
+
+async def test_adapter_uses_generated_resource_and_leaves_borrowed_client_open(compiler):
+    client = Client(completed())
+    async with OpenAIDecisions(client=client) as provider:
+        assert (
+            await Agent(instructions="Assess.", decisions=provider).decide(
+                "Allowed?", input="Evidence"
+            )
+            is True
+        )
+    assert client.requests[0]["model"] == "gpt-6-luna" and client.requests[0]["input"] == "Evidence"
+    assert not client.closed
+    with pytest.raises(RuntimeError, match="closed"):
+        await provider.get_decision(
+            DecisionRequest(
+                question="Allowed?", input="Evidence", output_schema={"type": "boolean"}
+            )
+        )
+
+
+async def test_unsupported_schema_fails_without_client_or_fallback(compiler):
+    compiler["supported"] = False
+    client = Client(completed())
+    with pytest.raises(ValueError, match="Unsupported Decisions output schema"):
+        await Agent(instructions="Assess.", decisions=OpenAIDecisions(client=client)).decide(
+            "Explain", input="Evidence", output_type=str
+        )
+    assert not client.requests
+    with pytest.raises(TypeError):
+        OpenAIDecisions(fallback_model="removed")
+    with pytest.raises(TypeError):
+        Agent(instructions="Assess.").session(decisions=Provider(True))
+    with pytest.raises(TypeError):
+        await Agent(instructions="Assess.").run("Answer", decisions=Provider(True))
 
 
 @pytest.mark.parametrize(
-    "failure",
-    [
-        pytest.param("budget", id="injected-usage-observer-error"),
-        "reader",
-        "native",
-        "revoked",
-        "cancelled",
-    ],
+    "reason,message",
+    [("refusal", "Decisions refused a question"), ("invalid_response", "Invalid decision answer")],
 )
-async def test_successful_bound_response_discards_payload_when_accounting_fails(compiler, failure):
-    from _agents_codex._decision_accounting import (
-        begin_decision_response,
-        consume_decision_response,
-    )
-    from agents import NativeError
-    from tests.test_decision_accounting import boundary
-
-    marker = "PRIVATE_SUCCESSFUL_DECISION_MARKER"
-    compiler["supported"] = False
-    provider = OpenAIDecisions(
-        client=Client(
-            {
-                "status": "completed",
-                "model": "fixture-generation",
-                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
-                "output": [
-                    {"content": [{"type": "output_text", "text": json.dumps({"response": marker})}]}
-                ],
-            }
-        ),
-        fallback_model="generation",
-    )
-    fixture = boundary()
-    owner = contexts()[1]
-    live = True
-    budget_error = RuntimeError("Decision budget observation failed")
-    if failure == "budget":
-        # Fault injection covers observer errors, not ordinary budget exhaustion.
-
-        def reject_usage(_usage):
-            raise budget_error
-
-        fixture.state.budget.observe = reject_usage
-    elif failure == "native":
-        commit = fixture.receipt.commit
-
-        async def reject_commit(metadata):
-            await commit(metadata)
-            return "Native decision accounting failed"
-
-        fixture.receipt.commit = reject_commit
-
-    async def begin():
-        return await begin_decision_response(fixture.session, fixture.state, {})
-
-    async def invoke():
-        with _bind_decisions(owner, lambda: live, begin, provider):
-            return await owner.decide("Assess", input="Synthetic evidence", output_type=str)
-
-    task = asyncio.create_task(invoke())
-    try:
-        await fixture.entered.wait()
-        if failure == "reader":
-            fixture.session._reader.set_result(None)
-        elif failure == "revoked":
-            live = False
-        elif failure == "cancelled":
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done()
-        fixture.release.set()
-        await fixture.finished.wait()
-        if failure != "reader":
-            assert consume_decision_response(fixture.session, fixture.event)
-        expected = (
-            RuntimeError
-            if failure == "budget"
-            else asyncio.CancelledError
-            if failure in ("revoked", "cancelled")
-            else NativeError
+async def test_completed_errors_keep_only_trustworthy_metadata(compiler, reason, message):
+    compiler["error"] = message
+    client = Client(completed())
+    with pytest.raises(DecisionError) as caught:
+        await Agent(instructions="Assess.", decisions=OpenAIDecisions(client=client)).decide(
+            "Allowed?", input="Evidence"
         )
-        with pytest.raises(expected) as caught:
-            await task
-        if failure == "budget":
-            assert caught.value is budget_error
-        elif failure == "reader":
-            assert "not delivered" in str(caught.value)
-        elif failure == "native":
-            assert str(caught.value) == "Native decision accounting failed"
-        assert len(provider._client.requests) == len(fixture.commits) == 1
-        metadata = json.loads(fixture.commits[0])
-        assert metadata["usage"]["total_tokens"] == 10
-        assert metadata["request_id"] == "req_openai"
-        assert metadata["model"] == "fixture-generation"
-        assert marker not in fixture.commits[0]
-        assert fixture.session._decision_completions == {}
-        assert_no_response_in_sdk_traceback(caught.value, marker)
-    finally:
-        fixture.release.set()
-        if not task.done() and not fixture.session._reader.done():
-            fixture.session._reader.set_result(None)
-        await asyncio.gather(task, return_exceptions=True)
+    assert caught.value.reason == reason and caught.value.request_id == "req_openai"
+    assert caught.value.usage == TokenUsage(7, 0, 0, 3, 0, 10)
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("entry", ["provider", "agent", "bound"])
+@pytest.mark.parametrize(
+    "body", [b'{"PRIVATE_RESPONSE', b'"PRIVATE_RESPONSE"', b'["PRIVATE_RESPONSE"]']
+)
+async def test_generated_raw_response_boundary_sanitizes_malformed_200(compiler, body, entry):
+    async def handle(request):
+        assert request.url.path == "/v1/decisions"
+        return httpx2.Response(
+            200,
+            headers={"x-request-id": "req_safe_200", "content-type": "application/json"},
+            content=body,
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as http:
+        client = AsyncOpenAI(
+            api_key="synthetic",
+            base_url="https://synthetic.invalid/v1",
+            http_client=http,
+            max_retries=0,
+        )
+        provider = OpenAIDecisions(client=client)
+        with pytest.raises(DecisionError) as caught:
+            if entry == "provider":
+                await provider.get_decision(
+                    DecisionRequest(
+                        question="Allowed?", input="Evidence", output_schema={"type": "boolean"}
+                    )
+                )
+            elif entry == "bound":
+                owner = contexts()[1]
+                with _bind_decisions(owner, lambda: True, provider):
+                    await owner.decide("Allowed?", input="Evidence")
+            else:
+                await Agent(instructions="Assess.", decisions=provider).decide(
+                    "Allowed?", input="Evidence"
+                )
+    assert caught.value.request_id == "req_safe_200" and caught.value.reason == "invalid_response"
+    assert_no_response_in_sdk_traceback(caught.value, "PRIVATE_RESPONSE")
+
+
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+async def test_generated_resource_preserves_normal_http_errors(compiler, failure):
+    from openai import APITimeoutError, AuthenticationError
+
+    async def handle(request):
+        if failure == "timeout":
+            raise httpx2.ReadTimeout("Synthetic timeout", request=request)
+        return httpx2.Response(401, json={"error": {"message": "synthetic rejection"}})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as http:
+        client = AsyncOpenAI(
+            api_key="synthetic",
+            base_url="https://synthetic.invalid/v1",
+            http_client=http,
+            max_retries=0,
+        )
+        with pytest.raises(AuthenticationError if failure == "http" else APITimeoutError):
+            await Agent(instructions="Assess.", decisions=OpenAIDecisions(client=client)).decide(
+                "Allowed?", input="Evidence"
+            )
+
+
+async def test_owned_client_is_lazy_and_closes_after_primary_failure(compiler, monkeypatch):
+    import openai
+
+    client = Client(completed())
+    created = []
+
+    def create():
+        created.append(True)
+        return client
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", create)
+    primary = ValueError("synthetic application failure")
+    with pytest.raises(ValueError) as caught:
+        async with OpenAIDecisions() as provider:
+            assert not created
+            assert (
+                await Agent(instructions="Assess.", decisions=provider).decide(
+                    "Allowed?", input="Evidence"
+                )
+                is True
+            )
+            raise primary
+    assert caught.value is primary and client.closed and len(created) == 1
+
+
+@pytest.mark.parametrize("details", [None, [], "invalid", {}, {"cached_tokens": -1}])
+async def test_invalid_usage_stays_unknown(compiler, details):
+    data = completed()
+    data["usage"]["input_tokens_details"] = details
+    client = Client(data)
+    response = await OpenAIDecisions(client=client).get_decision(
+        DecisionRequest(question="Allowed?", input="Evidence", output_schema={"type": "boolean"})
+    )
+    if details is None or details == {}:
+        assert response.usage == TokenUsage(7, 0, 0, 3, 0, 10)
+    else:
+        assert response.usage is None
+
+
+async def test_provider_schema_adaptation_does_not_weaken_private_validation():
+    class Gate(BaseModel):
+        allow: bool = True
+
+    class Adapting:
+        async def get_decision(self, request):
+            request.output_schema["required"].remove("allow")
+            return DecisionResponse(value={})
+
+    with pytest.raises(OutputValidationError):
+        await Agent(instructions="Assess.", decisions=Adapting()).decide(
+            "Allowed?", input="Evidence", output_type=Gate
+        )
 
 
 @pytest.mark.parametrize("failure", ["decision", "application", "cancellation"])
@@ -1059,191 +571,78 @@ async def test_owned_decisions_primary_failure_joins_cancelled_cleanup(compiler,
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_non_finite_model_input_fails_before_provider_work():
-    provider = Provider(None)
-    with pytest.raises(ValueError):
-        await Agent(instructions="Answer").decide(
-            "Allowed?", input=[{"role": "user", "content": float("nan")}], provider=provider
-        )
-    assert not provider.requests
+@pytest.mark.parametrize("sync_wrapper", [False, True])
+async def test_existing_callback_executor_keeps_scope_in_actual_callback(sync_wrapper):
+    from agents import Session
 
-
-@pytest.mark.parametrize("reason", ["refusal", "invalid_response"])
-@pytest.mark.parametrize("cleanup", ["failure", "cancel"])
-async def test_completed_provider_error_remains_primary_when_recording_fails(reason, cleanup):
     owner = contexts()[1]
-    failure = DecisionError(reason, usage=USAGE, request_id="completed", model="custom")
-    cleanup_error = (
-        asyncio.CancelledError() if cleanup == "cancel" else RuntimeError(cleanup + " failed")
+    first, override = Provider(True), Provider(False)
+    session = object.__new__(Session)
+    session._decisions_provider = first
+    session._closing = False
+    state = SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future())
+
+    async def body(ctx):
+        assert await ctx.decide("Allowed?", input="Evidence") is True
+        return await ctx.decide("Allowed?", input="Evidence", provider=override)
+
+    callback = (lambda ctx: body(ctx)) if sync_wrapper else body
+    assert (
+        await session._call_decision_callback(state, {"step_id": 7}, callback, lambda: True, owner)
+        is False
     )
-    recorded = []
-
-    async def begin():
-        async def record(response):
-            recorded.append(response)
-            raise cleanup_error
-
-        return record
-
-    with _bind_decisions(owner, lambda: True, begin, Provider(failure)):
-        with pytest.raises(DecisionError) as caught:
-            await owner.decide("Allowed?", input="Synthetic evidence")
-    assert caught.value is failure
-    assert caught.value.__context__ is cleanup_error
-    assert recorded == [
-        DecisionResponse(value=None, usage=USAGE, request_id="completed", model="custom")
-    ]
+    assert len(first.requests) == len(override.requests) == 1
+    with pytest.raises(RuntimeError, match="exact live callback"):
+        await owner.decide("Expired?", input="Evidence", provider=first)
 
 
-async def test_completed_provider_error_joins_recording_when_caller_is_cancelled():
-    owner = contexts()[1]
-    failure = DecisionError("refusal", usage=USAGE)
-    entered, release = asyncio.Event(), asyncio.Event()
-    recorded = []
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("failure", ["non-json", "depth"])
+async def test_non_json_error_tracebacks_discard_completed_value(monkeypatch, bound, failure):
+    marker = "PRIVATE_NON_JSON_RESPONSE_MARKER"
+    provider = Provider({marker} if failure == "non-json" else marker)
+    if failure == "depth":
+        encode = json.dumps
 
-    async def begin():
-        async def record(response):
-            entered.set()
-            await release.wait()
-            recorded.append(response)
+        def fail_completed(value, *args, **kwargs):
+            if value is provider.value:
+                raise RecursionError(marker)
+            return encode(value, *args, **kwargs)
 
-        return record
-
-    async def invoke():
-        with _bind_decisions(owner, lambda: True, begin, Provider(failure)):
-            await owner.decide("Allowed?", input="Synthetic evidence")
-
-    task = asyncio.create_task(invoke())
-    try:
-        await entered.wait()
-        task.cancel()
-        await asyncio.sleep(0)
-        assert not task.done()
-        release.set()
-        with pytest.raises(DecisionError) as caught:
-            await task
-        assert caught.value is failure
-        assert recorded == [DecisionResponse(value=None, usage=USAGE)]
-    finally:
-        release.set()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.parametrize("fallback", [False, True])
-@pytest.mark.parametrize("envelope", [None, [], "malformed"])
-async def test_real_openai_client_rejects_nonobject_completed_envelopes(
-    compiler, fallback, envelope
-):
-    import httpx2
-    import openai
-
-    compiler["supported"] = not fallback
-    requests = []
-
-    async def respond(request):
-        requests.append(request)
-        return httpx2.Response(
-            200,
-            headers={"content-type": "application/json", "x-request-id": "req_malformed"},
-            content=json.dumps(envelope).encode(),
-        )
-
-    async with openai.AsyncOpenAI(
-        api_key="synthetic-decision-key",
-        base_url="https://example.invalid/v1",
-        max_retries=0,
-        http_client=openai.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond)),
-    ) as client:
-        async with OpenAIDecisions(
-            client=client, fallback_model="generative-fallback" if fallback else None
-        ) as provider:
-            with pytest.raises(DecisionError) as caught:
-                await provider.get_decision(
-                    DecisionRequest(
-                        question="Allowed?", input="evidence", output_schema={"type": "boolean"}
-                    )
-                )
-        assert not client.is_closed()
-    assert caught.value.reason == "invalid_response"
-    assert caught.value.usage is None and caught.value.model is None
-    assert caught.value.__cause__ is None and caught.value.__context__ is None
-    assert len(requests) == 1
-    assert requests[0].url.path == ("/v1/responses" if fallback else "/v1/decisions")
-
-
-async def test_real_openai_client_preserves_normal_http_failures(compiler):
-    import httpx2
-    import openai
-
-    async def respond(request):
-        return httpx2.Response(
-            429,
-            headers={"x-request-id": "req_limited"},
-            json={"error": {"message": "Synthetic rate limit"}},
-        )
-
-    async with openai.AsyncOpenAI(
-        api_key="synthetic-decision-key",
-        base_url="https://example.invalid/v1",
-        max_retries=0,
-        http_client=openai.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond)),
-    ) as client:
-        async with OpenAIDecisions(client=client) as provider:
-            with pytest.raises(openai.RateLimitError) as caught:
-                await provider.get_decision(
-                    DecisionRequest(
-                        question="Allowed?", input="evidence", output_schema={"type": "boolean"}
-                    )
-                )
-    assert caught.value.request_id == "req_limited" and caught.value.status_code == 429
-
-
-@pytest.mark.parametrize("fallback", [False, True])
-@pytest.mark.parametrize("field", ["input_tokens_details", "output_tokens_details"])
-@pytest.mark.parametrize(
-    ("details", "known_usage"),
-    [
-        pytest.param([], False, id="empty-list"),
-        pytest.param("", False, id="empty-string"),
-        pytest.param(0, False, id="zero"),
-        pytest.param(False, False, id="false"),
-        pytest.param(None, True, id="null"),
-        pytest.param({}, True, id="empty-dict"),
-        pytest.param(Ellipsis, True, id="omitted"),
-    ],
-)
-async def test_adapter_usage_details_keep_invalid_containers_unknown(
-    compiler, fallback, field, details, known_usage
-):
-    compiler["supported"] = not fallback
-    usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
-    if details is not Ellipsis:
-        usage[field] = details
-    data = {"usage": usage}
-    if fallback:
-        data.update(
-            status="completed",
-            output=[{"content": [{"type": "output_text", "text": '{"response":true}'}]}],
-        )
-    else:
-        data["answers"] = [{"probability": 1}]
-    client = Client(data)
-    async with OpenAIDecisions(
-        client=client, fallback_model="generative-fallback" if fallback else None
-    ) as provider:
-        response = await provider.get_decision(
-            DecisionRequest(
-                question="Allowed?",
-                input="evidence",
-                output_schema={
-                    "type": "object",
-                    "properties": {"response": {"type": "boolean"}},
-                    "required": ["response"],
-                    "additionalProperties": False,
-                },
+        monkeypatch.setattr(json, "dumps", fail_completed)
+    with pytest.raises(DecisionError) as caught:
+        if bound:
+            owner = contexts()[1]
+            with _bind_decisions(owner, lambda: True, provider):
+                await owner.decide("Allowed?", input="Evidence")
+        else:
+            await Agent(instructions="Assess.", decisions=provider).decide(
+                "Allowed?", input="Evidence"
             )
+    assert caught.value.usage == USAGE and caught.value.request_id == "req_test"
+    assert_no_response_in_sdk_traceback(caught.value, marker)
+
+
+def test_direct_decision_schema_keeps_generation_scalar_wrapper():
+    from _agents_codex.schema import _prepare_output
+
+    adapter, schema, wrapped = _prepare_output(bool)
+    assert wrapped and schema["properties"]["response"]["type"] == "boolean"
+    assert adapter.validate_json('{"response":true}').response is True
+
+
+async def test_completed_error_remains_primary_if_usage_tracing_fails(monkeypatch):
+    from _agents_codex import decisions as implementation
+
+    primary = DecisionError("refusal", usage=USAGE, request_id="req-refused")
+    tracing = RuntimeError("Synthetic tracing failure")
+
+    def fail(*args, **kwargs):
+        raise tracing
+
+    monkeypatch.setattr(implementation, "_record_decision_usage", fail)
+    with pytest.raises(DecisionError) as caught:
+        await Agent(instructions="Assess.", decisions=Provider(primary)).decide(
+            "Allowed?", input="Evidence"
         )
-    assert response.value == {"response": True}
-    assert response.usage == (TokenUsage(7, 0, 0, 3, 0, 10) if known_usage else None)
-    assert len(client.requests) == 1
-    assert client.requests[0][0] == ("/responses" if fallback else "/decisions")
+    assert caught.value is primary and caught.value.__context__ is tracing

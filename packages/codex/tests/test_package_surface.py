@@ -57,7 +57,7 @@ assert not hasattr(OpenAIDecisions, 'decide')
 
 class Decisions:
     async def get_decision(self, request):
-        return DecisionResponse(value={'response': True})
+        return DecisionResponse(value=True)
 
 import asyncio
 assert asyncio.run(Agent(instructions='Answer.', decisions=Decisions()).decide(

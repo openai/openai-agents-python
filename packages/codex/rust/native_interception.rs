@@ -580,52 +580,6 @@ pub(crate) fn capture_step_stop(
 }
 
 impl CapturedTurnStop {
-    pub(crate) fn decision_ids(&self) -> Option<(&str, &str)> {
-        Some((&self.control.id, &self.owner.id))
-    }
-
-    pub(crate) fn decision_registered(&self, store: &ExtensionData) -> bool {
-        store
-            .get::<Control>()
-            .is_some_and(|control| Arc::ptr_eq(&control, &self.control))
-    }
-
-    pub(crate) fn decision_pending(&self, nonce: u64) -> bool {
-        let owner = &self.owner;
-        if self.control.stopped.is_cancelled()
-            || owner.cancelled.is_cancelled()
-            || !self.control.check(nonce)
-        {
-            return false;
-        }
-        let same_pending = {
-            let state = self
-                .control
-                .channel
-                .state
-                .lock()
-                .expect("interception control poisoned");
-            state.pending.get(&nonce).is_some_and(|pending| {
-                pending
-                    .issuer
-                    .upgrade()
-                    .is_some_and(|issuer| Arc::ptr_eq(&issuer, &self.control))
-                    && pending
-                        .owner
-                        .as_ref()
-                        .is_some_and(|original| Arc::ptr_eq(original, owner))
-            })
-        };
-        same_pending
-            && self
-                .control
-                .direct_turn
-                .lock()
-                .expect("interception turn poisoned")
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, owner))
-    }
-
     pub(crate) fn stop(&self) {
         let _state = self
             .control
@@ -1273,23 +1227,6 @@ impl Control {
     }
 
     // Unlike storage handoff, admission must still belong to a live caller.
-    pub(crate) fn capture_decision_owner(&self, nonce: u64) -> Option<CapturedTurnStop> {
-        if !self.check(nonce) {
-            return None;
-        }
-        let (control, owner) = {
-            let state = self
-                .channel
-                .state
-                .lock()
-                .expect("interception control poisoned");
-            let pending = state.pending.get(&nonce)?;
-            (pending.issuer.upgrade()?, pending.owner.clone()?)
-        };
-        let captured = CapturedTurnStop { control, owner };
-        captured.decision_pending(nonce).then_some(captured)
-    }
-
     pub fn check(&self, nonce: u64) -> bool {
         let state = self
             .channel
@@ -8206,54 +8143,6 @@ pub(crate) mod tests {
             "Handler Arc itself remains retained"
         );
     }
-    #[tokio::test]
-    async fn decision_authority_requires_original_live_policy_owner() {
-        let thread = ExtensionData::new("root");
-        let control = thread.get_or_init(|| Control::new("root".into(), true));
-        control.enable(3.0, Scope::ThreadTree).unwrap();
-        control
-            .configure_tools(vec![ToolRule {
-                generation: None,
-                namespace: None,
-                name: "exec_command".into(),
-                result: false,
-                timeout: None,
-                scope: Scope::ThreadTree,
-            }])
-            .unwrap();
-        let request = direct_request(control.clone(), "turn");
-        *control.direct_turn.lock().unwrap() = Some(request.owner.clone());
-        let token = CancellationToken::new();
-        let mut pending =
-            Box::pin(control.decide(before_request(&request.owner, "exec_command"), &token));
-        assert!(futures_util::poll!(&mut pending).is_pending());
-        let nonce = next_cell_notice(&control).await["nonce"].as_u64().unwrap();
-        assert!(control.handoff(nonce));
-        let captured = control
-            .capture_decision_owner(nonce)
-            .expect("live callback");
-        assert_eq!(captured.decision_ids(), Some(("root", "turn")));
-        assert!(captured.decision_registered(&thread));
-        assert!(captured.decision_pending(nonce));
-        assert!(!captured.decision_pending(nonce + 1));
-        let other = ExtensionData::new("root");
-        other.get_or_init(|| Control::new("root".into(), true));
-        assert!(!captured.decision_registered(&other));
-        // Reusing the same public turn ID does not transfer the old nonce.
-        let successor = direct_request(control.clone(), "turn");
-        *control.direct_turn.lock().unwrap() = Some(successor.owner.clone());
-        assert!(control.check(nonce));
-        assert!(!captured.decision_pending(nonce));
-        assert!(control.capture_decision_owner(nonce).is_none());
-        *control.direct_turn.lock().unwrap() = Some(request.owner.clone());
-        request.owner.cancelled.cancel();
-        assert!(!captured.decision_pending(nonce));
-        assert!(control.capture_decision_owner(nonce).is_none());
-        token.cancel();
-        assert!(control.release(nonce));
-        assert!(pending.await.is_err());
-    }
-
     #[tokio::test]
     async fn retained_pending_preserves_nonce_cancellation_stop_and_current_scope_fences() {
         let root = cell_owner_control(None, Some("exec_command"), true);

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -29,7 +30,7 @@ class Decisions:
     async def get_decision(self, request):
         self.requests.append(request)
         return DecisionResponse(
-            value={"response": "corrected" not in request.input},
+            value="corrected" not in request.input,
             usage=TokenUsage(7, 0, 0, 3, 0, 10),
             request_id=f"completion-policy-{len(self.requests)}",
             model="completion-policy-model",
@@ -73,7 +74,7 @@ async def test_repaired_candidate_uses_original_policy_owner_and_decision_provid
         decisions=unused,
         before_complete=complete,
     )
-    async with timeout(20), agent.session(context=context, decisions=selected) as session:
+    async with timeout(20), replace(agent, decisions=selected).session(context=context) as session:
         # Per-turn output selection must retain the original completion gate.
         turn = await session.submit("Report.", output_type=PromptedOutput(Report, 1))
         if action in ("accept", "continue"):
@@ -85,7 +86,7 @@ async def test_repaired_candidate_uses_original_policy_owner_and_decision_provid
             assert len(result.repair_attempts) == 1
             assert result.repair_attempts[0]["usage"]["total_tokens"] == 14
             assert result.thread_usage.total_token_usage.total_tokens == (
-                58 if action == "continue" else 34
+                28 if action == "continue" else 14
             )
         else:
             with pytest.raises(TurnStoppedError if action == "stop" else LookupError) as caught:
@@ -104,7 +105,7 @@ async def test_repaired_candidate_uses_original_policy_owner_and_decision_provid
         )
         records = [record async for record in session.turns()]
         original = next(record for record in records if record["id"] == turn.turn_id)
-        assert original["usage"]["total_tokens"] == (58 if action == "continue" else 34)
+        assert original["usage"]["total_tokens"] == (28 if action == "continue" else 14)
         assert [call.text for call in calls] == [
             '{"label":"x"}',
             '{"label":"corrected"}',
@@ -349,7 +350,7 @@ async def test_graceful_stop_during_correction_open_closes_without_admission(
     assert len(responses.requests) == 1
 
 
-async def test_cancel_repaired_decide_joins_cleanup_and_keeps_late_usage_on_original(responses):
+async def test_cancel_repaired_decide_joins_cleanup_without_charging_model_usage(responses):
     entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     requests = []
     completed_callbacks = []
@@ -364,7 +365,7 @@ async def test_cancel_repaired_decide_joins_cleanup_and_keeps_late_usage_on_orig
                 except asyncio.CancelledError:
                     cleaning.set()
                     await release.wait()
-            return DecisionResponse(value={"response": True}, usage=TokenUsage(7, 0, 0, 3, 0, 10))
+            return DecisionResponse(value=True, usage=TokenUsage(7, 0, 0, 3, 0, 10))
 
     async def complete(request):
         if request.text != '{"label":"successor"}':
@@ -394,16 +395,16 @@ async def test_cancel_repaired_decide_joins_cleanup_and_keeps_late_usage_on_orig
         with pytest.raises(TurnStoppedError):
             await turn.get_result()
         root_usage = [record async for record in session.turns()][0]["usage"]["total_tokens"]
-        assert root_usage == 34
+        assert root_usage == 14
         assert len(session._repair_turns) == 1
         assert session._repair_turns[0]["usage"]["total_tokens"] == 14
         assert session._repair_session is None
         successor = await (await session.submit("Next.")).get_result()
         assert successor.final_output == Report(label="successor")
-        assert successor.thread_usage.total_token_usage.total_tokens == 48
+        assert successor.thread_usage.total_token_usage.total_tokens == 28
         records = [record async for record in session.turns()]
         roots = [record for record in records if "parent_turn_id" not in record]
-        assert [record["usage"]["total_tokens"] for record in roots] == [34, 14]
+        assert [record["usage"]["total_tokens"] for record in roots] == [14, 14]
         repairs = [record for record in records if record.get("parent_turn_id") == turn.turn_id]
         assert [record["usage"]["total_tokens"] for record in repairs] == [14]
     assert completed_callbacks == ['{"label":"x"}']

@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, cast
 
-from ._lifecycle import _close_after_error
+from ._lifecycle import _close_after_error, _error_contexts, _retain_cleanup_error
 from ._public import preserve_module_identity as _preserve_module_identity
 from .schema import OutputValidationError, _prepare_output, _PreparedOutput
-from .telemetry import _owned_span
+from .telemetry import TraceOptions, TraceScope, _owned_span, current_context
 from .usage import TokenUsage
 
 if TYPE_CHECKING:
@@ -27,8 +27,8 @@ DecisionInput = str | Sequence[dict[str, Any]]
 class DecisionRequest:
     """One question, explicit input, and the exact JSON schema a provider must satisfy.
 
-    Non-object output types use the SDK's ``response`` wrapper. Return JSON
-    matching ``output_schema``; the typed facade validates and unwraps it.
+    Return the application JSON value matching ``output_schema``. Scalar
+    schemas and values use their original JSON type without a wrapper.
     Providers must not execute tools or change the owning conversation.
     """
 
@@ -90,7 +90,6 @@ class DecisionError(ValueError):
 class _DecisionScope:
     owner: object
     active: Callable[[], bool]
-    begin: Callable[[], Awaitable[Callable[[DecisionResponse], Awaitable[None]]]]
     provider: DecisionProvider | None
     task: asyncio.Task[Any] | None
     live: bool = True
@@ -116,10 +115,9 @@ _decision_scope: ContextVar[_DecisionScope | None] = ContextVar(
 def _bind_decisions(
     owner: object,
     active: Callable[[], bool],
-    begin: Callable[[], Awaitable[Callable[[DecisionResponse], Awaitable[None]]]],
     provider: DecisionProvider | None,
 ) -> Iterator[None]:
-    scope = _DecisionScope(owner, active, begin, provider, asyncio.current_task())
+    scope = _DecisionScope(owner, active, provider, asyncio.current_task())
     token = _decision_scope.set(scope)
     try:
         yield
@@ -134,13 +132,6 @@ def _check_provider(provider: DecisionProvider | None) -> DecisionProvider:
     if not callable(getattr(provider, "get_decision", None)):
         raise TypeError("provider must implement async get_decision(request)")
     return provider
-
-
-def _capture_decisions(
-    default: DecisionProvider | None, override: DecisionProvider | None
-) -> DecisionProvider | None:
-    selected = default if override is None else override
-    return None if selected is None else _check_provider(selected)
 
 
 async def _bound_decide(
@@ -210,46 +201,48 @@ async def _decide(
             output_type = cast(Any, Union)[tuple(cast(Any, Literal)[value] for value in choices)]
         else:
             output_type = cast(Any, Literal)[tuple(choices)]
-    adapter, schema, wrapped = _prepare_output(bool if output_type is None else output_type)
+    adapter, schema, wrapped = _prepare_output(
+        bool if output_type is None else output_type, wrap_scalars=False
+    )
     output = _PreparedOutput("native", adapter, schema, wrapped)
     provider = _check_provider(provider)
-    request = DecisionRequest(question=question, input=deepcopy(input), output_schema=schema)
-    record = None
+    request = DecisionRequest(
+        question=question, input=deepcopy(input), output_schema=deepcopy(schema)
+    )
+    from jsonschema import Draft202012Validator
+    from referencing import Registry
+
+    validator = Draft202012Validator(schema, registry=Registry())
     if scope is not None:
         scope.check(scope.owner)
-        record = await scope.begin()
-        scope.check(scope.owner, after_await=True)
     with _owned_span("decision", "operation"):
         try:
             response = await provider.get_decision(request)
         except DecisionError as error:
-            if record is not None:
-                completed = error._response()
-                await _close_after_error(error, lambda: record(completed))
-                assert scope is not None
+            previous = _error_contexts(error.__context__)
+            try:
+                _record_decision_usage(error._response(), outcome=error.reason)
+            except BaseException as usage_error:
+                _retain_cleanup_error(error, usage_error, previous)
+            if scope is not None:
                 scope.check(scope.owner, after_await=True)
             raise
         if not isinstance(response, DecisionResponse):
             raise TypeError("get_decision must return DecisionResponse")
-        if scope is not None:
-            # Retain a delivered completion before checking cancellation or the
-            # local output validator. The recorder owns joined publication.
-            # Accounting receives only metadata. Failed publication or revoked
-            # ownership must not retain the completed value in traceback locals.
-            assert record is not None
-            try:
-                await record(
-                    DecisionResponse(
-                        value=None,
-                        usage=response.usage,
-                        request_id=response.request_id,
-                        model=response.model,
-                    )
+        try:
+            _record_decision_usage(
+                DecisionResponse(
+                    value=None,
+                    usage=response.usage,
+                    request_id=response.request_id,
+                    model=response.model,
                 )
+            )
+            if scope is not None:
                 scope.check(scope.owner, after_await=True)
-            except BaseException:
-                del response
-                raise
+        except BaseException:
+            del response
+            raise
         try:
             text = json.dumps(response.value, allow_nan=False)
         except (TypeError, ValueError, RecursionError):
@@ -263,11 +256,13 @@ async def _decide(
             )
             del response
             raise failure from None
+        if not validator.is_valid(response.value):
+            raise OutputValidationError(text)
         validated = output.validate(text)
         if choices is not None:
             # Pydantic Literal unions can coerce 0 to False. Match the raw
             # scalar by JSON type before returning the original declared value.
-            selected = _choice_key(response.value["response"])
+            selected = _choice_key(response.value)
             for choice in choices:
                 if _choice_key(choice) == selected:
                     return choice
@@ -308,28 +303,57 @@ def _usage(raw: Any) -> TokenUsage | None:
     return TokenUsage(*counts)
 
 
+def _record_decision_usage(response: DecisionResponse, *, outcome: str = "completed") -> None:
+    context = current_context()
+    if context is None or context.disabled:
+        return
+    names = (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    counts = (
+        {name: getattr(response.usage, name) for name in names}
+        if isinstance(response.usage, TokenUsage)
+        else None
+    )
+    if counts is not None and (
+        any(type(value) is not int or value < 0 for value in counts.values())
+        or counts["cached_input_tokens"] > counts["input_tokens"]
+        or counts["cache_write_input_tokens"] > counts["input_tokens"]
+        or counts["reasoning_output_tokens"] > counts["output_tokens"]
+        or counts["total_tokens"] != counts["input_tokens"] + counts["output_tokens"]
+    ):
+        counts = None
+    metadata: dict[str, Any] = {"usage_known": counts is not None, "outcome": outcome}
+    if counts is not None:
+        metadata.update(
+            {name: value if value <= 2**53 - 1 else str(value) for name, value in counts.items()}
+        )
+    for name in ("request_id", "model"):
+        value = getattr(response, name)
+        if isinstance(value, str) and len(value) <= 256 and value.isprintable():
+            metadata[name] = value
+    with TraceScope("decision.usage", "operation", TraceOptions(metadata=metadata)):
+        pass
+
+
 class OpenAIDecisions:
-    """Answer bounded schemas with Luna, using an optional explicit generative fallback.
+    """Answer supported bounded schemas through the generated Decisions client.
 
     Install the matching SDK build with its ``decisions`` extra for this adapter.
     A supplied AsyncOpenAI client remains caller-owned. Otherwise the adapter
     lazily creates a client; use ``async with`` or ``aclose()`` to close it.
-    Closing the adapter rejects later calls. Unsupported schemas select
-    ``fallback_model`` before inference. Refusal, malformed answers, transport
-    failures and cancellation never retry
-    through that fallback. Ordinary HTTP retries follow the client's settings.
+    Unsupported schemas fail before inference. Transport retries and
+    cancellation follow the supplied client's ordinary behavior.
     """
 
-    def __init__(
-        self, *, client: AsyncOpenAI | None = None, fallback_model: str | None = None
-    ) -> None:
-        if fallback_model is not None and (
-            not isinstance(fallback_model, str) or not fallback_model.strip()
-        ):
-            raise ValueError("fallback_model must be a nonempty string")
+    def __init__(self, *, client: AsyncOpenAI | None = None) -> None:
         self._client = client
         self._owned = client is None
-        self._fallback_model = fallback_model
         self._closed = False
 
     async def __aenter__(self) -> OpenAIDecisions:
@@ -356,53 +380,41 @@ class OpenAIDecisions:
         native = import_module("agents._native")
         schema_json = json.dumps(request.output_schema, allow_nan=False)
         compiled = json.loads(native._decision_questions(schema_json, request.question))
-        questions = compiled["questions"] if compiled["supported"] else None
-        if questions is None and self._fallback_model is None:
-            raise ValueError(
-                "Unsupported Decisions output schema; "
-                "configure fallback_model for generative output"
-            )
+        if not compiled["supported"]:
+            raise ValueError("Unsupported Decisions output schema")
+        questions = compiled["questions"]
         if questions == []:
             value = json.loads(native._decision_result(schema_json, request.question, "[]"))
             return DecisionResponse(value=value, usage=TokenUsage(0, 0, 0, 0, 0, 0))
         try:
-            from openai import AsyncOpenAI, BaseModel as OpenAIObject
+            from openai import AsyncOpenAI
         except ImportError:
             raise ImportError("Install the matching SDK build with its decisions extra") from None
         if self._client is None:
             self._client = AsyncOpenAI()
-        if questions is None:
-            body = {
-                "model": self._fallback_model,
-                "stream": False,
-                "store": False,
-                "instructions": request.question,
-                "input": request.input,
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "decision",
-                        "strict": True,
-                        "schema": request.output_schema,
-                    }
-                },
-            }
-            path = "/responses"
-        else:
-            body = {"model": "gpt-6-luna", "input": request.input, "questions": questions}
-            path = "/decisions"
-        # The parser returns before this frame can raise, releasing raw payload
-        # aliases (including bound model_dump methods) from the traceback.
-        response = _parse_openai_response(
-            await self._client.post(path, cast_to=OpenAIObject, body=body),
-            native=native,
-            schema_json=schema_json,
-            question=request.question,
-            questions=questions,
+        response = await _request_openai_decision(
+            self._client, request, questions, native=native, schema_json=schema_json
         )
         if isinstance(response, DecisionError):
             raise response
         return response
+
+
+async def _request_openai_decision(
+    client: AsyncOpenAI,
+    request: DecisionRequest,
+    questions: Any,
+    *,
+    native: Any,
+    schema_json: str,
+) -> DecisionResponse | DecisionError:
+    """Keep raw response aliases and parser failures outside the raising frame."""
+    raw = await client.decisions.with_raw_response.create(
+        model="gpt-6-luna", input=cast(Any, request.input), questions=questions
+    )
+    return _parse_openai_response(
+        raw, native=native, schema_json=schema_json, question=request.question, questions=questions
+    )
 
 
 def _parse_openai_response(
@@ -411,13 +423,15 @@ def _parse_openai_response(
     native: Any,
     schema_json: str,
     question: str,
-    questions: list[dict[str, Any]] | None,
+    questions: list[dict[str, Any]],
 ) -> DecisionResponse | DecisionError:
     """Return metadata-only failures so no payload frame reaches the raised error."""
-    reported_request_id = getattr(raw, "_request_id", None)
+    reported_request_id = raw.headers.get("x-request-id")
     request_id = reported_request_id if isinstance(reported_request_id, str) else None
-    dump = getattr(raw, "model_dump", None)
-    data = dump() if callable(dump) else None
+    try:
+        data = raw.http_response.json()
+    except (ValueError, TypeError, RecursionError):
+        return DecisionError("invalid_response", request_id=request_id)
     if not isinstance(data, dict):
         return DecisionError("invalid_response", request_id=request_id)
     usage = _usage(data.get("usage"))
@@ -426,31 +440,17 @@ def _parse_openai_response(
     failure: Literal["refusal", "invalid_response"] | None = None
     value = None
     try:
-        if questions is None:
-            if data.get("status") != "completed":
-                raise ValueError("Responses fallback did not complete")
-            texts = []
-            for item in data.get("output", []):
-                for part in item.get("content", []):
-                    if part.get("type") == "refusal":
-                        raise DecisionError("refusal")
-                    if part.get("type") == "output_text":
-                        texts.append(part["text"])
-            value = json.loads("".join(texts))
-        else:
-            answers = data.get("answers")
-            if not isinstance(answers, list) or len(answers) != len(questions):
-                raise ValueError("Invalid answer count")
-            try:
-                value = json.loads(
-                    native._decision_result(
-                        schema_json, question, json.dumps(answers, allow_nan=False)
-                    )
-                )
-            except ValueError as error:
-                if str(error) == "Decisions refused a question":
-                    raise DecisionError("refusal") from None
-                raise ValueError("Invalid decision answer") from None
+        answers = data.get("answers")
+        if not isinstance(answers, list) or len(answers) != len(questions):
+            raise ValueError("Invalid answer count")
+        try:
+            value = json.loads(
+                native._decision_result(schema_json, question, json.dumps(answers, allow_nan=False))
+            )
+        except ValueError as error:
+            if str(error) == "Decisions refused a question":
+                raise DecisionError("refusal") from None
+            raise ValueError("Invalid decision answer") from None
     except DecisionError as error:
         failure = error.reason
     except (

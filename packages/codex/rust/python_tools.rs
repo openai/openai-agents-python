@@ -6011,20 +6011,10 @@ pub(crate) mod managed_tests {
             assert_eq!(request["msg"]["type"], "_sdk_prepare_request");
             assert_eq!(request["msg"]["turn_id"], started["turn_id"]);
             let request_id = request["msg"]["request_id"].as_u64().unwrap();
-            let thread = request["msg"]["thread"].as_str().unwrap();
-            let turn = request["msg"]["turn_id"].as_str().unwrap();
-            let generation = request["msg"]["generation"].as_u64().unwrap();
-            assert!(tools.check_prepared_authority(thread, turn, generation, request_id));
-            assert!(!tools.check_prepared_authority("other", turn, generation, request_id));
-            assert!(!tools.check_prepared_authority(thread, "other", generation, request_id));
-            assert!(!tools.check_prepared_authority(thread, turn, generation + 1, request_id));
-            assert!(!tools.check_prepared_authority(thread, turn, generation, request_id + 1));
             // Keep these synchronous: Core cannot consume the accepted reply
             // until this task yields on the current-thread executor.
             assert!(tools.reply_prepared_request(request_id, None, false));
-            assert!(!tools.check_prepared_authority(thread, turn, generation, request_id));
             tools.prepare_requests(false).unwrap();
-            assert!(!tools.check_prepared_authority(thread, turn, generation, request_id));
 
             let failure = "Fatal error: Native request preparation failed or was cancelled";
             let mut errors = Vec::new();

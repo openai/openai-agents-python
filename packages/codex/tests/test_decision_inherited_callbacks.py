@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-from contextlib import asynccontextmanager
 
 import pytest
 
@@ -12,7 +11,6 @@ from agents import (
     DecisionResponse,
     Environment,
     NativeAgents,
-    NativeError,
     NativeProvider,
     RunBudget,
     StopTurn,
@@ -32,7 +30,6 @@ from tests.test_deferred_opening_outcome import pending
 from tests.test_native_child_agents import collaboration, trust
 from tests.test_native_executor_tools import declaration
 from tests.test_native_manual_tools import next_request
-from tests.test_native_run_budget import require_follow_up
 
 
 class Provider:
@@ -42,7 +39,7 @@ class Provider:
     async def get_decision(self, request):
         self.requests.append(request)
         return DecisionResponse(
-            value={"response": True},
+            value=True,
             usage=TokenUsage(7, 0, 0, 3, 0, 10),
             request_id="req-inherited-callback",
             model="custom-decision-provider",
@@ -74,11 +71,10 @@ async def test_prepared_request_turn_decide_retains_usage_and_expires(responses:
         result = await turn.get_result()
         assert result.final_output == "prepared complete"
         assert captured == [turn]
-        assert result.thread_usage.total_token_usage.total_tokens == 24
+        assert result.thread_usage.total_token_usage.total_tokens == 14
         assert result.thread_usage.last_token_usage.total_tokens == 14
         receipts = [item async for item in session.turns()]
         assert sorted(item["usage"]["total_tokens"] for item in receipts[0]["responses"]) == [
-            10,
             14,
         ]
         with pytest.raises(RuntimeError, match="exact live callback"):
@@ -120,11 +116,10 @@ async def test_native_agents_approval_decide_retains_exact_usage_and_expires(
             result = await turn.get_result()
             assert result.final_output == "approval complete"
             assert len(captured) == 1 and captured[0].submission is turn
-            assert result.thread_usage.total_token_usage.total_tokens == 38
+            assert result.thread_usage.total_token_usage.total_tokens == 28
             assert result.thread_usage.last_token_usage.total_tokens == 14
             receipts = [item async for item in session.turns()]
             assert sorted(item["usage"]["total_tokens"] for item in receipts[0]["responses"]) == [
-                10,
                 14,
                 14,
             ]
@@ -132,98 +127,6 @@ async def test_native_agents_approval_decide_retains_exact_usage_and_expires(
                 await captured[0].decide("Expired?", input="Synthetic policy")
     assert len(decisions.requests) == 1
     assert len(responses.requests) == 2
-
-
-class BudgetProvider(Provider):
-    def __init__(self, missing):
-        super().__init__()
-        self.missing = missing
-
-    async def get_decision(self, request):
-        response = await super().get_decision(request)
-        return DecisionResponse(
-            value=response.value, usage=None if self.missing else response.usage
-        )
-
-
-def decision_budget(metric, limit, requests=None):
-    if metric == "cost":
-        return RunBudget(
-            max_requests=requests,
-            max_estimated_cost_micros=limit,
-            estimate_cost_micros=lambda usage: usage.total_tokens,
-        )
-    return RunBudget(max_requests=requests, max_tokens=limit)
-
-
-@pytest.mark.parametrize("metric", ["tokens", "cost", "missing"])
-async def test_before_step_decision_budget_blocks_first_model_admission(
-    responses: ResponsesFixture, metric
-):
-    decisions = BudgetProvider(metric == "missing")
-
-    async def check(turn, *, step_index):
-        assert await turn.decide("Allowed?", input="Synthetic evidence") is True
-
-    agent = Agent(
-        model="gpt-5.5",
-        instructions="Answer.",
-        decisions=decisions,
-        provider=NativeProvider(
-            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
-        ),
-    )
-    async with timeout(20), agent.session() as session:
-        turn = await session.submit(
-            "Answer.", budget=decision_budget(metric, 10), before_step=check
-        )
-        with pytest.raises(NativeError) as error:
-            await turn.get_result()
-        assert error.value.code == (
-            "run_budget_usage_unavailable" if metric == "missing" else "run_budget_exceeded"
-        )
-    assert len(decisions.requests) == 1
-    assert responses.requests == []
-
-
-@pytest.mark.parametrize("metric", ["tokens", "cost", "missing"])
-@pytest.mark.parametrize("follow_up", [False, True])
-async def test_preparation_decision_allows_admitted_request_and_gates_next_admission(
-    responses: ResponsesFixture, metric, follow_up
-):
-    decisions = BudgetProvider(metric == "missing")
-
-    async def prepare(turn, request, **kwargs):
-        assert await turn.decide("Allowed?", input="Synthetic evidence") is True
-
-    if follow_up:
-        responses.before_event = require_follow_up
-    responses.respond(assistant_output("admitted model result"))
-    responses.respond(assistant_output("must not be requested"))
-    agent = Agent(
-        model="gpt-5.5",
-        instructions="Answer.",
-        decisions=decisions,
-        provider=NativeProvider(
-            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
-        ),
-    )
-    async with timeout(20), agent.session() as session:
-        turn = await session.submit(
-            "Answer.",
-            prepare_request=prepare,
-            budget=decision_budget(metric, 20, requests=2 if follow_up else 1),
-        )
-        if follow_up:
-            with pytest.raises(NativeError) as error:
-                await turn.get_result()
-            assert error.value.code == (
-                "run_budget_usage_unavailable" if metric == "missing" else "run_budget_exceeded"
-            )
-        else:
-            assert (await turn.get_result()).final_output == "admitted model result"
-    assert len(decisions.requests) == 1
-    assert len(responses.requests) == 1
 
 
 async def test_before_step_explicit_stop_preserves_policy_outcome_without_cost_estimate(
@@ -261,39 +164,25 @@ async def test_before_step_explicit_stop_preserves_policy_outcome_without_cost_e
     assert responses.requests == []
 
 
-@pytest.mark.parametrize("explicit_restore_override", [False, True])
-async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_override(
-    responses: ResponsesFixture, explicit_restore_override
-):
-    original, captured, override = Provider(), Provider(), Provider()
+async def test_deferred_start_reuses_captured_agent_decisions(responses: ResponsesFixture):
+    original, replacement = Provider(), Provider()
     jobs, tool = declared(Journal(), JobProvider([done(), done()]))
-    restores = 0
-
-    class RestoringAgent(Agent):
-        @asynccontextmanager
-        async def session(self, **kwargs):
-            nonlocal restores
-            if kwargs.get("state") is not None:
-                restores += 1
-                if explicit_restore_override and restores == 1:
-                    kwargs["decisions"] = override
-            async with super().session(**kwargs) as session:
-                yield session
 
     async def complete(ctx):
         assert await ctx.decide("Is this complete?", input=ctx.text or "") is True
 
-    agent = RestoringAgent(
+    agent = Agent(
         model="gpt-5.5",
         instructions="Render.",
         tools=[tool],
         decisions=original,
         before_complete=complete,
         provider=NativeProvider(
-            base_url=responses.url, api_key="synthetic-native-agent-key", supports_websockets=False
+            base_url=responses.url, api_key="synthetic", supports_websockets=False
         ),
     )
-    async with timeout(20), agent.session(decisions=captured) as live:
+    async with timeout(20), agent.session() as live:
+        object.__setattr__(agent, "decisions", replacement)
         request = await pending(live, tool, responses)
         responses.respond(assistant_output("restored complete"))
         async with jobs.start(live, request) as (restored, turn):
@@ -304,10 +193,7 @@ async def test_deferred_start_inherits_captured_decisions_and_accepts_explicit_o
             responses.respond(assistant_output("second restored complete"))
             async with jobs.start(restored, second_request) as (_, second_turn):
                 assert (await second_turn.get_result()).final_output == "second restored complete"
-    assert restores == 2
-    assert original.requests == []
-    assert len(captured.requests) == (0 if explicit_restore_override else 2)
-    assert len(override.requests) == (2 if explicit_restore_override else 0)
+    assert len(original.requests) == 2 and not replacement.requests
 
 
 @pytest.mark.skipif(
@@ -347,7 +233,7 @@ async def test_read_only_environment_keeps_bound_decision_and_host_authority(
         async with agent.session(environment=environment) as session:
             result = await (await session.submit("Answer.")).get_result()
             assert result.final_output == "read-only complete"
-            assert result.thread_usage.total_token_usage.total_tokens == 24
+            assert result.thread_usage.total_token_usage.total_tokens == 14
             assert result.thread_usage.last_token_usage.total_tokens == 14
             assert (await session.save_state()).executor_read_only is True
     assert host_marker.read_text() == "approved"

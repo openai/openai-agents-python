@@ -634,9 +634,9 @@ _PROVIDER_LOCK = RLock()
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
 
-    ``decisions`` supplies an optional typed decision provider. Session/run
-    openings can override it; callback helpers inherit the captured provider
-    and accept per-call overrides. It never changes the Agent's model API.
+    ``decisions`` supplies an optional typed decision provider. Callback
+    helpers inherit the captured provider and accept per-call overrides.
+    It never changes the Agent's model API.
 
     Declaration fields are immutable. Construct a new Agent to change defaults;
     tools and model settings are captured at construction. A session captures
@@ -957,7 +957,6 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
@@ -981,7 +980,6 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
@@ -1005,7 +1003,6 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
@@ -1029,7 +1026,6 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
@@ -1150,7 +1146,6 @@ class Agent(Generic[ContextT, OutputT]):
                 storage=storage,
                 resume=resume,
                 provider=provider,
-                decisions=decisions,
                 model=model,
                 model_settings=model_settings,
                 environment=environment,
@@ -1177,7 +1172,6 @@ class Agent(Generic[ContextT, OutputT]):
         storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
@@ -1212,7 +1206,6 @@ class Agent(Generic[ContextT, OutputT]):
                 resume=resume,
                 environment=environment,
                 provider=provider,
-                decisions=decisions,
                 model=model,
                 model_settings=model_settings,
                 tool_selection=tools,
@@ -1262,7 +1255,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
@@ -1287,7 +1279,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
@@ -1312,7 +1303,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
@@ -1336,7 +1326,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
@@ -1520,8 +1509,6 @@ class Agent(Generic[ContextT, OutputT]):
                 options["state"] = state
             if provider is not None:
                 options["provider"] = provider
-            if decisions is not None:
-                options["decisions"] = decisions
             if model is not None:
                 options["model"] = model
             if model_settings is not None:
@@ -1646,7 +1633,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
@@ -1671,7 +1657,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
@@ -1696,7 +1681,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
@@ -1720,7 +1704,6 @@ class Agent(Generic[ContextT, OutputT]):
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
@@ -1774,8 +1757,6 @@ class Agent(Generic[ContextT, OutputT]):
                     options["on_interaction"] = on_interaction
                 if provider is not None:
                     options["provider"] = provider
-                if decisions is not None:
-                    options["decisions"] = decisions
                 if model is not None:
                     options["model"] = model
                 if model_settings is not None:

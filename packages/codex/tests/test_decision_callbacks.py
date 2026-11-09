@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +25,6 @@ from agents import (
     ContinueTurn,
     DecisionError,
     DecisionResponse,
-    NativeError,
     OpenAIDecisions,
     OutputValidationError,
     PromptedOutput,
@@ -56,7 +56,7 @@ class RecordingProvider:
         self.requests.append(request)
         value = request.input == "Final." if request.question == "Complete?" else True
         return DecisionResponse(
-            value={"response": value},
+            value=value,
             usage=self.usage,
             request_id=f"req-{self.name}-{len(self.requests)}",
             model="fixture-decision",
@@ -70,43 +70,29 @@ async def decision_peer():
     async def handle(request):
         body = await request.json()
         peer.requests.append((request.path, body))
-        if request.path == "/responses":
-            data = {
-                "status": "incomplete" if peer.mode == "incomplete" else "completed",
-                "model": "fixture-fallback",
-                "usage": WIRE_USAGE,
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": '{"text":"An explanation."}'}],
-                    }
-                ],
-            }
-        else:
-            answers = []
-            for question in body["questions"]:
-                answer = {"name": question["name"], "type": question["type"]}
-                if peer.mode == "refusal":
-                    answer["type"] = "refusal"
-                elif question["type"] == "predicate":
-                    answer["probability"] = 2 if peer.mode == "invalid" else 0.75
-                else:
-                    values = [choice["value"] for choice in question["choices"]]
-                    answer.update(
-                        choice=values[-1],
-                        confidence=1,
-                        probabilities=[
-                            {"value": value, "probability": int(index == len(values) - 1)}
-                            for index, value in enumerate(values)
-                        ],
-                    )
-                answers.append(answer)
-            data = {"answers": answers, "model": "fixture-decision", "usage": WIRE_USAGE}
+        answers = []
+        for question in body["questions"]:
+            answer = {"name": question["name"], "type": question["type"]}
+            if peer.mode == "refusal":
+                answer["type"] = "refusal"
+            elif question["type"] == "predicate":
+                answer["probability"] = 2 if peer.mode == "invalid" else 0.75
+            else:
+                values = [choice["value"] for choice in question["choices"]]
+                answer.update(
+                    choice=values[-1],
+                    confidence=1,
+                    probabilities=[
+                        {"value": value, "probability": int(index == len(values) - 1)}
+                        for index, value in enumerate(values)
+                    ],
+                )
+            answers.append(answer)
+        data = {"answers": answers, "model": "fixture-decision", "usage": WIRE_USAGE}
         return web.json_response(data, headers={"x-request-id": "req-http-decision"})
 
     app = web.Application()
     app.router.add_post("/decisions", handle)
-    app.router.add_post("/responses", handle)
     async with TestServer(app) as server:
         async with AsyncOpenAI(
             api_key="synthetic-decision-key",
@@ -144,9 +130,7 @@ async def test_builtin_uses_shared_compiler_and_real_http(decision_peer):
         (["unknown", True], True),
     ],
 )
-async def test_builtin_boolean_choices_use_decisions_without_fallback(
-    decision_peer, choices, expected
-):
+async def test_builtin_boolean_choices_use_decisions(decision_peer, choices, expected):
     async with OpenAIDecisions(client=decision_peer.client) as decisions:
         result = await Agent(
             instructions="Assess the supplied evidence.", decisions=decisions
@@ -163,7 +147,7 @@ async def test_builtin_boolean_choices_use_decisions_without_fallback(
 @pytest.mark.parametrize("mode,reason", [("refusal", "refusal"), ("invalid", "invalid_response")])
 async def test_builtin_errors_retain_completed_metadata(decision_peer, mode, reason):
     decision_peer.mode = mode
-    decisions = OpenAIDecisions(client=decision_peer.client, fallback_model="fixture-fallback")
+    decisions = OpenAIDecisions(client=decision_peer.client)
     with pytest.raises(DecisionError) as error:
         await Agent(instructions="Assess the supplied evidence.", decisions=decisions).decide(
             "Check.", input="Evidence"
@@ -172,30 +156,6 @@ async def test_builtin_errors_retain_completed_metadata(decision_peer, mode, rea
     assert error.value.usage == USAGE
     assert error.value.request_id == "req-http-decision"
     assert [path for path, _ in decision_peer.requests] == ["/decisions"]
-
-
-async def test_fallback_is_selected_before_inference_and_rejects_incomplete(decision_peer):
-    class Explanation(BaseModel):
-        text: str
-
-    decisions = OpenAIDecisions(client=decision_peer.client)
-    with pytest.raises(ValueError, match="Unsupported Decisions output schema"):
-        await Agent(instructions="Assess the supplied evidence.", decisions=decisions).decide(
-            "Explain.", input="Evidence", output_type=Explanation
-        )
-    assert not decision_peer.requests
-    fallback = OpenAIDecisions(client=decision_peer.client, fallback_model="fixture-fallback")
-    assert await Agent(instructions="Assess the supplied evidence.", decisions=fallback).decide(
-        "Explain.", input="Evidence", output_type=Explanation
-    ) == Explanation(text="An explanation.")
-    decision_peer.mode = "incomplete"
-    with pytest.raises(DecisionError) as error:
-        await Agent(instructions="Assess the supplied evidence.", decisions=fallback).decide(
-            "Explain.", input="Evidence", output_type=Explanation
-        )
-    assert error.value.reason == "invalid_response"
-    assert error.value.usage == USAGE
-    assert [path for path, _ in decision_peer.requests] == ["/responses", "/responses"]
 
 
 async def test_binding_reaches_step_tool_and_completion_without_changing_context_size(responses):
@@ -228,7 +188,7 @@ async def test_binding_reaches_step_tool_and_completion_without_changing_context
         decisions=original,
         before_complete=complete,
     )
-    async with timeout(20), agent.session(decisions=selected) as session:
+    async with timeout(20), replace(agent, decisions=selected).session() as session:
         turn = await session.submit(
             "Start.", before_step=before_step, budget=RunBudget(max_requests=3)
         )
@@ -239,9 +199,9 @@ async def test_binding_reaches_step_tool_and_completion_without_changing_context
             await completions[0].decide("Stale", input="Evidence")
     assert result.final_output == "Final."
     assert result.thread_usage is not None
-    assert result.thread_usage.total_token_usage.total_tokens == 102
+    assert result.thread_usage.total_token_usage.total_tokens == 42
     assert result.thread_usage.last_token_usage.total_tokens == 14
-    assert history[-1]["usage"]["total_tokens"] == 102
+    assert history[-1]["usage"]["total_tokens"] == 42
     assert [context.continuation_count for context in completions] == [0, 1]
     assert {context.turn_id for context in completions} == {turn.turn_id}
     assert len(selected.requests) == 5 and len(override.requests) == 1
@@ -288,7 +248,7 @@ async def test_terminal_tool_completion_keeps_decisions_owner_without_text_repai
         output_type=PromptedOutput(Final, max_retries=2),
         before_complete=complete,
     )
-    async with timeout(20), agent.session(context=context, decisions=selected) as session:
+    async with timeout(20), replace(agent, decisions=selected).session(context=context) as session:
         turn = await session.submit("Finish.")
         result = await turn.get_result()
         history = [entry async for entry in session.turns()]
@@ -298,20 +258,15 @@ async def test_terminal_tool_completion_keeps_decisions_owner_without_text_repai
     assert result.tool_call is not None and result.tool_call.call_id == "accepted-finish"
     assert result.repair_attempts == ()
     assert result.thread_usage is not None
-    assert result.thread_usage.total_token_usage.total_tokens == 48
+    assert result.thread_usage.total_token_usage.total_tokens == 28
     assert result.thread_usage.last_token_usage.total_tokens == 14
-    assert history[-1]["usage"]["total_tokens"] == 48
+    assert history[-1]["usage"]["total_tokens"] == 28
     decision_responses = [
         response
         for response in history[-1]["responses"]
         if response.get("upstream_request_id") in {"req-selected-1", "req-selected-2"}
     ]
-    assert [response["upstream_request_id"] for response in decision_responses] == [
-        "req-selected-1",
-        "req-selected-2",
-    ]
-    assert all(response["response_id"] is None for response in decision_responses)
-    assert all(response["turn_id"] == turn.turn_id for response in decision_responses)
+    assert decision_responses == []
     assert [candidate.continuation_count for candidate in completions] == [0, 1]
     assert {candidate.turn_id for candidate in completions} == {turn.turn_id}
     assert len(selected.requests) == 2 and not original.requests
@@ -319,40 +274,13 @@ async def test_terminal_tool_completion_keeps_decisions_owner_without_text_repai
     assert len(responses.requests) == 2
 
 
-@pytest.mark.parametrize(
-    "usage,code", [(USAGE, "run_budget_exceeded"), (None, "run_budget_usage_unavailable")]
-)
-async def test_completed_decision_is_accounted_before_next_sampling_admission(
-    responses, usage, code
-):
-    decisions = RecordingProvider(usage=usage)
-
-    async def complete(context):
-        await context.decide("Check", input=context.text or "")
-        return ContinueTurn("One more step.")
-
-    responses.respond(assistant_output("Candidate."))
-    responses.respond(assistant_output("Must not sample."))
-    agent = Agent(
-        instructions="Answer.",
-        provider=generative_provider(responses),
-        decisions=decisions,
-        before_complete=complete,
-    )
-    async with timeout(20):
-        with pytest.raises(NativeError) as error:
-            await agent.run("Start.", budget=RunBudget(max_tokens=20))
-    assert error.value.code == code
-    assert len(responses.requests) == len(decisions.requests) == 1
-
-
 @pytest.mark.parametrize("refuse", [False, True])
-async def test_invalid_completed_decision_retains_usage_before_raising(responses, refuse):
+async def test_invalid_completed_decision_keeps_model_usage_separate(responses, refuse):
     class InvalidProvider:
         async def get_decision(self, request):
             if refuse:
                 raise DecisionError("refusal", usage=USAGE)
-            return DecisionResponse(value={"response": "invalid boolean"}, usage=USAGE)
+            return DecisionResponse(value="invalid boolean", usage=USAGE)
 
     async def complete(context):
         await context.decide("Check", input=context.text or "")
@@ -369,14 +297,12 @@ async def test_invalid_completed_decision_retains_usage_before_raising(responses
         with pytest.raises(DecisionError if refuse else OutputValidationError):
             await turn.get_result()
         history = [entry async for entry in session.turns()]
-    assert history[-1]["usage"]["total_tokens"] == 24
+    assert history[-1]["usage"]["total_tokens"] == 14
     assert len(responses.requests) == 1
 
 
 @pytest.mark.parametrize("close_session", [False, True])
-async def test_cancel_joins_provider_cleanup_and_retains_late_completed_usage(
-    responses, close_session
-):
+async def test_cancel_joins_provider_cleanup_without_charging_model_usage(responses, close_session):
     entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     callbacks = 0
 
@@ -388,7 +314,7 @@ async def test_cancel_joins_provider_cleanup_and_retains_late_completed_usage(
             except asyncio.CancelledError:
                 cleaning.set()
                 await release.wait()
-            return DecisionResponse(value={"response": True}, usage=USAGE)
+            return DecisionResponse(value=True, usage=USAGE)
 
     async def complete(context):
         nonlocal callbacks
@@ -419,17 +345,17 @@ async def test_cancel_joins_provider_cleanup_and_retains_late_completed_usage(
         with pytest.raises(TurnStoppedError):
             await turn.get_result()
         usage = [event.usage async for event in events if isinstance(event, UsageUpdated)]
-        assert usage[-1].total_token_usage.total_tokens == 24
+        assert usage[-1].total_token_usage.total_tokens == 14
         if close_session:
             return
         successor = await (await session.submit("Next.")).get_result()
         history = [entry async for entry in session.turns()]
     assert successor.final_output == "Successor."
-    assert successor.thread_usage.total_token_usage.total_tokens == 38
-    assert [entry["usage"]["total_tokens"] for entry in history] == [24, 14]
+    assert successor.thread_usage.total_token_usage.total_tokens == 28
+    assert [entry["usage"]["total_tokens"] for entry in history] == [14, 14]
 
 
-async def test_child_decision_keeps_usage_after_root_finishes(
+async def test_child_decision_stays_live_after_root_finishes(
     tmp_path, monkeypatch, native_executor_binary
 ):
     monkeypatch.setenv("CODEX_EXEC_SERVER_TEST_BINARY", str(native_executor_binary))
@@ -465,13 +391,13 @@ async def test_child_decision_keeps_usage_after_root_finishes(
                 release.set()
             child_result = await child.get_result()
             assert child_result.final_output == "Child candidate."
-            assert child_result.thread_usage.total_token_usage.total_tokens == 17
+            assert child_result.thread_usage.total_token_usage.total_tokens == 7
             assert child_result.thread_usage.last_token_usage.total_tokens == 7
             assert (await root.get_result()).thread_usage == root_result.thread_usage
     assert len(decisions.requests) == 1
 
 
-async def test_terminal_decision_cancellation_keeps_late_usage_and_cancellation(responses):
+async def test_terminal_decision_cancellation_joins_without_model_usage(responses):
     class Final(BaseModel):
         value: int
 
@@ -488,7 +414,7 @@ async def test_terminal_decision_cancellation_keeps_late_usage_and_cancellation(
                 cleaning.set()
                 await release.wait()
             return DecisionResponse(
-                value={"response": True},
+                value=True,
                 usage=USAGE,
                 request_id="req-terminal-late",
                 model="fixture-decision",
@@ -540,24 +466,22 @@ async def test_terminal_decision_cancellation_keeps_late_usage_and_cancellation(
         with pytest.raises(TurnStoppedError):
             await turn.get_result()
         history = [record async for record in session.turns()]
-        assert history[-1]["usage"]["total_tokens"] == 24
+        assert history[-1]["usage"]["total_tokens"] == 14
         decision_responses = [
             response
             for response in history[-1]["responses"]
             if response.get("upstream_request_id") == "req-terminal-late"
         ]
-        assert len(decision_responses) == 1
-        assert decision_responses[0]["response_id"] is None
-        assert decision_responses[0]["turn_id"] == turn.turn_id
+        assert decision_responses == []
         assert candidates[0].turn_id == turn.turn_id and not resumed
         assert requests == ["value=7"]
         assert state.cleanup_error is None
         successor = await (await session.submit("Next.")).get_result()
         assert successor.final_output == Final(value=8)
         assert successor.repair_attempts == ()
-        assert successor.thread_usage.total_token_usage.total_tokens == 38
+        assert successor.thread_usage.total_token_usage.total_tokens == 28
         history = [record async for record in session.turns()]
-        assert [record["usage"]["total_tokens"] for record in history] == [24, 14]
+        assert [record["usage"]["total_tokens"] for record in history] == [14, 14]
     assert requests == ["value=7"] and not resumed
     assert len(responses.requests) == 2
 
@@ -592,11 +516,16 @@ async def _bound_decisions_with_native_tracing() -> None:
     app = web.Application()
     app.router.add_post("/responses", fixture.handle)
     decisions = RecordingProvider()
+    events = []
+
+    class Recorder:
+        def on_trace_event(self, event):
+            events.append({**event, "attributes": dict(event["attributes"])})
 
     async def complete(candidate):
-        assert await candidate.decide("Complete?", input=candidate.text)
+        assert await candidate.decide("PRIVATE_DECISION_QUESTION", input="PRIVATE_DECISION_INPUT")
 
-    await telemetry.configure()
+    await telemetry.configure(processors=[Recorder()])
     try:
         async with TestServer(app) as server:
             fixture.url = str(server.make_url(""))
@@ -611,7 +540,131 @@ async def _bound_decisions_with_native_tracing() -> None:
                 async with agent.session(trace_options={"disabled": disabled}) as session:
                     result = await (await session.submit("Answer.")).get_result()
                     assert result.final_output == "Final."
-                    assert result.thread_usage.total_token_usage.total_tokens == 24
+                    assert result.thread_usage.total_token_usage.total_tokens == 14
         assert len(decisions.requests) == len(fixture.requests) == 2
+        with telemetry.trace("metadata-only", options={"include_sensitive_data": False}):
+
+            class Invalid:
+                async def get_decision(self, request):
+                    return DecisionResponse(value="yes", usage=USAGE, request_id="req-invalid")
+
+            with pytest.raises(OutputValidationError):
+                await Agent(instructions="Assess.", decisions=Invalid()).decide(
+                    "PRIVATE_DECISION_QUESTION", input="PRIVATE_DECISION_INPUT"
+                )
+
+            class Refused:
+                async def get_decision(self, request):
+                    raise DecisionError("refusal", request_id="req-refused")
+
+            with pytest.raises(DecisionError):
+                await Agent(instructions="Assess.", decisions=Refused()).decide(
+                    "PRIVATE_DECISION_QUESTION", input="PRIVATE_DECISION_INPUT"
+                )
+        await telemetry.force_flush()
+        usage = [
+            event
+            for event in events
+            if event["name"] == "decision.usage" and event["lifecycle"] == "start"
+        ]
+        assert len(usage) == 3  # Disabled tracing creates no recording sink.
+        attributes = usage[0]["attributes"]
+        assert attributes["sdk.metadata.total_tokens"] == "10"
+        assert attributes["sdk.metadata.usage_known"] == "true"
+        assert attributes["sdk.metadata.outcome"] == "completed"
+        by_request = {
+            event["attributes"].get("sdk.metadata.request_id"): event["attributes"]
+            for event in usage
+        }
+        assert by_request["req-invalid"]["sdk.metadata.total_tokens"] == "10"
+        assert by_request["req-invalid"]["sdk.metadata.outcome"] == "completed"
+        assert by_request["req-refused"]["sdk.metadata.usage_known"] == "false"
+        assert by_request["req-refused"]["sdk.metadata.outcome"] == "refusal"
+        assert "sdk.metadata.total_tokens" not in by_request["req-refused"]
+        parents = {event["span_id"]: event for event in events}
+        assert parents[usage[0]["parent_span_id"]]["name"] == "decision"
+        encoded = json.dumps(events)
+        assert "PRIVATE_DECISION_QUESTION" not in encoded
+        assert "PRIVATE_DECISION_INPUT" not in encoded
     finally:
         await telemetry.shutdown()
+
+
+async def test_decision_usage_does_not_consume_model_budget(responses):
+    decisions = RecordingProvider(usage=TokenUsage(1000, 0, 0, 1000, 0, 2000))
+
+    async def check(turn, **kwargs):
+        assert await turn.decide("Allowed?", input="Synthetic evidence")
+
+    responses.respond(assistant_output("within model budget"))
+    agent = Agent(
+        instructions="Answer.", decisions=decisions, provider=generative_provider(responses)
+    )
+    async with timeout(20), agent.session() as session:
+        result = await (
+            await session.submit(
+                "Answer.", before_step=check, budget=RunBudget(max_tokens=15, max_requests=1)
+            )
+        ).get_result()
+        assert result.final_output == "within model budget"
+        assert result.thread_usage.total_token_usage.total_tokens == 14
+        history = [entry async for entry in session.turns()]
+        assert history[-1]["usage"]["total_tokens"] == 14
+        assert len(history[-1]["responses"]) == 1
+    assert len(decisions.requests) == len(responses.requests) == 1
+
+
+async def test_live_yielded_tool_can_decide_after_native_root_completion(responses):
+    from tests.test_native_code_mode import code_call
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    decisions = RecordingProvider()
+    contexts = []
+    finished = []
+
+    @function_tool
+    async def check(context: ToolContext[None]) -> str:
+        """Check while the yielded tool callback remains live."""
+        contexts.append(context)
+        entered.set()
+        await release.wait()
+        assert await context.decide("Ready?", input="Synthetic evidence")
+        finished.append(True)
+        return "checked"
+
+    final = assistant_output("done")
+
+    async def hold(event):
+        if event == final:
+            await entered.wait()
+
+    responses.before_event = hold
+    responses.respond(
+        code_call(
+            "const pending=tools.check({}); yield_control(); text(await pending);", "live-cell"
+        )
+    )
+    responses.respond(final)
+    agent = Agent(
+        instructions="Check then finish.",
+        tools=[check],
+        decisions=decisions,
+        programmatic_tool_calling=True,
+        provider=generative_provider(responses),
+    )
+    async with timeout(25), agent.session() as session:
+        turn = await session.submit("Check.")
+        await entered.wait()
+        state = session._active
+        assert state is not None
+        try:
+            terminal = await asyncio.shield(state.terminal)
+            assert terminal["type"] == "task_complete"
+        finally:
+            release.set()
+        result = await turn.get_result()
+        assert result.final_output == "done" and finished == [True]
+        assert result.thread_usage.total_token_usage.total_tokens == 28
+        with pytest.raises(RuntimeError, match="exact live callback"):
+            await contexts[0].decide("Expired?", input="Evidence")
+    assert len(decisions.requests) == 1

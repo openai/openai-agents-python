@@ -6,7 +6,6 @@ mod agent_profiles;
 mod application_instructions;
 mod async_bridge;
 mod auth;
-mod auxiliary_decisions;
 mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
@@ -1059,16 +1058,6 @@ impl NativeThread {
             return Err(py_error("Expired managed Python effect entry"));
         }
         Ok(admitted)
-    }
-
-    fn _capture_decision<'py>(
-        &self,
-        py: Python<'py>,
-        request_json: &str,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.current()?;
-        let request = request_json.to_owned();
-        async_bridge::future_into_py(py, auxiliary_decisions::capture(inner, request))
     }
 
     // Cancellation from a child callback must target its still-live issuer,
@@ -3778,7 +3767,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
-    module.add_class::<auxiliary_decisions::NativeDecisionCall>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapter>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapterRequest>()?;
     module.add_class::<live::NativeLiveSession>()?;

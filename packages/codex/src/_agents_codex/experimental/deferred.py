@@ -921,7 +921,6 @@ class DeferredTools:
             session._model_api_key,
             active.output,
             session._max_function_concurrency,
-            decisions_override=session._decisions_override,
         )
         try:
             selection.state = await self.prepare(session, request, timeout_seconds=timeout_seconds)

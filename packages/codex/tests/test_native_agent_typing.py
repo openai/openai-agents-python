@@ -1003,7 +1003,7 @@ assert_type(
 
 class ExampleDecisionProvider:
     async def get_decision(self, request: DecisionRequest) -> DecisionResponse:
-        return DecisionResponse(value={"response": True})
+        return DecisionResponse(value=True)
 
 
 decision_provider: DecisionProvider = ExampleDecisionProvider()
@@ -1050,9 +1050,9 @@ async def typed_decision_helpers(
     assert_type(await completion.decide("Allowed?", input=completion.text or ""), bool)
     assert_type(await tool_context.decide("Select", input="Evidence", choices=["a", "b"]), str)
     assert_type(await child_step.decide("Allowed?", input="Evidence"), bool)
-    async with deciding_agent.session(decisions=decision_provider):
+    async with deciding_agent.session():
         pass
-    assert_type(await deciding_agent.run("Answer", decisions=decision_provider), Completed[str])
+    assert_type(await deciding_agent.run("Answer"), Completed[str])
 
 
 Probability = Annotated[float, Field(ge=0, le=1)]

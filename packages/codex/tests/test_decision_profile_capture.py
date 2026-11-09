@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +30,7 @@ from agents import (
     PromptedOutput,
 )
 
-CHOICES = ("root", "target", "opening", "per-call", "replacement")
+CHOICES = ("root", "target", "per-call", "replacement")
 
 
 @pytest.fixture(autouse=True)
@@ -46,14 +45,13 @@ class Provider:
 
     async def get_decision(self, request):
         self.requests.append(request)
-        return DecisionResponse(value={"response": self.name}, model=self.name)
+        return DecisionResponse(value=self.name, model=self.name)
 
 
 def capture(root):
     opening = _capture_opening_agent(
         root,
         provider=None,
-        decisions=root.decisions,
         model=None,
         model_settings=None,
         tool_selection=None,
@@ -61,25 +59,16 @@ def capture(root):
     return _capture_agent_graph(root, root_declaration=opening)
 
 
-def callback_session(root, *, opening_override=None):
+def callback_session(root):
     profiles = capture(root)
     runtime, _ = _capture_profile_runtimes(profiles, _capture_tools(0, (), None), "Root", None)
     session = object.__new__(Session)
     session._profiles = runtime
+    session._closing = False
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
-    session._decisions_override = opening_override
     session._profile_current = ("agent_0", 0)
-    recorded = []
-
-    async def begin(state, message):
-        async def record(response):
-            recorded.append((message["profile_id"], response.model))
-
-        return record
-
-    session._begin_decision_response = begin
-    return session, recorded
+    return session
 
 
 def message(profile, epoch):
@@ -120,16 +109,15 @@ async def test_graph_copies_keep_each_provider_after_original_agents_change():
 
 
 @pytest.mark.parametrize(
-    ("target_binding", "opening_override", "per_call", "expected"),
+    ("target_binding", "per_call", "expected"),
     [
-        (False, False, False, ("root", "root")),
-        (True, False, False, ("root", "target")),
-        (True, True, False, ("opening", "opening")),
-        (True, True, True, ("per-call", "per-call")),
+        (False, False, ("root", "root")),
+        (True, False, ("root", "target")),
+        (True, True, ("per-call", "per-call")),
     ],
 )
 async def test_callback_provider_precedence_follows_captured_source(
-    target_binding, opening_override, per_call, expected
+    target_binding, per_call, expected
 ):
     providers = {name: Provider(name) for name in CHOICES}
     target = Agent(
@@ -138,9 +126,7 @@ async def test_callback_provider_precedence_follows_captured_source(
         decisions=providers["target"] if target_binding else None,
     )
     root = Agent(instructions="Root", decisions=providers["root"], handoffs=[target])
-    session, recorded = callback_session(
-        root, opening_override=providers["opening"] if opening_override else None
-    )
+    session = callback_session(root)
     object.__setattr__(root, "decisions", providers["replacement"])
     object.__setattr__(target, "decisions", providers["replacement"])
     selected = []
@@ -159,11 +145,14 @@ async def test_callback_provider_precedence_follows_captured_source(
         session._profile_current = ("agent_1" if profile == "agent_0" else "agent_0", 2)
         selected.append(
             await session._call_decision_callback(
-                object(), message(profile, epoch), check, lambda: True, completion("candidate")
+                SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future()),
+                message(profile, epoch),
+                check,
+                lambda: True,
+                completion("candidate"),
             )
         )
     assert tuple(selected) == expected
-    assert recorded == [("agent_0", expected[0]), ("agent_1", expected[1])]
     assert not providers["replacement"].requests
 
 
@@ -171,7 +160,7 @@ async def test_approval_context_cannot_borrow_a_later_profile_callback():
     root_provider, target_provider = Provider("root"), Provider("target")
     target = Agent(instructions="Target", name="Target", decisions=target_provider)
     root = Agent(instructions="Root", handoffs=[target], decisions=root_provider)
-    session, recorded = callback_session(root)
+    session = callback_session(root)
     child = ChildInvocation("session", "child", "instance", "child-turn")
     earlier = ChildStepContext(context=None, child=child, step_index=0)
     later = ChildStepContext(context=None, child=child, step_index=1)
@@ -181,7 +170,11 @@ async def test_approval_context_cannot_borrow_a_later_profile_callback():
 
     assert (
         await session._call_decision_callback(
-            object(), message("agent_1", 1), first, lambda: True, earlier
+            SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future()),
+            message("agent_1", 1),
+            first,
+            lambda: True,
+            earlier,
         )
         == "target"
     )
@@ -193,13 +186,16 @@ async def test_approval_context_cannot_borrow_a_later_profile_callback():
 
     assert (
         await session._call_decision_callback(
-            object(), message("agent_0", 0), second, lambda: True, later
+            SimpleNamespace(stopping=False, failure=asyncio.get_running_loop().create_future()),
+            message("agent_0", 0),
+            second,
+            lambda: True,
+            later,
         )
         == "root"
     )
     with pytest.raises(RuntimeError, match="exact live callback"):
         await later.decide("Expired?", input="evidence", choices=CHOICES)
-    assert recorded == [("agent_1", "target"), ("agent_0", "root")]
 
 
 @pytest.mark.parametrize("revoke", [False, True])
@@ -220,7 +216,7 @@ async def test_completion_repair_rechecks_original_profile_and_expires_previous_
         decisions=root_provider,
         output_type=PromptedOutput(Report, max_retries=1),
     )
-    session, recorded = callback_session(root)
+    session = callback_session(root)
     state = _Submission(_prepare_spec(target.output_type))
     candidates = []
     live = True
@@ -253,20 +249,18 @@ async def test_completion_repair_rechecks_original_profile_and_expires_previous_
             await work
         assert len(candidates) == 1
         assert state.accepted_output is None
-        assert recorded == [("agent_1", "target")]
         assert not root_provider.requests
         return
     assert await work is None
     assert [ctx.text for ctx in candidates] == ["invalid JSON", '{"label":"accepted"}']
     assert {ctx.turn_id for ctx in candidates} == {"original-turn"}
     assert state.accepted_output == (Report(label="accepted"),)
-    assert recorded == [("agent_1", "target"), ("agent_1", "target")]
     assert not root_provider.requests
 
 
 async def test_unknown_profile_fails_before_dispatch_instead_of_using_current_profile():
     provider = Provider("root")
-    session, recorded = callback_session(Agent(instructions="Root", decisions=provider))
+    session = callback_session(Agent(instructions="Root", decisions=provider))
 
     async def check(ctx):
         return await ctx.decide("Allowed?", input="evidence", choices=CHOICES)
@@ -276,113 +270,6 @@ async def test_unknown_profile_fails_before_dispatch_instead_of_using_current_pr
             SimpleNamespace(), message("foreign", 0), check, lambda: True, completion("candidate")
         )
     assert not provider.requests
-    assert not recorded
-
-
-@pytest.mark.parametrize(
-    ("target_binding", "opening_override", "expected"),
-    [(True, True, "opening"), (True, False, "target"), (False, False, "root")],
-)
-async def test_deferred_repeated_restore_preserves_opening_override_and_target_precedence(
-    monkeypatch, target_binding, opening_override, expected
-):
-    from _agents_codex import session as implementation
-    from _agents_codex.experimental import deferred
-
-    providers = {name: Provider(name) for name in CHOICES}
-    target = Agent(
-        instructions="Target",
-        name="Target",
-        decisions=providers["target"] if target_binding else None,
-    )
-    root = Agent(instructions="Root", decisions=providers["root"], handoffs=[target])
-    override = providers["opening"] if opening_override else None
-    opening = _capture_opening_agent(
-        root,
-        provider=None,
-        decisions=override or providers["root"],
-        model=None,
-        model_settings=None,
-        tool_selection=None,
-    )
-    session, _ = callback_session(opening, opening_override=override)
-    request = SimpleNamespace(call_id="manual-call")
-    jobs = deferred.DeferredTools(journal=object(), tenant="fixture", run_id="restore")
-
-    def prepare_live(session):
-        session._agent = root
-        session._catalog = session._profiles["agent_0"].catalog
-        session._bound_tools = session._catalog.tools
-        session._instructions = session._opening_agent.instructions
-        session._active = SimpleNamespace(output=_prepare_spec(str))
-        session._model_api_key = None
-        session._max_function_concurrency = None
-        session._context = None
-        session._manual_request = lambda *args, **kwargs: request
-
-    async def prepare(*args, **kwargs):
-        return SimpleNamespace(native_continuation=None)
-
-    async def advance(*args, **kwargs):
-        return "pending"
-
-    class OpeningCaptured(Exception):
-        def __init__(self, provider, override):
-            self.provider = provider
-            self.override = override
-
-    capture_decisions = implementation._capture_decisions
-
-    def stop_before_native(default, override):
-        raise OpeningCaptured(capture_decisions(default, override), override)
-
-    @asynccontextmanager
-    async def restored(selection, context, timeout):
-        # Exercise the real selected-opening branch, stopping at the existing
-        # provider-capture seam before native resources or checkpoint parsing.
-        selection.owner = asyncio.current_task()
-        token = implementation._restore_declaration.set(selection)
-        try:
-            with monkeypatch.context() as patch:
-                patch.setattr(implementation, "_capture_decisions", stop_before_native)
-                with pytest.raises(OpeningCaptured) as captured:
-                    await Session._open(selection.agent, state=selection.state)
-        finally:
-            selection.owner = None
-            implementation._restore_declaration.reset(token)
-        reopened, _ = callback_session(
-            selection.declaration, opening_override=captured.value.override
-        )
-        reopened._decisions_provider = captured.value.provider
-        prepare_live(reopened)
-        yield reopened, lambda: True
-
-    monkeypatch.setattr(jobs, "prepare", prepare)
-    monkeypatch.setattr(jobs, "advance", advance)
-    monkeypatch.setattr(deferred, "_restored_session", restored)
-    prepare_live(session)
-
-    async def check(ctx):
-        return await ctx.decide("Restored target?", input="evidence", choices=CHOICES)
-
-    selected = []
-    async with jobs.start(session, request) as (first, _):
-        selected.append(
-            await first._call_decision_callback(
-                object(), message("agent_1", 1), check, lambda: True, completion("first restore")
-            )
-        )
-        async with jobs.start(first, request) as (second, _):
-            selected.append(
-                await second._call_decision_callback(
-                    object(),
-                    message("agent_1", 2),
-                    check,
-                    lambda: True,
-                    completion("second restore"),
-                )
-            )
-    assert selected == [expected, expected]
 
 
 @pytest.mark.parametrize("successor_profile", ["agent_0", "agent_1"])
@@ -443,7 +330,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         transform_context=root_transform,
         before_compact=root_compact,
     )
-    session, recorded = callback_session(root)
+    session = callback_session(root)
     session._id = "session"
     session._context = {"tenant": "fixture"}
     session._owned_provider = provider
@@ -558,7 +445,6 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     assert candidates == ["invalid JSON", '{"label":"target-only"}']
     assert state.accepted_output == (TargetReport(label="target-only"),)
     assert state.repair_attempt_count == 1
-    assert recorded == [("agent_1", "target"), ("agent_1", "target")]
     assert not root_provider.requests
     (declaration,) = opened
     assert declaration.model == "physical-original"

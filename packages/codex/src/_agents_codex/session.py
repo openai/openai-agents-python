@@ -106,7 +106,7 @@ from .canonical_storage import (
 )
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
-from .decisions import DecisionProvider, DecisionResponse, _bind_decisions, _capture_decisions
+from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -1066,7 +1066,6 @@ class _RestoreDeclaration:
     api_key: str | None
     output: _PreparedOutput
     max_function_concurrency: int | None
-    decisions_override: DecisionProvider | None = None
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -2291,7 +2290,6 @@ def _capture_opening_agent(
     agent: Agent[ContextT, OutputT],
     *,
     provider: NativeProvider | None,
-    decisions: DecisionProvider | None,
     model: str | None,
     model_settings: ModelSettings | None,
     tool_selection: Sequence[Tool[ContextT]] | None,
@@ -2307,7 +2305,7 @@ def _capture_opening_agent(
             ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
         ),
         provider=agent.provider if provider is None else provider,
-        decisions=decisions,
+        decisions=agent.decisions,
         output_type=cast(OutputSpec[OutputT], agent.output_type),
         programmatic_tool_calling=agent.programmatic_tool_calling,
         transform_context=agent.transform_context,
@@ -2337,7 +2335,6 @@ class Session(Generic[ContextT, OutputT]):
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
-        decisions: DecisionProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
@@ -2375,10 +2372,6 @@ class Session(Generic[ContextT, OutputT]):
             and (selected.state is state or selected.state == state)
         ):
             agent = selected.declaration
-            if decisions is None:
-                decisions = selected.decisions_override
-            decisions_provider = _capture_decisions(agent.decisions, decisions)
-            agent = replace(agent, decisions=decisions_provider)
             if function_concurrency_omitted:
                 max_function_concurrency = selected.max_function_concurrency
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
@@ -2388,13 +2381,11 @@ class Session(Generic[ContextT, OutputT]):
                 )
         else:
             selected = None
-            decisions_provider = _capture_decisions(agent.decisions, decisions)
             # Capture the declaration before native opening can suspend. Keep
             # application hooks and executor policy bound to the original Agent.
             agent = _capture_opening_agent(
                 agent,
                 provider=provider,
-                decisions=decisions_provider,
                 model=model,
                 model_settings=model_settings,
                 tool_selection=tool_selection,
@@ -3158,8 +3149,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
-                session._decisions_provider = decisions_provider
-                session._decisions_override = decisions
+                session._decisions_provider = agent.decisions
                 session._profiles = profile_runtimes
                 session._agent_profile_fingerprint = profile_fingerprint
                 session._bindings = agent.tools
@@ -3537,8 +3527,6 @@ class Session(Generic[ContextT, OutputT]):
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
         self._decisions_provider: DecisionProvider | None = None
-        self._decisions_override: DecisionProvider | None = None
-        self._decision_completions: dict[str, Any] = {}
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
             weakref.WeakValueDictionary()
         )
@@ -7287,25 +7275,6 @@ class Session(Generic[ContextT, OutputT]):
         confirmed_rejection = False
         delegate_close = False
         usage_request: asyncio.Future[Any] | None = None
-        usage_callbacks_completed = 0
-
-        async def settled_usage() -> TokenUsageInfo | None:
-            nonlocal usage_request, usage_callbacks_completed
-            while True:
-                assert usage_request is not None
-                await asyncio.wait(
-                    (usage_request, state.failure), return_when=asyncio.FIRST_COMPLETED
-                )
-                await state.wait_for_callbacks()
-                usage = _token_usage_info(json.loads(usage_request.result()))
-                # Root callback keys remain retained after completion. A callback
-                # which finished after this read began may have committed usage,
-                # including a callback admitted while the read was in flight.
-                if len(state.callbacks) == usage_callbacks_completed:
-                    return usage
-                usage_callbacks_completed = sum(task.done() for task in state.callbacks)
-                usage_request = asyncio.ensure_future(self._native.call("token_usage_info"))
-
         try:
             if self._profiles and not admitted:
                 await self._refresh_profile_bindings()
@@ -7492,10 +7461,9 @@ class Session(Generic[ContextT, OutputT]):
             if terminal.get("error"):
                 raise _native_error(terminal["error"])
             if input is not None and state.realtime_tool is None:
-                # Start usage capture before draining callbacks: newly
-                # admitted work must not block the
+                # Terminal fixes this turn's native usage. Start the read while
+                # draining callbacks: newly admitted work must not block the
                 # final read on which it may itself depend.
-                usage_callbacks_completed = sum(task.done() for task in state.callbacks)
                 usage_request = asyncio.ensure_future(self._native.call("token_usage_info"))
             await state.wait_for_callbacks()
             await self._refresh_profile_bindings()
@@ -7522,7 +7490,14 @@ class Session(Generic[ContextT, OutputT]):
                     output = proposal.value
                 elif not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
-                usage = await settled_usage()
+                assert usage_request is not None
+                await asyncio.wait(
+                    (usage_request, state.failure), return_when=asyncio.FIRST_COMPLETED
+                )
+                # Native terminal does not seal callbacks on still-owned cells.
+                # Drain work admitted during usage before committing an outcome.
+                await state.wait_for_callbacks()
+                usage = _token_usage_info(json.loads(usage_request.result()))
                 if (
                     tool_payload is None
                     and not state.unsampled_steering
@@ -7551,7 +7526,6 @@ class Session(Generic[ContextT, OutputT]):
                         await state.wait_for_callbacks()
                         if state.cleanup_error is not None:
                             raise state.cleanup_error
-                        usage = await settled_usage()
                 if not state.unsampled_steering:
                     outcome = Completed(
                         handle,
@@ -8634,13 +8608,6 @@ class Session(Generic[ContextT, OutputT]):
                 if not state.stopping and not state.failure.done():
                     state.failure.set_result(NativeError("Prepared request expired"))
 
-    async def _begin_decision_response(
-        self, state: _CallbackState, message: dict[str, Any]
-    ) -> Callable[[DecisionResponse], Awaitable[None]]:
-        from ._decision_accounting import begin_decision_response
-
-        return await begin_decision_response(self, state, message)
-
     async def _call_decision_callback(
         self,
         state: _CallbackState,
@@ -8654,12 +8621,17 @@ class Session(Generic[ContextT, OutputT]):
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
             if getattr(self, "_profiles", None):
-                provider = _capture_decisions(provider, self._agent_for_message(message).decisions)
-            provider = _capture_decisions(provider, getattr(self, "_decisions_override", None))
+                profile_provider = self._agent_for_message(message).decisions
+                if profile_provider is not None:
+                    provider = profile_provider
             with _bind_decisions(
                 args[0],
-                lambda: not _native_callback_cancelled(state) and active(),
-                lambda: self._begin_decision_response(state, message),
+                lambda: (
+                    not state.stopping
+                    and not state.failure.done()
+                    and not self._closing
+                    and not _native_callback_cancelled(state)
+                ),
                 provider,
             ):
                 return await _call_callback(callback, active, *args, **kwargs)
@@ -9359,10 +9331,6 @@ class Session(Generic[ContextT, OutputT]):
                     self._cancel_native_callback(message["receipt"], native=event_native)
                     continue
                 pending_callback = message.get("_sdk_callback")
-                from ._decision_accounting import consume_decision_response
-
-                if consume_decision_response(self, event):
-                    continue
                 if message.get("type") == "token_count" and "api_rate_limits" in message:
                     snapshot = _api_rate_limits(message["api_rate_limits"])
                     if snapshot is not None:
