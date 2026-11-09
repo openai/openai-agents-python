@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Awaitable
 
 import pytest
 from aiohttp import web
@@ -136,7 +137,10 @@ async def test_chat_client_adapter_stays_inside_native_tool_loop() -> None:
     assert seen[0]["stream"] is False
 
 
-async def test_cancellation_joins_admitted_sync_model_and_discards_late_tool_call() -> None:
+@pytest.mark.parametrize("returns_awaitable", [False, True])
+async def test_cancellation_joins_admitted_sync_model_and_discards_late_tool_call(
+    returns_awaitable: bool,
+) -> None:
     entered = threading.Event()
     release = threading.Event()
     effects = []
@@ -147,9 +151,16 @@ async def test_cancellation_joins_admitted_sync_model_and_discards_late_tool_cal
         return "bad"
 
     class Model:
-        def complete(self, request: ModelRequest) -> ModelResponse:
+        def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:
             entered.set()
             release.wait(10)
+            if returns_awaitable:
+
+                async def late():
+                    effects.append("late-model-body")
+                    return ModelResponse([])
+
+                return late()
             return ModelResponse(
                 [
                     {
