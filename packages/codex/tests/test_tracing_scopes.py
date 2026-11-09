@@ -91,7 +91,7 @@ class NativeTracing:
             batch = self.batches.get_nowait()
         except asyncio.QueueEmpty:
             batch = {"events": [], "through_sequence": 0}
-        return json.dumps(batch)
+        return json.dumps({"dropped_records": 0, **batch})
 
     def ack_trace_events(self, sequence: int, failures: int) -> None:
         self.acks.append((sequence, failures))
@@ -1647,7 +1647,7 @@ async def test_cancelled_drain_accounts_result_before_restart_without_new_events
             seen.append(event["sequence"])
 
     async def drain(count: int) -> str:
-        raw = json.dumps(await native.batches.get())
+        raw = json.dumps({"dropped_records": 0, **(await native.batches.get())})
         entered.set()
         if completed_before_resume:
             assert runtime_telemetry._processor_task is not None
@@ -1894,6 +1894,7 @@ async def test_shutdown_joins_cancelled_drain_and_accounts_undelivered_records(
         await release.wait()
         return json.dumps(
             {
+                "dropped_records": 0,
                 "events": [{"sequence": 7, "processor_ids": [identifier]}],
                 "through_sequence": 7,
             }
@@ -2581,7 +2582,11 @@ async def test_foreign_pump_waits_for_native_route_publication(
             while not staged.is_set():
                 await asyncio.sleep(0)
             return json.dumps(
-                {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
+                {
+                    "dropped_records": 0,
+                    "events": [{"sequence": 1, "processor_ids": ["python-0"]}],
+                    "through_sequence": 1,
+                }
             )
         return await original_drain(count)
 
