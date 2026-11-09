@@ -319,7 +319,11 @@
     {
       "path": "0071-native-voice-parity.patch",
       "sha256": "cbbd7fbdd556b8f073ab75f9e8f70e3a0911431c4969b065a9c3d656118dcdd4"
+    },
+    {
+      "path": "0092-preserve-captured-profile-model-settings.patch",
+      "sha256": "dfeefbabe843edd1bee2c2fc93fb771d955daf5b1a500eff7565c737bf1c42eb"
     }
   ],
-  "result_tree": "72835f9cb2a21318f6002570830a8eaf5c87bc6b"
+  "result_tree": "ac4b12dfc13d5bddccf60d1dc5e27fcae5971252"
 }

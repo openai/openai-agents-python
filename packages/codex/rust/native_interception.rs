@@ -4561,6 +4561,61 @@ pub(crate) mod tests {
         thread.insert(control);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn captured_mcp_source_retains_rule_deadline_and_generation_after_refresh() {
+        let control = Arc::new(Control::new("root".into(), true));
+        control.enable(30.0, Scope::ThreadTree).unwrap();
+        let rule = |generation: u64, seconds| ToolRule {
+            name: "lookup".into(),
+            namespace: Some("mcp__records".into()),
+            timeout: Some(seconds),
+            scope: Scope::ThreadTree,
+            generation: Some(generation.to_string()),
+            result: false,
+        };
+        control.configure_tools(vec![rule(41, 0.025)]).unwrap();
+        let old = Arc::new(control.capture_mcp_source());
+        control.configure_tools(vec![rule(42, 0.007)]).unwrap();
+        let accepted = Arc::new(control.capture_mcp_source());
+        let name = ToolName::new(Some("mcp__records".to_owned()), "lookup".to_owned())
+            .with_default_namespace();
+        for (source, generation, milliseconds, turn) in [
+            (old.clone(), 41, 25, "old-source"),
+            (accepted.clone(), 42, 7, "accepted-source"),
+        ] {
+            let captured = source.policy.as_ref().unwrap().rules[&name];
+            assert_eq!(captured.0, Some(Duration::from_millis(milliseconds)));
+            assert_eq!(captured.3, Some(generation));
+            let owner = direct_request(control.clone(), turn).owner;
+            let mut before = before_request(&owner, "lookup");
+            before.tool_name.namespace = Some("mcp__records");
+            let request = ProfiledRequest {
+                request: before,
+                source: Some(source),
+            };
+            let token = CancellationToken::new();
+            let mut decision = Box::pin(control.decide(request, &token));
+            assert!(futures_util::poll!(&mut decision).is_pending());
+            let notice = control.next().await.unwrap();
+            let nonce = notice["nonce"].as_u64().unwrap();
+            assert_eq!(notice["generation"], generation);
+            assert!(control.check(nonce));
+            tokio::time::advance(Duration::from_millis(milliseconds - 1)).await;
+            assert!(control.check(nonce));
+            tokio::time::advance(Duration::from_millis(2)).await;
+            assert!(!control.check(nonce));
+            assert!(!control.resolve(nonce, r#"{"action":"continue"}"#));
+            assert!(decision.await.is_err());
+            // next() claimed a physical callback lease; timeout cannot release it.
+            assert!(control.release(nonce));
+            assert_eq!(control.next().await.unwrap(), json!({"cancel": nonce}));
+            assert!(control.channel.state.lock().unwrap().pending.is_empty());
+            control.join_expiry_cleanup().await.unwrap();
+        }
+        assert_eq!(old.policy.as_ref().unwrap().rules[&name].3, Some(41));
+        assert_eq!(accepted.policy.as_ref().unwrap().rules[&name].3, Some(42));
+    }
+
     #[test]
     fn pinned_executor_schema_requires_fields_and_rejects_wrong_types() {
         let admission = PinnedExecutorAdmission {

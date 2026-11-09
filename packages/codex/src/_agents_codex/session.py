@@ -7222,6 +7222,23 @@ class Session(Generic[ContextT, OutputT]):
                     state.output = self._default_output
                 if state.operation_refs is None:
                     state.operation_mcp = self._mcp_tools
+                    if (
+                        input is not None
+                        and state.continued_from is None
+                        and state.realtime_tool is None
+                    ):
+                        source_agent = self._effective_agent()
+                        _, state.operation_mcp, _ = _split_tools(
+                            self._default_tools
+                            if self._default_tools is not None
+                            else source_agent.tools,
+                            source_agent.programmatic_tool_calling,
+                            available=self._bindings,
+                            ceiling=source_agent.tools,
+                            environment=self._executor,
+                            native_agents=self._native_agents,
+                            handoffs=self._effective_handoffs(),
+                        )
             if admitted:
                 handle = state.handle
                 assert handle is not None
