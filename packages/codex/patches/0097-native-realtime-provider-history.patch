@@ -298,7 +298,7 @@ index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52ee
      let event = connection
          .next_event()
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1122768f3 100644
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..c25ffa8dddae5ad12ad2cadbf558c49a31414b79 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,5 +1,6 @@
@@ -621,7 +621,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1
              if sdk
                  .item_deletion
                  .lock()
-@@ -5399,6 +5593,70 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5399,12 +5593,99 @@ async fn handle_realtime_server_event_with_configuration(
      response_create_queue: &mut RealtimeResponseCreateQueue,
      configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
  ) -> anyhow::Result<()> {
@@ -646,16 +646,21 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1
 +                )?;
 +                Some(history.created(item, previous_item_id.is_some()))
 +            }
++            RealtimeEvent::ConversationItemAdded { item, .. } => {
++                // An external deletion can precede an already-written create receipt.
++                // Drain that receipt without restoring the deleted provider row.
++                Some(sdk.history.lock().unwrap().created(item, true))
++            }
 +            RealtimeEvent::FunctionCallRequested(call) => {
-+                sdk.history.lock().unwrap().observe_id(&call.item_id)?;
++                sdk.observe_history_item_id(&call.item_id)?;
 +                None
 +            }
 +            RealtimeEvent::HandoffRequested(call) => {
-+                sdk.history.lock().unwrap().observe_id(&call.item_id)?;
++                sdk.observe_history_item_id(&call.item_id)?;
 +                None
 +            }
 +            RealtimeEvent::NoopRequested(call) => {
-+                sdk.history.lock().unwrap().observe_id(&call.item_id)?;
++                sdk.observe_history_item_id(&call.item_id)?;
 +                None
 +            }
 +            RealtimeEvent::ConversationItemDone { item_id } => {
@@ -690,9 +695,37 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1
 +        return Ok(());
 +    }
      if let RealtimeEvent::ConversationItemDeleted { item_id } = &event {
-         if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
-             sdk.active.load(Ordering::Acquire)
-@@ -5812,7 +6070,8 @@ async fn handle_realtime_server_event_with_configuration(
+-        if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
+-            sdk.active.load(Ordering::Acquire)
+-                && sdk.item_deletion.lock().unwrap().acknowledge(item_id)
+-        }) {
++        let Some(sdk) = handoff_state
++            .sdk
++            .as_ref()
++            .filter(|sdk| sdk.active.load(Ordering::Acquire))
++        else {
+             return Ok(());
++        };
++        let external = {
++            let mut deletion = sdk.item_deletion.lock().unwrap();
++            if deletion.pending_matches(item_id) {
++                if !deletion.acknowledge(item_id) {
++                    return Ok(());
++                }
++                false
++            } else {
++                if !deletion.observe_deleted(item_id)? {
++                    return Ok(());
++                }
++                true
++            }
++        };
++        if external {
++            sdk.history.lock().unwrap().observe_deleted(item_id);
+         }
+     }
+     let should_stop = match &event {
+@@ -5812,7 +6093,8 @@ async fn handle_realtime_server_event_with_configuration(
          | RealtimeEvent::OutputTranscriptDone(_)
          | RealtimeEvent::FunctionCallFinished { .. }
          | RealtimeEvent::FunctionBatchFinished { .. }
@@ -703,10 +736,18 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..aafda9724502645caecb23f63e3631d1
          | RealtimeEvent::ConversationItemObserved(_)
          | RealtimeEvent::ConversationItemDeleted { .. }
 diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851ad24fedf 100644
+index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..97cb28ea2bd3deeae323d533d9dd520df9648eb8 100644
 --- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
 +++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
-@@ -34,9 +34,15 @@ struct Item {
+@@ -27,6 +27,7 @@ impl Drop for DeleteReply {
+ #[derive(Debug, Clone)]
+ struct Item {
+     kind: String,
++    present: bool,
+     role: Option<String>,
+     call_id: Option<String>,
+     approval_request_id: Option<String>,
+@@ -34,9 +35,15 @@ struct Item {
      effect_done: bool,
  }
  #[derive(Debug)]
@@ -722,7 +763,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
      deadline: tokio::time::Instant,
      reply: DeleteReply,
  }
-@@ -44,7 +50,8 @@ struct Pending {
+@@ -44,7 +51,8 @@ struct Pending {
  pub(super) struct State {
      items: HashMap<String, Item>,
      order: VecDeque<String>,
@@ -732,16 +773,16 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
      recent_noop_completions: VecDeque<String>,
      pending: Option<Pending>,
  }
-@@ -54,7 +61,7 @@ impl State {
+@@ -54,7 +62,7 @@ impl State {
      }
      fn upsert(&mut self, id: &str, item: Item) -> anyhow::Result<()> {
          anyhow::ensure!(Self::valid_id(id), "Invalid provider conversation item ID");
 -        if self.recent_deleted.iter().any(|known| known == id) {
-+        if self.recent_deleted.iter().any(|known| known.id == id) {
++        if self.is_deleted(id) {
              return Ok(());
          }
          let mut item = item;
-@@ -117,7 +124,7 @@ impl State {
+@@ -117,7 +125,7 @@ impl State {
      ) -> anyhow::Result<Option<codex_protocol::protocol::RealtimeConversationItemObservation>> {
          let mut observed = None;
          match event {
@@ -750,12 +791,45 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
                  let id = value["id"].as_str().context("Provider item has no ID")?;
                  let kind = value["type"]
                      .as_str()
-@@ -253,6 +260,21 @@ impl State {
+@@ -137,6 +145,7 @@ impl State {
+                     id,
+                     Item {
+                         kind: kind.to_owned(),
++                        present: true,
+                         role: bounded("role")?,
+                         call_id: bounded("call_id")?,
+                         approval_request_id: bounded("approval_request_id")?,
+@@ -180,6 +189,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.call_id.clone()),
+                         approval_request_id: None,
+@@ -195,6 +205,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.handoff_id.clone()),
+                         approval_request_id: None,
+@@ -216,6 +227,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.call_id.clone()),
+                         approval_request_id: None,
+@@ -253,6 +265,22 @@ impl State {
              })
          }))
      }
 +    pub(super) fn is_deleted(&self, id: &str) -> bool {
 +        self.recent_deleted.iter().any(|known| known.id == id)
++            || self.items.get(id).is_some_and(|item| !item.present)
 +    }
 +    pub(super) fn can_retrieve(&self, id: &str) -> bool {
 +        !self.is_deleted(id) && (!self.deleted_ids_evicted || self.items.contains_key(id))
@@ -772,7 +846,14 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
      pub(super) fn settle_call(&mut self, call_id: &str) {
          for item in self
              .items
-@@ -273,7 +295,9 @@ impl State {
+@@ -267,13 +295,15 @@ impl State {
+             .items
+             .get(id)
+             .ok_or_else(|| CodexErr::InvalidRequest("Unknown provider conversation item".into()))?;
+-        if !Self::valid_id(id) || self.pending.is_some() {
++        if !item.present || !Self::valid_id(id) || self.pending.is_some() {
+             return Err(CodexErr::InvalidRequest(
+                 "Invalid item or another deletion is pending".into(),
              ));
          }
          let supported = match item.kind.as_str() {
@@ -783,7 +864,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
              "function_call" | "function_call_output" => item.done && item.effect_done,
              "mcp_call" | "mcp_tool_call" | "mcp_list_tools" => item.done && item.effect_done,
              "mcp_approval_response" => item.done && item.approval_request_id.is_some(),
-@@ -303,11 +327,25 @@ impl State {
+@@ -303,11 +333,54 @@ impl State {
          self.pending = Some(Pending {
              item_id: id,
              acknowledged: false,
@@ -806,24 +887,51 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
 +        }
 +        true
 +    }
++    pub(super) fn pending_matches(&self, id: &str) -> bool {
++        self.pending
++            .as_ref()
++            .is_some_and(|pending| pending.item_id == id)
++    }
++    fn record_deleted(&mut self, id: &str, recreatable_message: bool) {
++        if self.recent_deleted.iter().any(|known| known.id == id) {
++            return;
++        }
++        if self.recent_deleted.len() == 128 {
++            self.recent_deleted.pop_front();
++            self.deleted_ids_evicted = true;
++        }
++        self.recent_deleted.push_back(DeletedItem {
++            id: id.to_owned(),
++            recreatable_message,
++        });
++    }
++    pub(super) fn observe_deleted(&mut self, id: &str) -> anyhow::Result<bool> {
++        anyhow::ensure!(Self::valid_id(id), "Invalid provider conversation item ID");
++        if self.is_deleted(id) {
++            return Ok(false);
++        }
++        if let Some(item) = self.items.get_mut(id) {
++            item.present = false;
++        }
++        self.record_deleted(id, false);
++        Ok(true)
++    }
      pub(super) fn acknowledge(&mut self, id: &str) -> bool {
          let Some(pending) = self
              .pending
-@@ -329,8 +367,12 @@ impl State {
+@@ -327,10 +400,7 @@ impl State {
+             if result.is_ok() {
+                 self.items.remove(id);
                  self.order.retain(|known| known != id);
-                 if self.recent_deleted.len() == 128 {
-                     self.recent_deleted.pop_front();
-+                    self.deleted_ids_evicted = true;
-                 }
+-                if self.recent_deleted.len() == 128 {
+-                    self.recent_deleted.pop_front();
+-                }
 -                self.recent_deleted.push_back(id.to_owned());
-+                self.recent_deleted.push_back(DeletedItem {
-+                    id: id.to_owned(),
-+                    recreatable_message: pending.recreatable_message,
-+                });
++                self.record_deleted(id, pending.recreatable_message);
              }
              pending.reply.finish(result);
          }
-@@ -343,6 +385,7 @@ impl State {
+@@ -343,6 +413,7 @@ impl State {
          self.items.clear();
          self.order.clear();
          self.recent_deleted.clear();
@@ -831,7 +939,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
          self.recent_noop_completions.clear();
      }
  }
-@@ -352,9 +395,12 @@ mod tests {
+@@ -352,9 +423,12 @@ mod tests {
      use super::*;
      fn message(state: &mut State, id: &str, role: &str) {
          state
@@ -847,7 +955,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
              .unwrap();
      }
      fn reply() -> (DeleteReply, tokio::sync::oneshot::Receiver<CodexResult<()>>) {
-@@ -405,9 +451,9 @@ mod tests {
+@@ -405,9 +479,9 @@ mod tests {
          message(&mut state, "instructions", "developer");
          assert!(state.validate("instructions").is_err());
          state
@@ -859,7 +967,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
              .unwrap();
          assert!(state.validate("streaming").is_err());
      }
-@@ -419,9 +465,12 @@ mod tests {
+@@ -419,9 +493,12 @@ mod tests {
              ("result", "function_call_output"),
          ] {
              state
@@ -875,7 +983,53 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
                  .unwrap();
          }
          assert!(state.validate("result").is_err());
-@@ -453,6 +502,13 @@ mod tests {
+@@ -440,6 +517,45 @@ mod tests {
+         assert!(state.validate(&format!("item-{}", ITEM_LIMIT + 7)).is_ok());
+     }
+     #[tokio::test]
++    async fn repeated_deletion_observation_preserves_owned_recovery() {
++        let mut state = State::default();
++        message(&mut state, "editable", "user");
++        let (reply, receiver) = reply();
++        assert!(state.begin_history_message("editable".into(), reply));
++        assert!(state.pending_matches("editable"));
++        assert!(state.acknowledge("editable"));
++        assert!(state.pending_matches("editable"));
++        assert!(!state.acknowledge("editable"));
++        state.finish("editable", Ok(()));
++        assert!(receiver.await.unwrap().is_ok());
++        assert!(state.can_recreate_message("editable"));
++        assert!(!state.observe_deleted("editable").unwrap());
++        assert!(state.can_recreate_message("editable"));
++    }
++    #[test]
++    fn external_deletion_preserves_unresolved_effect_metadata() {
++        let mut state = State::default();
++        state.observe(&RealtimeEvent::ConversationItemAdded {
++            item: serde_json::json!({"id":"tool", "type":"function_call", "call_id":"pending-call", "status":"in_progress"}),
++            previous_item_id: None,
++        }).unwrap();
++        assert!(state.observe_deleted("tool").unwrap());
++        assert!(!state.items["tool"].present);
++        assert!(!state.items["tool"].done);
++        assert!(!state.items["tool"].effect_done);
++        state
++            .observe(&RealtimeEvent::ConversationItemDone {
++                item_id: "tool".into(),
++            })
++            .unwrap();
++        assert!(!state.items["tool"].present);
++        assert!(!state.items["tool"].effect_done);
++        state.settle_call("pending-call");
++        assert!(state.items["tool"].effect_done);
++        assert!(!state.can_retrieve("tool"));
++        assert!(!state.can_recreate_message("tool"));
++    }
++    #[tokio::test]
+     async fn repeated_successful_pruning_releases_live_capacity() {
+         let mut state = State::default();
+         for n in 0..ITEM_LIMIT + 8 {
+@@ -453,6 +569,13 @@ mod tests {
          }
          assert!(state.items.is_empty());
          assert_eq!(state.recent_deleted.len(), 128);
@@ -889,7 +1043,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
      }
  }
 
-@@ -475,9 +531,9 @@ mod reserved_and_approval_tests {
+@@ -475,9 +598,9 @@ mod reserved_and_approval_tests {
              .unwrap();
          assert!(state.validate("background-item").is_err());
          state.settle_call("background-call");
@@ -901,7 +1055,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
          assert!(state.validate("background-item").is_ok());
          assert!(state.validate("background-output").is_ok());
      }
-@@ -503,7 +559,10 @@ mod reserved_and_approval_tests {
+@@ -503,7 +626,10 @@ mod reserved_and_approval_tests {
              serde_json::json!({"id":"mcp-item","type":"mcp_call","approval_request_id":"approval","status":"in_progress"}),
          ] {
              state
@@ -913,7 +1067,7 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
                  .unwrap();
          }
          assert!(state.validate("approval").is_err());
-@@ -547,18 +606,18 @@ mod late_output_tests {
+@@ -547,18 +673,18 @@ mod late_output_tests {
          state.finish("silent-item", Ok(()));
          assert!(rx.await.unwrap().is_ok());
          assert!(!state.items.contains_key("silent-item"));
@@ -938,10 +1092,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..e8e00ffbc5170a7a54439e599ed12851
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a8491a5ac5bd9bcb1adc7731526054d52b74393b
+index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a4ce4aa95
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1208 @@
+@@ -0,0 +1,1238 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -1547,6 +1701,25 @@ index 0000000000000000000000000000000000000000..a8491a5ac5bd9bcb1adc7731526054d5
 +        pending.waiting = None;
 +        self.advance()
 +    }
++    pub(super) fn observe_deleted(&mut self, id: &str) {
++        self.order.retain(|known| known != id);
++        if self.boundary.as_deref() == Some(id) {
++            self.incomplete = true;
++        }
++        let affected = self
++            .pending
++            .as_ref()
++            .is_some_and(|pending| match &pending.request {
++                Some(Request::Item { id: requested, .. }) => requested == id,
++                Some(Request::List { .. } | Request::Update { .. }) => true,
++                None => false,
++            });
++        if affected {
++            self.interrupt(invalid(
++                "Provider item was deleted during history operation",
++            ));
++        }
++    }
 +    pub(super) fn deleted(&mut self, id: &str) -> CodexResult<bool> {
 +        self.order.retain(|known| known != id);
 +        let Some(pending) = self.pending.as_mut() else {
@@ -1661,6 +1834,17 @@ index 0000000000000000000000000000000000000000..a8491a5ac5bd9bcb1adc7731526054d5
 +
 +#[cfg(test)]
 +mod tests {
++    #[test]
++    fn external_boundary_deletion_invalidates_order_without_inventing_root() {
++        let mut state = super::State::default();
++        state.boundary = Some("hidden-prefix".into());
++        state.order.push("observed".into());
++        state.observe_deleted("hidden-prefix");
++        assert!(state.incomplete);
++        assert_eq!(state.order, vec!["observed"]);
++        assert_eq!(state.boundary.as_deref(), Some("hidden-prefix"));
++    }
++
 +    use super::*;
 +    use serde_json::json;
 +    fn message(id: &str, text: &str) -> Value {

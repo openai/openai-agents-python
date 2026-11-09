@@ -9,7 +9,13 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeConversationItemObserved, RealtimeSIP
+from agents.realtime import (
+    RealtimeConfig,
+    RealtimeConversationItemDeleted,
+    RealtimeConversationItemObserved,
+    RealtimeHistory,
+    RealtimeSIP,
+)
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 from tests.test_native_realtime_transports import CallPeer, call_peer as call_peer
@@ -1788,7 +1794,9 @@ async def test_native_interrupted_history_delete_preserves_same_id_restoration(
                     lambda frame: frame["type"] == "conversation.item.create", after=cursor
                 )
                 cursor = peer.frames.index(creation, cursor) + 1
-                assert creation["item"] == restored
+                assert creation["item"] == {
+                    key: value for key, value in restored.items() if key != "status"
+                }
                 await observe_item(peer, events, restored)
                 await restoring
                 retrieving = asyncio.create_task(voice.retrieve_conversation_history())
@@ -1819,3 +1827,168 @@ async def test_native_interrupted_history_delete_preserves_same_id_restoration(
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize("local_delete_pending", [False, True])
+async def test_native_external_message_deletion_prunes_history_without_settling_other_delete(
+    realtime_peer: RealtimePeer, local_delete_pending: bool
+) -> None:
+    peer = realtime_peer
+    local = {
+        "id": "external-delete-local-pending",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Local deletion target"}],
+    }
+    external = {**local, "id": "external-delete-provider-target"}
+    deleting: asyncio.Task[None] | None = None
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-external-message-delete-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Honor the provider's current message set.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        if local_delete_pending:
+            await observe_item(peer, events, local)
+        await observe_item(
+            peer, events, external, previous_item_id=local["id"] if local_delete_pending else None
+        )
+        cursor = len(peer.frames)
+        try:
+            if local_delete_pending:
+                deleting = asyncio.create_task(voice.delete_conversation_item(local["id"]))
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == local["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {"type": "conversation.item.deleted", "item_id": external["id"]}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeConversationItemDeleted)
+                    and event.item_id == external["id"]
+                ):
+                    break
+            if deleting is not None:
+                assert not deleting.done()
+                await peer.socket.send_json(
+                    {"type": "conversation.item.deleted", "item_id": local["id"]}
+                )
+                await deleting
+                async for event in events:
+                    if (
+                        isinstance(event, RealtimeHistory)
+                        and event.completed
+                        and event.item.kind == "provider_item_deleted"
+                        and event.item.provider_item_id == local["id"]
+                    ):
+                        break
+            with pytest.raises(RuntimeError, match="deleted|evicted"):
+                await voice.retrieve_conversation_item(external["id"])
+            assert await voice.retrieve_conversation_history() == []
+            assert len(peer.frames) == cursor
+            assert not peer.disconnected.is_set()
+            assert peer.connections == 1
+        finally:
+            if deleting is not None:
+                if not deleting.done():
+                    await voice.aclose()
+                await asyncio.gather(deleting, return_exceptions=True)
+
+
+async def test_native_external_tool_deletion_does_not_settle_host_execution(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    entered, release, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    effects: list[str] = []
+
+    @function_tool
+    async def pending_lookup(key: str) -> str:
+        entered.set()
+        await release.wait()
+        effects.append(key)
+        completed.set()
+        return f"accepted-result:{key}"
+
+    call_id = "external-delete-host-tool"
+    provider_item_id = f"item-{call_id}"
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-external-tool-delete-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Wait for accepted host tool execution.",
+            tools=[pending_lookup],
+            provider=provider,
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", tools=(pending_lookup,))
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await peer.function("pending_lookup", {"key": "synthetic"}, call_id)
+        await entered.wait()
+        cursor = len(peer.frames)
+        try:
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {"type": "conversation.item.deleted", "item_id": provider_item_id}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeConversationItemDeleted)
+                    and event.item_id == provider_item_id
+                ):
+                    break
+            assert not completed.is_set()
+            assert effects == []
+            assert not any(
+                frame["type"] == "conversation.item.create"
+                and frame.get("item", {}).get("call_id") == call_id
+                for frame in peer.frames[cursor:]
+            )
+            with pytest.raises(RuntimeError):
+                await voice.delete_conversation_item(provider_item_id)
+            assert not any(
+                frame["type"] == "conversation.item.delete" for frame in peer.frames[cursor:]
+            )
+            release.set()
+            result = await peer.frame(
+                lambda frame: (
+                    frame["type"] == "conversation.item.create"
+                    and frame.get("item", {}).get("call_id") == call_id
+                ),
+                after=cursor,
+            )
+            assert result["item"]["output"] == "accepted-result:synthetic"
+            assert completed.is_set()
+            assert effects == ["synthetic"]
+            assert (
+                len(
+                    [
+                        frame
+                        for frame in peer.frames[cursor:]
+                        if frame["type"] == "conversation.item.create"
+                        and frame.get("item", {}).get("call_id") == call_id
+                    ]
+                )
+                == 1
+            )
+            assert not peer.disconnected.is_set()
+        finally:
+            release.set()
