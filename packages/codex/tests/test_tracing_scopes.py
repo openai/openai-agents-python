@@ -3549,3 +3549,37 @@ async def test_interception_reader_skips_only_revoked_contexts(
     else:
         assert retentions == ([] if expiry == "before_ingress" else [original_token])
     assert all(token in native.released for token in set(native.leases) - before)
+
+
+def test_process_capture_policy_applies_at_scope_and_operation_admission(native):
+    try:
+        telemetry.set_tracing_disabled(True)
+        with telemetry.trace("disabled", options={"disabled": False}) as disabled:
+            assert disabled.context.disabled
+        captured = runtime_telemetry._capture()
+        assert native.starts[-1]["disabled"] is True
+        captured.close()
+        telemetry.set_tracing_disabled(False)
+        with telemetry.trace("enabled"):
+            assert native.starts[-1]["disabled"] is None
+        telemetry.set_sensitive_data_logging_enabled(False)
+        with telemetry.trace("private", options={"include_sensitive_data": True}):
+            assert native.starts[-1]["include_sensitive_data"] is False
+        captured = runtime_telemetry._capture()
+        assert native.starts[-1]["include_sensitive_data"] is False
+        captured.close()
+    finally:
+        telemetry.set_tracing_disabled(False)
+        telemetry.set_sensitive_data_logging_enabled(True)
+
+
+def test_completion_payload_is_captured_before_caller_mutation(native):
+    value = {"result": ["original"]}
+    with telemetry.span("work") as active:
+        active.set_outcome(status="error", category="synthetic_error", data=value)
+        value["result"].append("later mutation")
+    assert native.ends[-1][1] == {
+        "status": "error",
+        "category": "synthetic_error",
+        "data": {"result": ["original"]},
+    }

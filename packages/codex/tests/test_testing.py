@@ -156,7 +156,13 @@ async def test_loopback_startup_does_not_require_reverse_dns(monkeypatch):
 
 
 async def test_http_response_order_and_request_snapshots(capsys):
-    assert testing.__all__ == ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
+    assert testing.__all__ == [
+        "ScriptedResponse",
+        "ScriptedResponses",
+        "text",
+        "tool_call",
+        "event",
+    ]
     arguments = {"key": "synthetic-record"}
     call = tool_call("lookup", arguments, call_id="http-call")
     arguments["key"] = "later-mutation"
@@ -638,3 +644,73 @@ async def test_scripted_usage_and_headers_drive_native_budget_and_rate_observati
             assert limits[0].snapshot.requests.reset_after_seconds == 1
             assert effects == ["lookup"]
             assert len(peer.requests) == 1
+
+
+async def test_dynamic_script_queue_and_raw_events_drive_native_turns():
+    seen = []
+    peer = ScriptedResponses([text("discard")])
+    peer.clear()
+
+    def respond(body):
+        seen.append(body)
+        peer.append(
+            ScriptedResponse(
+                [
+                    testing.event(
+                        {
+                            "type": "response.output_item.done",
+                            "item": {
+                                "type": "message",
+                                "role": "assistant",
+                                "id": "msg_raw_fixture",
+                                "content": [{"type": "output_text", "text": "raw answer"}],
+                            },
+                        }
+                    )
+                ],
+                response_id="resp_raw_fixture",
+            )
+        )
+        return ScriptedResponse(
+            [text("dynamic answer", item_id="msg_dynamic_fixture")],
+            response_id="resp_dynamic_fixture",
+        )
+
+    peer.append(respond)
+    async with peer:
+        agent = Agent(instructions="Respond.", model="gpt-5.5", provider=peer.provider)
+        assert (await agent.run("first synthetic input")).final_output == "dynamic answer"
+        assert (await agent.run("second synthetic input")).final_output == "raw answer"
+        assert len(peer.requests) == 2
+        assert len(seen) == 1
+        assert "first synthetic input" in json.dumps(seen)
+        peer.assert_exhausted()
+
+
+async def test_scripted_http_error_and_identifiers_are_served_without_native_mocks():
+    async with ScriptedResponses(
+        ScriptedResponse(
+            [],
+            status=400,
+            error_body={
+                "error": {"type": "invalid_request_error", "message": "synthetic rejection"}
+            },
+        )
+    ) as peer:
+        status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+        assert status == 400
+        assert json.loads(body)["error"]["message"] == "synthetic rejection"
+
+
+async def test_dynamic_callback_failure_remains_an_exhaustion_failure():
+    def respond(_body):
+        raise ValueError("synthetic-private-callback-error")
+
+    peer = ScriptedResponses(respond)
+    with pytest.raises(AssertionError, match="1 unexpected request"):
+        async with peer:
+            status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+            assert status == 500
+            assert "synthetic-private-callback-error" not in body
+            with pytest.raises(AssertionError, match="1 unexpected request"):
+                peer.assert_exhausted()

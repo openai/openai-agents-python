@@ -414,6 +414,41 @@ class TraceOptions:
 
 _current: ContextVar[SpanContext | None] = ContextVar("agents_trace_context", default=None)
 _in_processor: ContextVar[bool] = ContextVar("agents_trace_processor", default=False)
+_tracing_disabled = False
+_sensitive_data_logging_enabled = True
+
+
+def set_tracing_disabled(disabled: bool) -> None:
+    """Set capture policy for subsequently admitted scopes and operations.
+
+    Existing native work retains its captured policy. Re-enabling capture never
+    relaxes a disabled ancestor's restrictions.
+    """
+    if not isinstance(disabled, bool):
+        raise TypeError("disabled must be bool")
+    global _tracing_disabled
+    _tracing_disabled = disabled
+
+
+def set_sensitive_data_logging_enabled(enabled: bool) -> None:
+    """Restrict new native scopes to metadata while disabled.
+
+    Enabling this switch permits explicit include_sensitive_data options; it
+    does not enable content capture by default or relax existing ancestors.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be bool")
+    global _sensitive_data_logging_enabled
+    _sensitive_data_logging_enabled = enabled
+
+
+def _admission_policy() -> dict[str, bool]:
+    policy = {}
+    if _tracing_disabled or _in_processor.get():
+        policy["disabled"] = True
+    if not _sensitive_data_logging_enabled:
+        policy["include_sensitive_data"] = False
+    return policy
 
 
 def current_context() -> SpanContext | None:
@@ -533,9 +568,10 @@ class TraceScope:
                 "trace_id": value.trace_id,
                 "group_id": value.group_id,
                 "metadata": dict(value.metadata),
-                "disabled": True if _in_processor.get() else value.disabled,
+                "disabled": value.disabled,
                 "include_sensitive_data": value.include_sensitive_data,
                 "credential_ref": None,
+                **_admission_policy(),
             }
             if self._restrictions:
                 wire["restrictions_parents"] = list(self._restrictions)
@@ -572,7 +608,14 @@ class TraceScope:
                 native.release_trace_span(handle)
         return self
 
-    def set_outcome(self, *, status: str, category: str | None = None) -> None:
+    def set_outcome(
+        self,
+        *,
+        status: str,
+        category: str | None = None,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Set completion data; native privacy and payload bounds still apply."""
         if status not in ("ok", "error", "cancelled"):
             raise ValueError("Invalid span outcome status")
         if category is not None and (
@@ -581,7 +624,11 @@ class TraceScope:
             or any(not (char.isascii() and (char.isalnum() or char == "_")) for char in category)
         ):
             raise ValueError("Invalid span outcome category")
-        self._outcome = {"status": status, "category": category, "data": {}}
+        if data is not None and not isinstance(data, Mapping):
+            raise TypeError("data must be a mapping or None")
+        # Capture JSON now so caller mutation cannot change completion records.
+        payload = json.loads(json.dumps(dict(data or {}), allow_nan=False))
+        self._outcome = {"status": status, "category": category, "data": payload}
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if self._ended or self._context is None:
@@ -670,7 +717,7 @@ def _capture(
         if (
             options is not None
             or (context is not None and fallback is not None)
-            or _in_processor.get()
+            or bool(_admission_policy())
         ):
             # Native operation spans own their immutable parent and policy. The
             # caller's ambient context is restored before any queue or await.

@@ -43,6 +43,7 @@ from _agents_codex.testing import (
     dataclass as dataclass,
     deepcopy as deepcopy,
     deque as deque,
+    event as event,
     json as json,
     partial as partial,
     socket as socket,
@@ -51,4 +52,4 @@ from _agents_codex.testing import (
     uuid4 as uuid4,
 )
 
-__all__ = ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
+__all__ = ["ScriptedResponse", "ScriptedResponses", "text", "tool_call", "event"]

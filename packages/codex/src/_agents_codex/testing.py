@@ -24,7 +24,7 @@ import json as json
 import re as re
 import socket as socket
 from collections import deque as deque
-from collections.abc import Mapping as Mapping, Sequence as Sequence
+from collections.abc import Callable as Callable, Mapping as Mapping, Sequence as Sequence
 from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
@@ -51,7 +51,12 @@ class _ScriptItem:
     encoded: str
 
 
-def text(value: str) -> _ScriptItem:
+def event(value: Mapping[str, JsonValue]) -> _ScriptItem:
+    """Emit an arbitrary Responses SSE event, including malformed-wire fixtures."""
+    return _ScriptItem(json.dumps(dict(value), allow_nan=False))
+
+
+def text(value: str, *, item_id: str | None = None) -> _ScriptItem:
     """Emit one assistant text item."""
     return _ScriptItem(
         json.dumps(
@@ -60,7 +65,7 @@ def text(value: str) -> _ScriptItem:
                 "item": {
                     "type": "message",
                     "role": "assistant",
-                    "id": f"msg_{uuid4().hex}",
+                    "id": item_id if item_id is not None else f"msg_{uuid4().hex}",
                     "content": [{"type": "output_text", "text": value}],
                 },
             }
@@ -106,6 +111,13 @@ class ScriptedResponse:
     items: Sequence[_ScriptItem]
     usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)
     headers: Mapping[str, str] | None = field(default=None, kw_only=True)
+    response_id: str | None = field(default=None, kw_only=True)
+    status: int = field(default=200, kw_only=True)
+    error_body: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)
+
+
+ScriptResult = Sequence[_ScriptItem] | ScriptedResponse
+Script = ScriptResult | Callable[[Mapping[str, JsonValue]], ScriptResult]
 
 
 class _LoopbackHTTPServer(ThreadingHTTPServer):
@@ -132,33 +144,61 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     served it; requests and tool_output provide readback.
     """
 
-    def __init__(self, *responses: Sequence[_ScriptItem] | ScriptedResponse) -> None:
-        captured: list[ScriptedResponse] = []
-        for script in responses:
-            response = script if isinstance(script, ScriptedResponse) else ScriptedResponse(script)
-            headers = dict(response.headers or {})
-            for name, value in headers.items():
-                if (
-                    not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
-                    or name.lower() in {"content-type", "content-length", "transfer-encoding"}
-                    or not isinstance(value, str)
-                    or "\r" in value
-                    or "\n" in value
-                ):
-                    raise ValueError("Invalid scripted response headers")
-                value.encode("latin-1")
-            usage = (
-                None
-                if response.usage is None
-                else json.loads(json.dumps(dict(response.usage), allow_nan=False))
-            )
-            captured.append(ScriptedResponse(tuple(response.items), usage=usage, headers=headers))
-        self._responses = deque(captured)
+    def __init__(self, *responses: Script) -> None:
+        self._responses = deque(self._capture_script(script) for script in responses)
         self._requests: list[dict[str, JsonValue]] = []
         self._unexpected = 0
         self._lock = Lock()
         self._server: ThreadingHTTPServer | None = None
         self._provider: NativeProvider | None = None
+
+    @staticmethod
+    def _capture_script(script: Script) -> Script:
+        if callable(script):
+            return script
+        response = script if isinstance(script, ScriptedResponse) else ScriptedResponse(script)
+        headers = dict(response.headers or {})
+        for name, value in headers.items():
+            if (
+                not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                or name.lower() in {"content-type", "content-length", "transfer-encoding"}
+                or not isinstance(value, str)
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError("Invalid scripted response headers")
+            value.encode("latin-1")
+        if (
+            isinstance(response.status, bool)
+            or not isinstance(response.status, int)
+            or (response.status != 200 and not 400 <= response.status <= 599)
+        ):
+            raise ValueError("Scripted status must be 200 or an HTTP error status")
+        if response.response_id is not None and not isinstance(response.response_id, str):
+            raise TypeError("response_id must be a string or None")
+        return ScriptedResponse(
+            tuple(response.items),
+            usage=None
+            if response.usage is None
+            else json.loads(json.dumps(dict(response.usage), allow_nan=False)),
+            headers=headers,
+            response_id=response.response_id,
+            status=response.status,
+            error_body=None
+            if response.error_body is None
+            else json.loads(json.dumps(dict(response.error_body), allow_nan=False)),
+        )
+
+    def append(self, *responses: Script) -> None:
+        """Append responses for subsequent requests; dynamic callbacks may append."""
+        captured = [self._capture_script(script) for script in responses]
+        with self._lock:
+            self._responses.extend(captured)
+
+    def clear(self) -> None:
+        """Discard queued responses without changing recorded request history."""
+        with self._lock:
+            self._responses.clear()
 
     async def __aenter__(self) -> ScriptedResponses:
         if self._server is not None:
@@ -305,7 +345,32 @@ class _Handler(BaseHTTPRequestHandler):
             # A 400 is terminal in the ordinary native retry policy.
             self.send_error(400)
             return
-        response: dict[str, object] = {"id": response_id}
+        try:
+            if callable(items):
+                items = self.peer._capture_script(items(deepcopy(body)))
+            assert isinstance(items, ScriptedResponse)
+        except Exception:
+            self.send_error(500)
+            return
+        if items.status != 200:
+            payload = json.dumps(
+                dict(
+                    items.error_body
+                    or {"error": {"message": "Scripted provider error", "type": "scripted_error"}}
+                ),
+                allow_nan=False,
+            ).encode()
+            self.send_response(items.status)
+            for name, value in (items.headers or {}).items():
+                self.send_header(name, value)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        response: dict[str, object] = {
+            "id": items.response_id if items.response_id is not None else response_id
+        }
         created = json.dumps({"type": "response.created", "response": response})
         if items.usage is not None:
             response["usage"] = items.usage
