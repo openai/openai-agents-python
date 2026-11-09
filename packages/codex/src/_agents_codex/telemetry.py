@@ -854,6 +854,9 @@ _processor_serial = 0
 _active_processor_ids: set[str] = set()
 _retired_routes: dict[str, int] = {}
 _processor_acknowledged = 0
+_processor_dropped_records = 0
+_processor_loss_watermark = 0
+_processor_recovery_epoch = 0
 _worker_count = 0
 _worker_lock = Lock()
 _MAX_PROCESSOR_WORKERS = 16
@@ -1031,6 +1034,7 @@ class _ProcessorDelivery:
 @dataclass
 class _ProcessorBatch:
     deliveries: tuple[_ProcessorDelivery, ...]
+    loss_epoch: int = 0
     admitted_at: float = field(default_factory=monotonic)
     stopped: Event = field(default_factory=Event)
     completion: Future[None] | None = None
@@ -1068,6 +1072,7 @@ class _ProcessorRoute:
         self.processor = processor
         self.loop: asyncio.AbstractEventLoop | None = None
         self.pending: _ProcessorBatch | None = None
+        self.loss_epoch = 0
 
     async def _invoke(self, callback: _Callable[..., Any], *args: Any) -> None:
         import inspect
@@ -1087,6 +1092,13 @@ class _ProcessorRoute:
         if failed:
             raise RuntimeError("Trace processor delivery failed")
 
+    async def _recover_loss(self, epoch: int) -> None:
+        if epoch > self.loss_epoch:
+            callback = getattr(self.processor, "_on_native_trace_loss", None)
+            if callable(callback):
+                await self._invoke(callback)
+            self.loss_epoch = epoch
+
     async def _invoke_batch(self, batch: _ProcessorBatch) -> None:
         previous_finished = batch.admitted_at
         callback = getattr(self.processor, "on_trace_events", None)
@@ -1094,6 +1106,7 @@ class _ProcessorRoute:
             success = False
             if not batch.stopped.is_set() and monotonic() < previous_finished + 1.0:
                 try:
+                    await self._recover_loss(batch.loss_epoch)
                     await self._invoke(callback, tuple(item.event for item in batch.deliveries))
                     success = monotonic() < previous_finished + 1.0 and not batch.stopped.is_set()
                 except Exception:
@@ -1113,6 +1126,7 @@ class _ProcessorRoute:
                 continue
             success = True
             try:
+                await self._recover_loss(batch.loss_epoch)
                 await self._invoke(self.processor.on_trace_event, delivery.event)
             except Exception:
                 success = False
@@ -1125,7 +1139,7 @@ class _ProcessorRoute:
             delivery.result.set_result((success, finished))
             previous_finished = finished
 
-    def submit(self, events: Sequence[TraceLifecycleEvent]) -> _ProcessorBatch:
+    def submit(self, events: Sequence[TraceLifecycleEvent], loss_epoch: int = 0) -> _ProcessorBatch:
         from threading import Thread
 
         global _worker_count
@@ -1160,7 +1174,9 @@ class _ProcessorRoute:
                 with _worker_lock:
                     _worker_count -= 1
                 raise
-        batch = _ProcessorBatch(tuple(_ProcessorDelivery(event) for event in events))
+        batch = _ProcessorBatch(
+            tuple(_ProcessorDelivery(event) for event in events), loss_epoch=loss_epoch
+        )
         work = self._invoke_batch(batch)
         try:
             batch.completion = asyncio.run_coroutine_threadsafe(work, self.loop)
@@ -1224,7 +1240,8 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
     if ready is not None:
         # Eager task factories must not drain before route publication commits.
         await ready
-    global _processor_acknowledged
+    global _processor_acknowledged, _processor_dropped_records
+    global _processor_loss_watermark, _processor_recovery_epoch
     native = _native_tracing()
     while True:
         drain = _ProcessorDrain(native.drain_trace_events(64))
@@ -1233,24 +1250,42 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
         try:
             await asyncio.shield(drain)
             batch = json.loads(drain.outcome.result())
-            routes: dict[str, list[TraceLifecycleEvent]] = {}
-            for event in batch["events"]:
-                snapshot = _freeze(event)
-                for identifier in event.get("processor_ids", []):
-                    routes.setdefault(identifier, []).append(snapshot)
-            for identifier, events in routes.items():
-                with _processor_lock:
-                    processor = _processors.get(identifier)
-                    if processor is None or (
-                        processor.pending is not None and not processor.pending.done()
-                    ):
-                        continue
-                    try:
-                        delivery = processor.submit(events)
-                    except Exception:
-                        continue
-                deliveries.append(delivery)
-                await delivery.wait()
+            if batch["dropped_records"] > _processor_dropped_records:
+                # No-op merge preserves routes and captures the native sequence
+                # under its lock, including dropped records beyond the queue tail.
+                _processor_loss_watermark = native.set_trace_routes(
+                    '{"processor_ids":[],"replace":false}'
+                )
+                _processor_dropped_records = batch["dropped_records"]
+            watermark = _processor_loss_watermark
+            groups = [batch["events"]]
+            if watermark and batch["through_sequence"] >= watermark:
+                groups = [
+                    [event for event in batch["events"] if event["sequence"] <= watermark],
+                    [event for event in batch["events"] if event["sequence"] > watermark],
+                ]
+            for index, group in enumerate(groups):
+                if index == 1:
+                    _processor_recovery_epoch = watermark
+                    _processor_loss_watermark = 0
+                routes: dict[str, list[TraceLifecycleEvent]] = {}
+                for event in group:
+                    snapshot = _freeze(event)
+                    for identifier in event.get("processor_ids", []):
+                        routes.setdefault(identifier, []).append(snapshot)
+                for identifier, events in routes.items():
+                    with _processor_lock:
+                        processor = _processors.get(identifier)
+                        if processor is None or (
+                            processor.pending is not None and not processor.pending.done()
+                        ):
+                            continue
+                        try:
+                            delivery = processor.submit(events, _processor_recovery_epoch)
+                        except Exception:
+                            continue
+                    deliveries.append(delivery)
+                    await delivery.wait()
         finally:
             # Retain the result even if loop shutdown cancels the pump before
             # its native read finishes or before Python resumes with that read.

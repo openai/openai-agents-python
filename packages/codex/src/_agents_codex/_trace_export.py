@@ -77,6 +77,10 @@ class OpenAITraceExporter:
     delivery, and unknown child-only records never fabricate a root. The metadata
     runtime key is reserved for the native marker; other flattened native
     sdk.metadata attributes are preserved without guessing their JSON types.
+    After native record loss, the SDK drains through a captured native sequence
+    watermark then invalidates uncertain descriptors. Only fresh root starts can
+    re-establish identity; old child/end records fail closed. Native flush keeps
+    reporting loss. Lossless active roots retain their original eviction guarantee.
     """
 
     def __init__(
@@ -141,6 +145,7 @@ class OpenAITraceExporter:
             self._credentials = (object(), headers)
             self.set_api_key(api_key)
             self._traces: OrderedDict[str, _TraceState] = OrderedDict()
+            self._requires_root_start = False
         finally:
             del api_key, endpoint, organization, project, value, address, headers
 
@@ -170,6 +175,11 @@ class OpenAITraceExporter:
         finally:
             del self, api_key
 
+    def _on_native_trace_loss(self) -> None:
+        # A lost end invalidates liveness; never guess which active roots survived.
+        self._traces.clear()
+        self._requires_root_start = True
+
     def _prepare_events(
         self, events: Sequence[Mapping[str, Any]], revision: object
     ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]]]:
@@ -180,7 +190,7 @@ class OpenAITraceExporter:
             root = event.get("parent_span_id") is None
             state = self._traces.get(trace_id)
             if state is None:
-                if not root:
+                if not root or (self._requires_root_start and event["lifecycle"] != "start"):
                     admission_error = (
                         admission_error or "Native trace root descriptor is unavailable"
                     )
