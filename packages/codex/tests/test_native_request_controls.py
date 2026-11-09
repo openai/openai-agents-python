@@ -403,6 +403,29 @@ async def test_controls_reach_existing_websocket_frames():
         assert frames[-1]["prompt_cache_retention"] == "in_memory"
 
 
+async def test_empty_extra_body_remains_a_no_wire_patch_on_lite(responses):
+    responses.respond(assistant_output("empty body accepted"))
+    responses.respond(assistant_output("empty patch accepted"))
+    async with timeout(30), provider_for(responses) as provider:
+        async with Agent(
+            model="gpt-5.6-sol",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"extra_body": {}},
+        ).session() as session:
+            result = await (await session.submit("empty body")).get_result()
+            assert result.final_output == "empty body accepted"
+            await session.update(model_settings={"extra_body": {}})
+            with pytest.raises(
+                (ValueError, RuntimeError), match="standard Responses|Responses Lite"
+            ):
+                await session.update(model_settings={"extra_body": {"provider_feature": None}})
+            result = await (await session.submit("empty patch")).get_result()
+            assert result.final_output == "empty patch accepted"
+    assert len(responses.requests) == 2
+    assert all("provider_feature" not in request for request in responses.requests)
+
+
 async def test_known_lite_rejection_does_not_publish_a_model_or_controls_change(responses):
     responses.respond(assistant_output("still standard"))
     async with timeout(30), provider_for(responses) as provider:
