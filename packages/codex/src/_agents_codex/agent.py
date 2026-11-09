@@ -338,6 +338,11 @@ class NativeProvider:
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
+    Retry budgets and phase timeouts are native provider settings. Omission keeps
+    Core defaults. Zero disables retries or sets an immediate phase deadline.
+    Core caps request and stream retry budgets at 100 and retains retry safety,
+    cancellation, and replay ownership. Timeouts use integer milliseconds.
+
     Routing maps are captured at construction. ``env_headers`` resolves values
     once; missing/empty values stay omitted. Query pairs use URL encoding.
     Supplied routing options reject same-origin and cross-origin redirects.
@@ -372,8 +377,23 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    request_max_retries: int | None = field(default=None, repr=False)
+    stream_max_retries: int | None = field(default=None, repr=False)
+    stream_idle_timeout_ms: int | None = field(default=None, repr=False)
+    websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        for name in (
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+            "websocket_connect_timeout_ms",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) is not int or not 0 <= value <= 18_446_744_073_709_551_615
+            ):
+                raise ValueError(f"{name} must be an unsigned 64-bit integer or None")
         for name in ("base_url", "api_key"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
