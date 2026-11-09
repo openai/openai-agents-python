@@ -13,7 +13,11 @@ from agents.observation import EventGap, ResponseFactReceived, TurnFinished
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output
 from tests.test_buffered_responses import json_peer, json_response
-from tests.test_native_lifecycle_run import atomic_opening_placement, capture_lifecycle_sessions
+from tests.test_native_lifecycle_run import (
+    atomic_opening_placement,
+    capture_lifecycle_sessions,
+    exercise_shared_atomic_opening as exercise_shared_atomic_opening,
+)
 from tests.test_native_model_invocation_deadline import (
     MODEL_MS,
     Gate,
