@@ -296,12 +296,14 @@ async def _decide(
         except (TypeError, ValueError):
             text = None
         if text is None:
-            raise DecisionError(
+            failure = DecisionError(
                 "invalid_response",
                 usage=response.usage,
                 request_id=response.request_id,
                 model=response.model,
-            ) from None
+            )
+            del response
+            raise failure from None
         validated = output.validate(text)
         if choices is not None:
             # Pydantic Literal unions can coerce 0 to False. Match the raw
@@ -455,50 +457,73 @@ class OpenAIDecisions:
         else:
             body = {"model": "gpt-6-luna", "input": request.input, "questions": questions}
             path = "/decisions"
-        raw = await self._client.post(path, cast_to=OpenAIObject, body=body)
-        request_id = getattr(raw, "_request_id", None)
-        dump = getattr(raw, "model_dump", None)
-        data = dump() if callable(dump) else None
-        if not isinstance(data, dict):
-            raise DecisionError("invalid_response", request_id=request_id)
-        usage = _usage(data.get("usage"))
-        reported_model = data.get("model")
-        model = reported_model if isinstance(reported_model, str) else None
-        failure: Literal["refusal", "invalid_response"] | None = None
-        value = None
-        try:
-            if questions is None:
-                if data.get("status") != "completed":
-                    raise ValueError("Responses fallback did not complete")
-                texts = []
-                for item in data.get("output", []):
-                    for part in item.get("content", []):
-                        if part.get("type") == "refusal":
-                            raise DecisionError("refusal")
-                        if part.get("type") == "output_text":
-                            texts.append(part["text"])
-                value = json.loads("".join(texts))
-            else:
-                answers = data.get("answers")
-                if not isinstance(answers, list) or len(answers) != len(questions):
-                    raise ValueError("Invalid answer count")
-                try:
-                    value = json.loads(
-                        native._decision_result(
-                            schema_json, request.question, json.dumps(answers, allow_nan=False)
-                        )
+        # The parser returns before this frame can raise, releasing raw payload
+        # aliases (including bound model_dump methods) from the traceback.
+        response = _parse_openai_response(
+            await self._client.post(path, cast_to=OpenAIObject, body=body),
+            native=native,
+            schema_json=schema_json,
+            question=request.question,
+            questions=questions,
+        )
+        if isinstance(response, DecisionError):
+            raise response
+        return response
+
+
+def _parse_openai_response(
+    raw: Any,
+    *,
+    native: Any,
+    schema_json: str,
+    question: str,
+    questions: list[dict[str, Any]] | None,
+) -> DecisionResponse | DecisionError:
+    """Return metadata-only failures so no payload frame reaches the raised error."""
+    reported_request_id = getattr(raw, "_request_id", None)
+    request_id = reported_request_id if isinstance(reported_request_id, str) else None
+    dump = getattr(raw, "model_dump", None)
+    data = dump() if callable(dump) else None
+    if not isinstance(data, dict):
+        return DecisionError("invalid_response", request_id=request_id)
+    usage = _usage(data.get("usage"))
+    reported_model = data.get("model")
+    model = reported_model if isinstance(reported_model, str) else None
+    failure: Literal["refusal", "invalid_response"] | None = None
+    value = None
+    try:
+        if questions is None:
+            if data.get("status") != "completed":
+                raise ValueError("Responses fallback did not complete")
+            texts = []
+            for item in data.get("output", []):
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        raise DecisionError("refusal")
+                    if part.get("type") == "output_text":
+                        texts.append(part["text"])
+            value = json.loads("".join(texts))
+        else:
+            answers = data.get("answers")
+            if not isinstance(answers, list) or len(answers) != len(questions):
+                raise ValueError("Invalid answer count")
+            try:
+                value = json.loads(
+                    native._decision_result(
+                        schema_json, question, json.dumps(answers, allow_nan=False)
                     )
-                except ValueError as error:
-                    if str(error) == "Decisions refused a question":
-                        raise DecisionError("refusal") from None
-                    raise ValueError("Invalid decision answer") from None
-        except DecisionError as error:
-            failure = error.reason
-        except (ValueError, TypeError, KeyError, IndexError, StopIteration, AttributeError):
-            failure = "invalid_response"
-        if failure is not None:
-            raise DecisionError(failure, usage=usage, request_id=request_id, model=model)
-        return DecisionResponse(value=value, usage=usage, request_id=request_id, model=model)
+                )
+            except ValueError as error:
+                if str(error) == "Decisions refused a question":
+                    raise DecisionError("refusal") from None
+                raise ValueError("Invalid decision answer") from None
+    except DecisionError as error:
+        failure = error.reason
+    except (ValueError, TypeError, KeyError, IndexError, StopIteration, AttributeError):
+        failure = "invalid_response"
+    if failure is not None:
+        return DecisionError(failure, usage=usage, request_id=request_id, model=model)
+    return DecisionResponse(value=value, usage=usage, request_id=request_id, model=model)
 
 
 _preserve_module_identity(globals(), "agents.decisions")

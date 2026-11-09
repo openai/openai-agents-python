@@ -6,7 +6,7 @@ import asyncio
 import json
 import sys
 from dataclasses import FrozenInstanceError
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -627,6 +627,144 @@ async def test_non_json_provider_output_is_a_safe_completed_error(value):
     assert error.usage == USAGE and error.request_id == "req_test" and error.model == "custom"
     assert error.__context__ is None
     assert len(provider.requests) == 1
+
+
+def assert_no_response_in_sdk_traceback(error, marker):
+    def contains(value, seen):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        if isinstance(value, str):
+            return marker in value
+        if isinstance(value, dict):
+            return any(contains(item, seen) for pair in value.items() for item in pair)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(contains(item, seen) for item in value)
+        if isinstance(value, MethodType):
+            return contains(value.__self__, seen)
+        if isinstance(value, (DecisionResponse, SimpleNamespace, BaseModel)):
+            return contains(vars(value), seen)
+        # Caller-owned clients, providers, and input objects keep their own data.
+        return False
+
+    assert error.__cause__ is None and error.__context__ is None
+    assert not contains(vars(error), set())
+    frames = []
+    tb = error.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex.")):
+            frames.append(frame.f_code.co_name)
+            for name, value in frame.f_locals.items():
+                assert not contains(value, set()), (frame.f_code.co_name, name)
+        tb = tb.tb_next
+    assert frames
+
+
+@pytest.mark.parametrize("entry", ["raw", "provider", "standalone", "agent", "bound"])
+@pytest.mark.parametrize(
+    "case",
+    ["envelope", "refusal", "answers", "answer-count", "fallback-refusal", "fallback-text"],
+)
+async def test_completed_error_tracebacks_discard_provider_payload(compiler, entry, case):
+    marker = "PRIVATE_DECISION_PAYLOAD_MARKER"
+    fallback = case.startswith("fallback-")
+    compiler["supported"] = not fallback
+    if case == "refusal":
+        compiler["error"] = "Decisions refused a question"
+    elif case == "answers":
+        compiler["error"] = "Invalid answer " + marker
+    payload = {
+        "model": "resolved-model",
+        "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        "answers": [{"secret": marker}],
+    }
+    if case == "envelope":
+        payload = [marker]
+    elif case == "answer-count":
+        payload["answers"] = {"secret": marker}
+    elif fallback:
+        part = (
+            {"type": "refusal", "refusal": marker}
+            if case == "fallback-refusal"
+            else {"type": "output_text", "text": marker}
+        )
+        payload.update(status="completed", output=[{"content": [part]}])
+
+    class RawPayload(SimpleNamespace):
+        def model_dump(self):
+            return self.data
+
+    class PayloadClient:
+        async def post(self, *args, **kwargs):
+            # A real bound dump method also retains its receiver's payload.
+            return RawPayload(data=payload, _request_id="req_private")
+
+    provider = OpenAIDecisions(
+        client=PayloadClient(), fallback_model="generation" if fallback else None
+    )
+    recorded = []
+
+    async def begin():
+        async def record(response):
+            recorded.append(response)
+
+        return record
+
+    with pytest.raises(DecisionError) as caught:
+        if entry == "raw":
+            await provider.get_decision(
+                DecisionRequest(
+                    question="Allowed?", input="evidence", output_schema={"type": "boolean"}
+                )
+            )
+        elif entry == "provider":
+            await provider.decide("Allowed?", input="evidence")
+        elif entry == "standalone":
+            await decide("Allowed?", input="evidence", provider=provider)
+        elif entry == "agent":
+            await Agent(instructions="Answer", decisions=provider).decide(
+                "Allowed?", input="evidence"
+            )
+        else:
+            owner = contexts()[1]
+            with _bind_decisions(owner, lambda: True, begin, provider):
+                await owner.decide("Allowed?", input="evidence")
+    error = caught.value
+    assert error.reason == ("refusal" if case.endswith("refusal") else "invalid_response")
+    assert error.request_id == "req_private"
+    assert error.model == (None if case == "envelope" else "resolved-model")
+    expected_usage = None if case == "envelope" else TokenUsage(7, 0, 0, 3, 0, 10)
+    assert error.usage == expected_usage
+    assert recorded == ([error._response()] if entry == "bound" else [])
+    assert_no_response_in_sdk_traceback(error, marker)
+
+
+@pytest.mark.parametrize("bound", [False, True])
+async def test_non_json_error_tracebacks_discard_completed_value(bound):
+    marker = "PRIVATE_NON_JSON_RESPONSE_MARKER"
+    provider = Provider({"response": {marker}})
+    recorded = []
+
+    async def begin():
+        async def record(response):
+            # The usage sink consumes metadata, without retaining response content.
+            recorded.append((response.usage, response.request_id, response.model))
+
+        return record
+
+    with pytest.raises(DecisionError) as caught:
+        if bound:
+            owner = contexts()[1]
+            with _bind_decisions(owner, lambda: True, begin, provider):
+                await owner.decide("Allowed?", input="evidence")
+        else:
+            await decide("Allowed?", input="evidence", provider=provider)
+    assert caught.value.reason == "invalid_response"
+    assert caught.value.usage == USAGE
+    assert caught.value.request_id == "req_test" and caught.value.model == "custom"
+    assert recorded == ([(USAGE, "req_test", "custom")] if bound else [])
+    assert_no_response_in_sdk_traceback(caught.value, marker)
 
 
 async def test_non_finite_model_input_fails_before_provider_work():
