@@ -8213,6 +8213,7 @@ pub(crate) mod tests {
         control.enable(3.0, Scope::ThreadTree).unwrap();
         control
             .configure_tools(vec![ToolRule {
+                generation: None,
                 namespace: None,
                 name: "exec_command".into(),
                 result: false,
