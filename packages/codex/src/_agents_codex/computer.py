@@ -5,7 +5,14 @@ from __future__ import annotations
 import asyncio as asyncio
 import inspect as inspect
 import json as json
-from collections.abc import Awaitable as Awaitable, Callable as Callable
+import threading as threading
+import weakref as weakref
+from collections.abc import (
+    AsyncIterator as AsyncIterator,
+    Awaitable as Awaitable,
+    Callable as Callable,
+)
+from contextlib import asynccontextmanager as asynccontextmanager
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import Any as Any, Literal as Literal, Protocol as Protocol
@@ -82,9 +89,54 @@ class _Declaration:
     )
 
 
+class _DeviceGate:
+    def __init__(self, borrowed: Computer | None = None) -> None:
+        # A registry entry cannot outlive the physical object identity.
+        self._borrowed = borrowed
+        self._mutex = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._lock: asyncio.Lock | None = None
+        self._users = 0
+
+    @asynccontextmanager
+    async def hold(self) -> AsyncIterator[None]:
+        loop = asyncio.get_running_loop()
+        with self._mutex:
+            if self._users and self._loop is not loop:
+                raise RuntimeError("Computer is already in use by another event loop")
+            if not self._users:
+                self._loop, self._lock = loop, asyncio.Lock()
+            self._users += 1
+            lock = self._lock
+        assert lock is not None
+        try:
+            async with lock:
+                yield
+        finally:
+            with self._mutex:
+                self._users -= 1
+                if not self._users:
+                    self._loop, self._lock = None, None
+
+
+# Weak gate values avoid requiring hashable/weak-referenceable user drivers.
+# A live declaration or lease keeps the borrowed driver (and its ID) alive.
+_borrowed_gates: weakref.WeakValueDictionary[int, _DeviceGate] = weakref.WeakValueDictionary()
+_borrowed_gates_mutex = threading.Lock()
+
+
+def _borrowed_gate(driver: Computer) -> _DeviceGate:
+    with _borrowed_gates_mutex:
+        gate = _borrowed_gates.get(id(driver))
+        if gate is None:
+            gate = _DeviceGate(driver)
+            _borrowed_gates[id(driver)] = gate
+        return gate
+
+
 @dataclass
 class _Lease:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: _DeviceGate = field(default_factory=_DeviceGate)
     driver: Computer | None = None
     disposer: Callable[[Computer], None | Awaitable[None]] | None = None
 
@@ -97,7 +149,16 @@ class _ComputerResources:
     def lease(self, declaration: _Declaration) -> _Lease:
         if self._closed:
             raise RuntimeError("Computer resources are closed")
-        return self._leases.setdefault(declaration, _Lease())
+        lease = self._leases.get(declaration)
+        if lease is None:
+            gate = (
+                _DeviceGate()
+                if isinstance(declaration.source, ComputerProvider)
+                else _borrowed_gate(declaration.source)
+            )
+            lease = _Lease(lock=gate)
+            self._leases[declaration] = lease
+        return lease
 
     async def close(self) -> None:
         from .session import _call_callback, _error_contexts, _retain_cleanup_error
@@ -248,7 +309,7 @@ class _CapturedComputer(_CapturedFunction):
         actions = _actions(call)
         pending = deepcopy(call.pending_safety_checks)
         lease = resources.lease(self.computer)
-        async with lease.lock:
+        async with lease.lock.hold():
             if not admit():
                 raise asyncio.CancelledError
             if self.computer.approve is not None:

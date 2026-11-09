@@ -425,3 +425,18 @@ async def test_cancelled_sync_driver_does_not_start_unentered_coroutine():
         await asyncio.wait_for(task, 5)
     await resources.close()
     assert effects == driver.calls == []
+
+
+async def test_borrowed_device_gate_does_not_retain_a_released_device():
+    import gc
+    import weakref
+
+    driver = Driver()
+    reference = weakref.ref(driver)
+    tool = computer_tool(driver)
+    resources = _ComputerResources()
+    await invoke(tool, resources, {"action": {"type": "wait"}})
+    await resources.close()
+    del driver, tool, resources
+    gc.collect()
+    assert reference() is None

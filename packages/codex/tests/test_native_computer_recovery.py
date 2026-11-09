@@ -12,6 +12,7 @@ import pytest
 from agents import (
     Agent,
     ComputerProvider,
+    ComputerSafetyError,
     LocalRecoveryRequired,
     LocalStorage,
     NativeProvider,
@@ -220,6 +221,103 @@ def test_computer_native_completion_without_canonical_output_remains_uncertain()
     assert uncertain[0].arguments == original
     assert items[0]["arguments"] == {"normalized": True}
     assert items[0]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize("same_declaration", [False, True])
+@pytest.mark.parametrize("policy_kind", ["approve", "on_safety_check"])
+async def test_shared_borrowed_device_serializes_policy_across_sessions(
+    responses, same_declaration, policy_kind
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+    observations, effects = [], []
+    screen = 0
+
+    class SharedDriver(Driver):
+        async def wait(self):
+            nonlocal screen
+            entered.set()
+            await release.wait()
+            effects.append(screen)
+            screen += 1
+
+    driver = SharedDriver()
+
+    async def policy(*_):
+        observations.append(screen)
+        return screen == 0
+
+    options = {policy_kind: policy}
+    first_tool = computer_tool(driver, **options)
+    second_tool = first_tool if same_declaration else computer_tool(driver, **options)
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    first = Agent(instructions="Use computer.", provider=provider, tools=[first_tool])
+    second = Agent(instructions="Use computer.", provider=provider, tools=[second_tool])
+    checks = CHECKS if policy_kind == "on_safety_check" else []
+    responses.respond(computer_call(action={"type": "wait"}, pending_safety_checks=checks))
+    responses.respond(computer_call(action={"type": "wait"}, pending_safety_checks=checks))
+    from tests.native_fixtures import assistant_output
+
+    responses.respond(assistant_output("done"))
+    try:
+        async with first.session() as a, second.session() as b:
+            try:
+                one = await a.submit("first")
+                await asyncio.wait_for(entered.wait(), 5)
+                two = await b.submit("second")
+                async for event in two.events():
+                    if event.type == "tool_started":
+                        break
+                await asyncio.sleep(0.05)
+                assert observations == [0]
+                release.set()
+                assert (await one.get_result()).final_output == "done"
+                with pytest.raises(
+                    ComputerSafetyError, match="not approved|require acknowledgment"
+                ):
+                    await two.get_result()
+            finally:
+                release.set()
+    finally:
+        await provider.aclose()
+    assert observations == [0, 1]
+    assert effects == [0]
+    assert driver.calls == [("screenshot",)]
+
+
+async def test_computer_compaction_rejects_orphan_pair_before_publication(responses):
+    from tests.native_fixtures import assistant_output
+
+    responses.respond(computer_call(action={"type": "wait"}))
+    responses.respond(assistant_output("done"))
+    driver = Driver()
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    agent = Agent(instructions="Use computer.", provider=provider, tools=[computer_tool(driver)])
+    try:
+        async with agent.session() as session:
+            await (await session.submit("wait")).get_result()
+            snapshot = await session.model_context()
+            call = next(
+                i for i, item in enumerate(snapshot.items) if item["type"] == "computer_call"
+            )
+            output = next(
+                i for i, item in enumerate(snapshot.items) if item["type"] == "computer_call_output"
+            )
+            for retain in ([call], [output]):
+                with pytest.raises(RuntimeError, match="retain both original tool call and result"):
+                    await session.compact(
+                        summary="Keep the screen.", snapshot=snapshot, retain=retain
+                    )
+                assert (await session.model_context()).items == snapshot.items
+            await session.compact(
+                summary="Keep the screen.", snapshot=snapshot, retain=[call, output]
+            )
+            retained = await session.model_context()
+            assert [item["type"] for item in retained.items].count("computer_call") == 1
+            assert [item["type"] for item in retained.items].count("computer_call_output") == 1
+            assert driver.calls == [("wait", (), {}), ("screenshot",)]
+            assert len(responses.requests) == 2
+    finally:
+        await provider.aclose()
 
 
 if __name__ == "__main__":
