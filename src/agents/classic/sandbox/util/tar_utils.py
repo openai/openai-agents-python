@@ -513,10 +513,28 @@ def safe_extract_tarfile(
     - non-regular-file and non-directory members (devices, fifos, etc.)
     - archive members nested underneath archive symlink members
 
-    It pins the workspace root and each member parent without following symlinks,
-    and creates archive symlinks only after directories and regular files.
+    The caller supplies a trusted destination. Its symlinks are resolved once before
+    pinning the resulting root and each member parent without following symlinks.
+    Archive symlinks are created only after directories and regular files.
     """
 
+    if sys.platform == "win32":
+        raise NotImplementedError("Safe tar extraction requires Unix directory descriptors.")
+
+    _safe_extract_tarfile_at_root(
+        tar,
+        root=root.resolve(),
+        allow_external_symlink_targets=allow_external_symlink_targets,
+    )
+
+
+def _safe_extract_tarfile_at_root(
+    tar: tarfile.TarFile,
+    *,
+    root: Path,
+    allow_external_symlink_targets: bool = True,
+) -> None:
+    """Extract at a previously authorized root without resolving changed symlinks."""
     if sys.platform == "win32":
         raise NotImplementedError("Safe tar extraction requires Unix directory descriptors.")
 

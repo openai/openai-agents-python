@@ -14,6 +14,7 @@ import pytest
 from agents.classic.sandbox import Manifest
 from agents.classic.sandbox.errors import WorkspaceArchiveWriteError
 from agents.classic.sandbox.snapshot import NoopSnapshot
+from agents.classic.sandbox.util import safe_extract_tarfile
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="UnixLocal requires Unix")
 
@@ -158,3 +159,23 @@ async def test_hydration_rejects_replaced_root_ancestor(tmp_path: Path) -> None:
         await session.hydrate_workspace(_archive((member, b"archive")))
 
     assert not (outside / "workspace" / "restored.txt").exists()
+
+
+@pytest.mark.parametrize("existing_root", [False, True])
+def test_direct_tar_extraction_resolves_trusted_symlinked_ancestor(
+    tmp_path: Path, existing_root: bool
+) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    root = target / "workspace"
+    if existing_root:
+        root.mkdir()
+    member = tarfile.TarInfo("restored.txt")
+    member.size = len(b"archive")
+
+    with tarfile.open(fileobj=_archive((member, b"archive")), mode="r:*") as archive:
+        safe_extract_tarfile(archive, root=alias / "workspace")
+
+    assert (root / "restored.txt").read_bytes() == b"archive"

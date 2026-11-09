@@ -69,7 +69,7 @@ from ..types import ExecResult, ExposedPortEndpoint, Permissions, User
 from ..util.blocking_io import run_blocking_workspace_io
 from ..util.tar_utils import (
     UnsafeTarMemberError,
-    safe_extract_tarfile,
+    _safe_extract_tarfile_at_root,
     should_skip_tar_member,
     validate_tarfile,
 )
@@ -1510,7 +1510,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         def _extract_workspace() -> None:
             with tarfile.open(fileobj=data, mode="r:*") as tar:
-                safe_extract_tarfile(
+                _safe_extract_tarfile_at_root(
                     tar,
                     root=extraction_root,
                     allow_external_symlink_targets=False,
