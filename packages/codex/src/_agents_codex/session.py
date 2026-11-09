@@ -2463,12 +2463,12 @@ class Session(Generic[ContextT, OutputT]):
             or checklist
             or mcp_tools
             or environment is not None
-            or any(isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in available)
+            or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
             or any(tool._bind is None for tool in tools)
         ):
             raise ValueError(
                 "CustomStorage preview does not support children, goals, checklist, "
-                "code mode, manual tools, native tools or environments"
+                "code mode, manual tools, standalone native tools or environments"
             )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
