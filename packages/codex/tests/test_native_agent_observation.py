@@ -514,7 +514,11 @@ async def test_slow_session_readers_report_evicted_observations(
         assert all(a.sequence < b.sequence for a, b in zip(retained, retained[1:], strict=False))
 
 
-@pytest.mark.parametrize("chunk,count", [("x", 350), ("y" * 70_000, 1)])
+@pytest.mark.parametrize(
+    "chunk,count",
+    [("x", 350), ("y" * 70_000, 1)],
+    ids=["many-small-deltas", "single-large-delta"],
+)
 async def test_all_retention_preserves_late_and_slow_native_readers(
     responses: ResponsesFixture, chunk: str, count: int
 ) -> None:
