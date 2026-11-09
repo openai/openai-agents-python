@@ -70,8 +70,9 @@ class OpenAITraceExporter:
     awaits one client and its transport cleanup within the existing processor
     worker loop. No client is shared across loops and no background queue or
     Classic span objects are created. Failures are reported by the native
-    processor delivery/flush counters. Native-drain batches are delivered as one
-    HTTP request; native acknowledgement waits for that request. Up to 1024 recent
+    processor delivery/flush counters. Admitted records in a native-drain batch are
+    delivered as one HTTP request before any unrelated admission error is reported;
+    native acknowledgement waits for that request. Up to 1024 recent
     trace descriptors are retained. Active roots and descendants prevent eviction;
     completed traces are retired first. New roots beyond active capacity fail
     delivery, and unknown child-only records never fabricate a root. The metadata
@@ -182,8 +183,9 @@ class OpenAITraceExporter:
 
     def _prepare_events(
         self, events: Sequence[Mapping[str, Any]], revision: object
-    ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]]]:
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]], str | None]:
         states: dict[str, _TraceState] = {}
+        admitted: list[Mapping[str, Any]] = []
         admission_error = None
         for event in events:
             trace_id = "trace_" + event["trace_id"]
@@ -220,17 +222,16 @@ class OpenAITraceExporter:
                     state.root_ended = True
             self._traces.move_to_end(trace_id)
             states[trace_id] = state
-        # A failed native batch is acknowledged too: account for every admitted
-        # completion before rejecting, so one unavailable root cannot strand capacity.
-        if admission_error is not None:
-            raise RuntimeError(admission_error)
+            admitted.append(event)
+        # Native acknowledgement covers the whole batch. Preserve valid traces
+        # even when unrelated records have lost their root descriptor.
         pending = [
             (trace_id, state, state.descriptor)
             for trace_id, state in states.items()
             if state.delivered_to is not revision
         ]
         records = [descriptor for _, _, descriptor in pending]
-        for event in events:
+        for event in admitted:
             if event["lifecycle"] == "end":
                 records.append(
                     {
@@ -253,7 +254,7 @@ class OpenAITraceExporter:
                         else None,
                     }
                 )
-        return records, pending
+        return records, pending, admission_error
 
     async def on_trace_event(self, event: Mapping[str, Any]) -> None:
         try:
@@ -270,15 +271,16 @@ class OpenAITraceExporter:
         deadline = monotonic() + self._timeout
         cancelled: asyncio.CancelledError | None = None
         failed = False
+        admission_error = None
+        delivery_failed = False
         try:
             try:
-                records, pending = self._prepare_events(events, revision)
-                if not records:
-                    return
-                payload = json.dumps({"data": records}, allow_nan=False).encode()
-                await asyncio.wait_for(
-                    self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
-                )
+                records, pending, admission_error = self._prepare_events(events, revision)
+                if records:
+                    payload = json.dumps({"data": records}, allow_nan=False).encode()
+                    await asyncio.wait_for(
+                        self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
+                    )
             except asyncio.CancelledError as error:
                 # Preserve cancellation identity/args without completed transport frames.
                 cancelled = error.with_traceback(None)
@@ -286,16 +288,23 @@ class OpenAITraceExporter:
                 cancelled.__context__ = None
             except Exception:
                 failed = True
-            if cancelled is None and not failed and monotonic() <= deadline:
+            delivery_failed = failed or (bool(records) and monotonic() > deadline)
+            if cancelled is None and not delivery_failed:
                 if self._credentials[0] is revision:
                     for trace_id, state, descriptor in pending:
                         if self._traces.get(trace_id) is state and state.descriptor is descriptor:
                             state.delivered_to = revision
-                return
+                if admission_error is None:
+                    return
         finally:
             del self, events, payload, records, pending, headers
         if cancelled is not None:
             raise cancelled from None
+        if admission_error is not None:
+            message = "Native OpenAI trace export failed: record admission failed"
+            if delivery_failed:
+                message += "; delivery failed"
+            raise RuntimeError(message) from None
         raise RuntimeError("Native OpenAI trace export failed") from None
 
     async def _send(self, payload: bytes, headers: dict[str, str]) -> None:

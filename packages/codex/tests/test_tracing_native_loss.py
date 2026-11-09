@@ -18,6 +18,7 @@ from tests.test_native_trace_exporter import collector
 async def native_loss_case(long_names: bool):
     entered, release, phase = Event(), Event(), Event()
     observed = []
+    mixed_batches = []
     groups = 0
 
     class Observer:
@@ -27,6 +28,9 @@ async def native_loss_case(long_names: bool):
         async def on_trace_events(self, events):
             nonlocal groups
             observed.extend(events)
+            names = {event["name"] for event in events}
+            if "post-loss-fresh-root" in names and "old-after-loss" in names:
+                mixed_batches.append(names)
             if phase.is_set() and any(event["name"].startswith("burst-") for event in events):
                 groups += 1
                 if groups == 2:
@@ -52,26 +56,19 @@ async def native_loss_case(long_names: bool):
             assert await asyncio.to_thread(entered.wait, 3)
             # The loss watermark is captured and one batch acknowledged, but
             # the old backlog remains. Queue new events before recovery.
+            # Queue stale and fresh traces synchronously while native delivery
+            # is gated, so one recovery batch contains both admission outcomes.
+            with telemetry.span("old-after-loss"):
+                pass
+            roots[0].__exit__(None, None, None)
             with telemetry.trace(
                 "post-loss-fresh-root", options={"detached": True, "group_id": "fresh-group"}
             ):
                 pass
             release.set()
-            for _ in range(300):
-                if any(
-                    row.get("workflow_name") == "post-loss-fresh-root"
-                    for request in requests
-                    for row in request["payload"]["data"]
-                ):
-                    break
-                await asyncio.sleep(0.01)
-            # A genuinely live pre-loss root also has uncertain identity. Its
-            # child/end must fail closed, rather than synthesize a new root.
-            with telemetry.span("old-after-loss"):
-                pass
-            roots[0].__exit__(None, None, None)
             result = await telemetry.force_flush(timeout_ms=15000)
             assert result.dropped_records > 0 and result.status == "partial"
+            assert mixed_batches, "native recovery never exercised mixed stale/fresh admission"
             records = [row for request in requests for row in request["payload"]["data"]]
             assert not any(
                 row.get("span_data", {}).get("name") == "old-after-loss" for row in records

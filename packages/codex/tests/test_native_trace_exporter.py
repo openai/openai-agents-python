@@ -651,12 +651,43 @@ async def test_failed_batch_accounts_for_later_completions(rejected_child):
         await exporter.on_trace_events(roots)
         with pytest.raises(RuntimeError):
             await exporter.on_trace_events([rejected, {**roots[0], "lifecycle": "end"}, overflow])
-        assert len(received) == 1  # Failed batch is not partially delivered.
+        assert len(received) == 2  # Valid traces survive unrelated admission errors.
+        admitted = received[-1]["payload"]["data"]
+        assert any(row.get("workflow_name") == "overflow-root" for row in admitted)
+        assert any(
+            row.get("id") == "span_" + roots[0]["span_id"].rjust(24, "0") for row in admitted
+        )
         await exporter.on_trace_event({**overflow, "lifecycle": "end", "name": "renamed-end"})
-        assert received[-1]["payload"]["data"][0]["workflow_name"] == "overflow-root"
+        assert received[-1]["payload"]["data"][0]["trace_id"] == "trace_" + overflow["trace_id"]
         exporter.set_api_key("synthetic-rotated")
         await exporter.on_trace_event({**roots[1], "lifecycle": "end"})
         descriptor = received[-1]["payload"]["data"][0]
         assert descriptor["workflow_name"] == "original-root-1"
         assert descriptor["group_id"] == "original-group"
         assert len(exporter._traces) == 1024
+
+
+@pytest.mark.parametrize("delivery_status", [200, 503])
+async def test_mixed_loss_batch_delivers_only_admitted_records(delivery_status):
+    old = {**completed_event(), "lifecycle": "start", "name": "old-root"}
+    fresh = {**old, "trace_id": "e" * 32, "name": "fresh-root"}
+    stale = {**old, "lifecycle": "end", "parent_span_id": "c" * 16, "name": "stale-child"}
+    with collector([200, delivery_status, 200]) as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
+        await exporter.on_trace_event(old)
+        exporter._on_native_trace_loss()
+        with pytest.raises(RuntimeError, match="record admission failed") as failure:
+            await exporter.on_trace_events([stale, fresh, {**fresh, "lifecycle": "end"}])
+        assert ("delivery failed" in str(failure.value)) is (delivery_status == 503)
+        records = received[-1]["payload"]["data"]
+        assert len(records) == 2
+        assert records[0]["workflow_name"] == "fresh-root"
+        assert records[1]["span_data"]["name"] == "fresh-root"
+        assert all(
+            row.get("trace_id", row.get("id")) == "trace_" + fresh["trace_id"] for row in records
+        )
+        state = exporter._traces["trace_" + fresh["trace_id"]]
+        assert (state.delivered_to is exporter._credentials[0]) is (delivery_status == 200)
+        await exporter.on_trace_event({**fresh, "lifecycle": "end"})
+        descriptors = [row for row in received[-1]["payload"]["data"] if row["object"] == "trace"]
+        assert len(descriptors) == (1 if delivery_status == 503 else 0)
