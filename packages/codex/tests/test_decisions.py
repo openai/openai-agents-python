@@ -962,6 +962,103 @@ async def test_successful_bound_response_discards_payload_when_accounting_fails(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("failure", ["decision", "application", "cancellation"])
+async def test_owned_decisions_cleanup_preserves_primary_failure(compiler, monkeypatch, failure):
+    import openai
+
+    primary = (
+        ValueError("Application failed")
+        if failure == "application"
+        else asyncio.CancelledError("Application cancelled")
+    )
+    cleanup_error = RuntimeError("Owned client cleanup failed")
+    client = Client({"answers": [{"probability": 1}]})
+    closed = []
+
+    async def close():
+        closed.append(True)
+        raise cleanup_error
+
+    client.close = close
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda: client)
+    if failure == "decision":
+        compiler["error"] = "Decisions refused a question"
+    with pytest.raises(BaseException) as caught:
+        async with OpenAIDecisions() as provider:
+            try:
+                await Agent(instructions="Assess", decisions=provider).decide(
+                    "Allowed?", input="Synthetic evidence"
+                )
+                raise primary
+            except BaseException as error:
+                primary = error
+                raise
+    assert caught.value is primary
+    assert caught.value.__context__ is cleanup_error
+    assert closed == [True] and provider._closed
+    assert len(client.requests) == 1
+
+
+async def test_owned_decisions_normal_exit_surfaces_cleanup_failure(compiler, monkeypatch):
+    import openai
+
+    failure = RuntimeError("Owned client cleanup failed")
+    client = Client({"answers": [{"probability": 1}]})
+
+    async def close():
+        raise failure
+
+    client.close = close
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda: client)
+    with pytest.raises(RuntimeError) as caught:
+        async with OpenAIDecisions() as provider:
+            assert await Agent(instructions="Assess", decisions=provider).decide(
+                "Allowed?", input="Synthetic evidence"
+            )
+    assert caught.value is failure
+    assert provider._closed
+
+
+async def test_owned_decisions_primary_failure_joins_cancelled_cleanup(compiler, monkeypatch):
+    import openai
+
+    primary = ValueError("Application failed")
+    cleanup_error = RuntimeError("Owned client cleanup failed")
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    client = Client({"answers": [{"probability": 1}]})
+
+    async def close():
+        entered.set()
+        await release.wait()
+        finished.set()
+        raise cleanup_error
+
+    client.close = close
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda: client)
+
+    async def invoke():
+        async with OpenAIDecisions() as provider:
+            await Agent(instructions="Assess", decisions=provider).decide(
+                "Allowed?", input="Synthetic evidence"
+            )
+            raise primary
+
+    task = asyncio.create_task(invoke())
+    try:
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and not finished.is_set()
+        release.set()
+        with pytest.raises(ValueError) as caught:
+            await task
+        assert caught.value is primary and caught.value.__context__ is cleanup_error
+        assert finished.is_set() and len(client.requests) == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_non_finite_model_input_fails_before_provider_work():
     provider = Provider(None)
     with pytest.raises(ValueError):

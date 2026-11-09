@@ -7287,6 +7287,25 @@ class Session(Generic[ContextT, OutputT]):
         confirmed_rejection = False
         delegate_close = False
         usage_request: asyncio.Future[Any] | None = None
+        usage_callbacks_completed = 0
+
+        async def settled_usage() -> TokenUsageInfo | None:
+            nonlocal usage_request, usage_callbacks_completed
+            while True:
+                assert usage_request is not None
+                await asyncio.wait(
+                    (usage_request, state.failure), return_when=asyncio.FIRST_COMPLETED
+                )
+                await state.wait_for_callbacks()
+                usage = _token_usage_info(json.loads(usage_request.result()))
+                # Root callback keys remain retained after completion. A callback
+                # which finished after this read began may have committed usage,
+                # including a callback admitted while the read was in flight.
+                if len(state.callbacks) == usage_callbacks_completed:
+                    return usage
+                usage_callbacks_completed = sum(task.done() for task in state.callbacks)
+                usage_request = asyncio.ensure_future(self._native.call("token_usage_info"))
+
         try:
             if self._profiles and not admitted:
                 await self._refresh_profile_bindings()
@@ -7473,9 +7492,10 @@ class Session(Generic[ContextT, OutputT]):
             if terminal.get("error"):
                 raise _native_error(terminal["error"])
             if input is not None and state.realtime_tool is None:
-                # Terminal fixes this turn's native usage. Start the read while
-                # draining callbacks: newly admitted work must not block the
+                # Start usage capture before draining callbacks: newly
+                # admitted work must not block the
                 # final read on which it may itself depend.
+                usage_callbacks_completed = sum(task.done() for task in state.callbacks)
                 usage_request = asyncio.ensure_future(self._native.call("token_usage_info"))
             await state.wait_for_callbacks()
             await self._refresh_profile_bindings()
@@ -7502,14 +7522,7 @@ class Session(Generic[ContextT, OutputT]):
                     output = proposal.value
                 elif not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
-                assert usage_request is not None
-                await asyncio.wait(
-                    (usage_request, state.failure), return_when=asyncio.FIRST_COMPLETED
-                )
-                # Native terminal does not seal callbacks on still-owned cells.
-                # Drain work admitted during usage before committing an outcome.
-                await state.wait_for_callbacks()
-                usage = _token_usage_info(json.loads(usage_request.result()))
+                usage = await settled_usage()
                 if (
                     tool_payload is None
                     and not state.unsampled_steering
@@ -7538,6 +7551,7 @@ class Session(Generic[ContextT, OutputT]):
                         await state.wait_for_callbacks()
                         if state.cleanup_error is not None:
                             raise state.cleanup_error
+                        usage = await settled_usage()
                 if not state.unsampled_steering:
                     outcome = Completed(
                         handle,

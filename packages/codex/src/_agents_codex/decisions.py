@@ -338,7 +338,10 @@ class OpenAIDecisions:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        await self.aclose()
+        if args[1] is None:
+            await self.aclose()
+        else:
+            await _close_after_error(args[1], self.aclose)
 
     async def aclose(self) -> None:
         self._closed = True
