@@ -84,7 +84,7 @@ async def test_failed_handoff_retries_on_caller_then_transfers(streamed: bool) -
     assert hooks.on_handoff.call_args.kwargs["to_agent"] is target
     expected = {
         "companion": "companion result",
-        "bad": "An error occurred while running the tool. Please try again.",
+        "bad": "An error occurred while running the tool.",
     }
     for items in (caller_model.calls[1].input, target_model.calls[0].input, history):
         for call_id, output in expected.items():

@@ -505,8 +505,8 @@ async def test_schema_backed_direct_tool_preserves_argument_error_formatter() ->
 
     result = await failing_tool.on_invoke_tool(context, "{}")
 
-    assert result.startswith("An error occurred while running the tool. Please try again.")
-    assert result == "An error occurred while running the tool. Please try again."
+    assert result.startswith("An error occurred while running the tool.")
+    assert result == "An error occurred while running the tool."
     assert "sku" not in result
 
 
@@ -534,7 +534,7 @@ async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
     function_output = next(
         item for item in result.new_items if isinstance(item, ToolCallOutputItem)
     )
-    expected_error = "An error occurred while running the tool. Please try again."
+    expected_error = "An error occurred while running the tool."
     assert result.final_output == "inventory lookup failed"
     assert function_output.output == expected_error
     assert cast(dict[str, Any], function_output.raw_item)["output"] == expected_error
@@ -545,7 +545,7 @@ async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
 async def test_runner_validates_only_user_output_after_late_tool_timeout(
     monkeypatch: pytest.MonkeyPatch, custom_failure: bool
 ) -> None:
-    expected_error = "An error occurred while running the tool. Please try again."
+    expected_error = "An error occurred while running the tool."
 
     async def lookup_inventory() -> InventoryOutput:
         raise RuntimeError("inventory unavailable")

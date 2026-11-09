@@ -1999,7 +1999,7 @@ def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -
 
     Provide a custom ``failure_error_function`` to return application-approved error details.
     """
-    return "An error occurred while running the tool. Please try again."
+    return "An error occurred while running the tool."
 
 
 _FUNCTION_TOOL_TIMEOUT_BEHAVIORS: tuple[ToolTimeoutBehavior, ...] = (

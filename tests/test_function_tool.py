@@ -627,10 +627,10 @@ async def test_function_tool_default_error_works():
     ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="")
 
     result = await tool.on_invoke_tool(ctx, "")
-    assert result == "An error occurred while running the tool. Please try again."
+    assert result == "An error occurred while running the tool."
 
     result = await tool.on_invoke_tool(ctx, "{}")
-    assert result == "An error occurred while running the tool. Please try again."
+    assert result == "An error occurred while running the tool."
 
     result = await tool.on_invoke_tool(ctx, '{"a": 1}')
     assert result == default_tool_error_function(ctx, ValueError("test"))
@@ -903,7 +903,7 @@ async def test_manual_function_tool_uses_default_failure_error_function() -> Non
         error=asyncio.CancelledError("manual-tool-cancelled"),
     )
 
-    expected = "An error occurred while running the tool. Please try again."
+    expected = "An error occurred while running the tool."
     assert result == expected
     assert (
         tool_module.resolve_function_tool_failure_error_function(manual_tool)
@@ -1469,7 +1469,7 @@ async def test_default_failure_error_function_survives_deepcopy() -> None:
         error=asyncio.CancelledError(),
     )
 
-    expected = "An error occurred while running the tool. Please try again."
+    expected = "An error occurred while running the tool."
     assert result == expected
     assert (
         tool_module.resolve_function_tool_failure_error_function(copied_tool)
