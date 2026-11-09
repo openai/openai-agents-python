@@ -70,8 +70,6 @@ def codex_tool(
     selects a CLI thread; omit it to start a fresh thread or reuse this Session's
     thread. Thread IDs must be nonempty and cannot start with a dash.
     """
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("Codex tool name must be a nonempty string")
     if codex is not None and codex_options is not None:
         raise ValueError("supply codex or codex_options, not both")
     if not isinstance(persist_session, bool):

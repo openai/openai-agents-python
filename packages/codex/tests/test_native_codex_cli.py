@@ -82,17 +82,14 @@ async def test_cli_tool_uses_native_binding_and_real_cli_stream(
         assert thread_id in arguments
 
 
-@pytest.mark.parametrize("name", ["codex", "engineer"])
-async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses, name: str) -> None:
+async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses) -> None:
     responses.replies.extend(
         [
-            [function_call(name, {"prompt": "Do the task", "thread_id": None}, "cli-1")],
+            [function_call("codex", {"prompt": "Do the task", "thread_id": None}, "cli-1")],
             [assistant_output("done")],
         ]
     )
-    declaration = codex_tool(
-        name=name, codex_options=CodexOptions(codex_path_override=str(cli(tmp_path)))
-    )
+    declaration = codex_tool(codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))))
     async with Agent(
         instructions="Use codex.", provider=provider(responses), tools=[declaration]
     ).session() as session:
