@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -40,6 +42,14 @@ def model_config_for_trace(
     if extra_config:
         config.update(extra_config)
     return config
+
+
+def record_generation_tools(
+    span: Span[GenerationSpanData], tracing: ModelTracing, tools: Sequence[Mapping[str, Any]]
+) -> None:
+    if tools and tracing.include_data():
+        # Provider libraries may rewrite the request schemas in place.
+        span.span_data.tools = deepcopy(tools)
 
 
 def populate_generation_span(
