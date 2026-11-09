@@ -513,9 +513,11 @@ jobs:
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   lint:
+    # Push artifacts can be reused later, so those runs gate SDK execution on native publication.
+    name: ${{ github.event_name == 'pull_request' && 'lint (after native publication)' || 'lint' }}
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
-      !inputs.native_only &&
+      !inputs.native_only && github.event_name != 'pull_request' &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
@@ -523,12 +525,12 @@ jobs:
       needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
-    env:
+    env: &lint-env
       UV_NO_SYNC: "1"
       PYTHONPATH: src:packages/codex/src
     runs-on: ubuntu-latest
     timeout-minutes: 100
-    steps:
+    steps: &lint-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -556,6 +558,17 @@ jobs:
       - name: Skip lint
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping lint for non-code changes."
+
+  lint-pr:
+    name: ${{ github.event_name == 'pull_request' && 'lint' || 'lint (pull request)' }}
+    needs: changes
+    if: >-
+      !inputs.native_only && github.event_name == 'pull_request' &&
+      !cancelled() && needs.changes.result == 'success'
+    env: *lint-env
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps: *lint-steps
 
   typecheck:
     if: ${{ !inputs.native_only }}
@@ -898,9 +911,10 @@ jobs:
         run: echo "Skipping tests for non-code changes."
 
   build-docs:
+    name: ${{ github.event_name == 'pull_request' && 'build-docs (after native publication)' || 'build-docs' }}
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-
-      !inputs.native_only &&
+      !inputs.native_only && github.event_name != 'pull_request' &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
       needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
@@ -908,13 +922,13 @@ jobs:
       needs.produce-macos.result == 'success' &&
       ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    runs-on: &build-docs-runner ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
-    env:
+    env: &build-docs-env
       UV_NO_SYNC: "1"
       PYTHONPATH: src:packages/codex/src
       OPENAI_API_KEY: fake-for-tests
-    steps:
+    steps: &build-docs-steps
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -942,3 +956,14 @@ jobs:
       - name: Skip docs build
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping docs build for non-docs changes."
+
+  build-docs-pr:
+    name: ${{ github.event_name == 'pull_request' && 'build-docs' || 'build-docs (pull request)' }}
+    needs: changes
+    if: >-
+      !inputs.native_only && github.event_name == 'pull_request' &&
+      !cancelled() && needs.changes.result == 'success'
+    runs-on: *build-docs-runner
+    timeout-minutes: 100
+    env: *build-docs-env
+    steps: *build-docs-steps

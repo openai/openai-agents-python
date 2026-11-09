@@ -490,10 +490,11 @@ def test_native_reuse_never_forces_cache_warming(donor: str, event: str) -> None
             assert _condition(step["if"], values) is bool(expected[step["name"]])
 
 
-def test_native_publication_is_a_global_barrier() -> None:
+def test_native_publication_is_a_global_barrier_for_donor_runs() -> None:
     caller = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
     jobs = caller["jobs"]
     producers = {"produce-linux", "produce-windows", "produce-macos"}
+    early_pr_checks = {"lint-pr", "build-docs-pr"}
 
     def ancestors(name: str) -> set[str]:
         needs = jobs[name].get("needs", [])
@@ -501,9 +502,8 @@ def test_native_publication_is_a_global_barrier() -> None:
             needs = [needs]
         return set(needs).union(*(ancestors(parent) for parent in needs))
 
-    for name in jobs:
-        if name != "changes" and name not in producers:
-            assert producers <= ancestors(name), name
+    for name in jobs.keys() - producers - early_pr_checks - {"changes"}:
+        assert producers <= ancestors(name), name
     for name in producers:
         assert jobs[name]["needs"] == "changes"
     steps = _steps()
@@ -556,6 +556,7 @@ def test_global_publication_failure_blocks_every_sdk_entry(
         "jobs"
     ]
     values = {
+        "github.event_name": "push",
         "inputs.native_only": False,
         "needs.changes.result": "success",
         "needs.changes.outputs.code": code,
@@ -569,6 +570,43 @@ def test_global_publication_failure_blocks_every_sdk_entry(
     for name in ("native-linux", "native-macos"):
         assert _condition(jobs[name]["if"], values) is native
     assert _condition(jobs["native-windows"]["if"], values) is (native and windows == "true")
+
+
+@pytest.mark.parametrize(
+    ("event", "native_only", "changes_result", "expected"),
+    [
+        ("pull_request", False, "success", True),
+        ("pull_request", True, "success", False),
+        ("pull_request", False, "failure", False),
+        ("push", False, "success", False),
+        ("merge_group", False, "success", False),
+        ("workflow_dispatch", False, "success", False),
+    ],
+)
+def test_pull_request_lint_and_docs_wait_only_for_change_detection(
+    event: str, native_only: bool, changes_result: str, expected: bool
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    values = {
+        "github.event_name": event,
+        "inputs.native_only": native_only,
+        "needs.changes.result": changes_result,
+        "needs.changes.outputs.code": "true",
+        "needs.changes.outputs.windows": "true",
+        "needs.produce-linux.result": "success",
+        "needs.produce-windows.result": "success",
+        "needs.produce-macos.result": "success",
+    }
+    for name in ("lint", "build-docs"):
+        early, canonical = jobs[f"{name}-pr"], jobs[name]
+        assert early["needs"] == "changes"
+        assert _condition(early["if"], values) is expected
+        for key in ("runs-on", "timeout-minutes", "env", "steps"):
+            assert early[key] == canonical[key]
+        if event == "pull_request":
+            assert not _condition(canonical["if"], values)
 
 
 def test_qualification_repack_receives_verified_overlay_in_its_environment(
