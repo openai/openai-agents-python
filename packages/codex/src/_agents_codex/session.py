@@ -1565,7 +1565,7 @@ def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
 
 
-def _snapshot_function_arguments(arguments: dict[str, Any]) -> Mapping[str, Any]:
+def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
     # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
     # Prepare only those copies; deepcopy still owns copying all other values.
     memo: dict[int, Any] = {}
@@ -1593,9 +1593,16 @@ def _snapshot_function_arguments(arguments: dict[str, Any]) -> Mapping[str, Any]
             )
             pending.append(value.__pydantic_extra__)
     # Register every proxy first so shared and recursive values use one memo.
-    for original, backing in proxies:
-        backing.update(deepcopy(dict(original), memo))
-    return MappingProxyType(deepcopy(arguments, memo))
+    try:
+        for original, backing in proxies:
+            backing.update(deepcopy(dict(original), memo))
+        return MappingProxyType(deepcopy(arguments, memo))
+    except Exception as error:
+        identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
+        raise TypeError(
+            f"Tool {identity!r} requires deep-copyable validated arguments for "
+            "ToolContext.effective_arguments, including private model state"
+        ) from error
 
 
 def _capture_tools(
@@ -8860,7 +8867,7 @@ class Session(Generic[ContextT, OutputT]):
                     state.handle,
                     message["callId"],
                     MappingProxyType(deepcopy(raw_arguments)),
-                    _snapshot_function_arguments(kwargs),
+                    _snapshot_function_arguments(kwargs, ref),
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     call=ToolCallInfo(
                         tool=ref,
@@ -8904,7 +8911,7 @@ class Session(Generic[ContextT, OutputT]):
                     parsed = entry._parse_arguments(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
-                        context, effective_arguments=_snapshot_function_arguments(kwargs)
+                        context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
                 elif not isinstance(decision, Allow):
                     raise TypeError("Function before must return Allow, Deny or ReplaceArguments")
