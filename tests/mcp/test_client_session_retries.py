@@ -15,7 +15,7 @@ from mcp.types import (
 )
 
 from agents.exceptions import UserError
-from agents.mcp._compat import mcp_request_timeout_code
+from agents.mcp._compat import MCP_V2, mcp_request_timeout_code
 from agents.mcp.server import (
     MCPServerSse,
     MCPServerStdio,
@@ -698,6 +698,7 @@ async def test_serialized_prompt_requests_prevent_tool_cancellation(prompt_metho
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(MCP_V2, reason="MCP v1 requires shared HTTP requests to be serialized")
 @pytest.mark.parametrize("prompt_method", ["list_prompts", "get_prompt"])
 async def test_streamable_http_serializes_call_tool_with_prompt_requests(prompt_method: str):
     shared_session = OverlapTrackingSession()

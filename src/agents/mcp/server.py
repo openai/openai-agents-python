@@ -2316,6 +2316,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
+        MCP v2 allows concurrent requests on one session. If the connection drops, multiple
+        tools may have taken effect before the client receives their results. Enable retries
+        for those tools only when replay is safe.
+
         Args:
             params: The params that configure the server. This includes the URL of the server,
                 the headers to send to the server, the timeout for the HTTP request, the
@@ -2391,7 +2395,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
-        self._serialize_session_requests = True
+        # A failed HTTP request on MCP v1 can cancel other requests on the same session.
+        self._serialize_session_requests = not MCP_V2
 
     def create_streams(
         self,
