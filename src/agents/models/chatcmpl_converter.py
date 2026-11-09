@@ -288,6 +288,17 @@ class Converter:
         if not isinstance(item, dict):
             return None
 
+        # RunState wraps a plain assistant string in one output_text part when checkpointing.
+        # Restore easy-message semantics so a following tool call starts its own message.
+        match item:
+            case {
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": str() as text}],
+            } if "type" not in item:
+                item = {**item, "content": text}
+                del item["status"]
+
         keys = set(item)
         if not {"content", "role"} <= keys:
             return None
