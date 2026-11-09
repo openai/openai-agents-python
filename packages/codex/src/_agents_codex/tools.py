@@ -248,7 +248,9 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
                     "FileSearch max_num_results must be zero or an integer from 1 to 50"
                 )
         fields = asdict(tool)
-        provider_data = fields.pop("provider_data") or {}
+        provider_data = fields.pop("provider_data")
+        if provider_data is None:
+            provider_data = {}
         if not isinstance(provider_data, dict):
             raise TypeError("Hosted tool provider_data must be an object")
         if set(provider_data) & ({"type", "provider_data"} | fields.keys()):
@@ -260,7 +262,7 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
                 **{key: value for key, value in fields.items() if value is not None},
             }
         )
-    return cast(list[dict[str, Any]], json.loads(json.dumps(specs)))
+    return cast(list[dict[str, Any]], json.loads(json.dumps(specs, allow_nan=False)))
 
 
 @dataclass(frozen=True)
