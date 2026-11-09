@@ -1569,7 +1569,7 @@ def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
 
 
-def _snapshot_function_arguments(arguments: dict[str, Any]) -> Mapping[str, Any]:
+def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
     # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
     # Prepare only those copies; deepcopy still owns copying all other values.
     memo: dict[int, Any] = {}
@@ -1597,9 +1597,16 @@ def _snapshot_function_arguments(arguments: dict[str, Any]) -> Mapping[str, Any]
             )
             pending.append(value.__pydantic_extra__)
     # Register every proxy first so shared and recursive values use one memo.
-    for original, backing in proxies:
-        backing.update(deepcopy(dict(original), memo))
-    return MappingProxyType(deepcopy(arguments, memo))
+    try:
+        for original, backing in proxies:
+            backing.update(deepcopy(dict(original), memo))
+        return MappingProxyType(deepcopy(arguments, memo))
+    except Exception as error:
+        tool_identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
+        raise TypeError(
+            f"Tool {tool_identity!r} requires deep-copyable validated arguments for "
+            "ToolContext.effective_arguments, including private model state"
+        ) from error
 
 
 def _capture_tools(
@@ -6700,7 +6707,9 @@ class Session(Generic[ContextT, OutputT]):
         state.repair_attempt_count += 1
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
-        provider = self._opening_agent.provider or self._owned_provider
+        provider = self._opening_agent.provider
+        if provider is None:
+            provider = self._owned_provider
         assert provider is not None
         assert self._model_api_key is not None or self._codex_login_binding is not None
         history = json.loads(await self._native.read_thread_history(None))
@@ -7166,7 +7175,7 @@ class Session(Generic[ContextT, OutputT]):
             if not state.completion.done():
                 terminal = state.terminal.result() if state.terminal.done() else None
                 failure = state.failure.result() if state.failure.done() else state.cleanup_error
-                if state.policy_stop and failure is not None and state.cleanup_error is not None:
+                if failure is not None and state.cleanup_error is not None:
                     _retain_cleanup_error(
                         failure, state.cleanup_error, _error_contexts(failure.__context__)
                     )
@@ -7421,8 +7430,10 @@ class Session(Generic[ContextT, OutputT]):
                 return
             failed = False
         except BaseException as error:
-            if not state.failure.done():
+            if not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
         finally:
             guard.active = False
             _invocation.reset(token)
@@ -8002,8 +8013,10 @@ class Session(Generic[ContextT, OutputT]):
                 refs.add(search)
             selected_json = _native_tool_refs(tuple(refs & candidates))
         except BaseException as error:
-            if not state.failure.done():
+            if not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
         finally:
             guard.active = False
             _invocation.reset(token)
@@ -9009,7 +9022,7 @@ class Session(Generic[ContextT, OutputT]):
                     state.handle,
                     message["callId"],
                     MappingProxyType(deepcopy(raw_arguments)),
-                    _snapshot_function_arguments(kwargs),
+                    _snapshot_function_arguments(kwargs, ref),
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
                     call=ToolCallInfo(
                         tool=ref,
@@ -9053,7 +9066,7 @@ class Session(Generic[ContextT, OutputT]):
                     parsed = entry._parse_arguments(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
-                        context, effective_arguments=_snapshot_function_arguments(kwargs)
+                        context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
                 elif not isinstance(decision, Allow):
                     raise TypeError("Function before must return Allow, Deny or ReplaceArguments")

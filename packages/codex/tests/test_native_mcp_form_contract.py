@@ -115,6 +115,10 @@ async def test_real_primitive_form_constraints_and_correction(
                 ("date", "20240229"),
                 ("timestamp", "2024-02-29"),
                 ("timestamp", "2024-02-30T00:00:00Z"),
+                ("timestamp", "2024-02-29T12:00:00+01:99"),
+                ("timestamp", "2024-02-29T12:00:00+00:60"),
+                ("timestamp", "2024-02-29T12:00:00-00:60"),
+                ("timestamp", "2024-02-29T12:00:00+24:00"),
                 ("named", "Beta"),
                 ("titled", "Alpha"),
                 ("multiple", []),
@@ -137,8 +141,9 @@ async def test_real_primitive_form_constraints_and_correction(
             without_alias = {key: value for key, value in VALID.items() if key != "display-name"}
             with pytest.raises(ValueError, match="form"):
                 await request.respond({**without_alias, "display_name": "A name"})
+            corrected = {**VALID, "timestamp": "2024-02-29T12:00:00+23:59"}
             if reply == "respond":
-                await request.respond(VALID)
+                await request.respond(corrected)
             else:
                 await request.decline()
             with pytest.raises(InteractionExpiredError, match="expired|answered"):
@@ -148,7 +153,7 @@ async def test_real_primitive_form_constraints_and_correction(
             result = peer.answers[0]["result"]
             assert result["action"] == ("accept" if reply == "respond" else "decline")
             if reply == "respond":
-                assert result["content"] == VALID
+                assert result["content"] == corrected
             assert not await session.pending_interactions()
 
 

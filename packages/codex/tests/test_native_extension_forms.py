@@ -29,6 +29,7 @@ SCHEMA = {
         "count": {"type": "integer", "minimum": 1},
         "note": {"type": ["string", "null"]},
         "format": {"type": "string", "format": "email"},
+        "timestamp": {"type": "string", "format": "date-time"},
     },
     "required": ["profile", "tags", "count", "note"],
     "additionalProperties": False,
@@ -40,6 +41,7 @@ VALID = {
     "note": None,
     # Extension formats are annotations; standard primitive rules stay separate.
     "format": "an annotation",
+    "timestamp": "2024-02-29T12:00:00+01:99",
 }
 
 
