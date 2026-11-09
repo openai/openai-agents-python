@@ -828,3 +828,71 @@ async def test_codex_login_cannot_open_provider_hosted_tools(tmp_path):
         with pytest.raises(ValueError, match="API-key Responses provider"):
             async with agent.session():
                 pytest.fail("Codex login must not admit provider-hosted tools")
+
+
+@pytest.mark.parametrize("value", [-1, 51, True, 1.5, "2"])
+def test_file_search_rejects_invalid_result_limit(value):
+    with pytest.raises(ValueError, match="max_num_results"):
+        FileSearch(vector_store_ids=["vs_fixture"], max_num_results=value)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, 50])
+async def test_file_search_normalizes_result_limit_in_native_request(responses, value):
+    responses.respond(assistant_output("Done."))
+    borrowed = provider(responses)
+    async with (
+        timeout(20),
+        borrowed,
+        Agent(
+            instructions="Search.",
+            model="gpt-5.2",
+            provider=borrowed,
+            tools=[FileSearch(vector_store_ids=["vs_fixture"], max_num_results=value)],
+        ).session() as session,
+    ):
+        assert (await (await session.submit("Find a record.")).get_result()).final_output == "Done."
+    wire = next(t for t in responses.requests[0]["tools"] if t["type"] == "file_search")
+    assert wire == {
+        "type": "file_search",
+        "vector_store_ids": ["vs_fixture"],
+        **({"max_num_results": value} if value else {}),
+    }
+
+
+@pytest.mark.parametrize("include", [False, True])
+async def test_native_hosted_provider_fields_and_output_inclusion(responses, include):
+    extra = {"future_option": {"nested": [True, None]}}
+    responses.respond(assistant_output("Done."))
+    borrowed = provider(responses)
+    async with (
+        timeout(20),
+        borrowed,
+        Agent(
+            instructions="Use hosted tools.",
+            model="gpt-5.2",
+            provider=borrowed,
+            tools=[
+                FileSearch(vector_store_ids=["vs_fixture"], provider_data=extra),
+                CodeInterpreter(
+                    container="cntr_fixture", include_outputs=include, provider_data=extra
+                ),
+                ImageGeneration(provider_data=extra),
+            ],
+        ).session() as session,
+    ):
+        extra["future_option"]["nested"].append("late mutation")
+        assert (await (await session.submit("Run.")).get_result()).final_output == "Done."
+    request = responses.requests[0]
+    for kind in ["file_search", "code_interpreter", "image_generation"]:
+        wire = next(t for t in request["tools"] if t["type"] == kind)
+        assert wire["future_option"] == {"nested": [True, None]}
+        assert "provider_data" not in wire
+        assert "include_outputs" not in wire
+    assert ("code_interpreter_call.outputs" in request["include"]) == include
+
+
+def test_hosted_provider_fields_cannot_replace_admitted_identity():
+    from _agents_codex.tools import _capture_hosted_tools
+
+    with pytest.raises(ValueError, match="cannot replace"):
+        _capture_hosted_tools([ImageGeneration(provider_data={"type": "computer"})])

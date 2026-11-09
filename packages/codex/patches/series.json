@@ -335,7 +335,11 @@
     {
       "path": "0068-sdk-managed-execution-lifecycle.patch",
       "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
+    },
+    {
+      "path": "0100-native-hosted-option-fidelity.patch",
+      "sha256": "c06cdc7449e3767e439c349e2253546e15e2fa1b97b7f2d048fb3e429cd632a6"
     }
   ],
-  "result_tree": "c885d57cc6e4c78292ca6f40132fee6bf1ae5b50"
+  "result_tree": "cfb99dbd30557573f2e985049bf6166be75114ab"
 }
