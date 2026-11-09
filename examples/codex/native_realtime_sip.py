@@ -20,9 +20,12 @@ from agents.realtime import RealtimeConfig, RealtimeSIP
 
 async def main(call_id: str, seconds: float, drop_message_id: str | None) -> None:
     agent = Agent(instructions="Answer the caller concisely and use tools when needed.")
+    selected_tools = ()
     async with agent.session() as session:
         config = await session.build_realtime_sip_config(
-            config=RealtimeConfig(instructions="Help the caller and speak concise answers.")
+            config=RealtimeConfig(
+                instructions="Help the caller and speak concise answers.", tools=selected_tools
+            )
         )
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -32,7 +35,7 @@ async def main(call_id: str, seconds: float, drop_message_id: str | None) -> Non
             )
             response.raise_for_status()
         async with session.realtime(
-            config=RealtimeConfig(transport=RealtimeSIP(call_id))
+            config=RealtimeConfig(transport=RealtimeSIP(call_id), tools=selected_tools)
         ) as realtime:
 
             async def consume() -> None:
@@ -50,8 +53,8 @@ async def main(call_id: str, seconds: float, drop_message_id: str | None) -> Non
                     if target["type"] != "message":
                         raise ValueError("--drop-message-id must identify a provider message")
                     # Preserve tool/MCP/approval rows and keep messages between their anchors.
-                    # The audit and Session context remain intact. On provider failure,
-                    # retrieve observed history before retrying: edits may be partial.
+                    # The audit and Session context remain intact; edits may be partial.
+                    # Retrieve and retry only while the owner is active; provider errors close it.
                     await realtime.update_history(
                         [item for item in items if item["id"] != drop_message_id]
                     )

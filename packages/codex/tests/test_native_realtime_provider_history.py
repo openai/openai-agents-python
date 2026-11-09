@@ -1021,3 +1021,296 @@ async def test_native_sip_history_preserves_unobserved_provider_prefix(
                 if not updating.done():
                     await voice.aclose()
                 await asyncio.gather(updating, return_exceptions=True)
+
+
+async def test_native_vad_item_interrupts_history_edit_before_response_without_closing_call(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeHistory, RealtimeResponse
+
+    peer = realtime_peer
+    original = {
+        "id": "vad-race-original",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Original synthetic context"}],
+    }
+    corrected = {**original, "content": [{"type": "input_text", "text": "Corrected context"}]}
+    transcript = "A new synthetic caller utterance arrived during the edit."
+    incoming = {
+        "id": "vad-race-new-user",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_audio", "transcript": transcript}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-vad-item-race-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep ordinary caller input and its audit.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, original)
+        start = len(peer.frames)
+        cursor = start
+        updating = asyncio.create_task(voice.update_history([corrected]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            assert request["item_id"] == original["id"]
+            assert peer.socket is not None
+            # Provider VAD publishes the user item before its response.created event.
+            await peer.socket.send_json(
+                {
+                    "type": "conversation.item.added",
+                    "previous_item_id": original["id"],
+                    "item": incoming,
+                }
+            )
+            with pytest.raises(RuntimeError):
+                await updating
+            assert not peer.disconnected.is_set()
+            assert not peer.socket.closed
+            # Drain the written snapshot request while retaining the ordinary new item.
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": original})
+            await peer.socket.send_json(
+                {
+                    "type": "conversation.item.done",
+                    "previous_item_id": original["id"],
+                    "item": incoming,
+                }
+            )
+            await peer.socket.send_json(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": incoming["id"],
+                    "transcript": transcript,
+                }
+            )
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "vad-race-response"}}
+            )
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "vad-race-response"}}
+            )
+            observed, audited, response_done = False, False, False
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeConversationItemObserved)
+                    and event.item_id == incoming["id"]
+                ):
+                    observed = True
+                if (
+                    isinstance(event, RealtimeHistory)
+                    and event.completed
+                    and event.item.kind == "transcript_segment"
+                    and event.item.role == "user"
+                    and event.item.text == transcript
+                ):
+                    audited = True
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "vad-race-response"
+                    and event.status == "done"
+                ):
+                    response_done = True
+                if observed and audited and response_done:
+                    break
+            assert observed and audited and response_done
+            assert any(item.role == "user" and item.text == transcript for item in voice.history)
+            assert not any(
+                frame["type"] in ("conversation.item.delete", "conversation.item.create")
+                for frame in peer.frames[start:]
+            )
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                for item in (original, incoming):
+                    request = await peer.frame(
+                        lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                    )
+                    cursor = peer.frames.index(request, cursor) + 1
+                    assert request["item_id"] == item["id"]
+                    await peer.socket.send_json(
+                        {"type": "conversation.item.retrieved", "item": item}
+                    )
+                assert await retrieving == [original, incoming]
+                assert peer.connections == 1
+                assert not peer.disconnected.is_set()
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
+
+
+async def test_native_history_read_timeout_drains_late_receipt_before_same_id_reuse(
+    realtime_peer: RealtimePeer,
+) -> None:
+    from agents.realtime import RealtimeResponse
+
+    peer = realtime_peer
+    original = {
+        "id": "timeout-item",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Original"}],
+    }
+    fresh = {**original, "content": [{"type": "input_text", "text": "Fresh retrieval"}]}
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-history-timeout-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep this voice connection active.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, original)
+        cursor = len(peer.frames)
+        retrieving = asyncio.create_task(voice.retrieve_conversation_item(original["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            cursor = peer.frames.index(request, cursor) + 1
+            with pytest.raises(RuntimeError, match="timed out"):
+                await retrieving
+            assert not peer.disconnected.is_set()
+            with pytest.raises(RuntimeError, match="pending"):
+                await voice.retrieve_conversation_item(original["id"])
+            assert len(peer.frames) == cursor
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "timeout-voice-live"}}
+            )
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "timeout-voice-live"}}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "timeout-voice-live"
+                    and event.status == "done"
+                ):
+                    break
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": original})
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "late-read-drained"}}
+            )
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "late-read-drained"}}
+            )
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "late-read-drained"
+                    and event.status == "done"
+                ):
+                    break
+            again = asyncio.create_task(voice.retrieve_conversation_item(original["id"]))
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                assert request["item_id"] == original["id"]
+                assert not again.done()
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": fresh})
+                assert await again == fresh
+                assert peer.connections == 1
+                assert not peer.disconnected.is_set()
+            finally:
+                if not again.done():
+                    await voice.aclose()
+                await asyncio.gather(again, return_exceptions=True)
+        finally:
+            if not retrieving.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving, return_exceptions=True)
+
+
+async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_order(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+
+    def message(name: str) -> dict[str, Any]:
+        return {
+            "id": name,
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": name}],
+        }
+
+    first, second, inserted, unknown = (
+        message(name) for name in ("order-a", "order-b", "order-c", "order-unknown")
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-provider-order-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Observe provider conversation order.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, first)
+        await observe_item(peer, events, second, previous_item_id=first["id"])
+        await observe_item(peer, events, inserted, previous_item_id=first["id"])
+        cursor = len(peer.frames)
+        retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+        try:
+            for item in (first, inserted, second):
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == item["id"]
+                assert peer.socket is not None
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": item})
+            assert await retrieving == [first, inserted, second]
+        finally:
+            if not retrieving.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving, return_exceptions=True)
+        await observe_item(peer, events, unknown, previous_item_id="unresolved-provider-item")
+        with pytest.raises(RuntimeError, match="ordered"):
+            await voice.retrieve_conversation_history()
+        with pytest.raises(RuntimeError, match="ordered"):
+            await voice.update_history([first, inserted, second, unknown])
+        assert len(peer.frames) == cursor
+        retrieving_one = asyncio.create_task(voice.retrieve_conversation_item(unknown["id"]))
+        try:
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            assert request["item_id"] == unknown["id"]
+            assert peer.socket is not None
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": unknown})
+            assert await retrieving_one == unknown
+            assert peer.connections == 1
+            assert not peer.disconnected.is_set()
+        finally:
+            if not retrieving_one.done():
+                await voice.aclose()
+            await asyncio.gather(retrieving_one, return_exceptions=True)

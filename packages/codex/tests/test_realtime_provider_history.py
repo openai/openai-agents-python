@@ -9,6 +9,7 @@ import pytest
 
 from _agents_codex.realtime import RealtimeConfig, RealtimeSession
 from agents import Session
+from tests._asyncio import timeout
 
 
 def owner() -> tuple[RealtimeSession, list[tuple[str, dict[str, Any]]]]:
@@ -149,3 +150,70 @@ async def test_history_rejection_drops_media_from_sdk_traceback(
         traceback = traceback.tb_next
     assert frames
     assert all(media not in repr(frame.f_locals) for frame in frames)
+
+
+@pytest.mark.parametrize("text", ["a" * (2 * 1024 * 1024 + 1), "\x00" * 350_000])
+async def test_history_input_budget_rejects_before_json_copy(
+    text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice, requests = owner()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Oversized history must be rejected before JSON serialization")
+
+    monkeypatch.setattr("_agents_codex.realtime.json.dumps", unexpected)
+    with pytest.raises(ValueError, match="8 MiB"):
+        await voice.update_history(
+            [{"id": "oversized-history", "content": [{"type": "input_text", "text": text}]}]
+        )
+    assert requests == []
+
+
+async def test_history_input_budget_counts_nested_json_tuples_before_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    voice, requests = owner()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Oversized JSON tuples must be rejected before serialization")
+
+    monkeypatch.setattr("_agents_codex.realtime.json.dumps", unexpected)
+    with pytest.raises(ValueError, match="8 MiB"):
+        await voice.update_history(
+            ({"id": "oversized-history", "content": ({"text": "a" * 2_100_000},)},)
+        )
+    assert requests == []
+
+
+async def test_cancelled_history_retains_aggregate_input_budget_until_native_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    voice, _ = owner()
+    entered, release = asyncio.Event(), asyncio.Event()
+    accepted: list[str] = []
+
+    async def call(operation: str, request: str) -> str:
+        entered.set()
+        await release.wait()
+        accepted.append(operation)
+        return "{}"
+
+    monkeypatch.setattr(voice._session._native, "call", call)
+    items = [{"id": "large-history", "content": [{"text": "a" * 1_100_000}]}]
+    async with timeout(5):
+        updating = asyncio.create_task(voice.update_history(items))
+        try:
+            await entered.wait()
+            updating.cancel()
+            await asyncio.sleep(0)
+            assert not updating.done()
+            with pytest.raises(ValueError, match="input queue"):
+                await voice.update_history(items)
+            assert accepted == []
+        finally:
+            release.set()
+            await asyncio.gather(updating, return_exceptions=True)
+        assert updating.cancelled()
+        assert accepted == ["realtime_conversation_update_history_sdk"]
+        await voice.update_history(items)
+        assert accepted == ["realtime_conversation_update_history_sdk"] * 2

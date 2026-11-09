@@ -456,7 +456,7 @@ def _hosted_mcp_schema_size(
             size += 128
             size += _hosted_mcp_string_size(key, limit - size, json_text)
             size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         for child in value:
             size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
     if size > limit:
@@ -988,18 +988,29 @@ class RealtimeSession:
         untouched. The canonical ``history`` audit and Session context remain intact.
         A provider failure after acknowledgements can leave partial edits; retrieve
         observed history before retrying. Cancellation joins native acceptance.
+        Queued history inputs share the 128-operation/8 MiB Realtime input budget.
         """
         captured: Any = None
+        item: Any = None
         try:
             self._check_live()
             self._check_adapter_operation("update history in its own Realtime session")
-            captured = json.loads(json.dumps(items))
-            await _join(asyncio.create_task(self._call("update_history", items=captured)))
+            size = 256
+            try:
+                for item in items:
+                    size += _hosted_mcp_schema_size(
+                        item, _INPUT_QUEUE_BYTES_LIMIT - size, json_text=True
+                    )
+            except RuntimeError:
+                raise ValueError("Realtime history exceeds its 8 MiB input limit") from None
+            with self._input_admission(size):
+                captured = json.loads(json.dumps(items))
+                await _join(asyncio.create_task(self._call("update_history", items=captured)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
         finally:
-            del items, captured
+            del items, captured, item
 
     async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:
         """Retrieve one provider item, including media absent from ``history``.

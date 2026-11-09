@@ -298,7 +298,7 @@ index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52ee
      let event = connection
          .next_event()
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aae984d095 100644
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..16e7659751ba09334cde05029a1467eeefde1d8d 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,5 +1,6 @@
@@ -502,7 +502,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aa
                              if item["type"].as_str() == Some("function_call_output") {
                                  if let Some(id) = item["call_id"].as_str() {
                                      sdk.seen
-@@ -4197,7 +4320,11 @@ async fn run_realtime_input_task(
+@@ -4197,12 +4320,23 @@ async fn run_realtime_input_task(
              }
              _ = async {
                  let deadline = handoff_state.sdk.as_ref()
@@ -515,7 +515,20 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aa
                  match deadline {
                      Some(deadline) => tokio::time::sleep_until(deadline).await,
                      None => std::future::pending::<()>().await,
-@@ -4812,8 +4939,63 @@ async fn handle_sdk_realtime_command(
+                 }
+-            } => Err(RealtimeInputTaskExit::Terminal),
++            } => {
++                let read_timed_out = handoff_state.sdk.as_ref().is_some_and(|sdk| {
++                    let deletion_expired = sdk.item_deletion.lock().unwrap().deadline()
++                        .is_some_and(|deadline| deadline <= tokio::time::Instant::now());
++                    !deletion_expired && sdk.history.lock().unwrap().expire_read()
++                });
++                if read_timed_out { Ok(()) } else { Err(RealtimeInputTaskExit::Terminal) }
++            },
+             command = async {
+                 match &handoff_state.sdk {
+                     Some(sdk) => sdk.commands_rx.recv().await,
+@@ -4812,8 +4946,63 @@ async fn handle_sdk_realtime_command(
      if !sdk.active.load(Ordering::Acquire) {
          return Ok(());
      }
@@ -581,7 +594,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aa
              if sdk
                  .item_deletion
                  .lock()
-@@ -5399,6 +5581,70 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5399,6 +5588,70 @@ async fn handle_realtime_server_event_with_configuration(
      response_create_queue: &mut RealtimeResponseCreateQueue,
      configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
  ) -> anyhow::Result<()> {
@@ -633,7 +646,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aa
 +            }
 +            RealtimeEvent::Error(_) => {
 +                sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
-+                    "Provider rejected the history operation".into(),
++                    "Provider error terminated the voice connection".into(),
 +                ));
 +                None
 +            }
@@ -652,7 +665,7 @@ index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..6d25c80caf8b198f90db228ee96fc1aa
      if let RealtimeEvent::ConversationItemDeleted { item_id } = &event {
          if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
              sdk.active.load(Ordering::Acquire)
-@@ -5812,7 +6058,8 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5812,7 +6065,8 @@ async fn handle_realtime_server_event_with_configuration(
          | RealtimeEvent::OutputTranscriptDone(_)
          | RealtimeEvent::FunctionCallFinished { .. }
          | RealtimeEvent::FunctionBatchFinished { .. }
@@ -792,10 +805,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..9beceb7ea80436ed9217cbe99ed20b3e
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f090c8bc1d
+index 0000000000000000000000000000000000000000..0107632d12e2552e2c2c7d5b979cb432e731649d
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,1056 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -1125,7 +1138,24 @@ index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f0
 +            .is_some_and(|pending| matches!(pending.request, Some(Request::Update { .. })))
 +    }
 +    pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
-+        self.pending.as_ref().map(|p| p.deadline)
++        self.pending.as_ref().and_then(|pending| {
++            if pending.request.is_none() && matches!(pending.waiting, Some(Action::Retrieve(_))) {
++                None
++            } else {
++                Some(pending.deadline)
++            }
++        })
++    }
++    pub(super) fn expire_read(&mut self) -> bool {
++        if self.pending.as_ref().is_some_and(|pending| {
++            pending.deadline <= tokio::time::Instant::now()
++                && matches!(pending.waiting, Some(Action::Retrieve(_)))
++        }) {
++            self.interrupt(invalid("Provider history retrieval timed out"));
++            true
++        } else {
++            false
++        }
 +    }
 +    pub(super) fn observe_added(
 +        &mut self,
@@ -1141,18 +1171,54 @@ index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f0
 +                self.boundary = Some(previous.unwrap_or("root").to_owned());
 +            }
 +        }
-+        if self.editing() && !self.order.contains(&id) && !self.pending.as_ref().is_some_and(|pending| {
-+            matches!(&pending.waiting,Some(Action::Create {item,..}) if item["id"].as_str()==Some(id.as_str()))
-+        }) {
-+            return Err(invalid("Provider conversation changed during history replacement"));
++        self.observe_id(&id)?;
++        if let Some(previous) = previous {
++            let Some(old_index) = self.order.iter().position(|known| known == &id) else {
++                return Ok(());
++            };
++            self.order.remove(old_index);
++            let index = if previous == Some("root") || previous.is_none() {
++                (self.boundary.as_deref() == Some("root")).then_some(0)
++            } else if previous == self.boundary.as_deref() {
++                Some(0)
++            } else {
++                self.order
++                    .iter()
++                    .position(|known| Some(known.as_str()) == previous)
++                    .map(|index| index + 1)
++            };
++            if let Some(index) = index {
++                if old_index != index && self.editing() && !self.expected_create(&id) {
++                    self.interrupt(invalid(
++                        "Provider conversation changed during history replacement",
++                    ));
++                }
++                self.order.insert(index, id);
++            } else {
++                self.order.insert(old_index, id);
++                self.incomplete = true;
++                if self.editing() {
++                    self.interrupt(invalid("Provider conversation position is unknown"));
++                }
++            }
 +        }
-+        self.observe_id(&id)
++        Ok(())
++    }
++    fn expected_create(&self, id: &str) -> bool {
++        self.pending.as_ref().is_some_and(|pending| {
++            matches!(&pending.waiting, Some(Action::Create { item, .. }) if item["id"].as_str() == Some(id))
++        })
 +    }
 +    pub(super) fn observe_id(&mut self, id: &str) -> CodexResult<()> {
 +        if !valid_id(id) {
 +            return Err(invalid("Invalid provider item ID"));
 +        }
 +        let id = id.to_owned();
++        if self.editing() && !self.order.contains(&id) && !self.expected_create(&id) {
++            self.interrupt(invalid(
++                "Provider conversation changed during history replacement",
++            ));
++        }
 +        if !self.order.contains(&id) {
 +            if self.order.len() == LIMIT {
 +                self.incomplete = true;
@@ -1174,7 +1240,7 @@ index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f0
 +            finish_request(
 +                request,
 +                Err(invalid(
-+                    "Provider history exceeds the complete current-generation identity window",
++                    "Provider history does not have a complete ordered current-generation identity view",
 +                )),
 +            );
 +            return Ok(None);
@@ -1429,7 +1495,7 @@ index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f0
 +        let new = message("new", "correct");
 +        let mut state = State::default();
 +        state.observe_added(&first, Some(None)).unwrap();
-+        state.observe_added(&old, Some(None)).unwrap();
++        state.observe_added(&old, Some(Some("first"))).unwrap();
 +        let (reply, mut receipt) = tokio::sync::oneshot::channel();
 +        assert!(
 +            matches!(state.start(Request::Update{items:vec![first.clone(),new.clone()],reply}).unwrap(),Some(Action::Retrieve(id)) if id=="first")
@@ -1700,10 +1766,103 @@ index 0000000000000000000000000000000000000000..a505a4434e6695d3a98d83e20c35e1f0
 +        assert!(receipt.await.unwrap().is_err());
 +        assert!(state.busy());
 +        assert!(!state.editing());
++        assert!(state.deadline().is_some());
++        assert!(!state.expire_read());
 +        state.observe_added(&new, Some(None)).unwrap();
 +        state.created(&new).unwrap();
 +        assert!(!state.busy());
 +        assert_eq!(state.order, vec!["new", "old"]);
++    }
++    #[tokio::test]
++    async fn new_provider_item_interrupts_edit_and_drains_retrieval() {
++        for added_event in [false, true] {
++            let old = message("old", "old");
++            let mut state = State::default();
++            state.observe_added(&old, Some(None)).unwrap();
++            let (reply, receipt) = tokio::sync::oneshot::channel();
++            assert!(matches!(
++                state.start(Request::Update {
++                    items: vec![message("old", "corrected")], reply,
++                }).unwrap(), Some(Action::Retrieve(id)) if id == "old"
++            ));
++            let arrived = message("arrived", "new speech");
++            if added_event {
++                state.observe_added(&arrived, Some(Some("old"))).unwrap();
++            } else {
++                state.observe_id("arrived").unwrap();
++            }
++            assert!(receipt.await.unwrap().is_err());
++            assert!(state.busy());
++            assert!(!state.editing());
++            assert!(state.retrieved(old).unwrap().is_none());
++            assert!(!state.busy());
++            assert_eq!(state.order, vec!["old", "arrived"]);
++        }
++    }
++    #[tokio::test]
++    async fn retrieval_timeout_retains_receipt_without_blocking_voice_deadline() {
++        for update in [false, true] {
++            let old = message("old", "old");
++            let mut state = State::default();
++            state.observe_added(&old, Some(None)).unwrap();
++            let (reply, receipt) = tokio::sync::oneshot::channel();
++            let task = if update {
++                state
++                    .start(Request::Update {
++                        items: vec![old.clone()],
++                        reply,
++                    })
++                    .unwrap()
++            } else {
++                // Use the same reply shape for a read-only history list.
++                drop(reply);
++                let (list_reply, list_receipt) = tokio::sync::oneshot::channel();
++                let task = state.start(Request::List { reply: list_reply }).unwrap();
++                state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
++                assert!(state.expire_read());
++                assert!(list_receipt.await.unwrap().is_err());
++                task
++            };
++            assert!(matches!(task, Some(Action::Retrieve(id)) if id == "old"));
++            if update {
++                state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
++                assert!(state.expire_read());
++                assert!(receipt.await.unwrap().is_err());
++            }
++            assert!(state.busy());
++            assert!(state.deadline().is_none());
++            assert!(state.retrieved(old).unwrap().is_none());
++            assert!(!state.busy());
++        }
++    }
++    #[test]
++    fn explicit_predecessors_order_observed_items_and_reposition_prior_ids() {
++        let mut state = State::default();
++        state.observe_added(&message("a", "a"), Some(None)).unwrap();
++        state
++            .observe_added(&message("b", "b"), Some(Some("a")))
++            .unwrap();
++        state.observe_id("c").unwrap();
++        state
++            .observe_added(&message("c", "c"), Some(Some("a")))
++            .unwrap();
++        assert_eq!(state.order, vec!["a", "c", "b"]);
++        assert!(!state.incomplete);
++    }
++    #[test]
++    fn unresolved_predecessor_or_hidden_prefix_gap_blocks_ordered_operations() {
++        for previous in [None, Some("different-hidden")] {
++            let mut state = State::default();
++            state.set_boundary(false);
++            state
++                .observe_added(&message("first", "first"), Some(Some("hidden")))
++                .unwrap();
++            state
++                .observe_added(&message("new", "new"), Some(previous))
++                .unwrap();
++            assert!(state.incomplete);
++            assert_eq!(state.order.len(), 2);
++        }
 +    }
 +}
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs

@@ -432,3 +432,72 @@ async def test_initial_settings_failure_releases_serializer_credentials(phase: s
     assert "serialize_realtime_settings" in {frame.f_code.co_name for frame in frames}
     for frame in frames:
         assert all(secret not in repr(frame.f_locals) for secret in (authorization, header))
+
+
+@pytest.mark.parametrize("phase", ["check-open", "mcp", "native"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_public_sip_builder_releases_config_from_exception_frames(
+    phase: str, cancel: bool
+) -> None:
+    authorization = "synthetic-sip-wrapper-authorization"
+    header = "synthetic-sip-wrapper-header"
+    failure = asyncio.CancelledError("cancelled") if cancel else RuntimeError("rejected")
+    config = RealtimeConfig(
+        api_key="synthetic-sip-wrapper-voice-key",
+        settings={
+            "hosted_mcp_tools": [
+                {
+                    "server_label": "fixture",
+                    "server_url": "https://example.invalid",
+                    "authorization": authorization,
+                    "headers": {"X-Private": header},
+                }
+            ]
+        },
+    )
+
+    def check_open() -> None:
+        if phase == "check-open":
+            raise failure
+
+    async def prepare_mcp() -> None:
+        if phase == "mcp":
+            raise failure
+
+    async def tools(selection: Any) -> tuple[None, None]:
+        return None, None
+
+    async def call(operation: str, request: str) -> str:
+        assert operation == "realtime_conversation_config_sdk"
+        assert authorization in request and header in request
+        raise failure
+
+    session = cast(
+        Session[Any, Any],
+        SimpleNamespace(
+            _check_open=check_open,
+            _check_callback_operation=lambda _: None,
+            _prepare_realtime_mcp=prepare_mcp,
+            _realtime_function_tools=tools,
+            _native=SimpleNamespace(call=call),
+        ),
+    )
+    with pytest.raises(type(failure)) as caught:
+        await Session.build_realtime_sip_config(session, config=config)
+    assert caught.value is failure
+    wrapper_seen = False
+    traceback = caught.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if "/_agents_codex/" in frame.f_code.co_filename.replace("\\", "/"):
+            # RealtimeConfig has a redacted repr, so check the object reference directly.
+            assert all(value is not config for value in frame.f_locals.values())
+            assert authorization not in repr(frame.f_locals)
+            assert header not in repr(frame.f_locals)
+            if frame.f_code is Session.build_realtime_sip_config.__code__:
+                wrapper_seen = True
+                assert "config" not in frame.f_locals
+        traceback = traceback.tb_next
+    assert wrapper_seen
+    assert config.settings is not None
+    assert config.settings["hosted_mcp_tools"][0]["authorization"] == authorization
