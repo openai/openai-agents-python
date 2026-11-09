@@ -1,7 +1,8 @@
-"""Bounded, passive observations of a native Session.
+"""Passive observations of a native Session.
 
-Sequences belong to one Session. Observations are an in-memory suffix, not a
-durable log. Use Turn.get_result and canonical history for authoritative results.
+Sequences belong to one Session. Observations are retained in memory (a bounded
+suffix by default), not a durable log. Use Turn.get_result and canonical history
+for authoritative results.
 """
 
 from __future__ import annotations
@@ -336,9 +337,12 @@ _ObservationT = TypeVar("_ObservationT", bound=Observation)
 
 
 class _ObservationBuffer:
-    """One bounded suffix; publishing never awaits or invokes application code."""
+    """One retained event log; publishing never awaits or invokes application code."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self, session_id: str, *, retention: Literal["bounded", "all"] = "bounded"
+    ) -> None:
+        self.retention = retention
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
         self.records: deque[tuple[Observation, int, int]] = deque()
@@ -371,6 +375,20 @@ class _ObservationBuffer:
         if self.closed:
             return
         self.sequence += 1
+        if self.retention == "all":
+            self.records.append(
+                (
+                    EventGap(
+                        session_id=self.session_id,
+                        sequence=self.sequence,
+                        first_sequence=self.sequence,
+                    ),
+                    0,
+                    0,
+                )
+            )
+            self.notify()
+            return
         # Drop the prefix so the retained observations form a contiguous suffix.
         self.records.clear()
         self.characters = 0
@@ -402,14 +420,14 @@ class _ObservationBuffer:
                     key: value for key, value in metadata.items() if key != "partial_image_b64"
                 }
             size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
-        if size > 65_536 or image_size > 16 * 1024 * 1024:
+        if self.retention == "bounded" and (size > 65_536 or image_size > 16 * 1024 * 1024):
             self._mark_gap()
         else:
             self.sequence += 1
             self.records.append((event, size, image_size))
             self.characters += size
             self.image_characters += image_size
-            while (
+            while self.retention == "bounded" and (
                 len(self.records) > 256
                 or self.characters > 65_536
                 or self.image_characters > 32 * 1024 * 1024
@@ -540,7 +558,7 @@ class EventStream(AsyncIterator[Observation]):
                                     "native_status": item.get("native_status"),
                                 }
                             event = replace(event, item=item)
-                        if self._turn is None:
+                        if self._turn is None or isinstance(event, EventGap):
                             return event
                         owners = {step.submission_id for step in self._turn._steps()}
                         if getattr(event, "submission_id", None) in owners:

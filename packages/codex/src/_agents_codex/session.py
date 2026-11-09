@@ -92,6 +92,7 @@ from ._trace_context import (
 )
 from .agent import (
     _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
+    _OBSERVATION_RETENTION_UNSET as _OBSERVATION_RETENTION_UNSET,
     Agent as Agent,
     CodexAccount as CodexAccount,
     ContextT as ContextT,
@@ -1062,6 +1063,7 @@ class _RestoreDeclaration:
     api_key: str | None
     output: _PreparedOutput
     max_function_concurrency: int | None
+    observation_retention: Literal["bounded", "all"]
     state: SessionState = field(init=False)
     owner: asyncio.Task[Any] | None = None
 
@@ -2309,12 +2311,16 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
     ) -> Session[ContextT, OutputT]:
+        retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
+        if retention_omitted:
+            observation_retention = "bounded"
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
             max_function_concurrency = None
@@ -2342,6 +2348,8 @@ class Session(Generic[ContextT, OutputT]):
             agent = selected.declaration
             if function_concurrency_omitted:
                 max_function_concurrency = selected.max_function_concurrency
+            if retention_omitted:
+                observation_retention = selected.observation_retention
             if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
                 raise ValueError(
                     "DeferredTools.start restore requires its captured opening tools; "
@@ -2367,6 +2375,8 @@ class Session(Generic[ContextT, OutputT]):
                 before_compact=agent.before_compact,
                 before_complete=agent.before_complete,
             )
+        if observation_retention not in ("bounded", "all"):
+            raise ValueError('observation_retention must be "bounded" or "all"')
         profiles = (
             _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
         )
@@ -3111,6 +3121,7 @@ class Session(Generic[ContextT, OutputT]):
                     instructions,
                     _start_readers=False,
                     max_function_concurrency=max_function_concurrency,
+                    observation_retention=observation_retention,
                 )
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
@@ -3397,6 +3408,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         _start_readers: bool = True,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> None:
         self._trace_context: str | None = None
         self._provider_lease: Any = None
@@ -3499,7 +3511,7 @@ class Session(Generic[ContextT, OutputT]):
         self._interaction_error: BaseException | None = None
         self._sync_cleanup_owner = _sync_run.get()
         self._sync_cleanup_deferred = False
-        self._observations = _ObservationBuffer(self.id)
+        self._observations = _ObservationBuffer(self.id, retention=observation_retention)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
@@ -4024,8 +4036,10 @@ class Session(Generic[ContextT, OutputT]):
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
-        suffix. Gaps report unavailable observations. Use items() to recover
-        recorded completions, including completions after a turn settles.
+        history. The default bounded policy retains a suffix; "all" retains every
+        emitted observation for this Session lifetime. Gaps report unavailable
+        observations. Use items() to recover recorded completions, including
+        completions after a turn settles.
         Use interactions() for live requests that need an answer.
         Set include_execution_details=True for a trusted reader that needs
         command, patch, MCP, or provider-hosted tool payloads. Hosted completions

@@ -10,7 +10,7 @@ import weakref
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -514,6 +514,34 @@ async def test_slow_session_readers_report_evicted_observations(
         assert all(a.sequence < b.sequence for a, b in zip(retained, retained[1:], strict=False))
 
 
+@pytest.mark.parametrize("chunk,count", [("x", 350), ("y" * 70_000, 1)])
+async def test_all_retention_preserves_late_and_slow_native_readers(
+    responses: ResponsesFixture, chunk: str, count: int
+) -> None:
+    responses.respond(*text_response("retained-message", *[chunk for _ in range(count)]))
+    async with (
+        timeout(30),
+        Agent(instructions="Answer briefly.", provider=provider(responses)).session(
+            observation_retention="all"
+        ) as session,
+    ):
+        slow = session.events()
+        cancelled = session.events()
+        await cancelled.aclose()
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == chunk * count
+        await session._aclose()
+        late_events = await collect(session.events())
+        slow_events = await collect(slow)
+        assert late_events == slow_events
+        assert not any(isinstance(event, EventGap) for event in late_events)
+        assert (
+            "".join(event.delta for event in late_events if isinstance(event, OutputTextDelta))
+            == chunk * count
+        )
+        assert [event.sequence for event in late_events] == list(range(1, len(late_events) + 1))
+
+
 @pytest.mark.parametrize(
     ("chunk", "count", "successor"),
     [("x", 350, False), ("y" * 1000, 100, True)],
@@ -911,3 +939,51 @@ async def test_native_reader_exit_ends_observation_after_submission_cleanup(
             assert events[-2].status == "failed"
         with pytest.raises(RuntimeError, match="cannot continue"):
             await session.submit("must not run")
+
+
+async def test_invalid_observation_retention_rejected_before_opening() -> None:
+    agent = Agent(instructions="Answer.")
+    with pytest.raises(ValueError, match="observation_retention"):
+        async with agent.session(observation_retention="invalid"):  # type: ignore[arg-type]
+            pytest.fail("invalid retention opened a Session")
+
+
+async def test_all_retention_preserves_observations_before_source_gap() -> None:
+    from _agents_codex.observation import _ObservationBuffer
+
+    buffer = _ObservationBuffer("session", retention="all")
+    buffer.append(TurnStarted(session_id="session", submission_id="submission", turn_id="turn"))
+    buffer._mark_gap()
+    buffer.finish("closed")
+    events = await collect(EventStream(buffer, after=0))
+    assert [event.type for event in events] == ["turn_started", "gap", "session_ended"]
+    assert isinstance(events[1], EventGap)
+    assert events[1].first_sequence == events[1].sequence == 2
+
+
+@pytest.mark.parametrize("child_id", [None, "child"])
+async def test_all_retention_exposes_source_gaps_to_scoped_turn_readers(child_id) -> None:
+    from types import SimpleNamespace
+
+    from _agents_codex.observation import _ObservationBuffer
+
+    buffer = _ObservationBuffer("session", retention="all")
+    buffer._mark_gap()
+    buffer.finish("closed")
+    turn = SimpleNamespace(child_id=child_id, _steps=lambda: [])
+    events = await collect(EventStream(buffer, after=0, _turn=cast(Any, turn)))
+    assert len(events) == 1
+    assert isinstance(events[0], EventGap)
+    assert events[0].first_sequence == events[0].sequence == 1
+
+
+async def test_native_turn_replays_retained_source_gap(responses) -> None:
+    responses.respond(*text_response("gap-output", "done"))
+    async with Agent(instructions="Answer.", provider=provider(responses)).session(
+        observation_retention="all"
+    ) as session:
+        turn = await session.submit("begin")
+        assert (await turn.get_result()).final_output == "done"
+        session._observations._mark_gap()
+        events = [event async for event in turn.events()]
+        assert any(isinstance(event, EventGap) for event in events)

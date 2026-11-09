@@ -96,6 +96,7 @@ TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
 
 _MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()
+_OBSERVATION_RETENTION_UNSET: Any = object()
 
 
 class ModelSettings(TypedDict, total=False, closed=True):
@@ -888,6 +889,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -911,6 +913,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -934,6 +937,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -957,6 +961,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -972,6 +977,11 @@ class Agent(Generic[ContextT, OutputT]):
         becomes usable after native publication and its durability fence. An
         in-memory store adds no crash guarantee. Failed startup can leave accepted
         history in persistent storage; recover it instead of resubmitting seeds.
+
+        observation_retention="all" keeps every emitted observation in memory for
+        this Session lifetime, including for late readers. Memory grows with
+        emitted payloads until Session references are released. The default "bounded"
+        retains a limited suffix and reports gaps. This policy is not checkpointed.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1077,6 +1087,7 @@ class Agent(Generic[ContextT, OutputT]):
                 trace_options=trace_options,
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
+                observation_retention=observation_retention,
             ) as session:
                 yield session
         finally:
@@ -1103,6 +1114,7 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         _atomic_first_turn: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
@@ -1133,6 +1145,7 @@ class Agent(Generic[ContextT, OutputT]):
                 instruction_files=instruction_files,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
+                observation_retention=observation_retention,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
                 **cast(
@@ -1190,6 +1203,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1214,6 +1228,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1238,6 +1253,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -1266,6 +1282,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -1434,6 +1451,7 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
+            options["observation_retention"] = observation_retention
             if max_function_concurrency is not None:
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
@@ -1568,6 +1586,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1592,6 +1611,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1616,6 +1636,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1644,6 +1665,7 @@ class Agent(Generic[ContextT, OutputT]):
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
+        observation_retention: Literal["bounded", "all"] = "bounded",
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1682,6 +1704,7 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
+                options["observation_retention"] = observation_retention
                 if max_function_concurrency is not None:
                     options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:
