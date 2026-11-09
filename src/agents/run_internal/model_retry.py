@@ -65,6 +65,14 @@ _LEGACY_NETWORK_ERROR_TYPE_NAMES = (
 )
 
 
+class _StreamAttemptSkipped(Exception):
+    """The runner declined to start the model stream before provider retry handling applies."""
+
+    def __init__(self, reason: Exception) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _is_conversation_locked_error(error: Exception) -> bool:
     return (
         isinstance(error, BadRequestError) and getattr(error, "code", "") == "conversation_locked"
@@ -815,6 +823,8 @@ async def stream_response_with_retry(
                 if stream_owner is not None and not stream_owner.done():
                     await _cancel_and_drain_model_attempt_task(stream_owner)
             return
+        except _StreamAttemptSkipped as skipped:
+            raise skipped.reason from None
         except BaseException as error:
             if isinstance(error, ModelTimeoutError):
                 # The timed owner has already been cancelled and drained. Do not retain its

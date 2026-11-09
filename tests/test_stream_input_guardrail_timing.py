@@ -13,12 +13,14 @@ from agents import (
     GuardrailFunctionOutput,
     InputGuardrail,
     MaxTurnsExceeded,
+    ModelSettings,
     RunContextWrapper,
     Runner,
 )
 from agents.exceptions import InputGuardrailTripwireTriggered
 from agents.items import TResponseInputItem
-from agents.testing import ScriptedModel
+from agents.retry import ModelRetrySettings, RetryDecision, RetryPolicyContext
+from agents.testing import ModelCall, ModelStep, ScriptedModel
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.testing_processor import fetch_events, fetch_ordered_spans
 
@@ -179,6 +181,101 @@ async def test_run_streamed_input_guardrail_tripwire_raises(guardrail_delay: flo
     assert (
         exc.run_data.input_guardrail_results[0].guardrail.get_name() == "tripping_input_guardrail"
     )
+
+
+@pytest.mark.asyncio
+async def test_recorded_tripwire_during_instructions_skips_streamed_model_request():
+    async def instructions(ctx, agent):
+        assert result._input_guardrails_task is not None
+        await result._input_guardrails_task
+        return "Respond briefly."
+
+    model = ScriptedModel([[get_text_message("unexpected")]])
+    agent = Agent(
+        name="test",
+        instructions=instructions,
+        model=model,
+        model_settings=ModelSettings(timeout=5),
+        input_guardrails=[make_input_guardrail(0, trip=True)],
+    )
+    result = Runner.run_streamed(agent, "Hello")
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        async for _ in result.stream_events():
+            pass
+    assert len(model.calls) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trip", [True, False], ids=["rejected", "allowed"])
+async def test_stream_retry_observes_parallel_guardrail_verdict(trip: bool):
+    release_guardrail = asyncio.Event()
+    retry_errors = []
+
+    async def guardrail(ctx, agent, input):
+        await asyncio.wait_for(release_guardrail.wait(), timeout=5)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=trip)
+
+    async def retry_policy(context: RetryPolicyContext) -> RetryDecision:
+        retry_errors.append(context.error)
+        release_guardrail.set()
+        assert result._input_guardrails_task is not None
+        await result._input_guardrails_task
+        return RetryDecision(retry=True, delay=0)
+
+    timeout = TimeoutError("first attempt")
+    model = ScriptedModel([ModelStep.raise_error(timeout), [get_text_message("ok")]])
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail)],
+        model_settings=ModelSettings(retry=ModelRetrySettings(max_retries=2, policy=retry_policy)),
+    )
+    result = Runner.run_streamed(agent, "Hello")
+    if trip:
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _ in result.stream_events():
+                pass
+        assert len(model.calls) == 1
+    else:
+        async for _ in result.stream_events():
+            pass
+        assert result.final_output == "ok"
+        assert len(model.calls) == 2
+    assert retry_errors == [timeout]
+
+
+@pytest.mark.asyncio
+async def test_stream_retry_policy_receives_nested_runs_tripwire():
+    inner_guardrail = make_input_guardrail(0, trip=True)
+    inner_guardrail.run_in_parallel = False
+    inner = Agent(
+        name="inner",
+        model=ScriptedModel(),
+        input_guardrails=[inner_guardrail],
+    )
+
+    async def call_inner_run(call: ModelCall) -> ModelStep:
+        await Runner.run(inner, "Hello")
+        pytest.fail("Expected the inner guardrail to reject the input.")
+
+    def retry_inner_tripwire(context: RetryPolicyContext) -> RetryDecision:
+        return RetryDecision(
+            retry=isinstance(context.error, InputGuardrailTripwireTriggered), delay=0
+        )
+
+    model = ScriptedModel([ModelStep.respond(call_inner_run), [get_text_message("ok")]])
+    agent = Agent(
+        name="outer",
+        model=model,
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(max_retries=1, policy=retry_inner_tripwire)
+        ),
+    )
+    result = Runner.run_streamed(agent, "Hello")
+    async for _ in result.stream_events():
+        pass
+    assert result.final_output == "ok"
+    assert len(model.calls) == 2
 
 
 @pytest.mark.asyncio
