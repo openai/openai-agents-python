@@ -594,3 +594,37 @@ async def test_invalid_batch_serialization_does_not_retain_credential_headers():
         else:
             pytest.fail("invalid batch was accepted")
         assert not received
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"endpoint": "https://user:SYNTHETIC_PRIVATE_CONFIG@[invalid"},
+        {"endpoint": "https://user:SYNTHETIC_PRIVATE_CONFIG@localhost:bad-port"},
+        {"organization": "SYNTHETIC_PRIVATE_CONFIG", "project": "bad\nproject"},
+        {"project": "SYNTHETIC_PRIVATE_CONFIG", "api_key": "bad\nkey"},
+        {"endpoint": "http://localhost/?private=SYNTHETIC_PRIVATE_CONFIG", "api_key": "bad\nkey"},
+    ],
+)
+def test_constructor_validation_releases_library_owned_private_configuration(options):
+    secret = "SYNTHETIC_PRIVATE_CONFIG"
+    try:
+        telemetry.OpenAITraceExporter(**{"api_key": "synthetic-key", **options})
+    except ValueError as error:
+        assert_sanitized_failure(error, secret)
+        assert str(error) in {
+            "Invalid trace export endpoint",
+            "Trace export headers must be nonempty printable ASCII strings",
+        }
+        traceback = error.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if frame.f_globals.get("__name__") == "_agents_codex._trace_export":
+                # A failed constructor's partial instance belongs to the library.
+                # Caller-frame arguments remain caller-owned and are excluded.
+                partial = frame.f_locals.get("self")
+                if partial is not None:
+                    assert secret not in repr(vars(partial))
+            traceback = traceback.tb_next
+    else:
+        pytest.fail("invalid constructor accepted")

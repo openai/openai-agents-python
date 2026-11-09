@@ -88,11 +88,14 @@ class OpenAITraceExporter:
     ) -> None:
         value = None
         address = None
+        headers = None
         try:
             try:
                 address = urlsplit(endpoint)
                 _ = address.port
             except (TypeError, ValueError):
+                address = None
+            if address is None:
                 raise ValueError("Invalid trace export endpoint") from None
             if (
                 address.scheme not in ("http", "https")
@@ -128,6 +131,7 @@ class OpenAITraceExporter:
                 if value is not None:
                     self._validate_header(value)
                     headers[name] = value
+            self._validate_header(api_key)
             self._address = address
             self._timeout = timeout_ms / 1000
             self._max_retries = max_retries
@@ -135,7 +139,7 @@ class OpenAITraceExporter:
             self.set_api_key(api_key)
             self._traces: OrderedDict[str, _TraceState] = OrderedDict()
         finally:
-            del api_key, endpoint, organization, project, value, address
+            del api_key, endpoint, organization, project, value, address, headers
 
     @staticmethod
     def _validate_header(value: str) -> None:
