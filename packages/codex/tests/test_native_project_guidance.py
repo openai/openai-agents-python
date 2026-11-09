@@ -59,3 +59,27 @@ async def test_project_guidance_reads_workspace_image_without_command_grants(
     assert not any(
         tool.get("name") == "exec_command" for tool in responses.requests[0].get("tools", [])
     )
+
+
+@pytest.mark.parametrize("project_guidance", [False, True])
+async def test_native_agents_preserves_root_project_guidance(
+    tmp_path: Path, responses, monkeypatch: pytest.MonkeyPatch, project_guidance: bool
+) -> None:
+    from agents import NativeAgents
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_executor_tools import declaration
+
+    async with ExecutorPeer(tmp_path / "remote").serve() as executor:
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-certificates"))
+        responses.replies.append([assistant_output("done")])
+        async with Agent(
+            instructions="Answer.",
+            model="gpt-5.5",
+            tools=[NativeAgents()],
+            provider=provider(responses),
+        ).session(environment=declaration(executor), project_guidance=project_guidance) as session:
+            assert (await (await session.submit("Answer.")).get_result()).final_output == "done"
+        names = {tool.get("name") for tool in responses.requests[0]["tools"]}
+        assert ("view_image" in names) is project_guidance
+        assert "exec_command" in names

@@ -111,6 +111,12 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     supports_default_options: bool = False
     _dependencies: Dependencies | None = None
 
+    def resolve_trusted_manifest_for_resume(
+        self, manifest: Manifest, options: ClientOptionsT
+    ) -> Manifest:
+        """Resolve provider defaults before validating current live or resumed authority."""
+        return manifest
+
     def _resolve_dependencies(self) -> Dependencies | None:
         if self._dependencies is None:
             return None

@@ -143,7 +143,20 @@ def sandbox_environment(
     Mappings are not accepted as manifests. Validate untrusted data before
     constructing a Manifest; construction alone does not authorize its contents.
     """
+    try:
+        captured_options = deepcopy(
+            cast(_OptionsT, BaseSandboxClientOptions.parse(dict(options)))
+            if isinstance(options, Mapping)
+            else options
+        )
+    except (ValueError, TypeError) as error:
+        raise _configuration_error(error, "options") from None
+
     captured_manifest = _manifest(manifest)
+    if session is not None or authorized_resume_state is not None:
+        captured_manifest = _manifest(
+            client.resolve_trusted_manifest_for_resume(captured_manifest, captured_options)
+        )
     if concurrency_limits is not None:
         concurrency_limits = deepcopy(concurrency_limits)
         concurrency_limits.validate()
@@ -181,14 +194,6 @@ def sandbox_environment(
             captured_manifest, provider_backend_id=client.backend_id
         )
         authorized_resume_state.manifest = _manifest(captured_manifest)
-    try:
-        captured_options = deepcopy(
-            cast(_OptionsT, BaseSandboxClientOptions.parse(dict(options)))
-            if isinstance(options, Mapping)
-            else options
-        )
-    except (ValueError, TypeError) as error:
-        raise _configuration_error(error, "options") from None
 
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:

@@ -2846,7 +2846,7 @@ class Session(Generic[ContextT, OutputT]):
                                     else {}
                                 ),
                             },
-                            "features.view_image": False,
+                            "features.view_image": project_guidance,
                             "features.image_generation": False,
                             "features.current_time_reminder": False,
                             "features.sleep_tool": False,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -369,3 +370,50 @@ async def test_cancelled_admission_releases_its_simultaneously_acquired_lock(cau
             await admission
     assert not entered
     assert not lock.locked()
+
+
+async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(tmp_path: Path) -> None:
+    pid_path = tmp_path / "pid"
+    path = tmp_path / "blocked-stdin-codex"
+    path.write_text(
+        f"#!{sys.executable}\nimport os, time\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    path.chmod(0o700)
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        turn_options=TurnOptions(signal=asyncio.Event()),
+    )
+    binding = declaration._bind(None, None, declaration)
+    previous_tasks = asyncio.all_tasks()
+    task = asyncio.create_task(binding.callback(None, prompt="x" * (512 * 1024), thread_id=None))
+    pid = None
+    try:
+
+        async def started() -> None:
+            while not pid_path.exists() or not pid_path.read_text().strip():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(started(), 5)
+        pid = int(pid_path.read_text())
+        # The child never reads stdin, so this prompt cannot pass the pipe's drain.
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert not (asyncio.all_tasks() - previous_tasks)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+        # Also contain the failed pre-fix regression's orphaned stderr reader.
+        remaining = asyncio.all_tasks() - previous_tasks
+        if remaining:
+            await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), 5)

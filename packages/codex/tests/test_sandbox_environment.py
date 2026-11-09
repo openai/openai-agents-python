@@ -915,3 +915,50 @@ async def test_live_mount_authority_must_match_before_gateway_or_resume(mode, mi
         ):
             pytest.fail("Mismatched authority opened the gateway")
     assert events == []
+
+
+async def test_borrowed_vercel_uses_current_provider_manifest_defaults() -> None:
+    from agents.classic.extensions.sandbox.vercel.sandbox import (
+        VercelSandboxClient,
+        VercelSandboxClientOptions,
+        VercelSandboxSessionState,
+        _resolve_manifest_root,
+    )
+    from agents.classic.sandbox.session.sandbox_client import BaseSandboxClient
+
+    client = VercelSandboxClient()
+    inner = scripted_sandbox_session()
+    inner.state = VercelSandboxSessionState(
+        sandbox_id="synthetic-vercel",
+        snapshot=inner.state.snapshot,
+        manifest=_resolve_manifest_root(Manifest()),
+    )
+    # The provider-free resource uses the real provider's state/default resolver.
+    live = BaseSandboxClient._wrap_session(client, inner)
+    connected = []
+
+    @asynccontextmanager
+    async def connect(selected):
+        connected.append(selected)
+        yield Environment(url="wss://fixture.invalid", cwd=selected.state.manifest.root)
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=VercelSandboxClientOptions(),
+        session=live,
+        connect=connect,
+    ):
+        pass
+    assert connected == [live]
+    connected.clear()
+    with pytest.raises(MountConfigError):
+        async with sandbox_environment(
+            client,
+            manifest=Manifest(root="/different-authority"),
+            options=VercelSandboxClientOptions(),
+            session=live,
+            connect=connect,
+        ):
+            pass
+    assert connected == []

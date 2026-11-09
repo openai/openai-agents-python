@@ -150,10 +150,6 @@ class CodexExec:
             process.kill()
             raise RuntimeError("Codex subprocess has no stdin")
 
-        process.stdin.write(args.input.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-
         if process.stdout is None:
             process.kill()
             raise RuntimeError("Codex subprocess has no stdout")
@@ -191,6 +187,11 @@ class CodexExec:
                     await read_task
 
         try:
+            # Prompt backpressure belongs to the same subprocess cleanup scope.
+            process.stdin.write(args.input.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+
             while True:
                 line = await _read_stdout_line()
                 if not line:
