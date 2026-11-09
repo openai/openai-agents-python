@@ -168,11 +168,7 @@ class FileSearch:
 
     def __post_init__(self) -> None:
         value = self.max_num_results
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 50
-        ):
-            raise ValueError("FileSearch max_num_results must be zero or an integer from 1 to 50")
-        if value == 0:
+        if type(value) is int and value == 0:
             object.__setattr__(self, "max_num_results", None)
 
 
@@ -187,12 +183,12 @@ class CodeInterpreter:
     """
 
     container: str | CodeInterpreterAutoContainer
+    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
+    """Caller modes the provider permits; None retains the provider default."""
     include_outputs: bool = True
     """Whether to request raw provider code outputs in accepted history."""
     provider_data: dict[str, Any] | None = None
     """Additional provider fields; declared fields and tool identity cannot be replaced."""
-    allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
-    """Caller modes the provider permits; None retains the provider default."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -243,6 +239,14 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     for tool in tools:
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
+        if isinstance(tool, FileSearch):
+            value = tool.max_num_results
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 50
+            ):
+                raise ValueError(
+                    "FileSearch max_num_results must be zero or an integer from 1 to 50"
+                )
         fields = asdict(tool)
         provider_data = fields.pop("provider_data") or {}
         if not isinstance(provider_data, dict):

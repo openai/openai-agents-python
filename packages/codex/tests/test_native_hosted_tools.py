@@ -830,10 +830,13 @@ async def test_codex_login_cannot_open_provider_hosted_tools(tmp_path):
                 pytest.fail("Codex login must not admit provider-hosted tools")
 
 
-@pytest.mark.parametrize("value", [-1, 51, True, 1.5, "2"])
+@pytest.mark.parametrize("value", [-1, 51, True, False, 1.5, "2"])
 def test_file_search_rejects_invalid_result_limit(value):
+    from _agents_codex.tools import _capture_hosted_tools
+
+    tool = FileSearch(vector_store_ids=["vs_fixture"], max_num_results=value)
     with pytest.raises(ValueError, match="max_num_results"):
-        FileSearch(vector_store_ids=["vs_fixture"], max_num_results=value)
+        _capture_hosted_tools([tool])
 
 
 @pytest.mark.parametrize("value", [None, 0, 1, 50])
