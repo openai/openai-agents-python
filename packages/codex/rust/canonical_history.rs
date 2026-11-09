@@ -79,6 +79,23 @@ pub async fn replace(
         state.engine.goals.is_none(),
         "history transactions do not rewrite goal-backed sessions"
     );
+    // The Core revision is rechecked under its state lock when replacing below.
+    // Validate before durability: neither retained nor appended history may split
+    // a client tool call/result pair. Provider-hosted records keep their existing
+    // context-validator treatment, including server-side tool-search output.
+    let (current_revision, _, originals) = state.thread.sdk_history_snapshot(None).await;
+    ensure!(
+        current_revision == expected,
+        "canonical history revision conflict"
+    );
+    ensure!(
+        keep <= originals.len(),
+        "history keep exceeds snapshot length"
+    );
+    crate::context::check_pairs(&originals, &(0..keep).collect::<Vec<_>>())
+        .context("canonical history requires complete tool call/result pairs")?;
+    crate::context::check_pairs(&items, &(0..items.len()).collect::<Vec<_>>())
+        .context("canonical history requires complete tool call/result pairs")?;
     let revision = state
         .thread
         .sdk_replace_history(&expected, keep, items)

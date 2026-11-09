@@ -59,3 +59,87 @@ async def test_atomic_canonical_history_replacement_and_restore(responses):
     request = json.dumps(responses.requests[-1]["input"])
     assert "old input" not in request
     assert "imported result" in request and "call-history" in request
+
+
+@pytest.mark.parametrize("family", ["function", "custom", "search"])
+async def test_history_transactions_reject_split_or_unpaired_client_tools(responses, family):
+    responses.respond(assistant_output("pairs preserved"))
+    call = {"id": "call-item", "call_id": "history-pair"}
+    output = {"id": "result-item", "call_id": "history-pair"}
+    if family == "function":
+        call.update(type="function_call", name="lookup", arguments="{}")
+        output.update(type="function_call_output", output="retained result")
+    elif family == "custom":
+        call.update(type="custom_tool_call", name="lookup", input="raw input")
+        output.update(type="custom_tool_call_output", output="retained result")
+    else:
+        call.update(type="tool_search_call", execution="client", arguments={})
+        output.update(type="tool_search_output", execution="client", status="completed", tools=[])
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-history-pairs"
+    ) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=[call, output]
+            )
+            retained = await session.history_snapshot()
+            for keep, appended in [
+                (1, []),
+                (1, [output]),
+                (0, [call]),
+                (0, [output]),
+                (0, [output, call]),
+            ]:
+                with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
+                    await session.transact_history(
+                        expected_revision=retained.revision, keep=keep, items=appended
+                    )
+                assert await session.history_snapshot() == retained
+                assert responses.requests == []
+            assert (await (await session.submit("continue")).get_result()).final_output == (
+                "pairs preserved"
+            )
+    wire = responses.requests[-1]["input"]
+    assert sum(item.get("call_id") == "history-pair" for item in wire) == 2
+    assert not any(item.get("output") == "aborted" for item in wire)
+
+
+async def test_history_transactions_preserve_self_contained_provider_hosted_records(responses):
+    responses.respond(assistant_output("hosted preserved"))
+    items = [
+        {
+            "type": "web_search_call",
+            "id": "hosted-search",
+            "status": "completed",
+            "action": {"type": "search", "query": "synthetic query"},
+        },
+        {
+            "type": "tool_search_output",
+            "id": "server-search-output",
+            "call_id": None,
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+        },
+    ]
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-hosted-history"
+    ) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            before = await session.history_snapshot()
+            await session.transact_history(expected_revision=before.revision, keep=0, items=items)
+            retained = await session.history_snapshot()
+            assert [item["type"] for item in retained.items] == [
+                "web_search_call",
+                "tool_search_output",
+            ]
+            assert (await (await session.submit("continue")).get_result()).final_output == (
+                "hosted preserved"
+            )
+    wire = responses.requests[-1]["input"]
+    assert any(item.get("type") == "web_search_call" for item in wire)
+    assert any(
+        item.get("type") == "tool_search_output" and item.get("execution") == "server"
+        for item in wire
+    )
