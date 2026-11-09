@@ -43,7 +43,70 @@ from tests.native_fixtures import (
 from tests.test_native_agent import provider
 from tests.test_native_agent_observation import collect
 from tests.test_native_mcp_stdio import assert_stopped, records, stdio, wait_for_call
-from tests.test_native_mcp_tools import Peer, mcp_call
+from tests.test_native_mcp_tools import Peer, declarations, mcp_call
+
+
+@pytest.mark.parametrize("catalog_size", [16, 64])
+async def test_step_mcp_filter_projects_linear_catalogue_work(
+    responses: ResponsesFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog_size: int,
+    record_property,
+) -> None:
+    import _agents_codex.mcp as mcp_module
+    import _agents_codex.session as session_module
+
+    names = tuple(f"find.record.{index}" for index in range(catalog_size))
+    peer = Peer(names=names)
+    projecting_step = False
+    projected_entries = 0
+    step_work: list[int] = []
+    filtered: list[tuple[str, tuple[str, ...]]] = []
+    original_names = mcp_module._tool_names
+    original_select = Session._select_step_body
+
+    def count_entries(servers):
+        nonlocal projected_entries
+        if projecting_step:
+            projected_entries += sum(len(server.tools) for server in servers)
+        return original_names(servers)
+
+    async def select_step(session, state, message):
+        nonlocal projecting_step
+        projecting_step = True
+        before = projected_entries
+        try:
+            await original_select(session, state, message)
+            filtered.extend((server.name, tuple(server.tools)) for server in state.step_mcp or ())
+        finally:
+            step_work.append(projected_entries - before)
+            projecting_step = False
+
+    # Count processed catalogue entries across both aliases, including projections
+    # made indirectly through descriptor.tool(), rather than counting helper calls.
+    monkeypatch.setattr(mcp_module, "_tool_names", count_entries)
+    monkeypatch.setattr(session_module, "_tool_names", count_entries)
+    monkeypatch.setattr(Session, "_select_step_body", select_step)
+    async with timeout(20), peer.serve() as url:
+        descriptor = HttpMCP(name="records-store", url=url, tools=names)
+        selected = (names[1], names[-1])
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=[descriptor],
+        )
+        responses.respond(assistant_output("done"))
+        async with agent.session() as session:
+            turn = await session.submit("Answer.", tools=[descriptor.tool(raw) for raw in selected])
+            assert (await turn.get_result()).final_output == "done"
+        assert filtered and all(item == ("records-store", selected) for item in filtered)
+        assert set(declarations(responses.requests[0])) == {
+            ("mcp__records_store", f"find_record_{index}") for index in (1, catalog_size - 1)
+        }
+        # Allow several complete linear passes, but no per-leaf catalogue rescans.
+        record_property("projected_entries_per_step", step_work)
+        assert step_work and all(0 < work <= 8 * catalog_size for work in step_work)
 
 
 def test_existing_tool_event_constructors_keep_function_default() -> None:
@@ -519,3 +582,63 @@ async def test_child_mcp_projection_requires_exact_owner(boundary: str) -> None:
     assert len(events) == 1
     assert isinstance(events[0], ToolStarted)
     assert events[0].submission_id == state.handle.submission_id
+
+
+@pytest.mark.parametrize("share_on_root", [False, True])
+async def test_handoff_mcp_events_use_issuing_step_bindings(responses, share_on_root):
+    peer = Peer(names=("search",))
+    async with timeout(20), peer.serve() as url, provider(responses) as client:
+        descriptor = HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
+        target = Agent(name="B", instructions="Search.", tools=[descriptor])
+        source = Agent(
+            name="A",
+            instructions="Route to B.",
+            model="gpt-5.5",
+            provider=client,
+            tools=[descriptor] if share_on_root else [],
+            handoffs=[target],
+        )
+        responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+        responses.respond(mcp_call("search", "mcp__records", "lookup-B"))
+        responses.respond(assistant_output("done"))
+        async with source.session() as session:
+            turn = await session.submit("Begin")
+            assert (await turn.get_result()).final_output == "done"
+            events = [
+                event
+                async for event in turn.events()
+                if isinstance(event, (ToolStarted, ToolFinished)) and event.family == "mcp"
+            ]
+            assert len(peer.calls) == 1
+            assert [(event.type, event.call_id) for event in events] == [
+                ("tool_started", "lookup-B"),
+                ("tool_finished", "lookup-B"),
+            ]
+
+
+async def test_handoff_mcp_form_remains_owned_by_issuing_call(responses):
+    from agents import FormRequest, PendingRequests
+    from tests.test_native_scoped_policies import AskingPeer, selected
+
+    peer = AskingPeer()
+    async with timeout(20), peer.serve() as url, provider(responses) as client:
+        descriptor = HttpMCP(name="records", url=url, tools=["search"], approval_mode="preapproved")
+        target = Agent(name="B", instructions="Search.", tools=[descriptor])
+        source = Agent(
+            name="A",
+            instructions="Route to B.",
+            model="gpt-5.5",
+            provider=client,
+            handoffs=[target],
+        )
+        responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+        responses.respond(selected("lookup-B", "ordinary"))
+        responses.respond(assistant_output("done"))
+        async with source.session() as session:
+            turn = await session.submit("Begin")
+            pending = await turn.wait_for_request_or_result()
+            assert isinstance(pending, PendingRequests)
+            assert isinstance(pending.requests[0], FormRequest)
+            await pending.requests[0].respond({"answer": "approved"})
+            assert (await turn.get_result()).final_output == "done"
+            assert peer.answers[0]["result"]["action"] == "accept"

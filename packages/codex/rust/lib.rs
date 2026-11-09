@@ -1360,6 +1360,7 @@ impl NativeThread {
                         | "inject_if_running"
                         | "inject_response_items"
                         | "realtime_conversation_prepare_sdk"
+                        | "realtime_conversation_config_sdk"
                 ) || (operation == "realtime_conversation_update_sdk"
                     && params
                         .get("profile")
@@ -3571,7 +3572,7 @@ fn create_checkpoint_engine<'py>(
             let checkpoint: checkpoint::Checkpoint =
                 serde_json::from_value(payload).map_err(py_error)?;
             checkpoint
-                .initial_managed_model(specs.as_deref())
+                .initial_managed_models(specs.as_deref())
                 .map_err(py_error)
         })
         .transpose()?

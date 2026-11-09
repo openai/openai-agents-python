@@ -26,6 +26,12 @@ use crate::{
     options,
 };
 
+/// Saved names to admit against the current provider before freezing the catalog.
+pub struct ManagedModels {
+    pub root: Option<String>,
+    pub descendants: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Checkpoint {
     format_version: u32,
@@ -164,10 +170,10 @@ impl Checkpoint {
         Ok(ids)
     }
 
-    pub(crate) fn initial_managed_model(
+    pub(crate) fn initial_managed_models(
         &self,
         python_specs: Option<&[DynamicToolSpec]>,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<Option<ManagedModels>> {
         // This early read chooses the current native model services only.
         // restore_checkpoint validates a format-3 frame before lowering it
         // to the format-2 Core checkpoint accepted by check_revision.
@@ -180,11 +186,18 @@ impl Checkpoint {
             "checkpoint core revision differs"
         );
         self.validate(python_specs)?;
-        Ok(self
-            .managed_tool_specs
-            .as_ref()
-            .and_then(|_| managed_settings(&self.history, self.source_session_id))
-            .map(|settings| settings.model.clone()))
+        Ok(self.managed_tool_specs.as_ref().map(|_| ManagedModels {
+            root: managed_settings(&self.history, self.source_session_id)
+                .map(|settings| settings.model.clone()),
+            // Import restores each child's stored model. Names are untrusted
+            // requests for current validation, never historical capabilities.
+            descendants: self
+                .descendants
+                .iter()
+                .filter(|child| child.status == "active")
+                .filter_map(|child| child.metadata.model.clone())
+                .collect(),
+        }))
     }
 }
 
