@@ -29,25 +29,62 @@ async def test_mongodb_example_closes_client_when_initial_ping_fails(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["create", "start"])
-async def test_docker_mount_example_handles_setup_failure(monkeypatch, capsys, phase):
+@pytest.mark.parametrize("with_credentials", [False, True])
+async def test_docker_mount_example_reports_missing_driver(monkeypatch, capsys, with_credentials):
+    docker = pytest.importorskip("docker")
+    from agents.classic.sandbox.entries import DockerVolumeMountStrategy, S3Mount
+    from examples.classic.sandbox.docker.mounts import mount_smoke as example
+
+    error = docker.errors.NotFound('plugin "rclone" not found')
+
+    def create_container(**_kwargs):
+        raise error
+
+    def get_volume(_name):
+        raise docker.errors.NotFound("volume not found")
+
+    docker_client = SimpleNamespace(
+        images=SimpleNamespace(get=lambda _name: object()),
+        containers=SimpleNamespace(create=create_container),
+        volumes=SimpleNamespace(get=get_volume),
+    )
+    monkeypatch.setattr(example.docker, "from_env", lambda: docker_client)
+    mount = S3Mount(
+        bucket="test-bucket",
+        access_key_id="test-access" if with_credentials else None,
+        secret_access_key="test-secret" if with_credentials else None,
+        mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+    )
+    mount_cases = [example.MountSmokeCase(name="rclone", mount_dir="s3", mount=mount)]
+    expected_error = RuntimeError if with_credentials else SystemExit
+
+    with pytest.raises(expected_error) as caught:
+        await example.run_mount_smoke_test(
+            provider="s3", agent_name="test", mount_cases=mount_cases
+        )
+
+    if with_credentials:
+        assert "protected mount configuration" in str(caught.value)
+        assert "docker plugin ls" in capsys.readouterr().err
+        assert caught.value.__cause__ is None
+    else:
+        assert str(caught.value) == "rclone Docker volume plugin not found"
+        assert caught.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_docker_mount_example_deletes_sandbox_when_start_fails(monkeypatch, capsys):
     pytest.importorskip("docker")
     from agents.classic.sandbox.errors import MountCommandError
     from examples.classic.sandbox.docker.mounts import mount_smoke as example
 
     live_sessions = []
-    error = (
-        RuntimeError("sandbox operation failed while using a protected mount configuration")
-        if phase == "create"
-        else MountCommandError(command="mount", stderr="mount failed")
-    )
+    error = MountCommandError(command="mount", stderr="mount failed")
 
     async def start():
         raise error
 
     async def create(**_kwargs):
-        if phase == "create":
-            raise error
         session = SimpleNamespace(start=start)
         live_sessions.append(session)
         return session
@@ -60,16 +97,12 @@ async def test_docker_mount_example_handles_setup_failure(monkeypatch, capsys, p
     monkeypatch.setattr(example.docker, "from_env", lambda: object())
     monkeypatch.setattr(example, "DockerSandboxClient", lambda _docker: client)
 
-    with pytest.raises(type(error)) as caught:
+    with pytest.raises(MountCommandError) as caught:
         await example.run_mount_smoke_test(provider="test", agent_name="test", mount_cases=[])
 
     assert caught.value is error
     assert not live_sessions
-    output = capsys.readouterr()
-    if phase == "create":
-        assert "docker plugin ls" in output.err
-    else:
-        assert "mount stderr: mount failed" in output.out
+    assert "mount stderr: mount failed" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
