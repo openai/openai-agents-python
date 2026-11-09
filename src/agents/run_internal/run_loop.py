@@ -1578,19 +1578,15 @@ async def start_streaming(
                         current_agent.model_settings.resolve(run_config.model_settings).store,
                     )
 
-                    if (
-                        not isinstance(turn_result.next_step, NextStepRunAgain)
-                        or turn_result.has_recovered_tool_outputs
-                    ):
-                        _accumulate_tool_guardrail_results(
-                            streamed_result,
-                            turn_result,
-                            accepted_input_results=accepted_tool_input_guardrail_results,
-                            accepted_output_results=accepted_tool_output_guardrail_results,
-                            publish_output_results=not isinstance(
-                                turn_result.next_step, NextStepFinalOutput
-                            ),
-                        )
+                    _accumulate_tool_guardrail_results(
+                        streamed_result,
+                        turn_result,
+                        accepted_input_results=accepted_tool_input_guardrail_results,
+                        accepted_output_results=accepted_tool_output_guardrail_results,
+                        publish_output_results=not isinstance(
+                            turn_result.next_step, NextStepFinalOutput
+                        ),
+                    )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
                         if run_state is not None:
