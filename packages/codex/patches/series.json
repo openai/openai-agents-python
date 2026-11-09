@@ -339,7 +339,15 @@
     {
       "path": "0100-native-hosted-option-fidelity.patch",
       "sha256": "c06cdc7449e3767e439c349e2253546e15e2fa1b97b7f2d048fb3e429cd632a6"
+    },
+    {
+      "path": "0210-native-computer-use.patch",
+      "sha256": "6f2e8711da00c50f64b3fcb48ae3c11ce2df2e7a74c6d55d7521d9e4c71568ce"
+    },
+    {
+      "path": "0211-native-computer-guardian.patch",
+      "sha256": "70a07e4e7e46d5e0ae324fd80d53da0b18a9e944287a7cb59f8bd5e2e05a3887"
     }
   ],
-  "result_tree": "cfb99dbd30557573f2e985049bf6166be75114ab"
+  "result_tree": "6512c53edc693146441a0c5ba4593fbf0c1b7063"
 }

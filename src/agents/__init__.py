@@ -28,6 +28,12 @@ if TYPE_CHECKING:
     )
     from .compaction import CompactionContext as CompactionContext
     from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .computer import (
+        Computer as Computer,
+        ComputerProvider as ComputerProvider,
+        ComputerSafetyError as ComputerSafetyError,
+        computer_tool as computer_tool,
+    )
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -269,6 +275,10 @@ _MODULES = {
     "HttpMCP": ".mcp",
     "HostedVerificationMCP": ".mcp",
     "ChatGPTAppsMCP": ".mcp",
+    "Computer": ".computer",
+    "ComputerProvider": ".computer",
+    "ComputerSafetyError": ".computer",
+    "computer_tool": ".computer",
     "FunctionTool": "._function_tools",
     "Tool": "._function_tools",
     "ToolRef": ".tools",
