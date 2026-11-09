@@ -2307,6 +2307,7 @@ class Session(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         _captured_api_key: str | None = None,
@@ -2315,6 +2316,8 @@ class Session(Generic[ContextT, OutputT]):
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
     ) -> Session[ContextT, OutputT]:
+        if not isinstance(project_guidance, bool):
+            raise TypeError("project_guidance must be a bool")
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
             max_function_concurrency = None
@@ -2619,6 +2622,8 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if project_guidance and executor is None:
+                raise ValueError("project_guidance requires an Environment")
             if executor is not None:
                 for tool in allowed_tools:
                     if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
@@ -2786,6 +2791,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     "agents.enabled": False,
                     "features.goals": goals,
+                    "features.view_image": project_guidance,
                     "tools.update_plan.enabled": checklist,
                     "mcp_servers": {},
                     "features.non_prefixed_mcp_tool_names": False,
@@ -2876,6 +2882,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **({"_canonical_rules": True} if project_guidance else {}),
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,

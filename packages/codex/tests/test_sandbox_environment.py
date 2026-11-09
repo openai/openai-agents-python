@@ -720,3 +720,156 @@ def test_empty_manifest_mapping_is_not_a_trusted_manifest(helper: str) -> None:
         else:
             sandbox_environment(client, manifest=payload, options=Options(), connect=connect)
     assert client.events == []
+
+
+async def test_live_session_is_borrowed_and_never_deleted() -> None:
+    events: list[str] = []
+    client = Client(events)
+    session = await client.create(manifest=Manifest(), options=Options())
+    # The scripted session uses its own synthetic backend identifier.
+    client.backend_id = session.state.type
+    events.clear()
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is session
+        events.append("connect")
+        try:
+            yield Environment(url="wss://executor.invalid", cwd="/workspace")
+        finally:
+            events.append("gateway")
+
+    async with sandbox_environment(
+        client, manifest=Manifest(), options=Options(), session=session, connect=connect
+    ):
+        events.append("body")
+    assert events == ["connect", "body", "gateway"]
+
+
+async def test_authorized_resume_uses_current_manifest_and_owns_cleanup() -> None:
+    events: list[str] = []
+    client = Client(events)
+    original = await client.create(manifest=Manifest(root="/current"), options=Options())
+    client.backend_id = original.state.type
+    events.clear()
+    saved = original.state
+    seen = []
+
+    async def resume(state):
+        seen.append(state)
+        events.append("resume")
+        original._inner.state = state
+        return original
+
+    client.resume = resume
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is original
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/current")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(root="/current"),
+        options=Options(),
+        authorized_resume_state=saved,
+        connect=connect,
+    ):
+        pass
+    assert seen[0].manifest.root == "/current"
+    assert saved.manifest.root == "/current"
+    assert seen[0].manifest is not saved.manifest
+    assert events == ["resume", "start", "connect", "close", "delete"]
+
+
+def test_resume_rejects_mapping_backend_mismatch_and_conflicting_lifecycle() -> None:
+    client = Client([])
+
+    def connect(session):
+        return None
+
+    with pytest.raises(TypeError, match="application-authorized"):
+        sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            connect=connect,
+            authorized_resume_state={"type": "docker"},
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            connect=connect,
+            snapshot=object(),
+            authorized_resume_state=object(),
+        )
+
+
+async def test_creation_forwards_snapshot_and_budgets_before_start() -> None:
+    from agents.classic.sandbox.snapshot import NoopSnapshot
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    events: list[str] = []
+    client = Client(events)
+    create = client.create
+    snapshot = NoopSnapshot(id="synthetic-snapshot")
+    limits = SandboxArchiveLimits(max_members=8)
+    concurrency = SandboxConcurrencyLimits(manifest_entries=3)
+
+    async def create_with_snapshot(*, manifest, options, snapshot):
+        assert snapshot is not None
+        selected = await create(manifest=manifest, options=options)
+        start = selected.start
+
+        async def start_with_budgets():
+            assert selected._archive_limits == limits
+            await start()
+
+        selected.start = start_with_budgets
+        return selected
+
+    client.create = create_with_snapshot
+
+    @asynccontextmanager
+    async def connect(selected):
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=Options(),
+        connect=connect,
+        snapshot=snapshot,
+        archive_limits=limits,
+        concurrency_limits=concurrency,
+    ):
+        pass
+    assert events == ["create", "start", "close", "delete"]
+
+
+async def test_native_sandbox_pure_utilities_preserve_behavior() -> None:
+    from agents.sandbox import (
+        BackoffStrategy,
+        TruncationPolicy,
+        apply_diff,
+        retry_async,
+        truncate_text,
+    )
+
+    assert apply_diff("before\n", "@@\n-before\n+after\n") == "after\n"
+    assert truncate_text("short", TruncationPolicy.bytes(10)) == "short"
+    attempts = 0
+
+    @retry_async(interval=0, max_attempt=2, backoff=BackoffStrategy.FIXED, retry_if=lambda _: True)
+    async def transient():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("synthetic")
+        return "done"
+
+    assert await transient() == "done"
+    assert attempts == 2

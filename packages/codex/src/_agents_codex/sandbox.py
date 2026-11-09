@@ -11,6 +11,8 @@ from typing import Any, TypeVar, cast
 
 from pydantic import ValidationError
 
+from agents.classic.apply_diff import apply_diff
+from agents.classic.run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from agents.classic.sandbox._mount_security import (
     _mark_mount_error_data_safe,
     redact_mount_error_data_sync,
@@ -38,6 +40,19 @@ from agents.classic.sandbox.session.sandbox_client import (
     BaseSandboxClientOptions,
 )
 from agents.classic.sandbox.session.sandbox_session import SandboxSession
+from agents.classic.sandbox.session.sandbox_session_state import SandboxSessionState
+from agents.classic.sandbox.snapshot import (
+    LocalSnapshot,
+    LocalSnapshotSpec,
+    NoopSnapshot,
+    NoopSnapshotSpec,
+    RemoteSnapshot,
+    RemoteSnapshotSpec,
+    SnapshotBase,
+    SnapshotSpec,
+)
+from agents.classic.sandbox.util.retry import BackoffStrategy, retry_async
+from agents.classic.sandbox.util.token_truncation import TruncationPolicy, truncate_text
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .executor import Environment
@@ -85,12 +100,23 @@ def sandbox_environment(
     manifest: Manifest,
     options: _OptionsT | Mapping[str, Any],
     connect: Callable[[SandboxSession], AbstractAsyncContextManager[Environment[_ContextT]]],
+    snapshot: SnapshotSpec | SnapshotBase | None = None,
+    session: SandboxSession | None = None,
+    authorized_resume_state: SandboxSessionState | None = None,
+    concurrency_limits: SandboxConcurrencyLimits | None = None,
+    archive_limits: SandboxArchiveLimits | None = None,
 ) -> AbstractAsyncContextManager[Environment[_ContextT]]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
-    The provider validates and materializes the captured manifest. No saved sandbox
-    state or snapshot is accepted. Create a new source for each native Session.
+    The provider validates and materializes the captured manifest for create and
+    resume. A borrowed session keeps its already prepared manifest. A supplied live
+    session is borrowed: only its gateway is closed. An authorized_resume_state
+    explicitly authorizes all provider identity and snapshot fields, not merely
+    their types. Never pass untrusted deserialized state without authorizing those
+    fields. Resume uses the current manifest for filesystem authority. Snapshot,
+    live session and resume state are mutually exclusive. Create a new source for
+    each native Session.
     Cleanup follows client policy, including deletion of selected backends where
     the provider implements it. The caller must authorize that disposal.
     Supply an application-authorized Manifest and trusted provider options.
@@ -98,6 +124,40 @@ def sandbox_environment(
     constructing a Manifest; construction alone does not authorize its contents.
     """
     captured_manifest = _manifest(manifest)
+    if concurrency_limits is not None:
+        concurrency_limits = deepcopy(concurrency_limits)
+        concurrency_limits.validate()
+    if archive_limits is not None:
+        archive_limits = deepcopy(archive_limits)
+        archive_limits.validate()
+    if sum(value is not None for value in (snapshot, session, authorized_resume_state)) > 1:
+        raise ValueError("snapshot, session and authorized_resume_state are mutually exclusive")
+    if session is not None and not isinstance(session, SandboxSession):
+        raise TypeError("session must be a SandboxSession")
+    if session is not None:
+        if session.state.type != client.backend_id:
+            raise ValueError("session backend must match the configured client")
+        if concurrency_limits is not None or archive_limits is not None:
+            raise ValueError("configure borrowed session budgets before supplying the session")
+    if authorized_resume_state is not None:
+        if not isinstance(authorized_resume_state, SandboxSessionState):
+            raise TypeError(
+                "authorized_resume_state must be an application-authorized SandboxSessionState"
+            )
+        if authorized_resume_state.type != client.backend_id:
+            raise ValueError("resume state backend must match the configured client")
+        if authorized_resume_state.manifest.root != captured_manifest.root:
+            raise ValueError("resume state workspace root must match current manifest")
+        # Provider identity and snapshot fields require explicit caller authorization.
+        # Current configuration, never persisted manifest fields, grants authority.
+        authorized_resume_state = authorized_resume_state.model_copy(deep=True)
+        authorized_resume_state = authorized_resume_state.rebind_persisted_path_grants(
+            captured_manifest
+        )
+        authorized_resume_state = authorized_resume_state.rebind_persisted_mount_authority(
+            captured_manifest, provider_backend_id=client.backend_id
+        )
+        authorized_resume_state.manifest = _manifest(captured_manifest)
     try:
         captured_options = deepcopy(
             cast(_OptionsT, BaseSandboxClientOptions.parse(dict(options)))
@@ -110,11 +170,25 @@ def sandbox_environment(
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:
         async with AsyncExitStack() as owners:
-            session = await client.create(manifest=captured_manifest, options=captured_options)
-            owners.push_async_callback(client.delete, session)
-            owners.push_async_callback(session.aclose)
-            await session.start()
-            yield await owners.enter_async_context(connect(session))
+            selected = session
+            if selected is None:
+                selected = (
+                    await client.resume(authorized_resume_state.model_copy(deep=True))
+                    if authorized_resume_state is not None
+                    else await client.create(
+                        manifest=_manifest(captured_manifest),
+                        options=deepcopy(captured_options),
+                        **({"snapshot": snapshot} if snapshot is not None else {}),
+                    )
+                )
+                owners.push_async_callback(client.delete, selected)
+                owners.push_async_callback(selected.aclose)
+                if concurrency_limits is not None:
+                    selected._set_concurrency_limits(concurrency_limits)
+                if archive_limits is not None:
+                    selected._set_archive_limits(archive_limits)
+                await selected.start()
+            yield await owners.enter_async_context(connect(selected))
 
     return source()
 
@@ -155,6 +229,22 @@ def render_storage_layout(manifest: Manifest) -> str:
 
 
 __all__ = [
+    "RemoteSnapshotSpec",
+    "RemoteSnapshot",
+    "NoopSnapshotSpec",
+    "NoopSnapshot",
+    "LocalSnapshotSpec",
+    "LocalSnapshot",
+    "truncate_text",
+    "TruncationPolicy",
+    "retry_async",
+    "BackoffStrategy",
+    "apply_diff",
+    "SandboxConcurrencyLimits",
+    "SandboxArchiveLimits",
+    "SnapshotSpec",
+    "SnapshotBase",
+    "SandboxSessionState",
     "AzureBlobMount",
     "BaseSandboxClient",
     "BoxMount",

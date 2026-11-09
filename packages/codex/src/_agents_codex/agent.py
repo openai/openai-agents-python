@@ -883,6 +883,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -906,6 +907,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -929,6 +931,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -952,6 +955,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1011,6 +1015,10 @@ class Agent(Generic[ContextT, OutputT]):
         submission inherits its disabled/content restrictions, including when
         another ambient scope or explicit parent changes the trace linkage.
         Tracing context and export credentials never enter SessionState.
+
+        project_guidance loads native workspace instructions and enables native
+        workspace image viewing. It requires an Environment and uses only that
+        executor's granted paths. It does not grant command or write access.
 
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
@@ -1072,6 +1080,7 @@ class Agent(Generic[ContextT, OutputT]):
                 environment=environment,
                 tools=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
@@ -1098,6 +1107,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        project_guidance: bool = False,
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
@@ -1131,6 +1141,7 @@ class Agent(Generic[ContextT, OutputT]):
                 model_settings=model_settings,
                 tool_selection=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 parent_trace=parent_trace,
