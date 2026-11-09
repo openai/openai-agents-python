@@ -7,6 +7,7 @@ import json
 from copy import deepcopy
 from typing import Any, cast
 
+from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 from .mcp import HttpMCP, StdioMCP
 from .session import NativeError, Session
@@ -212,4 +213,5 @@ class MCPApp:
         self._closed = True
 
 
+_protect_mcp_methods(MCPApp, None)
 _preserve_module_identity(globals(), "agents.mcp_apps")

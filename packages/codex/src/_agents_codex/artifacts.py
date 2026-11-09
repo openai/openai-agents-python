@@ -26,6 +26,9 @@ def json_artifact_tool(
     non-finite numbers and invalid Unicode, return diagnostics for correction.
     Other exceptions fail the turn.
     The application chooses a trusted destination and Pydantic-compatible schema.
+    Candidates use Pydantic's JSON validation. Files contain the checked value's
+    JSON serialization with serialization aliases; schemas can define different
+    input and output forms.
     Its parent directory must exist. A rejected candidate never replaces an
     existing file; successful concurrent calls use the last atomic replacement.
     Atomic replacement does not guarantee durable storage after a machine crash.
@@ -42,7 +45,7 @@ def json_artifact_tool(
     )
     def publish(candidate_json: Annotated[str, Field(alias="json")]) -> Any:
         try:
-            candidate = json_module.loads(candidate_json, parse_constant=invalid_constant)
+            json_module.loads(candidate_json, parse_constant=invalid_constant)
         except (json_module.JSONDecodeError, ValueError) as error:
             return ToolOutput.error(
                 (
@@ -51,7 +54,7 @@ def json_artifact_tool(
                 )[:2048]
             )
         try:
-            checked = adapter.validate_python(candidate)
+            checked = adapter.validate_json(candidate_json)
         except ValidationError as error:
             problems = []
             for issue in error.errors(include_input=False, include_url=False)[:5]:
@@ -63,7 +66,7 @@ def json_artifact_tool(
                     f"Fix the JSON and call {name} again."
                 )[:2048]
             )
-        value = adapter.dump_python(checked, mode="json")
+        value = adapter.dump_python(checked, mode="json", by_alias=True)
         try:
             content = json_module.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n"
             content.encode("utf-8")

@@ -8,11 +8,12 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from agents import Agent, HttpMCP, OutputValidationError
+from agents import Agent, HttpMCP, NativeError, OutputValidationError
 from agents.mcp_apps import MCPApp
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 from tests.test_native_agent import provider
+from tests.test_native_mcp_configuration_values import _SECRET, assert_private_frames
 from tests.test_native_mcp_tools import Peer, mcp_call
 
 HTML = '<!doctype html><html><body><button id="increment">Increment</button></body></html>'
@@ -114,6 +115,145 @@ async def test_embedded_app_view_is_copied_and_rejects_other_tools(responses: Re
             app.close()
             with pytest.raises(ValueError, match="closed or stale"):
                 await app.call_tool("search", {"key": "44"})
+            assert len(peer.calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["open", "call", "tool", "arguments"])
+async def test_mcp_app_validation_errors_keep_credentials_private(
+    responses: ResponsesFixture, failure: str
+):
+    peer = Peer(call_result=app_result())
+    responses.respond(mcp_call("search", "mcp__counter", "counter-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter",
+            url=url,
+            tools=["search"],
+            approval_mode="preapproved",
+            headers={"X-Token": _SECRET},
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            if failure in {"open", "call"}:
+                with pytest.raises(
+                    ValueError,
+                    match="call_id must be a nonempty string" if failure == "open" else "absent",
+                ) as caught:
+                    await MCPApp.open(session, turn, "" if failure == "open" else "missing-call")
+            else:
+                app = await MCPApp.open(session, turn, "counter-call")
+                with pytest.raises(
+                    TypeError if failure == "arguments" else ValueError,
+                    match="not JSON serializable" if failure == "arguments" else "originating tool",
+                ) as caught:
+                    await app.call_tool(
+                        "search" if failure == "arguments" else "excluded", {"key": object()}
+                    )
+            assert_private_frames(caught.value, application_files=(__file__,))
+            # Removing traceback frames must leave the authenticated declaration
+            # and the borrowed Session usable after an ordinary validation error.
+            app = await MCPApp.open(session, turn, "counter-call")
+            assert (await app.call_tool("search", {"key": "44"}))["structuredContent"] == {
+                "count": 1
+            }
+            assert declaration.headers == {"X-Token": _SECRET}
+            assert len(responses.requests) == 2
+            assert len(peer.calls) == 2
+
+
+async def test_mcp_app_native_error_chain_keeps_credentials_private(responses: ResponsesFixture):
+    class FailingAppPeer(Peer):
+        reject_action = False
+
+        async def handle(self, request: web.Request) -> web.Response:
+            assert request.headers["X-Token"] == _SECRET
+            body = await request.json()
+            if body.get("method") == "tools/call" and self.reject_action:
+                return web.json_response(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "error": {"code": -32603, "message": "Synthetic MCP App action failure"},
+                    }
+                )
+            return await super().handle(request)
+
+    peer = FailingAppPeer(call_result=app_result())
+    responses.respond(mcp_call("search", "mcp__counter", "counter-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter",
+            url=url,
+            tools=["search"],
+            approval_mode="preapproved",
+            headers={"X-Token": _SECRET},
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            app = await MCPApp.open(session, turn, "counter-call")
+            peer.reject_action = True
+            with pytest.raises(NativeError, match="MCP app tool request failed") as caught:
+                await app.call_tool("search", {"key": "44"})
+            assert isinstance(caught.value.__cause__, RuntimeError)
+            assert caught.value.__context__ is caught.value.__cause__
+            assert_private_frames(caught.value, allow_chain=True, application_files=(__file__,))
+            peer.reject_action = False
+            assert (await app.call_tool("search", {"key": "45"}))["structuredContent"] == {
+                "count": 1
+            }
+            assert len(responses.requests) == 2
+
+
+async def test_mcp_app_view_error_chain_keeps_credentials_private(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
+):
+    peer = Peer(call_result=app_result())
+    responses.respond(mcp_call("search", "mcp__counter", "counter-call"))
+    responses.respond(assistant_output("Counter opened."))
+    async with timeout(20), peer.serve() as url:
+        declaration = HttpMCP(
+            name="counter",
+            url=url,
+            tools=["search"],
+            approval_mode="preapproved",
+            headers={"X-Token": _SECRET},
+        )
+        async with Agent(
+            instructions="Open counter.", provider=provider(responses), tools=[declaration]
+        ).session() as session:
+            turn = await session.submit("Open")
+            await turn.get_result()
+            app = await MCPApp.open(session, turn, "counter-call")
+            original = MemoryError("MCP App view unavailable")
+            cause = RuntimeError("View copy cause")
+            context = LookupError("View copy context")
+
+            def fail_copy(value: Any) -> Any:
+                try:
+                    raise context
+                except LookupError:
+                    raise original from cause
+
+            with monkeypatch.context() as patch:
+                patch.setattr("_agents_codex.mcp_apps.deepcopy", fail_copy)
+                with pytest.raises(MemoryError, match="MCP App view unavailable") as caught:
+                    _ = app.view
+            assert caught.value is original
+            assert original.__cause__ is cause and original.__context__ is context
+            assert_private_frames(original, allow_chain=True, application_files=(__file__,))
+            assert app.view["resource"] == RESOURCE
+            app.close()
+            with pytest.raises(ValueError, match="closed or stale") as closed:
+                await app.call_tool("search", {"key": "44"})
+            assert_private_frames(closed.value, application_files=(__file__,))
             assert len(peer.calls) == 1
 
 

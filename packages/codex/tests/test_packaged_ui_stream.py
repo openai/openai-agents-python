@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from typing import Any
 
 import pytest
 
-from agents import Agent, function_tool
+from agents import Agent, HttpMCP, function_tool
 from agents.ui import vercel_stream
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -17,6 +19,8 @@ from tests.native_fixtures import (
     text_response,
 )
 from tests.test_native_agent import provider
+from tests.test_native_mcp_configuration_values import _SECRET, assert_private_frames
+from tests.test_native_mcp_tools import Peer
 
 
 def frame(value: bytes) -> Any:
@@ -89,6 +93,129 @@ async def test_close_public_reader_keeps_native_turn_usable(responses: Responses
         assert (await turn.get_result()).final_output == "still running"
 
 
+@pytest.mark.parametrize("keyword_turn", [False, True])
+@pytest.mark.parametrize("owners", ["same", "foreign_session", "foreign_turn", "neither"])
+async def test_ui_validation_protects_both_native_owners(
+    responses: ResponsesFixture, owners: str, keyword_turn: bool
+) -> None:
+    responses.respond(*text_response("message", "done"))
+    async with timeout(30), Peer().serve() as url:
+        declaration = HttpMCP(
+            name="private", url=url, tools=["search"], headers={"X-Token": _SECRET}
+        )
+        async with (
+            Agent(
+                instructions="Read.", tools=[declaration], provider=provider(responses)
+            ).session() as protected,
+            Agent(instructions="Read.", provider=provider(responses)).session() as plain,
+        ):
+            owner = plain if owners in {"foreign_session", "neither"} else protected
+            supplied = plain if owners in {"foreign_turn", "neither"} else protected
+            turn = await owner.submit("read")
+            assert (await turn.get_result()).final_output == "done"
+            options: dict[str, Any] = {"session": supplied}
+            if owners in {"same", "neither"}:
+                options["include_tool_data"] = 1
+            body = (
+                vercel_stream(turn=turn, **options)
+                if keyword_turn
+                else vercel_stream(turn, **options)
+            )
+            with pytest.raises(
+                TypeError if owners in {"same", "neither"} else ValueError,
+                match="include_tool_data must be a bool"
+                if owners in {"same", "neither"}
+                else "owning Session",
+            ) as caught:
+                await anext(body)
+            if owners == "neither":
+                traceback = caught.value.__traceback__
+                assert any(
+                    entry.tb_frame.f_globals.get("__name__") == "_agents_codex.ui"
+                    for entry in _tracebacks(traceback)
+                )
+            else:
+                assert_private_frames(caught.value, application_files=(__file__,))
+            await body.aclose()
+
+
+def _tracebacks(traceback):
+    while traceback is not None:
+        yield traceback
+        traceback = traceback.tb_next
+
+
+@pytest.mark.parametrize("has_mcp", [False, True])
+async def test_cancelled_ui_reader_keeps_credentials_private_and_turn_live(
+    responses: ResponsesFixture, has_mcp: bool
+) -> None:
+    responses.respond(*text_response("message", "still running"))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold(event: Any) -> None:
+        entered.set()
+        await release.wait()
+
+    responses.before_event = hold
+    async with timeout(30), Peer().serve() as url:
+        tools = (
+            [HttpMCP(name="private", url=url, tools=["search"], headers={"X-Token": _SECRET})]
+            if has_mcp
+            else []
+        )
+        async with Agent(
+            instructions="Read.", tools=tools, provider=provider(responses)
+        ).session() as session:
+            turn = await session.submit("read")
+            body = vercel_stream(turn, session=session)
+            assert frame(await anext(body)) == {"type": "start"}
+            reading = asyncio.create_task(anext(body))
+            try:
+                await entered.wait()
+                await asyncio.sleep(0)
+                assert not reading.done()
+                reading.cancel()
+                with pytest.raises(asyncio.CancelledError) as caught:
+                    await reading
+                if has_mcp:
+                    assert_private_frames(
+                        caught.value, allow_chain=True, application_files=(__file__,)
+                    )
+            finally:
+                release.set()
+            await body.aclose()
+            assert (await turn.get_result()).final_output == "still running"
+
+
+@pytest.mark.parametrize("has_mcp", [False, True])
+async def test_ui_async_generator_protocol_preserves_error_frames(
+    responses: ResponsesFixture, has_mcp: bool
+) -> None:
+    responses.respond(*text_response("message", "done"))
+    async with timeout(30), Peer().serve() as url:
+        tools = (
+            [HttpMCP(name="private", url=url, tools=["search"], headers={"X-Token": _SECRET})]
+            if has_mcp
+            else []
+        )
+        async with Agent(
+            instructions="Read.", tools=tools, provider=provider(responses)
+        ).session() as session:
+            turn = await session.submit("read")
+            assert inspect.isasyncgenfunction(vercel_stream)
+            body = vercel_stream(turn, session=session)
+            assert frame(await body.asend(None)) == {"type": "start"}
+            assert frame(await body.athrow(ValueError("Synthetic client interruption"))) == {
+                "type": "error",
+                "errorText": "turn_failed",
+            }
+            assert frame(await body.asend(None)) == "[DONE]"
+            with pytest.raises(StopAsyncIteration):
+                await anext(body)
+            await body.aclose()
+            assert (await turn.get_result()).final_output == "done"
+
+
 async def test_done_only_response_requires_resync(responses: ResponsesFixture) -> None:
     from tests.native_fixtures import assistant_output
 
@@ -101,6 +228,40 @@ async def test_done_only_response_requires_resync(responses: ResponsesFixture) -
         frames = [frame(value) async for value in vercel_stream(turn, session=session)]
         assert frames[-2:] == [{"type": "error", "errorText": "resync_required"}, "[DONE]"]
         assert (await turn.get_result()).final_output == "no delta"
+
+
+@pytest.mark.parametrize(
+    "commentary", ["retained commentary", "", "x" * 1_048_577], ids=["text", "empty", "over-bound"]
+)
+@pytest.mark.parametrize("final_chunks", [("Final answer.",), ()])
+async def test_done_only_commentary_is_checked_before_finish(
+    responses: ResponsesFixture, commentary: str, final_chunks: tuple[str, ...]
+) -> None:
+    from tests.native_fixtures import assistant_output
+
+    retained = assistant_output(commentary)
+    retained["item"]["phase"] = "commentary"
+    final_events = text_response("final-message", *final_chunks)
+    for event in final_events:
+        if "item" in event:
+            event["item"]["phase"] = "final_answer"
+    responses.respond(retained, *final_events)
+    async with (
+        timeout(30),
+        Agent(instructions="Read.", provider=provider(responses)).session() as session,
+    ):
+        turn = await session.submit("read")
+        frames = [frame(value) async for value in vercel_stream(turn, session=session)]
+        assert frames[-2:] == [
+            {"type": "error", "errorText": "resync_required"} if commentary else {"type": "finish"},
+            "[DONE]",
+        ]
+        assert (await turn.get_result()).final_output == "".join(final_chunks)
+        assert [
+            value["delta"]
+            for value in frames
+            if isinstance(value, dict) and value["type"] == "text-delta"
+        ] == list(final_chunks)
 
 
 async def test_public_native_mcp_payload_uses_canonical_call_id(

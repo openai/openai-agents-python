@@ -1,6 +1,7 @@
 """Checked artifacts use the public tools and the real native correction loop."""
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,58 @@ async def test_packaged_artifact_repairs_in_same_native_session(tmp_path: Path) 
     assert list(tmp_path.iterdir()) == [destination]
 
 
+async def test_packaged_artifact_preserves_schema_aliases(tmp_path: Path) -> None:
+    class AliasedReport(BaseModel):
+        title: str = Field(alias="reportTitle")
+
+    destination = tmp_path / "report.json"
+    async with (
+        ScriptedResponses(
+            [tool_call("report", {"json": '{"reportTitle":"Results"}'}, call_id="valid")],
+            [text("Published")],
+        ) as peer,
+        timeout(30),
+    ):
+        agent = Agent(
+            instructions="Publish the requested JSON artifact.",
+            provider=peer.provider,
+            tools=[json_artifact_tool(name="report", path=destination, schema=AliasedReport)],
+        )
+        await agent.run("Publish the report.")
+        assert "Published validated JSON artifact report" in (peer.tool_output("valid") or "")
+    content = destination.read_text(encoding="utf-8")
+    assert json.loads(content) == {"reportTitle": "Results"}
+    assert AliasedReport.model_validate_json(content).title == "Results"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+async def test_packaged_artifact_accepts_strict_json_types(tmp_path: Path) -> None:
+    class StrictReport(BaseModel):
+        day: date = Field(strict=True)
+        point: tuple[int, int] = Field(strict=True)
+
+    destination = tmp_path / "report.json"
+    candidate = '{"day":"2026-11-09","point":[1,2]}'
+    async with (
+        ScriptedResponses(
+            [tool_call("report", {"json": candidate}, call_id="valid")],
+            [text("Published")],
+        ) as peer,
+        timeout(30),
+    ):
+        agent = Agent(
+            instructions="Publish the requested JSON artifact.",
+            provider=peer.provider,
+            tools=[json_artifact_tool(name="report", path=destination, schema=StrictReport)],
+        )
+        await agent.run("Publish the report.")
+        assert "Published validated JSON artifact report" in (peer.tool_output("valid") or "")
+    content = destination.read_text(encoding="utf-8")
+    assert json.loads(content) == {"day": "2026-11-09", "point": [1, 2]}
+    assert StrictReport.model_validate_json(content) == StrictReport.model_validate_json(candidate)
+    assert list(tmp_path.iterdir()) == [destination]
+
+
 async def test_packaged_artifact_bounds_diagnostics_and_preserves_previous(tmp_path: Path) -> None:
     class Titles(BaseModel):
         titles: list[int]
@@ -94,17 +147,28 @@ async def test_packaged_artifact_bounds_diagnostics_and_preserves_previous(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("schema", "invalid_json", "valid_json", "expected"),
+    ("schema", "invalid_json", "valid_json", "expected", "problem"),
     [
-        (float, "1e400", "1.25", 1.25),
-        (list[float], "[-1e400]", "[1.25]", [1.25]),
-        (float, '"1e400"', "1.25", 1.25),
-        (str, '"\\ud800"', '"Corrected café 🦦"', "Corrected café 🦦"),
-        (list[str], '["\\udfff"]', '["Corrected café 🦦"]', ["Corrected café 🦦"]),
+        (float, "1e400", "1.25", 1.25, "JSON value check failed"),
+        (list[float], "[-1e400]", "[1.25]", [1.25], "JSON value check failed"),
+        (float, '"1e400"', "1.25", 1.25, "JSON value check failed"),
+        (str, '"\\ud800"', '"Corrected café 🦦"', "Corrected café 🦦", "schema check failed"),
+        (
+            list[str],
+            '["\\udfff"]',
+            '["Corrected café 🦦"]',
+            ["Corrected café 🦦"],
+            "schema check failed",
+        ),
     ],
 )
 async def test_packaged_artifact_repairs_invalid_values_in_same_native_session(
-    tmp_path: Path, schema: type[Any], invalid_json: str, valid_json: str, expected: Any
+    tmp_path: Path,
+    schema: type[Any],
+    invalid_json: str,
+    valid_json: str,
+    expected: Any,
+    problem: str,
 ) -> None:
     destination = tmp_path / "report.json"
     previous = '{"retained":true}\n'
@@ -138,9 +202,9 @@ async def test_packaged_artifact_repairs_invalid_values_in_same_native_session(
             assert len(calls) == 3
             assert {item["turn_id"] for item in calls} == {turn.turn_id}
         feedback = peer.tool_output("invalid-value") or ""
-        assert "JSON value check failed" in feedback
+        assert problem in feedback
         assert len(feedback) < 2048
-        assert "JSON value check failed" in json.dumps(peer.requests[1])
+        assert problem in json.dumps(peer.requests[1])
         assert peer.tool_output("previous") == previous
         assert "Published validated JSON artifact report" in (peer.tool_output("corrected") or "")
     assert json.loads(destination.read_text(encoding="utf-8")) == expected

@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any
 
+from ._mcp_errors import _protect_method
 from ._public import preserve_module_identity as _preserve_module_identity
 from .observation import (
     EventGap,
@@ -131,7 +132,7 @@ async def vercel_stream(
                 final_id = None
                 unphased_id = None
                 recorded_text: dict[str, str] = {}
-                if started and (completed.final_output or opened):
+                if started:
                     try:
                         async for item in session.items(subagent_id=turn.child_id):
                             if (
@@ -163,14 +164,19 @@ async def vercel_stream(
                                         final_id = item["id"]
                     except Exception:
                         # Unavailable identity cannot establish a complete display.
-                        final_id = unphased_id = None
-                        recorded_text.clear()
+                        yield _sse({"type": "error", "errorText": "resync_required"})
+                        yield b"data: [DONE]\n\n"
+                        return
                 final_id = final_id or unphased_id
                 if (
                     started
                     and all(
                         "".join(parts) == recorded_text.get(item_id)
                         for item_id, parts in opened.items()
+                    )
+                    and all(
+                        not text or text == "".join(opened.get(item_id, []))
+                        for item_id, text in recorded_text.items()
                     )
                     and (
                         (
@@ -296,4 +302,20 @@ async def _tool_frames(
     return frames
 
 
+def _stream_mcp(owner: Any) -> tuple[Any, ...]:
+    if isinstance(owner, Turn):
+        owner = owner._session
+    if not isinstance(owner, Session):
+        return ()
+    opening = owner._opening_agent
+    return (opening, *(opening.tools if opening is not None else ()), *owner._mcp_tools)
+
+
+# Keep the public declaration free of the private boundary implementation.
+globals()["vercel_stream"] = _protect_method(
+    vercel_stream,
+    _stream_mcp,
+    owner_keywords=("turn", "session"),
+    preserve_generator_protocol=True,
+)
 _preserve_module_identity(globals(), "agents.ui")

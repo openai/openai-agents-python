@@ -44,11 +44,13 @@ def create_app() -> web.Application:
         response.set_cookie("synthetic-owner", owner, httponly=True, samesite="Strict")
         return response
 
-    async def asset(request):
-        response = web.FileResponse(ROOT / "dist" / request.match_info["asset"])
+    async def client_asset(request):
+        return web.FileResponse(ROOT / "dist" / "client.js")
+
+    async def app_asset(request):
+        response = web.FileResponse(ROOT / "dist" / "app.js")
         # The opaque sandbox can load this public, synthetic fixture script.
-        if request.match_info["asset"] == "app.js":
-            response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Origin"] = "*"
         return response
 
     def result():
@@ -259,8 +261,8 @@ def create_app() -> web.Application:
             raise web.HTTPBadRequest(text="Expected tools/call name and arguments")
         try:
             value = await state["app"].call_tool(params["name"], params["arguments"])
-        except (ValueError, TypeError) as error:
-            raise web.HTTPBadRequest(text=str(error)) from None
+        except (ValueError, TypeError):
+            raise web.HTTPBadRequest(text="Invalid counter action") from None
         return web.json_response(value)
 
     async def cleanup(application):
@@ -272,7 +274,8 @@ def create_app() -> web.Application:
 
     app.cleanup_ctx.append(cleanup)
     app.router.add_get("/", index)
-    app.router.add_get("/{asset:client.js|app.js}", asset)
+    app.router.add_get("/client.js", client_asset)
+    app.router.add_get("/app.js", app_asset)
     app.router.add_post("/mcp", mcp)
     app.router.add_post("/v1/responses", responses)
     app.router.add_post("/api/chat", chat)
