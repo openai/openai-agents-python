@@ -142,6 +142,9 @@ async def test_encrypted_prefix_cleanup_is_atomic(
             client=client,
         )
     await session.add_items([{"role": "user", "content": "expired"}] * 40)
+    # The expired prefix can have a later database timestamp than the live suffix.
+    async with backend.engine.begin() as conn:
+        await conn.execute(update(backend._messages).values(created_at=datetime(2099, 1, 1)))
     now[0] += 11
     await session.add_items(
         [{"role": "assistant" if i % 2 else "user", "content": f"live {i}"} for i in range(20)]
@@ -176,13 +179,13 @@ async def test_encrypted_prefix_cleanup_is_atomic(
     assert "expired" not in str(client.responses.compact.call_args.kwargs)
 
 
-async def test_replacement_uses_timestamp_order_not_id_order(backend) -> None:
-    visible: list[TResponseInputItem] = [
-        {"role": "user", "content": f"visible {i}"} for i in range(20)
+async def test_replacement_includes_backdated_append_in_visible_suffix(backend) -> None:
+    original: list[TResponseInputItem] = [
+        {"role": "user", "content": f"original {i}"} for i in range(20)
     ]
-    hidden: TResponseInputItem = {"role": "user", "content": "old timestamp, newer ID"}
-    await backend.add_items(visible)
-    await backend.add_items([hidden])
+    latest_item: TResponseInputItem = {"role": "user", "content": "old timestamp, newer ID"}
+    await backend.add_items(original)
+    await backend.add_items([latest_item])
     async with backend.engine.begin() as conn:
         latest = await conn.execute(
             select(backend._messages.c.id).order_by(backend._messages.c.id.desc()).limit(1)
@@ -203,7 +206,7 @@ async def test_replacement_uses_timestamp_order_not_id_order(backend) -> None:
         "continue",
         session=session,
     )
-    assert await backend.get_items(limit=100) == [hidden, summary]
+    assert await backend.get_items(limit=100) == [original[0], summary]
 
 
 async def test_cancelled_replacement_settles_before_other_instance_append(
