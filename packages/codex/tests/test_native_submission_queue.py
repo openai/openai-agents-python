@@ -1296,13 +1296,13 @@ async def test_revoked_environment_fences_reserved_steering_continuation(
     child_error = OSError("synthetic lease child failed before continuation admission")
     execute = Session._execute
 
-    async def hold_successor(session, state, input, *, admitted=False):
+    async def hold_successor(session, state, input, *, admitted=False, **kwargs):
         # Pause at entry: lease loss must be checked after this point, not just
         # when the owner reserves the successor or inside an already issued submit.
         if state.continued_from is not None:
             entered.set()
             await release.wait()
-        await execute(session, state, input, admitted=admitted)
+        await execute(session, state, input, admitted=admitted, **kwargs)
 
     class Continuation(ProjectContinuation):
         async def _submit(self, encoded):

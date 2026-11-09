@@ -202,6 +202,8 @@ async def test_one_shot_joins_the_identified_automatic_successor(
     async with timeout(20):
         result = await agent.run(
             "original input",
+            # This fixture injects Session events; use its explicit tool-roster path.
+            tools=[],
             on_interaction=(lambda request: request.reply("unused")) if with_handler else None,
         )
     assert result.final_output == "automatic result"

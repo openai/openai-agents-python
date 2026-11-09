@@ -74,18 +74,21 @@ async def cleanup_session(events, *, managed_environment=True):
     session._loop = asyncio.get_running_loop()
     session._close_task = None
     session._scope_close_task = None
+    session._native_scope_failure = None
     session._sync_cleanup_owner = _sync_run.get()
     session._sync_cleanup_deferred = False
     session._interaction_error = None
     session._environment_lease = lease
     session._resources_retired = False
     session._closed = False
+    session._last_turn = None
     session._pending = deque()
     session._observations = SimpleNamespace(notify=lambda: None)
     session._provider_lease = SimpleNamespace(release=lambda: events.append(("provider", None)))
     session._owned_provider = None
     session._repair_session = None
     session._model_context_snapshots = {}
+    session._profiles = {}
     session._profile_catalogs = {}
     session._catalog_bindings = {}
     failed = False

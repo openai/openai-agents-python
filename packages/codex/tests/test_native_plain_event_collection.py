@@ -43,11 +43,11 @@ def instrument_reader(monkeypatch: pytest.MonkeyPatch) -> list[ReadProbe]:
     original = Session._read_events
     probes: list[ReadProbe] = []
 
-    async def read(self: Session) -> None:
+    async def read(self: Session, *args: Any, **kwargs: Any) -> None:
         probe = ReadProbe(self._native)
         probes.append(probe)
         self._native = probe
-        await original(self)
+        await original(self, *args, **kwargs)
 
     monkeypatch.setattr(Session, "_read_events", read)
     return probes
@@ -88,6 +88,8 @@ def normalized_observations(events: list[Any]) -> list[dict[str, Any]]:
 async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonical_agent(
     responses, monkeypatch, chunks
 ):
+    # Compare each ordinary reader's native input with its public projection.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     probes = instrument_reader(monkeypatch)
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-batch-key")
     responses.replies.append(text_response("out", *chunks))
@@ -234,6 +236,8 @@ async def test_delegating_or_spoofed_factory_keeps_live_cursor_semantics(
 
 
 async def test_cancel_owned_run_receives_abort_without_cancelling_reader(responses, monkeypatch):
+    # Observe cancellation through the atomic path's existing Python reader.
+    monkeypatch.setattr("_agents_codex.agent._completed_run_eligible", lambda *args: False)
     probes = instrument_reader(monkeypatch)
     responses.delta_gate = asyncio.Event()
     emitted = asyncio.Event()

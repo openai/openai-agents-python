@@ -22,10 +22,8 @@ from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
-from pydantic import TypeAdapter
 
 from .._compat import cancel_once
-from .._function_tools import FunctionTool
 from .._lifecycle import _close_after_error, _error_contexts, _join
 from .._trace_context import TraceContext, _trace_context
 from ..agent import Agent
@@ -36,7 +34,6 @@ from ..manual import (
     _PreparedManualResult,
 )
 from ..observation import ToolFinished, ToolStarted
-from ..schema import NativeOutput, PromptedOutput
 from ..session import (
     TurnStoppedError,
     _ManualBoundaryLost,
@@ -162,6 +159,7 @@ class _Live:
     session: Any = None
     opening: asyncio.Task[Any] | None = None
     canceled: bool = False
+    answer_rejected: bool = False
 
 
 class _Projection:
@@ -268,14 +266,11 @@ class NativeA2AExecutor(AgentExecutor):
             raise PermissionError("A2A saved snapshot does not match the current binding")
         return record
 
-    def _reply(
-        self, context: RequestContext, record: NativeA2ATask, configured: NativeA2AAgent
-    ) -> tuple[SessionState, _PreparedManualResult]:
+    def _reply(self, context: RequestContext, record: NativeA2ATask) -> tuple[SessionState, Any]:
         parts = context.message.parts if context.message is not None else []
         if len(parts) != 1 or not parts[0].HasField("data"):
             raise InvalidParamsError(message="Expected one bounded challenge answer")
         value = MessageToDict(parts[0].data)
-        prepared = None
         try:
             _json(value, self.limits.message_bytes)
             if record.checkpoint is None:
@@ -284,7 +279,6 @@ class NativeA2AExecutor(AgentExecutor):
             continuation = state.native_continuation
             if continuation is None or len(continuation.pending_manual) != 1:
                 raise ValueError("Expected one settled root manual request")
-            pending = continuation.pending_manual[0]
             if (
                 isinstance(value, dict)
                 and set(value) == {"challenge", "generation", "result"}
@@ -292,25 +286,10 @@ class NativeA2AExecutor(AgentExecutor):
                 and type(value["generation"]) in (int, float)
                 and value["generation"] == record.generation
             ):
-                tools = [
-                    tool
-                    for tool in configured.agent.tools
-                    if isinstance(tool, FunctionTool) and tool.ref == ToolRef(pending.tool)
-                ]
-                if len(tools) == 1:
-                    captured = tools[0]._capture(configured.context)
-                    if isinstance(captured, _CapturedManual):
-                        checked = captured.output_adapter.validate_python(value["result"])
-                        prepared = _PreparedManualResult(
-                            captured.declaration,
-                            pending.call_id,
-                            captured._encode_result(checked, strict=True),
-                        )
+                return state, value["result"]
         except Exception:
             pass
-        if prepared is None:
-            raise InvalidParamsError(message="Invalid, stale or unsupported manual answer")
-        return state, prepared
+        raise InvalidParamsError(message="Invalid, stale or unsupported manual answer")
 
     async def _commit(
         self,
@@ -428,22 +407,24 @@ class NativeA2AExecutor(AgentExecutor):
                 projection = _Projection(context)
                 await projection.open()
                 if record is not None:
-                    state, reply = self._reply(context, record, configured)
+                    state, reply = self._reply(context, record)
                 try:
-                    events = []
-                    if record is None:
-                        initial = await projection.manager.get_task()
-                        events.append(initial)
-                    events.append(_status(binding, p.TASK_STATE_WORKING))
-                    record = await self._commit(
-                        lease,
-                        record,
-                        binding,
-                        projection,
-                        events,
-                        event_queue,
-                        status="running",
-                    )
+                    if state is None:
+                        events = []
+                        if record is None:
+                            initial = await projection.manager.get_task()
+                            events.append(initial)
+                        events.append(_status(binding, p.TASK_STATE_WORKING))
+                        record = await self._commit(
+                            lease,
+                            record,
+                            binding,
+                            projection,
+                            events,
+                            event_queue,
+                            status="running",
+                        )
+                    assert record is not None
                     # Keep Session entry, body and exit in one owned task. Caller
                     # cancellation joins it without consuming the caller's error.
                     work = asyncio.create_task(
@@ -468,12 +449,25 @@ class NativeA2AExecutor(AgentExecutor):
                         cancel_once(work)
                         await _close_after_error(error, lambda: _join(work))
                         raise
-                except Exception:
+                except Exception as error:
                     # Never erase a committed waiting/completed publication on enqueue failure.
                     latest = await self._load(lease, binding)
                     if latest is None:
                         raise
-                    if latest.status == "running":
+                    unchanged_waiting = (
+                        latest.status == "waiting"
+                        and record is not None
+                        and record.status == "waiting"
+                        and latest.generation == record.generation
+                    )
+                    if (
+                        unchanged_waiting
+                        and live.answer_rejected
+                        and not live.canceled
+                        and error.__context__ is None
+                    ):
+                        raise
+                    if latest.status == "running" or unchanged_waiting:
                         await self._commit(
                             lease,
                             latest,
@@ -509,7 +503,7 @@ class NativeA2AExecutor(AgentExecutor):
         configured: NativeA2AAgent,
         binding: NativeA2ABinding,
         state: SessionState | None,
-        reply: _PreparedManualResult | None,
+        reply: Any,
         prompt: str | None,
         live: _Live,
         lease: NativeA2ALease,
@@ -517,7 +511,7 @@ class NativeA2AExecutor(AgentExecutor):
         projection: _Projection,
         queue: EventQueue,
     ) -> NativeA2ATask:
-        output_type = configured.agent.output_type
+        output_adapter = None
         result, captured = None, None
         if not live.canceled:
             options: dict[str, Any] = {
@@ -541,26 +535,65 @@ class NativeA2AExecutor(AgentExecutor):
                             )
                             if turn is None:
                                 raise ValueError("Expected pending native root turn")
+                            submission = session._owned_submission(turn)
+                            if submission is None:
+                                raise ValueError("Expected an owned native root turn")
                             if state is not None:
                                 requests = await session.pending_interactions()
+                                pending = state.native_continuation
+                                assert pending is not None
+                                call = pending.pending_manual[0]
                                 request = next(
                                     (
                                         request
                                         for request in requests
                                         if isinstance(request, ActionRequested)
                                         and request.subagent_id is None
-                                        and reply is not None
-                                        and request.name == reply.declaration.name
-                                        and request.call_id == reply.call_id
+                                        and request.name == call.tool
+                                        and request.call_id == call.call_id
                                     ),
                                     None,
                                 )
-                                if request is None or reply is None:
-                                    raise ValueError(
-                                        "Checkpoint does not match the current manual declaration"
+                                prepared = None
+                                try:
+                                    if request is not None:
+                                        catalog = session._manual_catalog(request)
+                                        captured_tool = next(
+                                            (
+                                                entry
+                                                for entry in catalog.tools
+                                                if isinstance(entry, _CapturedManual)
+                                                and entry._ref == ToolRef(call.tool)
+                                            ),
+                                            None,
+                                        )
+                                        if captured_tool is not None:
+                                            checked = captured_tool.output_adapter.validate_python(
+                                                reply
+                                            )
+                                            prepared = _PreparedManualResult(
+                                                captured_tool.declaration,
+                                                call.call_id,
+                                                captured_tool._encode_result(checked, strict=True),
+                                            )
+                                except Exception:
+                                    pass
+                                if request is None or prepared is None:
+                                    live.answer_rejected = True
+                                    raise InvalidParamsError(
+                                        message="Invalid, stale or unsupported manual answer"
                                     )
                                 if not live.canceled:
-                                    await session._respond(request, prepared=reply)
+                                    record = await self._commit(
+                                        lease,
+                                        record,
+                                        binding,
+                                        projection,
+                                        [_status(binding, p.TASK_STATE_WORKING)],
+                                        queue,
+                                        status="running",
+                                    )
+                                    await session._respond(request, prepared=prepared)
                             if not live.canceled:
                                 progress = asyncio.create_task(
                                     self._progress(turn, binding, projection, queue)
@@ -620,6 +653,7 @@ class NativeA2AExecutor(AgentExecutor):
                                             )
                                     else:
                                         result = await turn.get_result()
+                                        output_adapter = submission.output.value_adapter
                                 except (TurnStoppedError, _ManualBoundaryLost):
                                     if not live.canceled:
                                         raise
@@ -687,10 +721,8 @@ class NativeA2AExecutor(AgentExecutor):
         if result is None:
             raise RuntimeError("Native task has no settled result")
         output = result.final_output
-        if isinstance(output_type, (NativeOutput, PromptedOutput)):
-            output_type = output_type.type_
-        if output_type is not None and output_type is not str:
-            output = TypeAdapter(output_type).dump_python(output, mode="json", warnings="error")
+        if output_adapter is not None:
+            output = output_adapter.dump_python(output, mode="json", warnings="error")
         _json(output, self.limits.message_bytes)
         parts = [p.Part(text=output)] if isinstance(output, str) else [_part({"result": output})]
         artifact = p.TaskArtifactUpdateEvent(

@@ -761,7 +761,7 @@ class DeferredTools:
             raise ValueError
         registered = {
             entry.name: entry
-            for entry in session._catalog.tools
+            for entry in session._manual_catalog(request).tools
             if isinstance(entry, _CapturedManual)
             and (job := self._jobs.get(entry.name))
             and job.tool is entry.declaration
@@ -916,7 +916,12 @@ class DeferredTools:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         selection = _RestoreDeclaration(
-            agent, opening, session._model_api_key, active.output, session._max_function_concurrency
+            agent,
+            opening,
+            session._model_api_key,
+            active.output,
+            session._max_function_concurrency,
+            session._observations.retention,
         )
         try:
             selection.state = await self.prepare(session, request, timeout_seconds=timeout_seconds)

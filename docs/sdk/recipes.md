@@ -29,7 +29,7 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 | Module | What it shows |
 | --- | --- |
 | [`local_mcp`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/local_mcp.py) | A trusted standard-library stdio server returns the PAPER catalog price. Select the raw tool name `lookup`. The native client cleans up the connection and process. Read-only metadata does not restrict the server's host permissions. |
-| [`image_input`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/image_input.py) | Sends a synthetic PNG as inline data and prints a typed answer. Local paths, PDFs, and remote URLs are unsupported. Model confidence is not a calibrated probability. |
+| [`image_input`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/image_input.py) | Sends a synthetic PNG as inline data and prints a typed answer. This sample uses inline images only; see [typed input](sessions.md#typed-input) for other input forms and their build, route, and model requirements. Model confidence is not a calibrated probability. |
 | [`retrieval`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/retrieval.py) | Searches tenant-scoped text and checks returned source IDs against retrieved IDs. A matching ID does not prove that the source supports the answer. |
 | [`programmatic_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/recipes/programmatic_tools.py) | Generated JavaScript aggregates regional sales and prints tool calls and history. Pending code cells and their runtime state need an open Session. |
 
@@ -91,7 +91,7 @@ Use these guides for the rules behind each recipe:
 | Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |
 | Delegate to another agent | [Native children](delegation.md#native-children) |
 
-For PDFs or document search, extract text in application code and retrieve authorized excerpts. The SDK cannot accept PDFs or arbitrary files directly or provide authoritative native citation spans. Images require inline image data.
+For document search, select authorized sources in application code and check citations against the retrieved excerpts. The SDK does not provide authoritative native citation spans. See [typed input](sessions.md#typed-input) for supported image and file inputs; forms added after alpha.7 require a matching development build.
 
 ### Human in the loop: approve the exact request
 

@@ -25,12 +25,13 @@ use tokio::sync::watch;
 
 use crate::engine::ThreadState;
 
-// Freeze the root and all current application-declared role models before an
-// environment is attached. Role files are created by the SDK, never restored
-// from historical instructions or model-selected overrides.
+// Freeze the root, current role models, and saved descendant model names before
+// an environment is attached. Every name uses current provider metadata and
+// policy; historical instructions and capabilities never authorize a model.
 pub async fn validated_catalog(
     config: &Config,
     models: &SharedModelsManager,
+    restored_models: &[String],
 ) -> anyhow::Result<Vec<ModelInfo>> {
     #[derive(serde::Deserialize)]
     struct DeclaredRole {
@@ -43,6 +44,20 @@ pub async fn validated_catalog(
         .as_ref()
         .context("NativeAgents requires an explicit model")?;
     let mut catalog = vec![validate_model(config, models, root_model).await?];
+    for model in restored_models {
+        if !catalog.iter().any(|info| &info.slug == model) {
+            let info = validate_model(config, models, model).await?;
+            ensure!(
+                !config.features.enabled(Feature::CodeMode)
+                    || matches!(
+                        info.tool_mode,
+                        Some(ToolMode::CodeMode | ToolMode::CodeModeOnly)
+                    ),
+                "Native descendant model metadata is incompatible with Session Code Mode"
+            );
+            catalog.push(info);
+        }
+    }
     let mut roles = Vec::new();
     for role in config.agent_roles.values() {
         if let Some(path) = &role.config_file {
@@ -93,7 +108,7 @@ async fn validate_model(
     let info = models
         .get_model_info(model, &config.to_models_manager_config())
         .await;
-    // Root and every declared role are validated before the environment opens.
+    // Root, declared roles, and saved descendants are validated before the environment opens.
     // Model-supplied overrides cannot expand this frozen native catalogue.
     crate::engine::EngineState::validate_hosted_search(config, &info)?;
     ensure!(

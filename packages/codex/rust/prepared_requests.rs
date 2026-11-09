@@ -81,6 +81,43 @@ impl PreparedRequestAdmission for Ticket {
 }
 
 impl PythonTools {
+    pub(crate) fn can_run_without_python(&self) -> bool {
+        self.current
+            .read()
+            .expect("Python tools poisoned")
+            .entries
+            .is_empty()
+            && self.fixed.is_empty()
+            && self.instance.is_none()
+            && !self.suspended.load(Ordering::Acquire)
+            && !self.selecting_steps.load(Ordering::Acquire)
+            && !self.selecting_children.load(Ordering::Acquire)
+            && !self.context_transform_enabled
+            && !self.before_compact_enabled
+            && !self.before_complete_enabled
+            && !self
+                .prepared_requests
+                .lock()
+                .expect("Prepared requests poisoned")
+                .enabled
+            && self
+                .pending
+                .lock()
+                .expect("Python calls poisoned")
+                .is_empty()
+            && self
+                .admission
+                .lock()
+                .expect("Python admission poisoned")
+                .is_none()
+            && self
+                .step_defaults
+                .read()
+                .expect("Step defaults poisoned")
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+    }
+
     pub(crate) fn prepare_requests(&self, enabled: bool) -> Result<()> {
         let mut state = self
             .prepared_requests
