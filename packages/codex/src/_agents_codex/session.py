@@ -3563,7 +3563,9 @@ class Session(Generic[ContextT, OutputT]):
         """Build the provider session configuration for accepting an incoming SIP call.
 
         Submit the returned object as the call-accept request body, then attach
-        with ``realtime(config=RealtimeConfig(transport=RealtimeSIP(call_id)))``.
+        using the same RealtimeConfig model, voice, instructions, settings, and
+        tool selection, with ``transport=RealtimeSIP(call_id)``. The builder
+        saves no configuration for a later attachment.
         This prepares the same Session-owned MCP tools and captured instructions
         as connection startup, without connecting voice or resolving voice
         credentials. MCP discovery may perform network I/O and raise its errors.
