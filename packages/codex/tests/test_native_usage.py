@@ -12,7 +12,18 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from typing_extensions import assert_type
 
-from agents import Agent, Completed, Session, SessionState, Turn, TurnStoppedError, function_tool
+from agents import (
+    Agent,
+    Completed,
+    DecisionResponse,
+    NativeProvider,
+    Session,
+    SessionState,
+    ToolContext,
+    Turn,
+    TurnStoppedError,
+    function_tool,
+)
 from agents._history import project_history
 from agents.observation import UsageUpdated
 from agents.usage import TokenUsage, TokenUsageInfo
@@ -561,3 +572,72 @@ async def test_final_usage_includes_decisions_from_settled_callbacks(timing: str
         assert all(task.done() for task in state.callbacks)
         assert host._decision_completions == {}
         host._reader.cancel()
+
+
+async def test_late_callback_decision_usage_reaches_final_native_result(
+    responses: ResponsesFixture,
+) -> None:
+    """Include late callback charges from the real native ledger in the final result."""
+    from tests.test_native_code_mode import code_call
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    snapshots = []
+
+    class Decisions:
+        async def get_decision(self, request):
+            entered.set()
+            await release.wait()
+            return DecisionResponse(value={"response": True}, usage=TokenUsage(7, 0, 0, 3, 0, 10))
+
+    @function_tool
+    async def check(context: ToolContext[None]) -> str:
+        """Check the synthetic record."""
+        assert await context.decide("Ready?", input="synthetic evidence")
+        return "checked"
+
+    final = assistant_output("done")
+
+    async def hold(event):
+        if event == final:
+            await entered.wait()
+
+    responses.before_event = hold
+    responses.respond(
+        code_call(
+            "const pending=tools.check({}); yield_control(); text(await pending);", "late-cell"
+        )
+    )
+    responses.respond(final)
+    agent = Agent(
+        instructions="Check then finish.",
+        tools=[check],
+        decisions=Decisions(),
+        programmatic_tool_calling=True,
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+    )
+    async with timeout(25), agent.session() as session:
+        native = session._native
+
+        class Observe:
+            def __getattr__(self, name):
+                return getattr(native, name)
+
+            async def call(self, operation):
+                result = await native.call(operation)
+                if operation == "token_usage_info":
+                    snapshots.append(json.loads(result)["total_token_usage"]["total_tokens"])
+                    # Release only after Core returns the first eager snapshot.
+                    release.set()
+                return result
+
+        session._native = Observe()
+        try:
+            turn = await session.submit("Check.")
+            result = await turn.get_result()
+            assert result.final_output == "done"
+            assert result.thread_usage.total_token_usage.total_tokens == 38
+            history = [record async for record in session.turns()]
+            assert history[-1]["usage"]["total_tokens"] == 38
+            assert snapshots == [28, 38]
+        finally:
+            release.set()
