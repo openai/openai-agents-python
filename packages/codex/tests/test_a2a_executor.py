@@ -15,7 +15,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict
-from pydantic import BaseModel, PlainSerializer
+from pydantic import BaseModel, ConfigDict, PlainSerializer, TypeAdapter, model_serializer
 
 from agents import (
     Agent,
@@ -275,6 +275,67 @@ async def test_nested_typed_result_uses_its_declared_json_serializer(tmp_path, r
     assert MessageToDict(stored.task.artifacts[0].parts[0].data) == {"result": expected}
 
 
+@pytest.mark.parametrize("handoff", [False, True], ids=["target-only", "handoff"])
+async def test_terminal_profile_uses_its_captured_output_serializer(tmp_path, responses, handoff):
+    serialized = []
+
+    class SourceOutput(BaseModel):
+        model_config = ConfigDict(title="SharedOutput")
+        value: int
+
+        def source_label(self):
+            return f"A:{self.value}"
+
+        @model_serializer
+        def serialize(self):
+            serialized.append("A")
+            return self.source_label()
+
+    class TargetOutput(BaseModel):
+        model_config = ConfigDict(title="SharedOutput")
+        value: int
+
+        @model_serializer
+        def serialize(self):
+            serialized.append("B")
+            return f"B:{self.value}"
+
+    assert TypeAdapter(SourceOutput).json_schema() == TypeAdapter(TargetOutput).json_schema()
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    target = Agent(name="B", instructions="Return seven.", output_type=TargetOutput)
+    source = Agent(
+        name="A",
+        instructions="Handoff to B.",
+        model="gpt-5.5",
+        provider=provider,
+        output_type=SourceOutput,
+        handoffs=[target],
+    )
+    if handoff:
+        responses.respond(function_call("transfer_to_b", {}, "transfer"))
+    else:
+        target = Agent(
+            name="B",
+            instructions="Return seven.",
+            model="gpt-5.5",
+            provider=provider,
+            output_type=TargetOutput,
+        )
+    responses.respond(assistant_output('{"value":7}'))
+    executor = NativeA2AExecutor(
+        store=HostStore(tmp_path),
+        agent_factory=lambda binding, context: NativeA2AAgent(agent=source if handoff else target),
+    )
+    try:
+        done, _ = await invoke(executor, request_context())
+        assert done.task.status.state == p.TASK_STATE_COMPLETED
+        assert done.task.artifacts[0].parts[0].text == "B:7"
+        assert serialized == ["B"]
+        assert len(responses.requests) == (2 if handoff else 1)
+    finally:
+        await provider.aclose()
+
+
 async def test_typed_result_limit_uses_serialized_size(tmp_path, responses):
     expanded = Annotated[int, PlainSerializer(lambda value: str(value) * 1024, return_type=str)]
     responses.respond(assistant_output('{"response": 7}'))
@@ -458,6 +519,74 @@ async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses
     assert MessageToDict(completed.task.history[-1].parts[0].data) == answer
     assert executor.store.read(binding).acknowledges(completed.task)
     assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("opening", ["none", "shared", "same-name"])
+async def test_handoff_manual_answer_uses_the_issuing_profile(tmp_path, responses, opening):
+    approval = FunctionTool(
+        name="approve", description="Choose.", input_type=Approval, output_type=str
+    )
+    source_tools = [] if opening == "none" else [approval]
+    if opening == "same-name":
+        source_tools = [
+            FunctionTool(
+                name="approve", description="Choose.", input_type=Approval, output_type=bool
+            )
+        ]
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    target = Agent(name="B", instructions="Ask for approval.", tools=[approval])
+    opened, closed = [], []
+
+    class TrackingAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **options):
+            session = None
+            try:
+                async with super().session(**options) as session:
+                    opened.append(session)
+                    yield session
+            finally:
+                if session is not None:
+                    closed.append(session)
+
+    source = TrackingAgent(
+        name="A",
+        instructions="Handoff to B.",
+        model="gpt-5.5",
+        provider=provider,
+        tools=source_tools,
+        handoffs=[target],
+    )
+    executor = NativeA2AExecutor(
+        store=HostStore(tmp_path),
+        agent_factory=lambda binding, context: NativeA2AAgent(agent=source),
+    )
+    responses.respond(function_call("transfer_to_b", {}, "transfer"))
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "approval"))
+    try:
+        waiting, _ = await invoke(executor, request_context())
+        assert waiting.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+        proposal = MessageToDict(waiting.task.status.message.parts[0].data)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        saved = executor.store.read(binding)
+        answer = {
+            "challenge": proposal["challenge"],
+            "generation": proposal["generation"],
+            "result": False,
+        }
+        with pytest.raises(InvalidParamsError, match="manual answer"):
+            await invoke(executor, request_context(reply=answer, current=waiting.task))
+        assert executor.store.read(binding) == saved
+        assert len(responses.requests) == 2
+        assert len(opened) == 2 and opened == closed
+        answer["result"] = "approved"
+        responses.respond(assistant_output("accepted"))
+        done, _ = await invoke(executor, request_context(reply=answer, current=waiting.task))
+        assert done.task.status.state == p.TASK_STATE_COMPLETED
+        assert done.task.artifacts[0].parts[0].text == "accepted"
+        assert tool_output(responses.requests[2], "approval") == "approved"
+    finally:
+        await provider.aclose()
 
 
 async def test_manual_string_answer_serializes_once_with_strict_warnings(tmp_path, responses):
@@ -753,7 +882,7 @@ async def test_cancel_interrupts_managed_environment_entry_and_joins_rollback(
         await asyncio.sleep(0)
         assert not running.done() and all(not task.done() for task in canceling)
         binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
-        assert executor.store.read(binding).status == "running"
+        assert executor.store.read(binding).status == ("waiting" if resume else "running")
         assert len(responses.requests) == requests_before and not acquisitions
         release.set()
         stored, _ = await asyncio.wait_for(running, 5)

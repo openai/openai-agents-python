@@ -135,6 +135,91 @@ class RealtimeConfig:
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
 
 
+async def _prepare_realtime_params(
+    session: Session[Any, Any],
+    config: RealtimeConfig,
+    *,
+    settings: dict[str, Any],
+    tools: Sequence[FunctionTool[Any, Any, Any]] | None,
+    transport: dict[str, Any],
+) -> dict[str, Any]:
+    """Project the same captured native source for connection and call acceptance."""
+    try:
+        function_tools, selection_id = await session._realtime_function_tools(tools)
+        params: dict[str, Any] = {
+            "settings": settings,
+            "function_tools": function_tools,
+            "expected_selection_id": selection_id,
+            "hosted_mcp_auto_response": config.automatically_trigger_response_for_mcp_tool_calls,
+            "params": {
+                "client_managed_handoffs": True,
+                "delegation_ack_filler": None,
+                "flush_transcript_tail_on_session_end": True,
+                "codex_responses_as_items": False,
+                "codex_response_item_prefix": None,
+                "codex_response_handoff_mode": "thinking",
+                "backend_reasoning_status": False,
+                "codex_response_handoff_channel_prefixes": None,
+                "model": config.model,
+                "output_modality": "audio",
+                "include_startup_context": False,
+                "initial_items": [],
+                "realtime_start_instructions": None,
+                "realtime_end_instructions": None,
+                "realtime_session_id": None,
+                "transport": transport,
+                "version": "v2",
+                "voice": config.voice,
+            },
+        }
+        if config.instructions is not None:
+            params["params"]["prompt"] = config.instructions
+        return params
+    finally:
+        del config
+
+
+async def _build_realtime_sip_config(
+    session: Session[Any, Any], config: RealtimeConfig
+) -> dict[str, Any]:
+    request: str | None = None
+    prepared: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    try:
+        auto_response = config.automatically_trigger_response_for_mcp_tool_calls
+        if type(auto_response) is not bool:
+            raise TypeError("automatically_trigger_response_for_mcp_tool_calls must be a bool")
+        if not auto_response:
+            raise ValueError(
+                "Set automatically_trigger_response_for_mcp_tool_calls=False on the "
+                "subsequent SIP attachment, not the call-accept configuration"
+            )
+        settings = _serialize_settings(config.settings or {})
+        if config.tools is None:
+            await session._prepare_realtime_mcp()
+        prepared = await _prepare_realtime_params(
+            session,
+            config,
+            settings=settings,
+            tools=None if config.tools is None else tuple(config.tools),
+            transport={"type": "websocket"},
+        )
+        prepared.pop("hosted_mcp_auto_response")
+        request = json.dumps(prepared)
+        return cast(
+            dict[str, Any],
+            json.loads(await session._native.call("realtime_conversation_config_sdk", request)),
+        )
+    except BaseException as error:
+        _clear_adapter_error_frames(error)
+        raise
+    finally:
+        prepared.clear()
+        settings.clear()
+        request = None
+        del config
+
+
 class RealtimeUserInputText(TypedDict):
     """One user text part for native Realtime input."""
 
@@ -376,17 +461,24 @@ def _hosted_mcp_schema_size(
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     if isinstance(value, str):
         size += _hosted_mcp_string_size(value, limit - size, json_text)
-    elif isinstance(value, dict):
+    elif isinstance(value, Mapping):
         for key, child in value.items():
             size += 128
             size += _hosted_mcp_string_size(key, limit - size, json_text)
             size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         for child in value:
             size += _hosted_mcp_schema_size(child, limit - size, depth + 1, json_text=json_text)
     if size > limit:
         raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
     return size
+
+
+def _realtime_history_mapping(value: object) -> dict[str, Any]:
+    """Normalize declared Mapping values after their input budget is reserved."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise TypeError("Realtime history values must be JSON values")
 
 
 def _hosted_mcp_catalog_size(
@@ -614,12 +706,6 @@ class RealtimeSession:
                 or not config.transport.call_id.strip()
             ):
                 raise ValueError("call_id must be a nonempty string")
-            if any(
-                value is not None for value in (config.model, config.voice, config.instructions)
-            ):
-                raise ValueError(
-                    "SIP call configuration must be supplied before accepting the call"
-                )
         elif config.transport is not None:
             raise TypeError("transport must be RealtimeWebRTC, RealtimeSIP, or None")
         self._generation = uuid4().hex
@@ -705,40 +791,14 @@ class RealtimeSession:
                 transport = {"type": "existing_call", "call_id": self._config.transport.call_id}
             if self._selected_tools is None:
                 await self._session._prepare_realtime_mcp()
-            function_tools, selection_id = await self._session._realtime_function_tools(
-                self._selected_tools
+            prepare_params = await _prepare_realtime_params(
+                self._session,
+                self._config,
+                settings=self._settings,
+                tools=self._selected_tools,
+                transport=transport,
             )
             self._check_live(require_ready=False)
-            prepare_params: dict[str, Any] = {
-                "settings": self._settings,
-                "function_tools": function_tools,
-                "expected_selection_id": selection_id,
-                "hosted_mcp_auto_response": (
-                    self._config.automatically_trigger_response_for_mcp_tool_calls
-                ),
-                "params": {
-                    "client_managed_handoffs": True,
-                    "delegation_ack_filler": None,
-                    "flush_transcript_tail_on_session_end": True,
-                    "codex_responses_as_items": False,
-                    "codex_response_item_prefix": None,
-                    "codex_response_handoff_mode": "thinking",
-                    "backend_reasoning_status": False,
-                    "codex_response_handoff_channel_prefixes": None,
-                    "model": self._config.model,
-                    "output_modality": "audio",
-                    "include_startup_context": False,
-                    "initial_items": [],
-                    "realtime_start_instructions": None,
-                    "realtime_end_instructions": None,
-                    "realtime_session_id": None,
-                    "transport": transport,
-                    "version": "v2",
-                    "voice": self._config.voice,
-                },
-            }
-            if self._config.instructions is not None:
-                prepare_params["params"]["prompt"] = self._config.instructions
             try:
                 if self._config.adapter is not None:
                     handle = self._session._native._realtime_adapter(self._generation)
@@ -934,6 +994,79 @@ class RealtimeSession:
         if not isinstance(provider_item_id, str) or not provider_item_id:
             raise ValueError("provider_item_id must be a nonempty string")
         await _join(asyncio.create_task(self._call("delete_item", item_id=provider_item_id)))
+
+    async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:
+        """Edit provider history observed during this connection, in the supplied order.
+
+        Supply unique item IDs. Only supported message rows are editable; retain
+        tool, MCP, and approval rows exactly and in order. Messages cannot move
+        across those authority anchors. Native validation owns item eligibility.
+        Items predating attachment that this connection has not observed remain
+        untouched. The canonical ``history`` audit and Session context remain intact.
+        A provider failure after acknowledgements can leave partial edits; retrieve
+        observed history before retrying. Cancellation joins native acceptance.
+        Queued history inputs share the 128-operation/8 MiB Realtime input budget.
+        """
+        captured: Any = None
+        item: Any = None
+        try:
+            self._check_live()
+            self._check_adapter_operation("update history in its own Realtime session")
+            size = 256
+            try:
+                for item in items:
+                    size += _hosted_mcp_schema_size(
+                        item, _INPUT_QUEUE_BYTES_LIMIT - size, json_text=True
+                    )
+            except RuntimeError:
+                raise ValueError("Realtime history exceeds its 8 MiB input limit") from None
+            with self._input_admission(size):
+                captured = json.loads(json.dumps(list(items), default=_realtime_history_mapping))
+                await _join(asyncio.create_task(self._call("update_history", items=captured)))
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+        finally:
+            del items, captured, item
+
+    async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:
+        """Retrieve one provider item, including media absent from ``history``.
+
+        A known ID may identify an item predating attachment. Retrieving it does
+        not add it to this connection's observed order or canonical audit view.
+        """
+        try:
+            self._check_live()
+            self._check_adapter_operation("retrieve an item in its own Realtime session")
+            if not isinstance(provider_item_id, str) or not provider_item_id:
+                raise ValueError("provider_item_id must be a nonempty string")
+            return cast(
+                dict[str, Any],
+                await _join(
+                    asyncio.create_task(self._call("retrieve_item", item_id=provider_item_id))
+                ),
+            )
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+
+    async def retrieve_conversation_history(self) -> list[dict[str, Any]]:
+        """Retrieve full provider items observed during this connection, in order.
+
+        Results include media absent from ``history``. Items predating attachment
+        are omitted unless this connection observed them; use a known item ID to
+        retrieve one explicitly. Retrieval does not modify the canonical audit.
+        """
+        try:
+            self._check_live()
+            self._check_adapter_operation("retrieve history in its own Realtime session")
+            return cast(
+                list[dict[str, Any]],
+                await _join(asyncio.create_task(self._call("retrieve_history"))),
+            )
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
 
     def _check_adapter_operation(self, operation: str) -> None:
         from .session import _invocation
