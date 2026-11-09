@@ -54,7 +54,7 @@ Reconciliation acquires the same exclusive ownership and commits a result for th
 
 ## Supported state and limits
 
-This preview supports root Sessions with automatic Python tools. Before opening native execution, it rejects native tools (including MCP and web search), environments, child agents, goals, checklists, code mode, and manual tools. The adapter does not yet persist the additional state and receipts those features require.
+This preview supports root Sessions with automatic Python tools and provider-hosted search, file search, code interpreter, and image generation. Before opening native execution, it rejects standalone native tools, MCP, environments, child agents, goals, checklists, code mode, and manual tools. The adapter does not yet persist the additional state and receipts those features require.
 
 Portable `SessionState` and custom canonical storage cannot be combined. Thread listing, archival, forks, and local rollout-path access are unsupported. Use `LocalStorage` for its other [supported combinations](../../../docs/sdk/state.md#choose-how-to-store-a-conversation).
 
