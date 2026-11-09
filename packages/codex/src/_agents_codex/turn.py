@@ -182,7 +182,7 @@ class Turn(Generic[OutputT]):
         await self._session._cancel_turn(self, mode)
 
     def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
-        """Observe owned steps with their native IDs and gaps since admission.
+        """Observe owned steps; all retention omits gaps from before admission.
 
         TurnFinished describes an actual native step; get_result() is overall completion.
         The iterator ends when the owned steps settle. For a yielded cell or background

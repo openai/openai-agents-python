@@ -473,7 +473,12 @@ class EventStream(AsyncIterator[Observation]):
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
         self._buffer = buffer
-        self._after = max(after, getattr(_turn, "_observation_after", 0))
+        # Bounded readers preserve their Session-global loss notification.
+        self._after = (
+            max(after, getattr(_turn, "_observation_after", 0))
+            if buffer.retention == "all"
+            else after
+        )
         self._closed = False
         self._reading = False
         self._turn = _turn

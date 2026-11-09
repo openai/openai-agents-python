@@ -1045,7 +1045,7 @@ async def test_repair_local_eviction_does_not_report_loss_in_parent_log() -> Non
 
 
 @pytest.mark.parametrize("retention", ["bounded", "all"])
-async def test_turn_gap_window_starts_at_submission_admission(responses, retention) -> None:
+async def test_turn_gap_window_preserves_each_retention_contract(responses, retention) -> None:
     responses.respond(*text_response("first", "first"))
     responses.respond(*text_response("second", "second"))
     async with Agent(instructions="Answer.", provider=provider(responses)).session(
@@ -1056,7 +1056,11 @@ async def test_turn_gap_window_starts_at_submission_admission(responses, retenti
         session._observations._mark_gap()
         second = await session.submit("second")
         await second.get_result()
-        assert not any(isinstance(event, EventGap) for event in [e async for e in second.events()])
+        # Bounded raw observations keep their existing Session-global gap.
+        # Complete retention scopes stored gaps to this Turn's admission.
+        assert any(isinstance(event, EventGap) for event in [e async for e in second.events()]) == (
+            retention == "bounded"
+        )
         assert any(isinstance(event, EventGap) for event in [e async for e in first.events()])
         # A loss published after completion remains observable by a fresh cursor.
         session._observations._mark_gap()
