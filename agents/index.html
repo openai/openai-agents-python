@@ -5720,10 +5720,11 @@
   " href="../ref/model_settings/#agents.model_settings.ModelSettings.tool_choice"><code>ModelSettings.tool_choice</code></a>. Valid values are:</p>
 <ol>
 <li><code>auto</code>, which allows the LLM to decide whether or not to use a tool.</li>
-<li><code>required</code>, which requires the LLM to use a tool (but it can intelligently decide which tool).</li>
+<li><code>required</code>, which requires the LLM to use a tool and lets it choose among the available tools.</li>
 <li><code>none</code>, which requires the LLM to <em>not</em> use a tool.</li>
 <li>Setting a specific string e.g. <code>my_tool</code>, which requires the LLM to use that specific tool.</li>
 </ol>
+<p>For a read-only request, expose only read-only tools. For example, if a user asks for a ticket's status and the only available tools add a comment or close the ticket, <code>required</code> can cause the first tool call to change the ticket. <code>Agent.reset_tool_choice</code> takes effect only after the agent has used a tool. Use <code>auto</code> when the model should also be able to answer without calling a tool.</p>
 <p>When you are using OpenAI Responses tool search, named tool choices are more limited: you cannot target bare namespace names or deferred-only tools with <code>tool_choice</code>, and <code>tool_choice="tool_search"</code> does not target <a class="autorefs autorefs-internal" title="ToolSearchTool
 
 
