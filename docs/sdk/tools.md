@@ -136,7 +136,14 @@ Include `report_artifacts` in the Agent's tools. The references can remain in ac
 
 ### Callback deadlines
 
-Set `@function_tool(callback_timeout=2.0)` to limit the callback body, including time spent waiting for synchronous execution. The SDK withholds late results even if the callback suppresses cancellation. It waits for callback cleanup before reporting completion. A running application function can delay cleanup, and the deadline cannot undo earlier effects. The deadline excludes `before`, `after`, argument validation, and result conversion.
+Set `@function_tool(callback_timeout=2.0)` to limit the callback body, including time waiting for synchronous execution. The deadline excludes `before`, `after`, argument validation, and result conversion. The SDK discards late results and waits for callback cleanup. A running function can delay cleanup, and any effects it has already performed remain.
+
+Choose what happens after a timeout.
+
+- `timeout_behavior="raise_exception"` fails the turn with `ToolTimeoutError`. This is the default.
+- `timeout_behavior="error_as_result"` sends a failed tool result to the model. The SDK skips the normal return-type validation and the `after` hook.
+
+In result mode, supply `timeout_error_function(context, error)` to return your own error text after cleanup. The formatter can be synchronous or asynchronous. If it raises, the turn fails.
 
 ## Application context
 

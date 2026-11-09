@@ -15,7 +15,7 @@ For a live model example, supply `OPENAI_API_KEY` through your usual credential 
 With `OPENAI_API_KEY` configured, run the greeting example:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.basic
+python -m examples.codex.basic
 ```
 
 The example asks the agent to greet Ada with the Python `greeting` tool and prints the final answer. Live wording can vary. The [source](basic.py) shows the tool declaration and `Agent.run()` call.

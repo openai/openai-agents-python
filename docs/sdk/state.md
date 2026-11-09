@@ -70,7 +70,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run `.venv/bin/python local_conversation.py` on Linux/macOS or `.\.venv\Scripts\python.exe local_conversation.py` on Windows. The script keeps native conversation data in `conversations` under the current directory and prints an answer recalling `atlas`; the model chooses the wording.
+In your activated SDK environment, run `python local_conversation.py` from the directory where you saved the script. The script stores the conversation in a `conversations` subdirectory. The answer should recall `atlas`. The model chooses the wording.
 
 This script demonstrates closing and reopening within one application process. To reopen after a process restart, store `saved_id` in trusted application storage and retain the profile directory. Supply the same directory and current application configuration when reopening. See the [LocalStorage reference](reference.md#localstorage) for configuration, writer and portability constraints.
 

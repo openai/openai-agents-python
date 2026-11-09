@@ -83,10 +83,10 @@ official references are:
 - <https://modal.com/docs/reference/modal.config>
 - <https://modal.com/docs/guide/sandbox>
 
-If you want to configure credentials directly from the CLI:
+To use the CLI, replace the two placeholders with your Modal credentials.
 
 ```bash
-uv run modal token set --token-id <token-id> --token-secret <token-secret>
+uv run modal token set --token-id "your-token-id" --token-secret "your-token-secret"
 ```
 
 Or export environment variables for the current shell:
