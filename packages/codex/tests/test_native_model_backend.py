@@ -76,7 +76,7 @@ async def test_custom_model_core_executes_tool_and_supplies_result_to_next_respo
     assert seen[0].context == {"tenant": "synthetic"}
 
 
-@pytest.mark.parametrize("native_model", [None, "fixture-chat-standard"])
+@pytest.mark.parametrize("native_model", [None, "gpt-5.2"])
 @pytest.mark.parametrize("parallel", [False, True])
 async def test_chat_client_adapter_stays_inside_native_tool_loop(
     native_model: str | None, parallel: bool
@@ -236,4 +236,162 @@ async def test_cancellation_joins_admitted_sync_model_and_discards_late_tool_cal
                 await stopping
             with pytest.raises(TurnStoppedError):
                 await turn.get_result()
+    assert effects == []
+
+
+@pytest.mark.parametrize("refusal", [False, True])
+async def test_chat_completed_response_preserves_native_facts_and_controls(refusal: bool) -> None:
+    from agents import NativeError
+
+    requests = []
+    captured_instructions = []
+    effects = []
+    private = "private-model-refusal"
+    token = {"token": "ok", "bytes": [111, 107], "logprob": -0.25, "top_logprobs": []}
+
+    async def respond(http: web.Request) -> web.Response:
+        requests.append(await http.json())
+        return web.json_response(
+            {
+                "id": "chat_facts",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": None if refusal else "ok",
+                            "refusal": private if refusal else None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "id": "never",
+                                    "function": {"name": "echo", "arguments": '{"value":"never"}'},
+                                }
+                            ]
+                            if refusal
+                            else None,
+                        },
+                        "logprobs": {"content": [token]} if not refusal else None,
+                    }
+                ],
+            }
+        )
+
+    @function_tool
+    def echo(value: str) -> str:
+        effects.append(value)
+        return value
+
+    application = web.Application()
+    application.router.add_post("/v1/chat/completions", respond)
+    async with (
+        TestServer(application) as server,
+        AsyncOpenAI(api_key="synthetic-key", base_url=str(server.make_url("/v1"))) as client,
+    ):
+        adapter = ChatCompletionsModel(client, "chat-model")
+
+        class CaptureModel:
+            async def complete(self, request: ModelRequest) -> ModelResponse:
+                captured_instructions.append(
+                    [
+                        {
+                            "role": item["role"],
+                            "content": [
+                                {"type": "text", "text": part["text"]} for part in item["content"]
+                            ],
+                        }
+                        for item in request.body["input"]
+                        if item.get("type") == "message" and item["role"] in ("system", "developer")
+                    ]
+                )
+                return await adapter.complete(request)
+
+        async with (
+            NativeProvider(model_backend=CaptureModel()) as provider,
+            Agent(
+                model="gpt-5.2",
+                instructions="Preserve this exact instruction.",
+                model_settings={"verbosity": "high", "top_logprobs": 1},
+                tools=[echo],
+                provider=provider,
+            ).session() as session,
+        ):
+            turn = await session.submit("answer")
+            if refusal:
+                with pytest.raises(NativeError) as caught:
+                    await turn.get_result()
+                assert caught.value.response_integrity_reason == "provider_refusal"
+                assert private not in str(caught.value)
+            else:
+                assert (await turn.get_result()).final_output == "ok"
+            recorded = [row async for row in session.turns()][0]
+            facts = [row["fact"] for row in recorded.get("response_facts", [])]
+            if refusal:
+                assert any(fact["kind"] == "refusal" and fact["text"] == private for fact in facts)
+                assert recorded["status"] == "failed"
+            else:
+                assert any(
+                    fact["kind"] == "text_probabilities" and fact["tokens"] == [token]
+                    for fact in facts
+                )
+    assert effects == []
+    assert len(requests) == 1
+    assert [
+        message for message in requests[0]["messages"] if message["role"] in ("system", "developer")
+    ] == captured_instructions[0]
+    assert "Preserve this exact instruction." in json.dumps(captured_instructions[0])
+    assert requests[0]["verbosity"] == "high"
+    assert requests[0]["logprobs"] is True
+    assert requests[0]["top_logprobs"] == 1
+
+
+@pytest.mark.parametrize("later", ["refusal", "malformed"])
+async def test_completed_model_validates_whole_output_before_any_tool(later: str) -> None:
+    from agents import NativeError
+
+    effects = []
+
+    @function_tool
+    def echo(value: str) -> str:
+        effects.append(value)
+        return value
+
+    class Producer:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            return ModelResponse(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "never",
+                        "name": "echo",
+                        "arguments": '{"value":"never"}',
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "refusal", "refusal": "private-later-refusal"}],
+                    }
+                    if later == "refusal"
+                    else {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": 7}],
+                    },
+                ]
+            )
+
+    async with (
+        NativeProvider(model_backend=Producer()) as provider,
+        Agent(instructions="Answer.", tools=[echo], provider=provider).session() as session,
+    ):
+        turn = await session.submit("answer")
+        with pytest.raises(NativeError) as caught:
+            await turn.get_result()
+        assert caught.value.response_integrity_reason == (
+            "provider_refusal" if later == "refusal" else "undecodable_output_item"
+        )
     assert effects == []

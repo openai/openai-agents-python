@@ -537,3 +537,57 @@ async def test_extended_request_fields_capture_clear_and_restore(
 def test_extra_body_rejects_native_envelope_fields_before_opening(key: str) -> None:
     with pytest.raises(ValueError, match="extra_body cannot replace"):
         Agent(instructions="Answer.", model_settings={"extra_body": {key: False}})
+
+
+async def test_empty_include_is_a_sparse_no_wire_patch_on_lite(responses):
+    for text in ["opened", "cleared", "restored"]:
+        responses.respond(assistant_output(text))
+    async with timeout(30), provider_for(responses) as provider:
+        agent = Agent(
+            model="gpt-5.6-sol",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"include": []},
+        )
+        async with agent.session() as session:
+            assert (await (await session.submit("open")).get_result()).final_output == "opened"
+            await session.update(model_settings={"include": []})
+            saved = await session.save_state()
+            with pytest.raises(
+                (ValueError, RuntimeError), match="standard Responses|Responses Lite"
+            ):
+                await session.update(model_settings={"include": ["message.output_text.logprobs"]})
+            await session.update(model_settings={"include": None})
+            assert (await (await session.submit("clear")).get_result()).final_output == "cleared"
+        async with agent.session(state=saved) as restored:
+            assert (
+                await (await restored.submit("restore")).get_result()
+            ).final_output == "restored"
+    assert len(responses.requests) == 3
+    assert all(
+        "message.output_text.logprobs" not in request.get("include", [])
+        for request in responses.requests
+    )
+
+
+async def test_empty_include_clears_additions_and_preserves_native_required_includes(responses):
+    for text in ["before", "empty", "restored"]:
+        responses.respond(assistant_output(text))
+    async with timeout(30), provider_for(responses) as provider:
+        agent = Agent(
+            model=MODEL,
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"include": ["message.output_text.logprobs"]},
+        )
+        async with agent.session() as session:
+            await (await session.submit("before")).get_result()
+            await session.update(model_settings={"include": []})
+            await (await session.submit("empty")).get_result()
+            saved = await session.save_state()
+        async with agent.session(state=saved) as restored:
+            await (await restored.submit("restore")).get_result()
+    assert "message.output_text.logprobs" in responses.requests[0]["include"]
+    for request in responses.requests[1:]:
+        assert "message.output_text.logprobs" not in request["include"]
+        assert "reasoning.encrypted_content" in request["include"]

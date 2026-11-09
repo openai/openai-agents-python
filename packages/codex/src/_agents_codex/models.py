@@ -186,6 +186,8 @@ class ChatCompletionsModel:
             if key in request.body
         }
         text = request.body.get("text") or {}
+        if text.get("verbosity") is not None:
+            options["verbosity"] = text["verbosity"]
         output_format = text.get("format") or {}
         if output_format.get("type") == "json_schema":
             options["response_format"] = {
@@ -222,14 +224,17 @@ class ChatCompletionsModel:
             raise ValueError("ChatCompletionsModel requires exactly one response choice")
         message = value["choices"][0]["message"]
         output = []
+        output_content: list[dict[str, Any]] = []
         if message.get("content") is not None:
-            output.append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": message["content"]}],
-                }
-            )
+            text_part: dict[str, Any] = {"type": "output_text", "text": message["content"]}
+            probabilities = (value["choices"][0].get("logprobs") or {}).get("content")
+            if probabilities is not None:
+                text_part["logprobs"] = probabilities
+            output_content.append(text_part)
+        if message.get("refusal") is not None:
+            output_content.append({"type": "refusal", "refusal": message["refusal"]})
+        if output_content:
+            output.append({"type": "message", "role": "assistant", "content": output_content})
         for call in message.get("tool_calls") or []:
             if call.get("type") != "function":
                 raise ValueError("ChatCompletionsModel received an unsupported tool call")
