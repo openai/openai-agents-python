@@ -85,7 +85,7 @@ def completed_event():
     return {
         "trace_id": "a" * 32,
         "span_id": "b" * 16,
-        "parent_span_id": "c" * 16,
+        "parent_span_id": None,
         "name": "synthetic operation",
         "lifecycle": "end",
         "outcome": "error",
@@ -107,7 +107,7 @@ async def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity
     trace, span = received[-1]["payload"]["data"]
     assert trace["id"] == "trace_" + "a" * 32
     assert span["id"] == "span_" + "0" * 8 + "b" * 16
-    assert span["parent_id"] == "span_" + "0" * 8 + "c" * 16
+    assert span["parent_id"] is None
     assert span["started_at"] == "2023-11-14T22:13:20.123456789Z"
     assert span["ended_at"] == "2023-11-14T22:13:21.987654321Z"
     assert span["error"]["data"]["outcome"] == "error"
@@ -280,9 +280,11 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
-            delivery.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            delivery.cancel("synthetic caller cancellation")
+            with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
+            assert failure.value.args == ("synthetic caller cancellation",)
+            assert_sanitized_failure(failure.value, secret)
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
                 await delivery
@@ -389,7 +391,7 @@ async def test_failed_root_descriptor_metadata_and_rotation_survive_delivery():
             "sdk.metadata.literal": "true",
         },
     }
-    child = {**completed_event(), "name": "child-span"}
+    child = {**completed_event(), "parent_span_id": "c" * 16, "name": "child-span"}
     with collector([503, 200, 200]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic-old-key", endpoint=endpoint)
         with pytest.raises(RuntimeError):
@@ -426,7 +428,7 @@ async def test_batch_delivery_preserves_order_and_bounded_descriptor_lifetime():
         roots = [
             {
                 **completed_event(),
-                "lifecycle": "start",
+                "lifecycle": "end",
                 "parent_span_id": None,
                 "trace_id": f"{index:032x}",
             }

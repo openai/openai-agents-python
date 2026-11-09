@@ -39,7 +39,8 @@ def _span_id(value: str | None) -> str | None:
 @dataclass
 class _TraceState:
     descriptor: dict[str, Any]
-    root: bool
+    active_spans: int = 0
+    root_ended: bool = False
     delivered_to: object | None = None
 
 
@@ -71,7 +72,9 @@ class OpenAITraceExporter:
     Classic span objects are created. Failures are reported by the native
     processor delivery/flush counters. Native-drain batches are delivered as one
     HTTP request; native acknowledgement waits for that request. Up to 1024 recent
-    trace descriptors are retained, including failed deliveries. The metadata
+    trace descriptors are retained. Active roots and descendants prevent eviction;
+    completed traces are retired first. New roots beyond active capacity fail
+    delivery, and unknown child-only records never fabricate a root. The metadata
     runtime key is reserved for the native marker; other flattened native
     sdk.metadata attributes are preserved without guessing their JSON types.
     """
@@ -176,15 +179,29 @@ class OpenAITraceExporter:
             root = event.get("parent_span_id") is None
             state = self._traces.get(trace_id)
             if state is None:
-                state = _TraceState(_descriptor(event), root)
+                if not root:
+                    raise RuntimeError("Native trace root descriptor is unavailable")
+                if len(self._traces) >= 1024:
+                    completed = next(
+                        (
+                            key
+                            for key, entry in self._traces.items()
+                            if entry.root_ended and entry.active_spans == 0
+                        ),
+                        None,
+                    )
+                    if completed is None:
+                        raise RuntimeError("Native active trace descriptor capacity reached")
+                    del self._traces[completed]
+                state = _TraceState(_descriptor(event))
                 self._traces[trace_id] = state
-            elif root and not state.root:
-                state.descriptor = _descriptor(event)
-                state.root = True
-                state.delivered_to = None
+            if event["lifecycle"] == "start":
+                state.active_spans += 1
+            else:
+                state.active_spans = max(0, state.active_spans - 1)
+                if root:
+                    state.root_ended = True
             self._traces.move_to_end(trace_id)
-            if len(self._traces) > 1024:
-                self._traces.popitem(last=False)
             states[trace_id] = state
         pending = [
             (trace_id, state, state.descriptor)
@@ -230,48 +247,61 @@ class OpenAITraceExporter:
         pending: list[tuple[str, _TraceState, dict[str, Any]]] = []
         payload = b""
         deadline = monotonic() + self._timeout
+        cancelled: asyncio.CancelledError | None = None
         failed = False
         try:
-            records, pending = self._prepare_events(events, revision)
-            if not records:
+            try:
+                records, pending = self._prepare_events(events, revision)
+                if not records:
+                    return
+                payload = json.dumps({"data": records}, allow_nan=False).encode()
+                await asyncio.wait_for(
+                    self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
+                )
+            except asyncio.CancelledError as error:
+                # Preserve cancellation identity/args without completed transport frames.
+                cancelled = error.with_traceback(None)
+                cancelled.__cause__ = None
+                cancelled.__context__ = None
+            except Exception:
+                failed = True
+            if cancelled is None and not failed and monotonic() <= deadline:
+                if self._credentials[0] is revision:
+                    for trace_id, state, descriptor in pending:
+                        if self._traces.get(trace_id) is state and state.descriptor is descriptor:
+                            state.delivered_to = revision
                 return
-            payload = json.dumps({"data": records}, allow_nan=False).encode()
-            await asyncio.wait_for(
-                self._send(payload, dict(headers)), timeout=max(0.0, deadline - monotonic())
-            )
-        except Exception:
-            # Leave raw timeout/transport handlers before exposing a public error.
-            # Explicit cancellation stays owned by the caller.
-            failed = True
-        if failed or monotonic() > deadline:
+        finally:
             del self, events, payload, records, pending, headers
-            raise RuntimeError("Native OpenAI trace export failed") from None
-        if self._credentials[0] is revision:
-            for trace_id, state, descriptor in pending:
-                if self._traces.get(trace_id) is state and state.descriptor is descriptor:
-                    state.delivered_to = revision
+        if cancelled is not None:
+            raise cancelled from None
+        raise RuntimeError("Native OpenAI trace export failed") from None
 
     async def _send(self, payload: bytes, headers: dict[str, str]) -> None:
-        # Keep the client inside the delivery's timeout and cancellation scope.
-        # Streaming reads only headers; remote response bodies are never retained.
-        async with self._httpx.AsyncClient(
-            timeout=self._timeout, follow_redirects=False, trust_env=False
-        ) as client:
-            for attempt in range(self._max_retries + 1):
-                retry = False
-                try:
-                    async with client.stream(
-                        "POST", self._address.geturl(), content=payload, headers=headers
-                    ) as response:
-                        if 200 <= response.status_code < 300:
-                            return
-                        retry = response.status_code >= 500
-                except self._httpx.HTTPError:
-                    retry = True
-                if not retry or attempt == self._max_retries:
-                    break
-        # Avoid exposing endpoints, request bodies, response bodies or credentials.
-        raise RuntimeError("Native OpenAI trace export failed") from None
+        client = response = None
+        try:
+            # Keep the client inside the delivery's timeout and cancellation scope.
+            # Streaming reads only headers; remote response bodies are never retained.
+            async with self._httpx.AsyncClient(
+                timeout=self._timeout, follow_redirects=False, trust_env=False
+            ) as client:
+                for attempt in range(self._max_retries + 1):
+                    retry = False
+                    try:
+                        async with client.stream(
+                            "POST", self._address.geturl(), content=payload, headers=headers
+                        ) as response:
+                            if 200 <= response.status_code < 300:
+                                return
+                            retry = response.status_code >= 500
+                    except self._httpx.HTTPError:
+                        retry = True
+                    if not retry or attempt == self._max_retries:
+                        break
+            # Avoid exposing endpoints, request bodies, response bodies or credentials.
+            raise RuntimeError("Native OpenAI trace export failed") from None
+        finally:
+            del self, payload, headers, client, response
 
 
 class ConsoleTraceProcessor:

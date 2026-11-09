@@ -710,7 +710,7 @@ async def test_dynamic_callback_failure_remains_an_exhaustion_failure():
     with pytest.raises(ValueError, match="synthetic-private-callback-error"):
         async with peer:
             status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
-            assert status == 500
+            assert status == 400
             assert "synthetic-private-callback-error" not in body
             with pytest.raises(ValueError, match="synthetic-private-callback-error"):
                 peer.assert_exhausted()

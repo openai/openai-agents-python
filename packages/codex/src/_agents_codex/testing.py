@@ -343,7 +343,9 @@ class _Handler(BaseHTTPRequestHandler):
             response_id = f"resp_{len(self.peer._requests)}"
             items = (
                 self.peer._responses.popleft()
-                if self.path == "/v1/responses" and self.peer._responses
+                if self.path == "/v1/responses"
+                and self.peer._responses
+                and self.peer._callback_error is None
                 else None
             )
         if items is None:
@@ -358,7 +360,8 @@ class _Handler(BaseHTTPRequestHandler):
             with self.peer._lock:
                 if self.peer._callback_error is None:
                     self.peer._callback_error = error
-            self.send_error(500)
+            # Callback assertions are terminal fixture failures, never transient provider errors.
+            self.send_error(400)
             return
         if items.status != 200:
             payload = json.dumps(

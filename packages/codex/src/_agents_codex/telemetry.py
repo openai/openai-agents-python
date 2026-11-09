@@ -621,19 +621,34 @@ class TraceScope:
         data: Mapping[str, Any] | None = None,
     ) -> None:
         """Set completion data; native privacy and payload bounds still apply."""
-        if status not in ("ok", "error", "cancelled"):
-            raise ValueError("Invalid span outcome status")
-        if category is not None and (
-            not isinstance(category, str)
-            or len(category) > 256
-            or any(not (char.isascii() and (char.isalnum() or char == "_")) for char in category)
-        ):
-            raise ValueError("Invalid span outcome category")
-        if data is not None and not isinstance(data, Mapping):
-            raise TypeError("data must be a mapping or None")
-        # Capture JSON now so caller mutation cannot change completion records.
-        payload = json.loads(json.dumps(dict(data or {}), allow_nan=False))
-        self._outcome = {"status": status, "category": category, "data": payload}
+        payload = None
+        serialization_error: type[TypeError] | type[ValueError] | None = None
+        try:
+            if status not in ("ok", "error", "cancelled"):
+                raise ValueError("Invalid span outcome status")
+            if category is not None and (
+                not isinstance(category, str)
+                or len(category) > 256
+                or any(
+                    not (char.isascii() and (char.isalnum() or char == "_")) for char in category
+                )
+            ):
+                raise ValueError("Invalid span outcome category")
+            if data is not None and not isinstance(data, Mapping):
+                raise TypeError("data must be a mapping or None")
+            # Capture JSON now so caller mutation cannot change completion records.
+            try:
+                payload = json.loads(
+                    json.dumps(dict(data if data is not None else {}), allow_nan=False)
+                )
+            except (TypeError, ValueError, OverflowError, RecursionError) as error:
+                serialization_error = TypeError if isinstance(error, TypeError) else ValueError
+            if serialization_error is None:
+                self._outcome = {"status": status, "category": category, "data": payload}
+        finally:
+            del self, data, payload
+        if serialization_error is not None:
+            raise serialization_error("Span outcome data must be JSON serializable") from None
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if self._ended or self._context is None:
