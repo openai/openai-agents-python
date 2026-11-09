@@ -2969,6 +2969,14 @@ class Session(Generic[ContextT, OutputT]):
                         + (
                             [
                                 {"name": name, "namespace": "functions"}
+                                for name in ("read_text_file", "view_image")
+                            ]
+                            if project_guidance
+                            else []
+                        )
+                        + (
+                            [
+                                {"name": name, "namespace": "functions"}
                                 for name in ("create_goal", "get_goal", "update_goal")
                             ]
                             if goals

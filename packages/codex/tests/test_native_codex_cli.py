@@ -82,8 +82,8 @@ async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses)
     async with Agent(
         instructions="Use codex.", provider=provider(responses), tools=[declaration]
     ).session() as session:
-        result = await (await session.submit("Do the task")).wait()
-        assert result.output == "done"
+        result = await (await session.submit("Do the task")).get_result()
+        assert result.final_output == "done"
     assert "CLI completed" in json.dumps(responses.requests[1])
 
 

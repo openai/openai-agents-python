@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,12 @@ async def test_project_guidance_requires_an_executor(responses) -> None:
     assert responses.requests == []
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 async def test_project_guidance_reads_workspace_image_without_command_grants(
     tmp_path: Path, responses
 ) -> None:
@@ -44,8 +51,8 @@ async def test_project_guidance_reads_workspace_image_without_command_grants(
         environment=Environment.local(cwd=tmp_path),
         project_guidance=True,
     ) as session:
-        completed = await (await session.submit("Read the image.")).wait()
-        assert completed.output == "image read"
+        completed = await (await session.submit("Read the image.")).get_result()
+        assert completed.final_output == "image read"
     request = json.dumps(responses.requests[1])
     assert "data:image/png;base64," in request
     assert "SYNTHETIC_WORKSPACE_GUIDANCE" in request
