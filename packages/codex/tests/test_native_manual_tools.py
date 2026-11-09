@@ -507,3 +507,115 @@ async def test_caught_graceful_stop_after_request_wait_has_no_background_error(r
         assert len(responses.requests) == 1
     finally:
         loop.set_exception_handler(previous)
+
+
+@pytest.mark.parametrize("kind", ["annotated", "subclass", "plain", "json"])
+async def test_manual_string_serializer_reaches_provider_once(responses, kind):
+    from typing import Annotated
+
+    from pydantic import PlainSerializer
+    from pydantic_core import core_schema
+
+    calls: list[str] = []
+
+    def serialize(value: str):
+        calls.append(value)
+        return {"units": value} if kind == "json" else f"units:{value}"
+
+    class SerializedString(str):
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source, handler):
+            return core_schema.no_info_after_validator_function(
+                cls,
+                core_schema.str_schema(),
+                serialization=core_schema.plain_serializer_function_ser_schema(
+                    serialize, return_schema=core_schema.str_schema(), when_used="json"
+                ),
+            )
+
+    output_type = (
+        str
+        if kind == "plain"
+        else SerializedString
+        if kind == "subclass"
+        else Annotated[str, PlainSerializer(serialize, when_used="json")]
+    )
+    report = FunctionTool(
+        name="report", description="Report units", input_type=LookupArgs, output_type=output_type
+    )
+    responses.respond(function_call("report", {"key": "7"}, "manual-serialized"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Report.", tools=[report], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("report")
+        request = await next_request(session.interactions(), report)
+        await request.respond(SerializedString("7") if kind == "subclass" else "7")
+        assert (await turn.get_result()).final_output == "done"
+    assert calls == ([] if kind == "plain" else ["7"])
+    expected = {"json": '{"units":"7"}', "plain": "7"}.get(kind, "units:7")
+    assert tool_output(responses.requests[1], "manual-serialized") == expected
+
+
+async def test_manual_string_serialization_failure_keeps_reply_available(responses):
+    from typing import Annotated
+
+    from pydantic import PlainSerializer
+
+    calls: list[str] = []
+
+    def serialize(value: str) -> str:
+        calls.append(value)
+        if value == "invalid":
+            raise ValueError("Cannot serialize this value")
+        return f"units:{value}"
+
+    report = FunctionTool(
+        name="report",
+        description="Report units",
+        input_type=LookupArgs,
+        output_type=Annotated[str, PlainSerializer(serialize, return_type=str, when_used="json")],
+    )
+    responses.respond(function_call("report", {"key": "7"}, "retry-serialized"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Report.", tools=[report], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("report")
+        request = await next_request(session.interactions(), report)
+        with pytest.raises(ValueError, match="validation"):
+            await request.respond("invalid")
+        [pending] = await session.pending_interactions()
+        assert pending.call_id == request.call_id
+        assert len(responses.requests) == 1
+        await request.respond("7")
+        assert (await turn.get_result()).final_output == "done"
+    assert calls == ["invalid", "7"]
+    assert tool_output(responses.requests[1], "retry-serialized") == "units:7"
+
+
+async def test_manual_direct_tool_output_keeps_text_content(responses):
+    from agents import ToolOutput
+
+    report = FunctionTool(
+        name="report", description="Report units", input_type=LookupArgs, output_type=ToolOutput
+    )
+    responses.respond(function_call("report", {"key": "7"}, "manual-error"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Report.", tools=[report], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("report")
+        request = await next_request(session.interactions(), report)
+        await request.respond(ToolOutput.error("unavailable"))
+        assert (await turn.get_result()).final_output == "done"
+    assert tool_output(responses.requests[1], "manual-error") == "unavailable"

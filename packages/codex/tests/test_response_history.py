@@ -146,6 +146,54 @@ def test_legacy_receipt_and_missing_response_list_remain_readable() -> None:
     assert SessionState.from_json(state.to_json()).repair_turns == [turn]
 
 
+@pytest.mark.parametrize("reported", [None, 0, 4])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_aggregate_cache_writes_preserve_linked_unknowns_and_reported_values(
+    reported: int | None, mixed: bool
+) -> None:
+    records = []
+    if mixed:
+        records.extend([observation("known", {"cache_write_input_tokens": 4}), accounting("known")])
+    raw = {} if reported is None else {"cache_write_input_tokens": reported}
+    record = accounting("observation-a")
+    total = (4 if mixed else 0) + (reported or 0)
+    record["payload"]["turn_token_usage"]["cache_write_input_tokens"] = total
+    records.extend([observation(usage=raw), record])
+    turn = project(*records)
+    assert turn["usage"] is not None
+    details = turn["usage"]["input_tokens_details"]
+    assert details.get("cache_write_tokens") == (None if reported is None else total)
+    assert details["cached_tokens"] == 0
+    assert turn["usage"]["input_tokens"] == 14
+    assert turn["usage"]["output_tokens_details"]["reasoning_tokens"] == 0
+    state = SessionState(
+        format_version=2,
+        codex_revision="synthetic-revision",
+        source_session_id="current-session",
+        history=[
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn"}},
+            *records,
+        ],
+        root_metadata={},
+    )
+    restored = SessionState.from_json(state.to_json())
+    assert project(*restored.history)["usage"] == turn["usage"]
+
+
+@pytest.mark.parametrize("mismatch", ["unlinked", "missing", "thread_id", "turn_id"])
+def test_aggregate_cache_writes_require_exact_contributor_link(mismatch: str) -> None:
+    received = observation(usage={})
+    record = accounting(None if mismatch == "unlinked" else "observation-a")
+    record["payload"]["turn_token_usage"]["cache_write_input_tokens"] = 0
+    if mismatch == "missing":
+        record["payload"]["response_observation_id"] = "missing"
+    elif mismatch in {"thread_id", "turn_id"}:
+        received["payload"][mismatch] = "different-origin"
+    turn = project(received, record)
+    assert turn["usage"] is not None
+    assert turn["usage"]["input_tokens_details"]["cache_write_tokens"] == 0
+
+
 def test_rollback_discards_response_projection_indexes() -> None:
     turn = project(
         observation(),
