@@ -1919,11 +1919,13 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
-def _check_buffered_native_agents(
+def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
     if native_agents is not None and provider is not None and provider.response_mode == "buffered":
         raise CapabilityError("Buffered Responses do not support native child agents")
+    if native_agents is not None and provider is not None and provider.model_backend is not None:
+        raise ValueError("model_backend does not yet support native child agents")
 
 
 def _check_native_agents_environment(
@@ -2800,7 +2802,7 @@ class Session(Generic[ContextT, OutputT]):
                 *restored_defaults,
                 *(_MCPResourceRef(name) for name in restored_resource_servers),
             )
-        _check_buffered_native_agents(native_agents, agent.provider)
+        _check_native_agents_provider(native_agents, agent.provider)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -3102,8 +3104,6 @@ class Session(Generic[ContextT, OutputT]):
             owned_provider = provider is None
             if provider is None:
                 provider = NativeProvider()
-            if provider.model_backend is not None and native_agents is not None:
-                raise ValueError("model_backend does not yet support native child agents")
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
