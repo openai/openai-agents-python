@@ -28,6 +28,7 @@ from agents import (
     ImageGenerationTool,
     ModelSettings,
     ModelTracing,
+    ProgrammaticToolCallingTool,
     Runner,
     ShellTool,
     Tool,
@@ -36,6 +37,7 @@ from agents import (
     __version__,
     function_tool,
     handoff,
+    tool_namespace,
     trace,
 )
 from agents.exceptions import ModelBehaviorError, UserError
@@ -2411,6 +2413,85 @@ async def test_preview_model_forced_computer_tool_choice_uses_preview_selector(
             "display_height": 600,
         }
     ]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "with_hosted", "as_handoff", "expected_choice"),
+    [
+        ("web_search", False, False, {"type": "function", "name": "web_search"}),
+        ("web_search", True, False, {"type": "web_search"}),
+        ("web_search_preview", True, False, {"type": "web_search_preview"}),
+        ("mcp", False, True, {"type": "function", "name": "mcp"}),
+        (
+            "programmatic_tool_calling",
+            False,
+            False,
+            {"type": "function", "name": "programmatic_tool_calling"},
+        ),
+    ],
+)
+async def test_responses_tool_choice_with_hosted_name(
+    name: str, with_hosted: bool, as_handoff: bool, expected_choice: dict[str, str]
+) -> None:
+    tools: list[Tool] = [function_tool(lambda: "ok", name_override="lookup")]
+    handoffs = [handoff(Agent(name="Target"), tool_name_override=name)] if as_handoff else []
+    if not as_handoff:
+        tools.append(function_tool(lambda: "ok", name_override=name))
+    if with_hosted:
+        tools.append(WebSearchTool())
+
+    # Inspect the serialized request because the bug is in the provider wire format.
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        assert {t["name"] for t in body["tools"] if t["type"] == "function"} == {"lookup", name}
+        assert any(t["type"] == "web_search" for t in body["tools"]) == with_hosted
+        assert body["tool_choice"] == expected_choice
+        return httpx2.Response(200, json=get_response_obj([]).model_dump())
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+        max_retries=0,
+    ) as client:
+        await OpenAIResponsesModel("gpt-4.1", client).get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(tool_choice=name),
+            tools=tools,
+            output_schema=None,
+            handoffs=handoffs,
+            tracing=ModelTracing.DISABLED,
+        )
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [
+            function_tool(lambda: "ok", name_override="web_search", defer_loading=True),
+            ToolSearchTool(),
+        ],
+        tool_namespace(
+            name="internal",
+            description="Internal tools",
+            tools=[function_tool(lambda: "ok", name_override="web_search")],
+        ),
+        [
+            function_tool(
+                lambda: "ok", name_override="web_search", allowed_callers=["programmatic"]
+            ),
+            ProgrammaticToolCallingTool(),
+        ],
+    ],
+    ids=["deferred", "namespaced", "programmatic-only"],
+)
+def test_hosted_name_ignores_functions_unavailable_for_direct_selection(tools: list[Tool]) -> None:
+    converted = Converter.convert_tools(tools, [], tool_choice="web_search")
+
+    assert converted.tool_choice == {"type": "web_search"}
 
 
 @pytest.mark.allow_call_model_methods
