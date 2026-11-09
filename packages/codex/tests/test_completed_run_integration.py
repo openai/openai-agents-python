@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
+import sys
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -12,12 +15,13 @@ from _agents_codex._completed_turn_owner import _CompletedTurnOwner
 from _agents_codex.session import _join_run_owner
 from agents import Agent, NativeProvider, Session
 from agents.observation import TurnFinished
-from tests.native_fixtures import responses as responses
+from tests._asyncio import timeout
+from tests.native_fixtures import ResponsesFixture, responses as responses
 from tests.test_native_agent_observation import text_response
 
 
 @pytest.mark.asyncio
-async def test_success_returns_real_completed_without_constructing_session(
+async def test_success_uses_completed_owner_when_runtime_services_are_shared(
     responses: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -38,9 +42,11 @@ async def test_success_returns_real_completed_without_constructing_session(
             raise AssertionError("Supported completed run constructed a live Session")
 
         with monkeypatch.context() as native_only:
-            native_only.setattr(Session, "__init__", reject_session)
+            if sys.platform == "linux":
+                native_only.setattr(Session, "__init__", reject_session)
             result = await agent.run("eligible native scope")
-        assert isinstance(result.turn._session, _CompletedTurnOwner)
+        expected_owner = _CompletedTurnOwner if sys.platform == "linux" else Session
+        assert isinstance(result.turn._session, expected_owner)
         assert result.final_output == "answer"
         assert await result.turn.get_result() is result
         assert len(responses.requests) == 2
@@ -116,7 +122,11 @@ async def test_eligibility_opt_out_keeps_existing_atomic_opening(
         await provider.aclose()
 
 
-@pytest.mark.parametrize("input", [None, {"role": "user", "content": "text"}, "x" * 16385])
+@pytest.mark.parametrize(
+    "input",
+    [None, {"role": "user", "content": "text"}, "x" * 16385],
+    ids=["no-input", "item-input", "large-input"],
+)
 def test_unsupported_inputs_do_not_select_completed_route(input: Any) -> None:
     from _agents_codex.agent import _completed_run_eligible
 
@@ -208,6 +218,52 @@ async def test_implicit_provider_stays_on_ordinary_owned_cleanup(
     finally:
         for provider in providers:
             await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["streaming", "buffered"])
+async def test_completed_facts_preserve_privacy_and_independent_reader_copies(mode: str) -> None:
+    import json
+    from dataclasses import asdict
+
+    from agents.observation import EventGap, ResponseFactReceived
+    from tests._asyncio import timeout
+    from tests.test_native_response_facts import PRIVATE, fact_peer
+
+    async with timeout(30), fact_peer() as peer:
+        peer.replies.append((False, False))
+        async with NativeProvider(
+            base_url=peer.url, api_key="completed-facts-key", response_mode=mode
+        ) as provider:
+            result = await Agent(
+                instructions="Answer.",
+                model="gpt-5.2",
+                provider=provider,
+                model_settings={"top_logprobs": 0},
+            ).run("answer")
+        expected_owner = _CompletedTurnOwner if sys.platform == "linux" else Session
+        assert isinstance(result.turn._session, expected_owner)
+        assert result.final_output == "aa"
+        assert len(peer.requests) == 1 and peer.requests[0]["top_logprobs"] == 0
+        assert "message.output_text.logprobs" in peer.requests[0]["include"]
+        ordinary = [event async for event in result.turn.events()]
+        trusted = [event async for event in result.turn.events(include_execution_details=True)]
+        assert PRIVATE not in json.dumps([asdict(event) for event in ordinary])
+        assert PRIVATE not in repr(trusted)
+        facts = [event.record for event in trusted if isinstance(event, ResponseFactReceived)]
+        assert facts and PRIVATE in json.dumps(facts)
+        assert all(row["thread_id"] == result.turn.session_id for row in facts)
+        assert all(row["turn_id"] == result.turn.turn_id for row in facts)
+        assert all(row["response_id"] == "response-1" for row in facts)
+        assert all(row["upstream_request_id"] == "upstream-1" for row in facts)
+        assert not any(isinstance(event, EventGap) for event in trusted)
+        assert [event.sequence for event in trusted] == list(range(1, len(trusted) + 1))
+        assert sum(isinstance(event, TurnFinished) for event in trusted) == 1
+        facts[0]["fact"].clear()
+        again = [event async for event in result.turn.events(include_execution_details=True)]
+        assert all(
+            event.record["fact"] for event in again if isinstance(event, ResponseFactReceived)
+        )
 
 
 @pytest.mark.asyncio
@@ -428,3 +484,127 @@ async def test_unsubmitted_publication_error_joins_placeholder_and_allows_reuse(
         assert len(responses.requests) == 2
     finally:
         await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_before_open", [False, True], ids=["success", "cancel-before-open"])
+async def test_real_native_run_holds_original_acquisition_before_open_poll(
+    responses: ResponsesFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_before_open: bool,
+) -> None:
+    async with timeout(30):
+        native = importlib.import_module("agents._native")
+        prepare = native._prepare_run_conversation
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        first_cancel = asyncio.Event()
+        second_cancel = asyncio.Event()
+        preparations: list[None] = []
+        cancellations: list[None] = []
+
+        class Gate:
+            def __init__(self, real: Any) -> None:
+                self.real = real
+
+            async def run(self) -> Any:
+                entered.set()
+                await release.wait()
+                return await self.real.run()
+
+            def cancel(self) -> None:
+                self.real.cancel()
+                cancellations.append(None)
+                if len(cancellations) == 1:
+                    first_cancel.set()
+                elif len(cancellations) == 2:
+                    second_cancel.set()
+
+        def held_prepare(*args: Any, **kwargs: Any) -> Gate:
+            real = prepare(*args, **kwargs)
+            preparations.append(None)
+            return Gate(real)
+
+        original = NativeProvider(
+            base_url=responses.url,
+            api_key="held-original-test-key",
+            supports_websockets=False,
+            headers={"x-test-opening-owner": "original"},
+        )
+        future = NativeProvider(
+            base_url=responses.url,
+            api_key="held-future-test-key",
+            supports_websockets=False,
+            headers={"x-test-opening-owner": "future"},
+        )
+        original_instructions = "Original held declaration marker."
+        future_instructions = "Future replacement declaration marker."
+        original_input = "Original held input marker."
+        future_input = "Independent future input marker."
+        agent = Agent(model="gpt-5.2", instructions=original_instructions, provider=original)
+        running: asyncio.Task[Any] | None = None
+        try:
+            if not cancel_before_open:
+                responses.respond(*text_response("held-original", "original answer"))
+            with monkeypatch.context() as held:
+                held.setattr(native, "_prepare_run_conversation", held_prepare)
+                running = asyncio.create_task(agent.run(original_input))
+                await entered.wait()
+                assert preparations == [None]
+                assert responses.requests == []  # Opening has not been polled.
+                with pytest.raises(RuntimeError, match="open or opening Sessions"):
+                    await original.aclose()
+
+                # Create a new immutable declaration; the issued call keeps its capture.
+                agent = replace(agent, instructions=future_instructions, provider=future)
+                if cancel_before_open:
+                    running.cancel("first held-opening cancellation")
+                    await first_cancel.wait()
+                    running.cancel("second held-opening cancellation")
+                    await second_cancel.wait()
+                    assert cancellations == [None, None]
+                    assert not running.done()
+                    assert responses.requests == []
+                    release.set()
+                    with pytest.raises(asyncio.CancelledError) as cancelled:
+                        await running
+                    assert cancelled.value.args == ("first held-opening cancellation",)
+                    assert responses.requests == []
+                else:
+                    release.set()
+                    completed = await running
+                    assert completed.final_output == "original answer"
+                    assert len(responses.requests) == 1
+                    original_wire = json.dumps(responses.requests[0]["input"])
+                    assert original_instructions in original_wire
+                    assert original_input in original_wire
+                    assert future_instructions not in original_wire
+                    assert responses.request_headers[0]["authorization"] == (
+                        "Bearer held-original-test-key"
+                    )
+                    assert responses.request_headers[0]["x-test-opening-owner"] == "original"
+
+            # The original acquisition has joined before another declaration runs.
+            await original.aclose()
+            responses.respond(*text_response("held-future", "future answer"))
+            completed = await agent.run(future_input)
+            assert completed.final_output == "future answer"
+            assert len(responses.requests) == (1 if cancel_before_open else 2)
+            future_wire = json.dumps(responses.requests[-1]["input"])
+            assert future_instructions in future_wire
+            assert future_input in future_wire
+            assert original_instructions not in future_wire
+            assert original_input not in future_wire
+            assert "original answer" not in future_wire
+            assert responses.request_headers[-1]["authorization"] == "Bearer held-future-test-key"
+            assert responses.request_headers[-1]["x-test-opening-owner"] == "future"
+        finally:
+            release.set()
+            if running is not None:
+                if not running.done():
+                    running.cancel("held-opening test cleanup")
+                await asyncio.gather(running, return_exceptions=True)
+            try:
+                await original.aclose()
+            finally:
+                await future.aclose()
