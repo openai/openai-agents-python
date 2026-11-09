@@ -460,6 +460,42 @@ async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses
     assert len(responses.requests) == 2
 
 
+async def test_manual_string_answer_serializes_once_with_strict_warnings(tmp_path, responses):
+    calls: list[str] = []
+
+    def serialize(value: str):
+        calls.append(value)
+        return 7 if value == "invalid" else f"units:{value}"
+
+    tool = FunctionTool(
+        name="approve",
+        description="Application approval",
+        input_type=Approval,
+        output_type=Annotated[str, PlainSerializer(serialize, return_type=str, when_used="json")],
+    )
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "serialized-answer"))
+    executor = make_executor(tmp_path, responses, [tool])
+    first, _ = await invoke(executor, request_context())
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    answer = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "invalid",
+    }
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    with pytest.raises(InvalidParamsError, match="manual answer"):
+        await invoke(executor, request_context(reply=answer, current=first.task))
+    assert executor.store.read(binding) == saved
+    assert len(responses.requests) == 1 and calls == ["invalid"]
+    answer["result"] = "7"
+    responses.respond(assistant_output("done"))
+    completed, _ = await invoke(executor, request_context(reply=answer, current=first.task))
+    assert completed.task.status.state == p.TASK_STATE_COMPLETED
+    assert calls == ["invalid", "7"]
+    assert tool_output(responses.requests[1], "serialized-answer") == "units:7"
+
+
 @pytest.mark.parametrize("reason_size", [20, 300])
 async def test_generated_approval_limit_includes_message_envelope(tmp_path, responses, reason_size):
     tool = FunctionTool(

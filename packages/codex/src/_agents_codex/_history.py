@@ -30,6 +30,7 @@ class _HistoryItem:
     recorded_id: bool
     output: "_HistoryItem | None" = None
     custom_input: str | None = None
+    user_alias: bool = False
 
 
 _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
@@ -166,6 +167,7 @@ def project_history(
     current_turn: str | None = None
     aborted_turn: str | None = None
     turn_order: list[str] = []
+    pending_user: _HistoryItem | None = None
 
     def remember(
         item: dict[str, Any],
@@ -173,7 +175,7 @@ def project_history(
         native: bool,
         recorded_id: bool = True,
         custom_input: str | None = None,
-    ) -> None:
+    ) -> _HistoryItem:
         kind = item["type"]
         is_output = kind == "function_call_output"
         is_execution = kind in _EXECUTION_TYPES
@@ -215,10 +217,15 @@ def project_history(
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
+        return occurrence
 
     for record in history:
         kind, payload = record["type"], record["payload"]
+        if kind in {"compacted", "session_meta"}:
+            pending_user = None
         if kind == "turn_context":
+            if payload.get("turn_id") != current_turn:
+                pending_user = None
             current_turn = payload.get("turn_id") or current_turn
             aborted_turn = None
             if current_turn and current_turn not in turn_order:
@@ -313,7 +320,7 @@ def project_history(
                         item["reconciliation"] = reconciliation
                         if reconciliation == "not_applied":
                             item["status"] = "failed"
-                    remember(
+                    occurrence = remember(
                         item,
                         native=False,
                         recorded_id=bool(payload.get("id")),
@@ -323,6 +330,34 @@ def project_history(
                             else None
                         ),
                     )
+                    metadata = payload.get("internal_chat_message_metadata_passthrough")
+                    recorded_metadata = record.get("metadata")
+                    input_order = (
+                        recorded_metadata.get("user_input_order")
+                        if isinstance(recorded_metadata, dict)
+                        else None
+                    )
+                    kinds = (
+                        metadata.get("content_item_kinds") if isinstance(metadata, dict) else None
+                    )
+                    if (
+                        item["type"] == "message"
+                        and item["role"] == "user"
+                        and not occurrence.native
+                        and isinstance(metadata, dict)
+                        and metadata.get("turn_id") == turn_id
+                        and type(input_order) is int
+                        and input_order >= 0
+                        and isinstance(kinds, list)
+                        and len(kinds) > 0
+                        and len(kinds) == len(payload["content"])
+                        and all(
+                            value
+                            in {"user.text", "user.image", "user.file", "images.preparation_error"}
+                            for value in kinds
+                        )
+                    ):
+                        pending_user = occurrence
         elif kind == "event_msg":
             event_kind = payload["type"]
             if event_kind == "thread_rolled_back":
@@ -343,11 +378,14 @@ def project_history(
                     }
                 current_turn = None
                 aborted_turn = None
+                pending_user = None
                 projector = EventProjector(session_id, source_id=subagent_id)
                 continue
             turn_id = payload.get("turn_id") or payload.get("turnId") or current_turn
             if not turn_id:
                 continue
+            if pending_user is not None and pending_user.value["turn_id"] != turn_id:
+                pending_user = None
             if turn_id not in turn_order:
                 turn_order.append(turn_id)
             # The live projector can create a fallback final message. History
@@ -369,6 +407,8 @@ def project_history(
             aborted_turn = None
             message.pop("last_agent_message", None)
             native_item = payload.get("item", {})
+            if native_item.get("type") == "ContextCompaction":
+                pending_user = None
             for event in projector.project({"id": turn_id, "msg": message}):
                 if (
                     event["type"] == "agent.session.turn.in_progress"
@@ -398,9 +438,19 @@ def project_history(
                         and native_item.get("content_items") is None
                     ):
                         continue
-                    remember(item, native=True)
+                    occurrence = remember(item, native=True)
+                    if native_item.get("type") == "UserMessage":
+                        # Only the first native event for an input reaches this
+                        # projector branch. Pair by acceptance provenance and
+                        # record order, never by equal message content.
+                        if pending_user is not None and occurrence is not pending_user:
+                            pending_user.user_alias = True
+                        pending_user = None
+            if event_kind in {"task_started", "turn_started"}:
+                pending_user = None
             if event_kind in {"task_complete", "turn_complete", "turn_aborted"}:
                 current_turn = None
+                pending_user = None
                 if event_kind == "turn_aborted":
                     aborted_turn = turn_id
     for turn_id, turn in turns.items():
@@ -416,6 +466,11 @@ def project_history(
         response["id"] for kind, response in responses if kind == "response_observation_record"
     }
     projected_ids: set[str] = set()
+    accounted_observations = {
+        (response["thread_id"], response["turn_id"], response["id"])
+        for kind, response in responses
+        if kind == "token_usage_record" and response["id"] is not None
+    }
     for kind, response in responses:
         observation_id = response["id"]
         if observation_id is not None:
@@ -427,6 +482,20 @@ def project_history(
         response_turn = turns.get(response["turn_id"])
         if response_turn is not None:
             response_turn.setdefault("responses", []).append(response)
+            # Native accounting fills omitted cache writes with zero. Suppress
+            # only this optional aggregate when an exact contributor proves
+            # that its received count is unknown.
+            if (
+                kind == "response_observation_record"
+                and (response["thread_id"], response["turn_id"], observation_id)
+                in accounted_observations
+                and (response.get("usage") or {})
+                .get("input_tokens_details", {})
+                .get("cache_write_tokens")
+                is None
+                and response_turn["usage"] is not None
+            ):
+                response_turn["usage"]["input_tokens_details"].pop("cache_write_tokens", None)
     # Reserve recorded model IDs first. An execution row keeps its native ID in call_id
     # when that ID is already used by another row in this snapshot.
     cursor_ids = {
@@ -478,7 +547,9 @@ def project_history(
                     custom_input=occurrence.custom_input,
                 )
             )
-    return list(turns.values()), cast(list[SessionItem], [item.value for item in items])
+    return list(turns.values()), cast(
+        list[SessionItem], [item.value for item in items if not item.user_alias]
+    )
 
 
 _preserve_module_identity(globals(), "agents._history")

@@ -156,3 +156,111 @@ async def test_tool_context_preserves_received_arguments_before_mutating_validat
         assert (await (await session.submit("read")).get_result()).final_output == "done"
     assert validated == [["z", "a"]]
     assert seen == [(["z", "a"], ["a", "z"])]
+
+
+@pytest.mark.parametrize("consumer", ["context", "before", "after", "formatter", "replacement"])
+async def test_argument_snapshot_failure_identifies_tool_and_preserves_cause(
+    responses: ResponsesFixture, consumer: str
+) -> None:
+    import threading
+
+    from pydantic import BaseModel, PrivateAttr, model_validator
+
+    from agents import ReplaceArguments
+    from tests.test_native_function_namespaces import namespaced_call
+
+    class Payload(BaseModel):
+        value: str
+        _lock: Any = PrivateAttr(default=None)
+
+        @model_validator(mode="after")
+        def create_private_state(self):
+            if self.value == "uncopyable":
+                self._lock = threading.Lock()
+            return self
+
+    entered: list[str] = []
+
+    def before(context: ToolContext[None]):
+        entered.append("before")
+        return ReplaceArguments({"payload": {"value": "uncopyable"}})
+
+    def after(context, output):
+        entered.append("after")
+        return output
+
+    def formatter(context, error):
+        entered.append("formatter")
+        return "expired"
+
+    async def read(payload: Payload) -> str:
+        entered.append("body")
+        return payload.value
+
+    async def read_with_context(context: ToolContext[None], payload: Payload) -> str:
+        return await read(payload)
+
+    callback = read_with_context if consumer == "context" else read
+    callback.__annotations__["payload"] = Payload
+    tool = function_tool(
+        name="read",
+        namespace="records",
+        before=before if consumer in ("before", "replacement") else None,
+        after=after if consumer == "after" else None,
+        callback_timeout=1 if consumer == "formatter" else None,
+        timeout_behavior="error_as_result",
+        timeout_error_function=formatter if consumer == "formatter" else None,
+    )(callback)
+    responses.respond(
+        namespaced_call(
+            "records",
+            "read",
+            {"payload": {"value": "copyable" if consumer == "replacement" else "uncopyable"}},
+            "private-snapshot",
+        )
+    )
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Read.", tools=[tool], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("read")
+        with pytest.raises(
+            TypeError, match=r"records.read.*deep-copyable.*ToolContext.effective_arguments"
+        ) as failure:
+            await turn.get_result()
+        assert isinstance(failure.value.__cause__, TypeError)
+        assert "lock" in str(failure.value.__cause__)
+    assert entered == (["before"] if consumer == "replacement" else [])
+    assert len(responses.requests) == 1
+
+
+async def test_context_snapshot_keeps_private_model_state_detached(
+    responses: ResponsesFixture,
+) -> None:
+    from pydantic import BaseModel, PrivateAttr
+
+    class Payload(BaseModel):
+        value: str
+        _history: list[str] = PrivateAttr(default_factory=list)
+
+    snapshots: list[Payload] = []
+
+    async def read(context: ToolContext[None], payload: Payload) -> str:
+        snapshots.append(context.effective_arguments["payload"])
+        payload._history.append("body")
+        return payload.value
+
+    read.__annotations__["payload"] = Payload
+    tool = function_tool(read)
+    responses.respond(function_call("read", {"payload": {"value": "accepted"}}, "private-copy"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Read.", tools=[tool], provider=provider(responses)
+        ).session() as session,
+    ):
+        assert (await (await session.submit("read")).get_result()).final_output == "done"
+    assert len(snapshots) == 1 and snapshots[0]._history == []

@@ -101,6 +101,12 @@ class ToolContext(Generic[ContextT_co]):
 
     A first parameter annotated with ToolContext is injected by the session.
     Its value never becomes part of the model-visible argument schema.
+    effective_arguments is a detached deep copy of the validated arguments.
+    Values must support deepcopy, including private Pydantic model state.
+    This also applies to accepted ReplaceArguments values, before/after hooks,
+    and custom timeout formatters with an active callback deadline in result mode.
+    Keep runtime resources such as locks in application context, or define an
+    appropriate copy protocol on the argument type.
     trace_context snapshots the native issuing span for outgoing propagation;
     None means native tracing supplied no carrier in the supported profile.
     Retaining this metadata

@@ -571,6 +571,10 @@ class _ElicitationRequest(_NativeQuestion):
                         parsed,
                     ):
                         raise ValueError("MCP form requires an ISO date-time with offset")
+                    if parsed[-1] not in "Zz" and (
+                        int(parsed[-5:-3]) > 23 or int(parsed[-2:]) > 59
+                    ):
+                        raise ValueError("MCP form date-time has an invalid timezone offset")
                     datetime.fromisoformat(
                         parsed.replace("t", "T").replace("Z", "+00:00").replace("z", "+00:00")
                     )
@@ -897,13 +901,13 @@ class _CapturedManual:
     ) -> str:
         from .tools import ToolOutput
 
-        text = (
-            value
-            if isinstance(value, str)
-            else self.output_adapter.dump_json(
-                value, warnings="error" if strict or expected_json is not None else True
-            ).decode()
-        )
+        wire = self.output_adapter.dump_json(
+            value, warnings="error" if strict or expected_json is not None else True
+        ).decode()
+        # Declared strings keep raw text after their serializer has run once.
+        text = json.loads(wire) if isinstance(value, str) else wire
+        if not isinstance(text, str):
+            text = wire
         if expected_json is not None and text != expected_json:
             raise ValueError("Manual tool result differs from its verified projection")
         response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)

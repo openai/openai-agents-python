@@ -85,6 +85,9 @@ class RecordedTurn(TypedDict):
     Output-correction attempts instead retain their own native session and
     turn IDs, with parent_session_id and parent_turn_id naming the original.
     Their usage is per recorded turn, never a sum of cumulative snapshots.
+    The optional aggregate ``cache_write_tokens`` count is absent when an
+    exactly linked contributing response omitted that count. Legacy accounting
+    without such a link retains its normalized total.
     Older records can omit receipt. When present, it describes a sampling attempt.
     """
 
