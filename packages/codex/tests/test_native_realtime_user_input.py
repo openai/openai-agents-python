@@ -126,7 +126,7 @@ async def test_response_overrides_follow_the_coalesced_request_once(realtime_pee
 
         start = len(peer.frames)
         invalid: Any = {"tools": []}
-        with pytest.raises(ValueError, match="unknown field"):
+        with pytest.raises(RuntimeError, match="unknown field"):
             await owner.request_response(invalid)
         await owner.request_response({"instructions": "Superseded request."})
         await owner.request_response(
