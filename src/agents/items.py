@@ -211,7 +211,7 @@ def _tool_search_item_to_input_item(
     if isinstance(raw_item, dict):
         payload = dict(raw_item)
     elif isinstance(raw_item, BaseModel):
-        payload = raw_item.model_dump(exclude_unset=True)
+        payload = raw_item.model_dump(exclude_unset=True, by_alias=True)
     else:
         raise AgentsException(f"Unexpected raw item type: {type(raw_item)}")
 
@@ -230,7 +230,7 @@ def _output_item_to_input_item(raw_item: Any) -> TResponseInputItem:
     if isinstance(raw_item, dict):
         payload = dict(raw_item)
     elif isinstance(raw_item, BaseModel):
-        payload = raw_item.model_dump(exclude_unset=True)
+        payload = raw_item.model_dump(exclude_unset=True, by_alias=True)
     else:
         raise AgentsException(f"Unexpected raw item type: {type(raw_item)}")
 

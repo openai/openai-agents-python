@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 from openai.types.responses.computer_action import Click as BatchedClick, Type as BatchedType
+from openai.types.responses.function_tool import FunctionTool as ResponseFunctionTool
 from openai.types.responses.response_apply_patch_tool_call import ResponseApplyPatchToolCall
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -538,7 +539,11 @@ def test_to_input_items_for_tool_search_strips_created_by() -> None:
         call_id="call_tsc_123",
         execution="server",
         status="completed",
-        tools=[],
+        tools=[
+            ResponseFunctionTool.model_validate(
+                {"type": "function", "name": "lookup", "async": True}
+            )
+        ],
         type="tool_search_output",
         created_by="server",
     )
@@ -562,7 +567,7 @@ def test_to_input_items_for_tool_search_strips_created_by() -> None:
             "call_id": "call_tsc_123",
             "execution": "server",
             "status": "completed",
-            "tools": [],
+            "tools": [{"type": "function", "name": "lookup", "async": True}],
             "type": "tool_search_output",
         },
     ]
@@ -621,24 +626,21 @@ def test_to_input_items_strips_created_by_for_non_tool_search_items() -> None:
     assert all("created_by" not in item for item in input_items)
 
 
-def test_tool_call_item_to_input_item_strips_created_by() -> None:
-    """RunItem replay must strip output-only created_by, matching ModelResponse.to_input_items."""
+def test_async_function_call_replay_uses_wire_alias_and_strips_created_by() -> None:
     agent = Agent(name="A")
-    call = ResponseFunctionToolCall.model_validate(
-        {
-            "id": "fc_1",
-            "arguments": "{}",
-            "call_id": "call_1",
-            "name": "lookup",
-            "type": "function_call",
-            "created_by": "server",
-        }
-    )
+    expected: ResponseFunctionToolCallParam = {
+        "id": "fc_1",
+        "arguments": "{}",
+        "call_id": "call_1",
+        "name": "lookup",
+        "type": "function_call",
+        "async": True,
+    }
+    call = ResponseFunctionToolCall.model_validate({**expected, "created_by": "server"})
     item = ToolCallItem(agent=agent, raw_item=call)
-    replayed = item.to_input_item()
-    assert isinstance(replayed, dict)
-    assert replayed["type"] == "function_call"
-    assert "created_by" not in replayed
+    response = ModelResponse(output=[call], usage=Usage(), response_id=None)
+    assert item.to_input_item() == expected
+    assert response.to_input_items() == [expected]
     assert getattr(call, "created_by", None) == "server"
 
 
