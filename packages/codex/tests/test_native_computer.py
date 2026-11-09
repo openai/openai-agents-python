@@ -135,9 +135,13 @@ async def test_named_computer_choice_requires_the_current_native_declaration(res
     effects = []
     provider = NativeProvider(base_url=responses.url, api_key="synthetic")
     try:
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(
+            NativeError,
+            match="named tool choice is outside the already admitted step catalog",
+        ):
             await Agent(
                 instructions="Use computer.",
+                model="gpt-5",
                 provider=provider,
                 tools=[computer_tool(ComputerProvider(lambda _: effects.append("create")))],
                 model_settings={"tool_choice": choice},
