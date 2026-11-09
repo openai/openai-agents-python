@@ -497,6 +497,8 @@ async def prepare_input_with_session(
             prune_history_indexes = set(range(len(converted_history)))
             if session_input_callback is None and resolved_settings.limit is not None:
                 output_pruning_indexes = set(prune_history_indexes)
+                if len(converted_history) == resolved_settings.limit:
+                    _omit_boundary_assistant_message_ids(converted_history)
     else:
         if not callable(session_input_callback):
             raise UserError(
@@ -1835,6 +1837,18 @@ def _is_unpersistable_for_openai_conversation(item: TResponseInputItem) -> bool:
     if not isinstance(item, dict) or item.get("type") != "reasoning":
         return False
     return not item.get("id") and not item.get("encrypted_content")
+
+
+def _omit_boundary_assistant_message_ids(history: list[TResponseInputItem]) -> None:
+    """Replay the leading response fragment by value if the window cut off its reasoning."""
+    for item in history:
+        if item.get("type") == "reasoning" or item.get("role") in ("user", "developer", "system"):
+            break
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            message = cast(dict[str, Any], item)
+            item_id = message.get("id")
+            if isinstance(item_id, str) and item_id.startswith("msg_"):
+                del message["id"]
 
 
 def _sanitize_openai_conversation_history_items_for_model_input(

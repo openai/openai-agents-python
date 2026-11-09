@@ -46,7 +46,7 @@ from agents.sandbox.session.dependencies import Dependencies
 from agents.sandbox.session.pty_types import PTY_PROCESSES_MAX, allocate_pty_process_id
 from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
-from agents.sandbox.workspace_paths import SandboxPathGrant
+from agents.sandbox.workspace_paths import SandboxPathGrant, WorkspacePathPolicy
 
 _WORKER_URL = "https://sandbox-cf.example.workers.dev"
 
@@ -990,7 +990,11 @@ async def test_cloudflare_mount_and_unmount_validate_path_access_for_write() -> 
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_mount_rejects_read_only_extra_path_grant() -> None:
+async def test_cloudflare_mount_rejects_read_only_extra_path_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Cloudflare workspace exists only on the remote worker.
+    monkeypatch.setattr(WorkspacePathPolicy, "_path_exists", staticmethod(lambda path: False))
     fake_http = _FakeHttp({"POST /mount": _FakeResponse(status=200, json_body={"ok": True})})
     sess = _make_session(
         state=_make_state(
