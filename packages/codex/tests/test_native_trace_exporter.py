@@ -630,3 +630,33 @@ def test_constructor_validation_releases_library_owned_private_configuration(opt
             traceback = traceback.tb_next
     else:
         pytest.fail("invalid constructor accepted")
+
+
+@pytest.mark.parametrize("rejected_child", [False, True])
+async def test_failed_batch_accounts_for_later_completions(rejected_child):
+    roots = [
+        {
+            **completed_event(),
+            "lifecycle": "start",
+            "trace_id": f"{index:032x}",
+            "name": f"original-root-{index}",
+            "attributes": {"sdk.group_id": "original-group"},
+        }
+        for index in range(1024)
+    ]
+    overflow = {**roots[0], "trace_id": "f" * 32, "name": "overflow-root"}
+    rejected = {**overflow, "parent_span_id": "c" * 16} if rejected_child else overflow
+    with collector() as (endpoint, received):
+        exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
+        await exporter.on_trace_events(roots)
+        with pytest.raises(RuntimeError):
+            await exporter.on_trace_events([rejected, {**roots[0], "lifecycle": "end"}, overflow])
+        assert len(received) == 1  # Failed batch is not partially delivered.
+        await exporter.on_trace_event({**overflow, "lifecycle": "end", "name": "renamed-end"})
+        assert received[-1]["payload"]["data"][0]["workflow_name"] == "overflow-root"
+        exporter.set_api_key("synthetic-rotated")
+        await exporter.on_trace_event({**roots[1], "lifecycle": "end"})
+        descriptor = received[-1]["payload"]["data"][0]
+        assert descriptor["workflow_name"] == "original-root-1"
+        assert descriptor["group_id"] == "original-group"
+        assert len(exporter._traces) == 1024

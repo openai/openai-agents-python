@@ -174,13 +174,17 @@ class OpenAITraceExporter:
         self, events: Sequence[Mapping[str, Any]], revision: object
     ) -> tuple[list[dict[str, Any]], list[tuple[str, _TraceState, dict[str, Any]]]]:
         states: dict[str, _TraceState] = {}
+        admission_error = None
         for event in events:
             trace_id = "trace_" + event["trace_id"]
             root = event.get("parent_span_id") is None
             state = self._traces.get(trace_id)
             if state is None:
                 if not root:
-                    raise RuntimeError("Native trace root descriptor is unavailable")
+                    admission_error = (
+                        admission_error or "Native trace root descriptor is unavailable"
+                    )
+                    continue
                 if len(self._traces) >= 1024:
                     completed = next(
                         (
@@ -191,7 +195,10 @@ class OpenAITraceExporter:
                         None,
                     )
                     if completed is None:
-                        raise RuntimeError("Native active trace descriptor capacity reached")
+                        admission_error = (
+                            admission_error or "Native active trace descriptor capacity reached"
+                        )
+                        continue
                     del self._traces[completed]
                 state = _TraceState(_descriptor(event))
                 self._traces[trace_id] = state
@@ -203,6 +210,10 @@ class OpenAITraceExporter:
                     state.root_ended = True
             self._traces.move_to_end(trace_id)
             states[trace_id] = state
+        # A failed native batch is acknowledged too: account for every admitted
+        # completion before rejecting, so one unavailable root cannot strand capacity.
+        if admission_error is not None:
+            raise RuntimeError(admission_error)
         pending = [
             (trace_id, state, state.descriptor)
             for trace_id, state in states.items()
