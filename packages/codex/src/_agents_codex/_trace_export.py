@@ -273,6 +273,7 @@ class OpenAITraceExporter:
         failed = False
         admission_error = None
         delivery_failed = False
+        trace_id = state = descriptor = None
         try:
             try:
                 records, pending, admission_error = self._prepare_events(events, revision)
@@ -297,7 +298,7 @@ class OpenAITraceExporter:
                 if admission_error is None:
                     return
         finally:
-            del self, events, payload, records, pending, headers
+            del self, events, payload, records, pending, headers, trace_id, state, descriptor
         if cancelled is not None:
             raise cancelled from None
         if admission_error is not None:
