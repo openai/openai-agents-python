@@ -293,7 +293,7 @@ async def _decide(
             scope.check(scope.owner, after_await=True)
         try:
             text = json.dumps(response.value, allow_nan=False)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             text = None
         if text is None:
             failure = DecisionError(
@@ -519,7 +519,15 @@ def _parse_openai_response(
                 raise ValueError("Invalid decision answer") from None
     except DecisionError as error:
         failure = error.reason
-    except (ValueError, TypeError, KeyError, IndexError, StopIteration, AttributeError):
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        IndexError,
+        StopIteration,
+        AttributeError,
+        RecursionError,
+    ):
         failure = "invalid_response"
     if failure is not None:
         return DecisionError(failure, usage=usage, request_id=request_id, model=model)

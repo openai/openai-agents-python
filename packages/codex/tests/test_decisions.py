@@ -664,9 +664,21 @@ def assert_no_response_in_sdk_traceback(error, marker):
 @pytest.mark.parametrize("entry", ["raw", "provider", "standalone", "agent", "bound"])
 @pytest.mark.parametrize(
     "case",
-    ["envelope", "refusal", "answers", "answer-count", "fallback-refusal", "fallback-text"],
+    [
+        "envelope",
+        "refusal",
+        "answers",
+        "answer-count",
+        "fallback-refusal",
+        "fallback-text",
+        "fallback-depth",
+        "answers-depth",
+        "result-depth",
+    ],
 )
-async def test_completed_error_tracebacks_discard_provider_payload(compiler, entry, case):
+async def test_completed_error_tracebacks_discard_provider_payload(
+    compiler, monkeypatch, entry, case
+):
     marker = "PRIVATE_DECISION_PAYLOAD_MARKER"
     fallback = case.startswith("fallback-")
     compiler["supported"] = not fallback
@@ -683,20 +695,38 @@ async def test_completed_error_tracebacks_discard_provider_payload(compiler, ent
         payload = [marker]
     elif case == "answer-count":
         payload["answers"] = {"secret": marker}
+    elif case == "answers-depth":
+        value = marker
+        for _ in range(max(10_000, sys.getrecursionlimit() * 2)):
+            value = [value]
+        payload["answers"] = [value]
+    elif case == "result-depth":
+        text = "[" * (max(10_000, sys.getrecursionlimit() * 2)) + json.dumps(marker)
+        text += "]" * (max(10_000, sys.getrecursionlimit() * 2))
+        monkeypatch.setattr(sys.modules["agents._native"], "_decision_result", lambda *args: text)
     elif fallback:
         part = (
             {"type": "refusal", "refusal": marker}
             if case == "fallback-refusal"
             else {"type": "output_text", "text": marker}
         )
+        if case == "fallback-depth":
+            part["text"] = (
+                "[" * (max(10_000, sys.getrecursionlimit() * 2))
+                + json.dumps(marker)
+                + "]" * (max(10_000, sys.getrecursionlimit() * 2))
+            )
         payload.update(status="completed", output=[{"content": [part]}])
 
     class RawPayload(SimpleNamespace):
         def model_dump(self):
             return self.data
 
+    requests = []
+
     class PayloadClient:
         async def post(self, *args, **kwargs):
+            requests.append(args[0])
             # A real bound dump method also retains its receiver's payload.
             return RawPayload(data=payload, _request_id="req_private")
 
@@ -737,13 +767,19 @@ async def test_completed_error_tracebacks_discard_provider_payload(compiler, ent
     expected_usage = None if case == "envelope" else TokenUsage(7, 0, 0, 3, 0, 10)
     assert error.usage == expected_usage
     assert recorded == ([error._response()] if entry == "bound" else [])
+    assert requests == (["/responses"] if fallback else ["/decisions"])
     assert_no_response_in_sdk_traceback(error, marker)
 
 
 @pytest.mark.parametrize("bound", [False, True])
-async def test_non_json_error_tracebacks_discard_completed_value(bound):
+@pytest.mark.parametrize("failure", ["non-json", "depth"])
+async def test_non_json_error_tracebacks_discard_completed_value(bound, failure):
     marker = "PRIVATE_NON_JSON_RESPONSE_MARKER"
-    provider = Provider({"response": {marker}})
+    value = {marker} if failure == "non-json" else marker
+    if failure == "depth":
+        for _ in range(max(10_000, sys.getrecursionlimit() * 2)):
+            value = [value]
+    provider = Provider({"response": value})
     recorded = []
 
     async def begin():
@@ -764,6 +800,7 @@ async def test_non_json_error_tracebacks_discard_completed_value(bound):
     assert caught.value.usage == USAGE
     assert caught.value.request_id == "req_test" and caught.value.model == "custom"
     assert recorded == ([(USAGE, "req_test", "custom")] if bound else [])
+    assert len(provider.requests) == 1
     assert_no_response_in_sdk_traceback(caught.value, marker)
 
 
