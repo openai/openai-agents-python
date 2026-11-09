@@ -1,7 +1,10 @@
 """Project canonical rollout records without synthesizing model output."""
 
+import json as json
 from dataclasses import dataclass as dataclass
 from typing import Any as Any, cast as cast
+
+from pydantic import JsonValue as JsonValue
 
 from ._events import FunctionCallItem as FunctionCallItem, SessionItem as SessionItem
 from ._projection import (
@@ -29,7 +32,7 @@ class _HistoryItem:
     native: bool
     recorded_id: bool
     output: "_HistoryItem | None" = None
-    custom_input: str | None = None
+    original_input: JsonValue | None = None
     user_alias: bool = False
 
 
@@ -77,9 +80,9 @@ def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] |
 def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
     kind = raw["type"]
     item_id = raw.get("id")
-    if kind in {"function_call", "custom_tool_call"}:
+    if kind in {"function_call", "custom_tool_call", "computer_call"}:
         item_id = item_id or raw.get("call_id")
-    elif kind in {"function_call_output", "custom_tool_call_output"}:
+    elif kind in {"function_call_output", "custom_tool_call_output", "computer_call_output"}:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)
     if not item_id:
         return None
@@ -99,8 +102,8 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         }
     if kind == "reasoning":
         return {**common, "summary": raw["summary"], "status": None}
-    if kind in {"function_call", "custom_tool_call"}:
-        name = raw["name"]
+    if kind in {"function_call", "custom_tool_call", "computer_call"}:
+        name = "computer" if kind == "computer_call" else raw["name"]
         if raw.get("namespace"):
             name = f"{raw['namespace']}.{name}"
         return {
@@ -108,16 +111,30 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
             "type": "function_call",
             "call_id": raw["call_id"],
             "name": name,
-            "arguments": raw.get("arguments", raw.get("input")),
+            "arguments": raw if kind == "computer_call" else raw.get("arguments", raw.get("input")),
             "status": "in_progress",
         }
-    if kind in {"function_call_output", "custom_tool_call_output"} and raw.get("call_id"):
+    if kind in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "computer_call_output",
+    } and raw.get("call_id"):
         return {
             **common,
             "type": "function_call_output",
             "call_id": raw["call_id"],
             "status": "completed",
-            "output": raw["output"],
+            "output": (
+                json.dumps(
+                    {
+                        "output": raw["output"],
+                        "acknowledged_safety_checks": raw.get("acknowledged_safety_checks", []),
+                    },
+                    allow_nan=False,
+                )
+                if kind == "computer_call_output"
+                else raw["output"]
+            ),
             "error": None,
         }
     if kind == "web_search_call":
@@ -174,7 +191,7 @@ def project_history(
         *,
         native: bool,
         recorded_id: bool = True,
-        custom_input: str | None = None,
+        original_input: JsonValue | None = None,
     ) -> _HistoryItem:
         kind = item["type"]
         is_output = kind == "function_call_output"
@@ -213,7 +230,7 @@ def project_history(
         identities[identity] = occurrence
         if kind == "function_call":
             if not native:
-                occurrence.custom_input = custom_input
+                occurrence.original_input = original_input
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
@@ -292,7 +309,11 @@ def project_history(
         elif kind == "response_item":
             turn_id = current_turn
             reconciliation = None
-            if payload.get("type") in {"function_call_output", "custom_tool_call_output"}:
+            if payload.get("type") in {
+                "function_call_output",
+                "custom_tool_call_output",
+                "computer_call_output",
+            }:
                 metadata = payload.get("internal_chat_message_metadata_passthrough")
                 if isinstance(metadata, dict):
                     original_turn = metadata.get("turn_id")
@@ -324,9 +345,14 @@ def project_history(
                         item,
                         native=False,
                         recorded_id=bool(payload.get("id")),
-                        custom_input=(
-                            payload.get("input")
-                            if uncertain_calls is not None and payload["type"] == "custom_tool_call"
+                        original_input=(
+                            (
+                                payload
+                                if payload["type"] == "computer_call"
+                                else payload.get("input")
+                            )
+                            if uncertain_calls is not None
+                            and payload["type"] in {"custom_tool_call", "computer_call"}
                             else None
                         ),
                     )
@@ -544,7 +570,7 @@ def project_history(
                 _uncertain_call(
                     subagent_id if subagent_id is not None else session_id,
                     cast(FunctionCallItem, item),
-                    custom_input=occurrence.custom_input,
+                    original_input=occurrence.original_input,
                 )
             )
     return list(turns.values()), cast(

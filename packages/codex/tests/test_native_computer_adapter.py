@@ -348,3 +348,80 @@ async def test_cancelled_sync_factory_does_not_start_unentered_coroutine():
         await asyncio.wait_for(task, 5)
     await resources.close()
     assert started == disposed == []
+
+
+@pytest.mark.parametrize("method", ["wait", "screenshot"])
+async def test_cancelled_sync_driver_joins_issued_task_before_disposal(method):
+    entered, returning, release = threading.Event(), threading.Event(), threading.Event()
+    operation_release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    order = []
+
+    async def operation():
+        await operation_release.wait()
+        order.append("operation finished")
+        return "aA==" if method == "screenshot" else None
+
+    async def issue():
+        return asyncio.create_task(operation())
+
+    def callback():
+        pending = asyncio.run_coroutine_threadsafe(issue(), loop).result(5)
+        entered.set()
+        assert release.wait(5)
+        returning.set()
+        return pending
+
+    driver = Driver()
+    setattr(driver, method, callback)
+    resources = _ComputerResources()
+    tool = computer_tool(ComputerProvider(lambda _: driver, lambda _: order.append("disposed")))
+    task = asyncio.create_task(invoke(tool, resources, {"actions": [{"type": method}]}))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.to_thread(returning.wait, 5)
+
+    async def cleanup():
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await resources.close()
+
+    closing = asyncio.create_task(cleanup())
+    await asyncio.sleep(0.05)
+    assert order == []
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+    operation_release.set()
+    await asyncio.wait_for(closing, 5)
+    assert order == ["operation finished", "disposed"]
+
+
+async def test_cancelled_sync_driver_does_not_start_unentered_coroutine():
+    entered, release = threading.Event(), threading.Event()
+    effects = []
+
+    async def deferred():
+        effects.append("must not run")
+
+    def wait():
+        entered.set()
+        assert release.wait(5)
+        return deferred()
+
+    driver = Driver()
+    driver.wait = wait
+    resources = _ComputerResources()
+    task = asyncio.create_task(
+        invoke(computer_tool(driver), resources, {"actions": [{"type": "wait"}]})
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    await resources.close()
+    assert effects == driver.calls == []

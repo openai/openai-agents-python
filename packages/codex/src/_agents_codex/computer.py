@@ -165,6 +165,64 @@ def _actions(call: _ComputerCall) -> list[dict[str, Any]]:
     return actions
 
 
+async def _call_owned_callback(
+    callback: Callable[..., Any],
+    admit: Callable[[], bool],
+    /,
+    *args: Any,
+    _retain: Callable[[Any], Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    from .session import _call_callback
+
+    issued: Awaitable[Any] | None = None
+    completed = False
+
+    def finish(value: Any) -> Any:
+        nonlocal completed
+        completed = True
+        return _retain(value) if _retain is not None else value
+
+    def enter() -> Any:
+        nonlocal issued
+        value = callback(*args, **kwargs)
+        if not inspect.isawaitable(value):
+            return finish(value)
+        issued = value
+
+        async def settle() -> Any:
+            nonlocal issued
+            if not inspect.iscoroutine(value):
+                issued = asyncio.ensure_future(value)
+                return finish(await asyncio.shield(issued))
+            return finish(await value)
+
+        return settle()
+
+    try:
+        return await _call_callback(enter, admit)
+    finally:
+        # A sync worker may return an already-issued operation after revocation.
+        # Its device lease must outlive physical completion, including repeated
+        # cancellation. Never start an unentered coroutine after revocation.
+        if issued is not None and not inspect.iscoroutine(issued) and not completed:
+            operation = asyncio.ensure_future(issued)
+            cancelled: asyncio.CancelledError | None = None
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError as error:
+                    cancelled = cancelled or error
+            finish(operation.result())
+            if cancelled is not None:
+                raise cancelled
+        elif (
+            inspect.iscoroutine(issued)
+            and inspect.getcoroutinestate(issued) == inspect.CORO_CREATED
+        ):
+            issued.close()
+
+
 @dataclass(frozen=True, kw_only=True)
 class _CapturedComputer(_CapturedFunction):
     computer: _Declaration = field(repr=False)
@@ -179,12 +237,10 @@ class _CapturedComputer(_CapturedFunction):
         context: ToolContext[Any],
         call: _ComputerCall,
     ) -> str:
-        from .session import _call_callback
-
         async def invoke(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
             if not admit():
                 raise asyncio.CancelledError
-            result = await _call_callback(callback, admit, *args, **kwargs)
+            result = await _call_owned_callback(callback, admit, *args, **kwargs)
             if not admit():
                 raise asyncio.CancelledError
             return result
@@ -214,50 +270,7 @@ class _CapturedComputer(_CapturedFunction):
                         lease.disposer = source.dispose
                         return driver
 
-                    created: Awaitable[Computer] | None = None
-
-                    def create_owned() -> Any:
-                        nonlocal created
-                        value = source.create(context)
-                        if inspect.isawaitable(value):
-                            created = value
-
-                            async def acquire() -> Computer:
-                                nonlocal created
-                                if not inspect.iscoroutine(value):
-                                    created = asyncio.ensure_future(value)
-                                    return retain(await asyncio.shield(created))
-                                return retain(await value)
-
-                            return acquire()
-                        return retain(value)
-
-                    try:
-                        await _call_callback(create_owned, admit)
-                    finally:
-                        # A worker can return an already-issued acquisition after
-                        # cancellation. Keep its awaitable visible even if
-                        # the callback runner closes our unentered wrapper.
-                        if (
-                            created is not None
-                            and not inspect.iscoroutine(created)
-                            and lease.driver is None
-                        ):
-                            acquisition = asyncio.ensure_future(created)
-                            cancelled: asyncio.CancelledError | None = None
-                            while not acquisition.done():
-                                try:
-                                    await asyncio.shield(acquisition)
-                                except asyncio.CancelledError as error:
-                                    cancelled = cancelled or error
-                            retain(acquisition.result())
-                            if cancelled is not None:
-                                raise cancelled
-                        elif (
-                            inspect.iscoroutine(created)
-                            and inspect.getcoroutinestate(created) == inspect.CORO_CREATED
-                        ):
-                            created.close()
+                    await _call_owned_callback(source.create, admit, context, _retain=retain)
                 else:
                     lease.driver = source
                 if not admit():
