@@ -294,10 +294,13 @@ class AgentBase(Generic[TContext]):
             register_agent_tool_configuration,
             snapshot_agent_tools,
         )
+        from .tool import _validate_classic_tools
 
         register_agent_tool_configuration(get_public_agent(self))
         tools = snapshot_agent_tools(self)
+        _validate_classic_tools(tools)
         mcp_tools = await self.get_mcp_tools(run_context)
+        _validate_classic_tools(mcp_tools)
 
         async def _check_tool_enabled(tool: Tool) -> bool:
             if not isinstance(tool, FunctionTool):

@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing_extensions import Unpack
 
 from . import _debug
+from ._run_state_agent_identity import _validate_classic_agent_graph
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -274,6 +275,21 @@ def _sandbox_memory_input(
     if original_user_input is not None:
         return copy_input_items(original_user_input)
     return copy_input_items(original_input)
+
+
+def _validate_classic_run_inputs(
+    starting_agent: Agent[Any], input: str | list[TResponseInputItem] | RunState[Any]
+) -> None:
+    if not isinstance(input, (str, list, RunState)):
+        raise TypeError(
+            "Classic Runner requires str, a response-item list, or an agents.classic.RunState. "
+            "Restore native SessionState with a native Agent instead."
+        )
+    _validate_classic_agent_graph(starting_agent)
+    if isinstance(input, RunState):
+        for stored_agent in (input._starting_agent, input._current_agent):
+            if stored_agent is not None and stored_agent is not starting_agent:
+                _validate_classic_agent_graph(stored_agent)
 
 
 class Runner:
@@ -577,6 +593,7 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        _validate_classic_run_inputs(starting_agent, input)
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
         cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
@@ -2635,6 +2652,7 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
+        _validate_classic_run_inputs(starting_agent, input)
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
