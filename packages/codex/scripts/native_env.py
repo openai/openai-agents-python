@@ -73,6 +73,7 @@ def _download(url: str, destination: Path, checksum: str) -> Path:
                         raise ValueError(f"SHA256 mismatch for {destination.name}")
                     temporary.replace(destination)
                 finally:
+                    output.close()
                     temporary.unlink(missing_ok=True)
             break
         except urllib.error.HTTPError as error:

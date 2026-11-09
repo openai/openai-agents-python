@@ -10,6 +10,65 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("status", [404, 504])
+def test_native_download_closes_temporary_writer_before_windows_unlink(
+    monkeypatch, tmp_path, status
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import native_env
+
+    writers = {}
+    create = native_env.tempfile.NamedTemporaryFile
+    unlink = Path.unlink
+    content = b"verified artifact"
+    destination = tmp_path / "artifact"
+    body = io.BytesIO(b"gateway error body")
+    failure = urllib.error.HTTPError(
+        "https://example.invalid/artifact", status, "failed", None, body
+    )
+    calls, delays = [], []
+
+    def tracked_writer(**kwargs):
+        writer = create(**kwargs)
+        writers[Path(writer.name)] = writer
+        return writer
+
+    def windows_unlink(path, **kwargs):
+        if path in writers and not writers[path].closed:
+            raise PermissionError("Windows cannot unlink an open temporary file")
+        return unlink(path, **kwargs)
+
+    def open_url(url, *, timeout):
+        calls.append((url, timeout))
+        if len(calls) == 1:
+            raise failure
+        assert body.closed
+        return io.BytesIO(content)
+
+    monkeypatch.setattr(native_env.tempfile, "NamedTemporaryFile", tracked_writer)
+    monkeypatch.setattr(Path, "unlink", windows_unlink)
+    monkeypatch.setattr(native_env.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(native_env.time, "sleep", delays.append)
+    checksum = hashlib.sha256(content).hexdigest()
+    if status == 404:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            native_env._download("https://example.invalid/artifact", destination, checksum)
+        assert caught.value is failure
+        assert not body.closed
+        failure.close()
+        assert len(calls) == 1 and delays == []
+        assert not destination.exists()
+    else:
+        assert (
+            native_env._download("https://example.invalid/artifact", destination, checksum)
+            == destination
+        )
+        assert destination.read_bytes() == content
+        assert len(calls) == 2 and delays == [1]
+    assert writers and all(writer.closed for writer in writers.values())
+    assert list(tmp_path.glob("*.part")) == []
+
+
 @pytest.mark.parametrize("status", [502, 503, 504])
 def test_native_download_retries_transient_http_before_atomic_publication(
     monkeypatch, tmp_path, status
