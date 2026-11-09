@@ -1,0 +1,70 @@
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index d9d6514..d0e5796 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -160,6 +160,23 @@ impl EnvironmentManager {
+         }
+     }
+ 
++    /// Registers a lazy local launcher without selecting a default environment.
++    /// This explicit application configuration does not discover ambient environments.
++    pub fn with_unselected_local_environment(
++        local_runtime_paths: ExecServerRuntimeOptions,
++        http_client_factory: HttpClientFactory,
++    ) -> Result<Self, ExecServerError> {
++        Self::from_snapshot(
++            EnvironmentProviderSnapshot {
++                environments: Default::default(),
++                default: EnvironmentDefault::Disabled,
++                include_local: true,
++            },
++            Some(local_runtime_paths),
++            http_client_factory,
++        )
++    }
++
+     /// Builds a test-only manager from a raw exec-server URL value.
+     pub async fn create_for_tests(
+         exec_server_url: Option<String>,
+@@ -1323,6 +1340,41 @@ mod tests {
+         assert!(!environment.is_remote());
+     }
+ 
++    #[tokio::test]
++    async fn unselected_local_launcher_does_not_supply_a_default_or_remote_fallback() {
++        let manager = EnvironmentManager::with_unselected_local_environment(
++            test_runtime_paths(),
++            HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
++        )
++        .expect("create explicit local launcher");
++        assert!(manager.default_environment().is_none());
++        assert!(manager.default_environment_ids().is_empty());
++        assert!(manager.try_local_environment().is_some());
++        assert!(manager.get_environment(REMOTE_ENVIRONMENT_ID).is_none());
++        assert!(manager.get_environment("missing-remote").is_none());
++        assert_eq!(
++            manager.http_client_factory().outbound_proxy_policy(),
++            OutboundProxyPolicy::RespectSystemProxy
++        );
++        manager
++            .upsert_environment(
++                REMOTE_ENVIRONMENT_ID.into(),
++                "wss://127.0.0.1:1/exec".into(),
++                None,
++            )
++            .expect("register selected remote without connecting");
++        assert!(
++            manager
++                .get_environment(REMOTE_ENVIRONMENT_ID)
++                .unwrap()
++                .is_remote()
++        );
++        assert!(!manager.try_local_environment().unwrap().is_remote());
++        assert!(manager.default_environment().is_none());
++        assert!(manager.default_environment_ids().is_empty());
++        assert!(manager.get_environment("missing-remote").is_none());
++    }
++
+     #[tokio::test]
+     async fn disabled_environment_manager_has_no_default_or_local_environment() {
+         let manager = EnvironmentManager::without_environments(HttpClientFactory::new(
