@@ -245,7 +245,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.21"
+CURRENT_SCHEMA_VERSION = "1.22"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -304,6 +304,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "current-response diagnostics until its terminal guardrails complete."
     ),
     "1.21": "Makes duplicate-agent identity independent of mutable hook instance state.",
+    "1.22": "Records current-response ownership for approvals propagated from nested agent tools.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1608,6 +1609,14 @@ class RunState(Generic[TContext, TAgent]):
             indexes.append(session_index)
         return indexes
 
+    def _has_nested_approval_owner(self, item: ToolApprovalItem) -> bool:
+        """A child-owned interruption does not need an occurrence in the parent history."""
+        try:
+            return self._find_nested_approval_state(item) is not None
+        except UserError:
+            # Ambiguous approvals cannot establish ownership for a guarded resume.
+            return False
+
     def _current_response_generated_item_ownership(
         self,
         generated_items: Sequence[RunItem],
@@ -1640,12 +1649,15 @@ class RunState(Generic[TContext, TAgent]):
         indexes_by_identity: dict[int, list[int]] = {}
         for index in range(start + len(processed_items), len(generated_items)):
             indexes_by_identity.setdefault(id(generated_items[index]), []).append(index)
-        interruption_indexes: list[int] = []
+        interruption_indexes: list[int | None] = []
         for item in interruptions:
             indexes = indexes_by_identity.pop(id(item), [])
-            if len(indexes) != 1:
+            if not indexes and self._has_nested_approval_owner(item):
+                interruption_indexes.append(None)
+            elif len(indexes) == 1:
+                interruption_indexes.append(indexes[0])
+            else:
                 return None
-            interruption_indexes.append(indexes[0])
         return {"start": start, "end": len(generated_items), "interruptions": interruption_indexes}
 
     def _serialize_context_payload(
@@ -4640,6 +4652,7 @@ async def _build_run_state_from_json(
             generated_source_indexes=generated_source_indexes,
             last_processed_response_data=last_processed_response_data,
             current_step_data=current_step_data,
+            allow_nested_ownership=(schema_major, schema_minor) >= (1, 22),
             current_response_generated_item_ownership=(
                 state_json.get("current_response_generated_item_ownership")
                 if (schema_major, schema_minor)
@@ -5462,6 +5475,7 @@ def _restore_current_response_item_identities(
     generated_source_indexes: Sequence[int],
     last_processed_response_data: Any,
     current_step_data: Mapping[str, Any],
+    allow_nested_ownership: bool,
     current_response_generated_item_ownership: Any,
 ) -> None:
     """Relink one response from explicit generated-item ownership after deserialization."""
@@ -5507,24 +5521,26 @@ def _restore_current_response_item_identities(
         return
     if not isinstance(interruption_indexes, list):
         return
-    if len(interruption_indexes) != len(serialized_interruptions) or any(
-        type(index) is not int or index < processed_end or index >= source_end
-        for index in interruption_indexes
+    if len(interruption_indexes) != len(serialized_interruptions):
+        return
+    if serialized_generated_items[source_start:processed_end] != serialized_processed_items:
+        return
+    seen_indexes: set[int] = set()
+    for index, approval, serialized in zip(
+        interruption_indexes, current_step.interruptions, serialized_interruptions, strict=True
     ):
-        return
-    if len(set(interruption_indexes)) != len(interruption_indexes):
-        return
-    source_indexes = [*range(source_start, processed_end), *interruption_indexes]
-    serialized_current_response_items = [*serialized_processed_items, *serialized_interruptions]
-    if any(
-        serialized_generated_items[source_index] != expected_item
-        for source_index, expected_item in zip(
-            source_indexes,
-            serialized_current_response_items,
-            strict=True,
-        )
-    ):
-        return
+        if index is None:
+            if not allow_nested_ownership or not state._has_nested_approval_owner(approval):
+                return
+        elif (
+            type(index) is not int
+            or not processed_end <= index < source_end
+            or index in seen_indexes
+            or serialized_generated_items[index] != serialized
+        ):
+            return
+        else:
+            seen_indexes.add(index)
 
     restored_indexes_by_source: dict[int, list[int]] = {}
     for restored_index, source_index in enumerate(generated_source_indexes):
@@ -5540,7 +5556,8 @@ def _restore_current_response_item_identities(
     processed_item_count = len(serialized_processed_items)
     restored_processed_items = restored_current_response_items[:processed_item_count]
     restored_interruptions = [
-        restored_current_response_items[index - source_start] for index in interruption_indexes
+        approval if index is None else restored_current_response_items[index - source_start]
+        for index, approval in zip(interruption_indexes, current_step.interruptions, strict=True)
     ]
     if not all(isinstance(item, ToolApprovalItem) for item in restored_interruptions):
         return
