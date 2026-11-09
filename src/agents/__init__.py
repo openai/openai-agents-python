@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         EncryptedSessionStore as EncryptedSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
+        SQLAlchemySessionStore as SQLAlchemySessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
@@ -235,6 +236,7 @@ _MODULES = {
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",
+    "SQLAlchemySessionStore": ".canonical_storage",
     "LocalRecoveryRequired": ".recovery",
     "ReconciledCall": ".recovery",
     "UncertainCall": ".recovery",

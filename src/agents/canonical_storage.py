@@ -34,3 +34,6 @@ from _agents_codex.canonical_storage import (
     weakref as weakref,
 )
 from _agents_codex.canonical_storage_encrypt import EncryptedSessionStore as EncryptedSessionStore
+from _agents_codex.canonical_storage_sqlalchemy import (
+    SQLAlchemySessionStore as SQLAlchemySessionStore,
+)
