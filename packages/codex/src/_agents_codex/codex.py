@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import aclosing
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +35,7 @@ from _agents_shared.codex_cli.turn_options import (
 )
 
 from ._function_tools import ToolContext, _PythonTool, function_tool
+from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -42,6 +43,37 @@ from ._public import preserve_module_identity as _preserve_module_identity
 class _SessionThread:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     thread: Thread | None = None
+
+
+@asynccontextmanager
+async def _session_slot(lock: asyncio.Lock, signal: asyncio.Event | None) -> AsyncIterator[None]:
+    if signal is None:
+        async with lock:
+            yield
+        return
+    if signal.is_set():
+        raise RuntimeError("Codex CLI call cancelled before execution")
+    acquired = asyncio.create_task(lock.acquire())
+    aborted = asyncio.create_task(signal.wait())
+    try:
+        done, _ = await asyncio.wait((acquired, aborted), return_when=asyncio.FIRST_COMPLETED)
+        if aborted in done or signal.is_set():
+            raise RuntimeError("Codex CLI call cancelled before execution")
+        acquired.result()
+        yield
+    finally:
+        acquired.cancel()
+        aborted.cancel()
+        try:
+            await _join(asyncio.gather(acquired, aborted, return_exceptions=True))
+        finally:
+            if (
+                acquired.done()
+                and not acquired.cancelled()
+                and acquired.exception() is None
+                and acquired.result()
+            ):
+                lock.release()
 
 
 def codex_tool(
@@ -63,6 +95,7 @@ def codex_tool(
     the CLI owns its own task and its usage is returned separately in the result.
     on_event observes the CLI stream. Python task cancellation closes and joins
     the stream's subprocess. TurnOptions supports stdout inactivity timeouts.
+    Its signal also cancels calls awaiting persistent-session admission.
 
     persist_session reuses the most recently completed CLI thread within the
     invoking native Session and serializes that Session's calls. Separate native
@@ -158,7 +191,9 @@ def codex_tool(
                 )
             # Values contain only a CLI thread and lock; neither retains this key.
             state = sessions.setdefault(invocation.session, _SessionThread())
-            async with state.lock:
+            async with _session_slot(
+                state.lock, captured_turn_options.signal if captured_turn_options else None
+            ):
                 return await execute(prompt, thread_id, state)
         return await execute(prompt, thread_id)
 

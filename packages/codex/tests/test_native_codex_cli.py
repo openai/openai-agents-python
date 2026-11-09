@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, FunctionTool
+from agents import Agent, FunctionTool, ToolContext, function_tool
 from agents.codex import CodexOptions, TurnOptions, codex_tool
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
@@ -230,3 +230,142 @@ async def test_observer_failures_preserve_native_success_and_thread_reuse(
     assert "resume" not in argv[0]
     assert "resume" in argv[1]
     assert len(observed) == 6
+
+
+async def test_configured_signal_cancels_queued_call_without_releasing_active_owner(
+    tmp_path: Path, responses
+) -> None:
+    import asyncio
+
+    signal = asyncio.Event()
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    failures: list[BaseException] = []
+    observed = False
+
+    async def observe(event) -> None:
+        nonlocal observed
+        if event.type == "thread.started" and not observed:
+            observed = True
+            entered.set()
+            await finish.wait()
+
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))),
+        turn_options=TurnOptions(signal=signal),
+        persist_session=True,
+        on_event=observe,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    @function_tool
+    async def batch(context: ToolContext[object]) -> str:
+        tasks = []
+        try:
+            first = asyncio.create_task(binding.callback(context, prompt="First", thread_id=None))
+            tasks.append(first)
+            await asyncio.wait_for(entered.wait(), 5)
+            second = asyncio.create_task(binding.callback(context, prompt="Queued", thread_id=None))
+            tasks.append(second)
+            await asyncio.sleep(0)
+            signal.set()
+            with pytest.raises(RuntimeError, match="cancelled before execution"):
+                await asyncio.wait_for(asyncio.shield(second), 1)
+            assert not first.done()
+            assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 1
+            signal.clear()
+            third = asyncio.create_task(binding.callback(context, prompt="Third", thread_id=None))
+            tasks.append(third)
+            await asyncio.sleep(0)
+            assert not third.done()
+            assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 1
+            finish.set()
+            await asyncio.gather(first, return_exceptions=True)
+            assert (await third)["response"] == "CLI completed"
+            return "batch complete"
+        except BaseException as error:
+            failures.append(error)
+            raise
+        finally:
+            signal.clear()
+            finish.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    responses.replies.extend(
+        [
+            [function_call("batch", {}, "configured-signal")],
+            [assistant_output("done")],
+        ]
+    )
+    async with Agent(
+        instructions="Run batch.", provider=provider(responses), tools=[batch]
+    ).session() as session:
+        await (await session.submit("Run.")).get_result()
+    assert not failures
+    assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("cause", ["configured", "task"])
+async def test_cancelled_queue_admission_does_not_release_another_owner(cause: str) -> None:
+    import asyncio
+
+    from _agents_codex.codex import _session_slot
+
+    lock = asyncio.Lock()
+    await lock.acquire()
+    signal = asyncio.Event()
+    entered = False
+
+    async def use() -> None:
+        nonlocal entered
+        async with _session_slot(lock, signal):
+            entered = True
+
+    queued = asyncio.create_task(use())
+    await asyncio.sleep(0)
+    if cause == "configured":
+        signal.set()
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await queued
+    else:
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+    assert not entered
+    assert lock.locked()
+    lock.release()
+    signal.clear()
+    async with _session_slot(lock, signal):
+        assert lock.locked()
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize("cause", ["configured", "task"])
+async def test_cancelled_admission_releases_its_simultaneously_acquired_lock(cause: str) -> None:
+    import asyncio
+
+    from _agents_codex.codex import _session_slot
+
+    lock = asyncio.Lock()
+    signal = asyncio.Event()
+    entered = False
+
+    async def use() -> None:
+        nonlocal entered
+        async with _session_slot(lock, signal):
+            entered = True
+
+    admission = asyncio.create_task(use())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert lock.locked()
+    if cause == "configured":
+        signal.set()
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await admission
+    else:
+        admission.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await admission
+    assert not entered
+    assert not lock.locked()
