@@ -162,6 +162,8 @@ asyncio.run(main(sys.argv[1]))
 
 Canonical history keeps prior transcripts and appends a `provider_item_deleted` entry with its target in `provider_item_id`. Shared Session history, tool outcomes, and approval records remain intact. Deletion cannot retract output already generated or change context a response already consumed. A later voice connection can use retained Session context. This operation prunes the current provider conversation rather than erasing Session history.
 
+Each voice connection retains at most 8 MiB of estimated canonical history. Long, fragmented transcripts can also exhaust a cumulative limit on the work spent extending text snapshots. History and its work accounting last for the connection, regardless of how quickly events are consumed. Guardrail transcripts have a separate work limit shared across retained guardrail items. Exceeding these limits fails the voice connection.
+
 ## Settings, tools, and active Agents
 
 `RealtimeConfig.settings` uses `NativeRealtimeSettings` fields such as `input_format`, `output_format`, `transcription`, `turn_detection`, `output_voice`, and `hosted_mcp_tools`. `voice.update()` accepts sparse changes. Omitted fields keep their values. PCM16 uses mono 24 kHz samples; G.711 uses mono 8 kHz bytes. A codec setting does not convert your samples. `RealtimeAudioInput` labels encoded input, and `RealtimeAudio` carries the accepted output format and item identity.

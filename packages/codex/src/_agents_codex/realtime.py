@@ -530,6 +530,8 @@ class RealtimeSession:
     _GUARDRAIL_TEXT_LIMIT = 1_048_576
     # Bound cumulative prefix copies, not only the final retained transcript.
     _GUARDRAIL_TEXT_WORK_LIMIT = 64 * 1024 * 1024
+    # Canonical history survives completed items for the owner's lifetime.
+    _HISTORY_TEXT_WORK_LIMIT = 256 * 1024 * 1024
     _BUFFER_BYTES_LIMIT = 8 * 1024 * 1024
     _KINDS = frozenset(
         {
@@ -562,6 +564,7 @@ class RealtimeSession:
         self._identity_bytes = 0
         self._queue_bytes = 0
         self._history_bytes = 0
+        self._history_text_work = 0
         self._audio_samples: dict[tuple[str, str, int], _ReceivedAudio] = {}
         self._playback: dict[tuple[str, str, int], RealtimePlaybackPosition] = {}
         if type(config.automatically_trigger_response_for_mcp_tool_calls) is not bool:
@@ -2403,10 +2406,19 @@ class RealtimeSession:
             previous_transcript = self._history.get(value["item_id"])
             if previous_transcript is None:
                 raise RuntimeError("Realtime history delta has no canonical item")
-            updated_transcript = replace(
-                previous_transcript, text=previous_transcript.text + value["delta"]
+            delta = value["delta"]
+            if self._history_bytes + 4 * len(delta) > self._BUFFER_BYTES_LIMIT:
+                raise RuntimeError("Realtime history byte capacity exceeded")
+            work = (
+                len(previous_transcript.text) + len(delta)
+                if previous_transcript.text and delta
+                else 0
             )
+            if self._history_text_work + work > self._HISTORY_TEXT_WORK_LIMIT:
+                raise RuntimeError("Realtime history text work capacity exceeded")
+            updated_transcript = replace(previous_transcript, text=previous_transcript.text + delta)
             self._record_history(updated_transcript)
+            self._history_text_work += work
             self._emit(RealtimeHistory(updated_transcript, False))
 
     def _record_history(self, item: RealtimeHistoryItem) -> None:
