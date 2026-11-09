@@ -31,10 +31,14 @@ use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, broadcast,
 use crate::environment::{LocalPrivatePaths, LocalStorageHome};
 use crate::{NativeThread, config, extensions, goals, options, telemetry};
 
+mod scoped;
+
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
+    runtime_parent: Option<Arc<EngineState>>,
+    managed_execution: Option<codex_core::config::ManagedExecution>,
     pub context_gate: Arc<AsyncRwLock<()>>,
     pub context_retired: AtomicBool,
     pub store: Arc<dyn ThreadStore>,
@@ -73,6 +77,10 @@ const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
 const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
 
 impl EngineState {
+    pub(crate) fn owns_runtime_services(&self) -> bool {
+        self.runtime_parent.is_none()
+    }
+
     fn bind_codex_login(config: &mut Config, provider_id: &str) -> anyhow::Result<()> {
         ensure!(
             config.model_provider_id == CODEX_LOGIN_PROVIDER
@@ -80,9 +88,10 @@ impl EngineState {
             "The selected model provider must use the saved Codex login"
         );
         config.model_provider_id = provider_id.to_owned();
+        let provider = config.model_provider.clone();
         config
             .model_providers
-            .insert(provider_id.to_owned(), config.model_provider.clone());
+            .insert(provider_id.to_owned(), provider);
         Ok(())
     }
 
@@ -214,10 +223,42 @@ impl EngineState {
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
         session_initial_config: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_configuration(
+            config_json,
+            runtime_json,
+            checkpoint,
+            api_key,
+            initial_model,
+            canonical_store,
+            session_initial_config,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_configuration(
+        config_json: String,
+        runtime_json: String,
+        checkpoint: bool,
+        api_key: Option<String>,
+        initial_model: Option<String>,
+        canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
+        session_initial_config: bool,
+        prepared: Option<(
+            Config,
+            codex_config::CloudConfigBundleLoader,
+            Option<codex_core::config::ManagedExecution>,
+        )>,
+    ) -> anyhow::Result<Self> {
         telemetry::engine_starting().await?;
-        let prepared_runtime = config::prepare_runtime(&runtime_json)?;
-        let runtime_json = prepared_runtime;
-        let (mut config, cloud_config) = config::load(&config_json, &runtime_json, None).await?;
+        let runtime_json = config::prepare_runtime(&runtime_json)?;
+        let (mut config, cloud_config, managed_execution) = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                let (config, cloud) = config::load(&config_json, &runtime_json, None).await?;
+                (config, cloud, None)
+            }
+        };
         // Capture one typed runtime at the original first accessor decode point.
         let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
         let native_turn_control = runtime_options.native_turn_control();
@@ -486,6 +527,7 @@ impl EngineState {
                 auth.clone(),
                 goals.as_ref(),
                 local_checklist_store.is_some(),
+                managed_execution.is_some(),
                 weak.clone(),
                 environment.clone(),
                 extension_events.clone(),
@@ -529,6 +571,8 @@ impl EngineState {
         });
         let result = Self {
             manager,
+            runtime_parent: None,
+            managed_execution,
             context_gate: Arc::new(AsyncRwLock::new(())),
             context_retired: AtomicBool::new(false),
             store,
@@ -627,6 +671,11 @@ impl EngineState {
             self.validate_seed_files(&mut startup, batch.items())
                 .await?;
         }
+        if initial_config.is_some()
+            && let Some(profile) = &self.managed_execution
+        {
+            startup.thread_extension_init.insert(profile.clone());
+        }
         if let Some(id) = resume {
             ensure!(
                 (self.store.as_any().is::<LocalThreadStore>()
@@ -713,6 +762,17 @@ impl EngineState {
         if let Some(pool) = &self.model_http_pool {
             startup.thread_extension_init.insert(pool.clone());
         }
+        if self.runtime_parent.is_some() {
+            ensure!(
+                matches!(&startup.initial_history, InitialHistory::New),
+                "shared runtime requires a fresh conversation"
+            );
+            ensure!(
+                startup.reserved_thread_id.is_none(),
+                "shared runtime owns conversation identities"
+            );
+            startup.reserved_thread_id = Some(ThreadId::new());
+        }
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
                 if let Some(home) = self.native_storage_home()
@@ -749,6 +809,13 @@ impl EngineState {
                 !self.managed_thread_ids.lock().await.contains(&id),
                 "Bare resume of a managed thread is unsupported; restore a portable checkpoint in a new engine"
             );
+        }
+        if self.runtime_parent.is_some() {
+            // Retain cleanup ownership even if Core fails before publishing a thread.
+            self.managed_thread_ids
+                .lock()
+                .await
+                .insert(id.expect("reserved scope identity"));
         }
         let extension_events = self.extension_events.subscribe();
         let new_thread = self.manager.start_thread(startup).await?;
@@ -830,6 +897,7 @@ impl EngineState {
         let created = self.manager.subscribe_thread_created();
         let state = Arc::new(ThreadState {
             request_metadata: Arc::new(crate::request_metadata::Queue::default()),
+            initial_turn: std::sync::Mutex::new(None),
             id: new.thread_id,
             thread: new.thread.clone(),
             engine: self.clone(),
@@ -1302,6 +1370,9 @@ impl EngineState {
     }
 
     async fn close_locked(&self) -> anyhow::Result<()> {
+        if self.runtime_parent.is_some() {
+            return self.close_scope().await;
+        }
         if self.closed.load(Ordering::Acquire) {
             if let Some(store) = &self.local_checklist_store {
                 store.check_durability()?;
@@ -1829,6 +1900,7 @@ pub enum ForkSelection {
 }
 
 pub struct ThreadState {
+    pub(crate) initial_turn: std::sync::Mutex<Option<Arc<crate::ops::InitialTurn>>>,
     pub(crate) request_metadata: Arc<crate::request_metadata::Queue>,
     pub id: ThreadId,
     pub thread: Arc<CodexThread>,

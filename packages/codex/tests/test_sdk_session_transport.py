@@ -1540,28 +1540,33 @@ async def test_cancelled_open_retires_late_core_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native = importlib.import_module("agents._native")
-    create = native.create_engine
+    create = native._open_conversation
     entered = asyncio.Event()
     release = asyncio.Event()
     homes = []
     engines = []
+    threads = []
 
     async def held_create(*args: Any, **kwargs: Any) -> Any:
-        runtime = json.loads(args[1])
-        homes.append(Path(runtime["codex_home"]))
-        engine = await create(*args, **kwargs)
+        opened = await create(*args, **kwargs)
+        engine, thread, home = opened
+        assert (home is None) == engine._runtime_is_shared
         engines.append(engine)
+        threads.append(thread)
+        if home is not None:
+            homes.append(Path(home.name))
         entered.set()
         await release.wait()
-        return engine
+        return opened
 
     async with timeout(30), http_peer() as peer:
         agent = Agent(model="gpt-5.2", instructions="cancel acquisition", provider=peer.provider())
-        monkeypatch.setattr(native, "create_engine", held_create)
+        monkeypatch.setattr(native, "_open_conversation", held_create)
         opening = asyncio.create_task(agent.run("must never reach provider"))
         try:
             await entered.wait()
-            assert homes[0].is_dir()
+            assert len(engines) == len(threads) == 1
+            assert all(home.is_dir() for home in homes)
             opening.cancel("cancel opening")
             await asyncio.sleep(0)
             assert not opening.done()
@@ -1573,12 +1578,15 @@ async def test_cancelled_open_retires_late_core_owner(
             await asyncio.gather(opening, return_exceptions=True)
         with pytest.raises(RuntimeError, match="closed"):
             await engines[0].start_thread()
-        assert not homes[0].exists()
+        with pytest.raises(RuntimeError, match="closed"):
+            await threads[0].read_goal()
+        assert all(not home.exists() for home in homes)
         assert peer.requests == []
-        monkeypatch.setattr(native, "create_engine", create)
+        monkeypatch.setattr(native, "_open_conversation", create)
         peer.respond(assistant_output("later acquisition succeeded"))
         assert (await agent.run("try again")).final_output == "later acquisition succeeded"
         await agent.provider.aclose()
+        assert agent.provider._closed and agent.provider._transport is None
 
 
 async def test_core_workspaces_and_instruction_updates_stay_session_owned() -> None:

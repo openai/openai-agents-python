@@ -194,8 +194,9 @@ async def test_provider_owned_ranges_reach_the_wire_without_numeric_loss(
     assert request["top_p"] == -0.1
 
 
+@pytest.mark.parametrize("ordinary", [False, True], ids=["atomic", "ordinary"])
 async def test_explicit_verbosity_reaches_provider_despite_catalog_support_flag(
-    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, ordinary: bool
 ) -> None:
     from agents import _native
 
@@ -206,14 +207,25 @@ async def test_explicit_verbosity_reaches_provider_despite_catalog_support_flag(
     assert model["use_responses_lite"] is False
     assert "used_fallback_model_metadata" not in model
     create_engine = _native.create_engine
+    open_conversation = _native._open_conversation
+    configured_paths: list[str] = []
 
-    def configured_catalog(config_json: str, *args: Any, **kwargs: Any) -> Any:
+    def configured_json(config_json: str) -> str:
         config = json.loads(config_json)
         assert "model_catalog_json" not in config
         config["model_catalog_json"] = str(catalog)
-        return create_engine(json.dumps(config), *args, **kwargs)
+        return json.dumps(config)
 
-    monkeypatch.setattr(_native, "create_engine", configured_catalog)
+    def configured_engine(config_json: str, *args: Any, **kwargs: Any) -> Any:
+        configured_paths.append("ordinary")
+        return create_engine(configured_json(config_json), *args, **kwargs)
+
+    def configured_conversation(config_json: str, *args: Any, **kwargs: Any) -> Any:
+        configured_paths.append("atomic")
+        return open_conversation(configured_json(config_json), *args, **kwargs)
+
+    monkeypatch.setattr(_native, "create_engine", configured_engine)
+    monkeypatch.setattr(_native, "_open_conversation", configured_conversation)
     responses.respond(assistant_output("provider accepted verbosity"))
     async with timeout(25), provider_for(responses) as provider:
         result = await Agent(
@@ -221,7 +233,8 @@ async def test_explicit_verbosity_reaches_provider_despite_catalog_support_flag(
             instructions="Answer.",
             provider=provider,
             model_settings={"verbosity": "high"},
-        ).run("Forward explicit verbosity.")
+        ).run("Forward explicit verbosity.", initial_messages=[] if ordinary else None)
+    assert configured_paths == ["ordinary" if ordinary else "atomic"]
     assert result.final_output == "provider accepted verbosity"
     assert len(responses.requests) == 1
     assert responses.requests[0]["model"] == "gpt-5.5"

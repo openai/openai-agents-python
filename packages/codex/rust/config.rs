@@ -144,6 +144,10 @@ fn strict_by_default() -> bool {
 }
 
 impl RuntimeOptions {
+    pub(crate) fn loader_overrides(self) -> Result<LoaderOverrides> {
+        self.loader.into_native()
+    }
+
     pub(crate) fn parse(runtime_json: &str) -> Result<Self> {
         decode(serde_json::from_str(runtime_json)?)
     }
@@ -253,6 +257,31 @@ struct LoaderOptions {
     macos_managed_config_requirements_base64: Option<String>,
 }
 
+impl LoaderOptions {
+    fn into_native(self) -> Result<LoaderOverrides> {
+        Ok(LoaderOverrides {
+            packaged_defaults_path: self.packaged_defaults_path,
+            user_config_path: self.user_config_path,
+            user_config_profile: self
+                .user_config_profile
+                .map(|value| value.parse())
+                .transpose()?,
+            managed_config_path: self.managed_config_path,
+            system_config_path: self.system_config_path,
+            system_requirements_path: self.system_requirements_path,
+            ignore_managed_requirements: self.ignore_managed_requirements,
+            ignore_login_requirements: self.ignore_login_requirements,
+            ignore_user_config: self.ignore_user_config,
+            ignore_project_config: self.ignore_project_config,
+            ignore_user_and_project_exec_policy_rules: self
+                .ignore_user_and_project_exec_policy_rules,
+            #[cfg(target_os = "macos")]
+            managed_preferences_base64: self.managed_preferences_base64,
+            macos_managed_config_requirements_base64: self.macos_managed_config_requirements_base64,
+        })
+    }
+}
+
 fn toml_value(value: Value) -> Result<toml::Value> {
     Ok(match value {
         Value::Null => bail!("TOML cannot represent null"),
@@ -322,26 +351,7 @@ pub async fn load(
         options.allowed_symlinked_codex_home.is_none(),
         "Configure executor startup options on the remote exec-server"
     );
-    let loader = options.loader;
-    let loader = LoaderOverrides {
-        packaged_defaults_path: loader.packaged_defaults_path,
-        user_config_path: loader.user_config_path,
-        user_config_profile: loader
-            .user_config_profile
-            .map(|value| value.parse())
-            .transpose()?,
-        managed_config_path: loader.managed_config_path,
-        system_config_path: loader.system_config_path,
-        system_requirements_path: loader.system_requirements_path,
-        ignore_managed_requirements: loader.ignore_managed_requirements,
-        ignore_login_requirements: loader.ignore_login_requirements,
-        ignore_user_config: loader.ignore_user_config,
-        ignore_project_config: loader.ignore_project_config,
-        ignore_user_and_project_exec_policy_rules: loader.ignore_user_and_project_exec_policy_rules,
-        #[cfg(target_os = "macos")]
-        managed_preferences_base64: loader.managed_preferences_base64,
-        macos_managed_config_requirements_base64: loader.macos_managed_config_requirements_base64,
-    };
+    let loader = options.loader.into_native()?;
     let cloud = cloud.unwrap_or_default();
     // A live SDK/HTTP route selects its own provider before this load, at both
     // engine and thread startup. Never merge ambient provider definitions into it.
@@ -504,9 +514,10 @@ pub async fn load(
             bail!("{}", error.message);
         }
     }
+    let model_provider_id = config.model_provider_id.clone();
     if let Some(enabled) = options.model_provider_include_internal_metadata {
         config.model_provider.include_internal_metadata = enabled;
-        if let Some(provider) = config.model_providers.get_mut(&config.model_provider_id) {
+        if let Some(provider) = config.model_providers.get_mut(&model_provider_id) {
             provider.include_internal_metadata = enabled;
         }
     }
@@ -519,9 +530,7 @@ pub async fn load(
         for (id, provider) in &mut config.model_providers {
             // A native resumed ThreadSpawn selects its saved provider from
             // this inherited map, not necessarily the root's current one.
-            if scope == crate::native_interception::Scope::ThreadTree
-                || *id == config.model_provider_id
-            {
+            if scope == crate::native_interception::Scope::ThreadTree || *id == model_provider_id {
                 provider.supports_websockets = false;
             }
         }
