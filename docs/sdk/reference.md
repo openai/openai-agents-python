@@ -271,7 +271,13 @@ Use `Tool[Application]` to annotate collections that mix supported tool declarat
 
 ### ToolOutput
 
-`ToolOutput.text(value)`, `ToolOutput.image(image_url)` and `ToolOutput.error(message)` construct native tool results. For mixed content, pass a list of `ToolOutputText` and `ToolOutputImage` items to `ToolOutput`. Images must be inline base64 image data URLs; remote URLs, file IDs and local paths are unsupported. `ToolOutput.error(...)` returns an explicit failed tool result (`success=False`), which differs from raising a Python exception. See [tool values](tools.md#inspect-or-change-tool-values).
+`ToolOutput.text(value)`, `ToolOutput.image(image_url)` and `ToolOutput.error(message)` construct native tool results. For mixed content, pass a list of `ToolOutputText` and `ToolOutputImage` items to `ToolOutput`.
+
+For images, supply exactly one of `image_url` (an inline base64 image data URL or an HTTP or HTTPS URL) and `file_id`. Optional `detail` accepts `"low"`, `"high"`, `"auto"`, or `"original"`.
+
+HTTP(S) URLs and file IDs require API-key authentication and a compatible standard Responses model; `CodexLogin` and Responses Lite do not support these references. The helpers do not fetch URLs or upload files. Local filesystem paths are unsupported. See [image results](tools.md#return-text-images-and-tool-errors) for model and detail limits.
+
+`ToolOutput.error(...)` returns an explicit failed tool result (`success=False`), which differs from raising a Python exception. See [tool values](tools.md#inspect-or-change-tool-values).
 
 ### ToolContext
 
@@ -520,7 +526,7 @@ A dictionary with `type="input_text"` and `text`.
 
 ### InputImage
 
-A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`.
+A dictionary with `type="input_image"` and an `image_url` containing an inline base64 image data URL or an HTTP or HTTPS URL. Optional `detail` accepts `"low"`, `"high"`, `"auto"`, or `"original"`. HTTP(S) URLs have the same [route and model limits as image results](tools.md#return-text-images-and-tool-errors). Use the distinct `InputImageFile` type for a provider `file_id`.
 
 ## Existing MCP clients
 

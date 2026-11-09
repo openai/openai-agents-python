@@ -34,7 +34,7 @@ Later examples with `await` or `async with` are fragments for an async function 
 
 ## Typed input
 
-Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of `InputText` and `InputImage` dictionaries. These types use the Responses field names:
+Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of input dictionaries. For text and images, use `InputText`, `InputImage`, and `InputImageFile`. These types use the Responses field names:
 
 ```python
 from agents import InputText, UserMessage
@@ -44,7 +44,9 @@ message: UserMessage = {"role": "user", "content": [text]}
 result = await agent.run(message)
 ```
 
-An `InputImage` uses `type="input_image"` and an `image_url` containing a base64 image data URL. Omit `detail` or set it to `"auto"`; other detail values, remote URLs, file IDs and local paths are unsupported. Codex decodes and prepares the image.
+An `InputImage` uses `type="input_image"` and an `image_url` containing an inline base64 image data URL or an HTTP or HTTPS URL. Use `InputImageFile` with `type="input_image"` and `file_id` for a provider image file. Both types accept optional `detail` values of `"low"`, `"high"`, `"auto"`, or `"original"`.
+
+HTTP(S) URLs and file IDs require API-key authentication and a compatible standard Responses model. Select `Agent.model` explicitly; the current default uses Responses Lite. `CodexLogin` and Responses Lite require inline image data. The native runtime checks the current model and detail before accepting the image; see [image reference limits](tools.md#return-text-images-and-tool-errors). Local filesystem paths are unsupported.
 
 Do not pass manual results to `Session.submit()`. Reply to the exact live `ActionRequested` with `await request.respond(value)`, using the declared output type. If validation fails, the request remains available, so you can retry while it remains live. Request identity keeps root and child replies separate even if native call IDs match.
 

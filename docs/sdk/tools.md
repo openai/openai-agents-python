@@ -98,14 +98,18 @@ def preview() -> ToolOutput:
     return ToolOutput([ToolOutputText("A one-pixel preview."), ToolOutputImage(image_url)])
 ```
 
-Annotate functions that return these objects with `ToolOutput`, as above. For images, pass an inline base64 image data URL, an HTTP or HTTPS URL, or a file ID. Supply exactly one of `image_url` and `file_id`; `detail` can be `"low"`, `"high"`, `"auto"`, or `"original"`:
+Annotate functions that return these objects with `ToolOutput`, as above. For images, pass an inline base64 image data URL, an HTTP or HTTPS URL, or a file ID.
+
+HTTP(S) URLs and file IDs require API-key authentication and a compatible model that uses standard Responses. Set `Agent.model` explicitly; the current default model uses Responses Lite. `CodexLogin` and Responses Lite do not support these references. Use inline base64 image data URLs on those routes, subject to the model's image and detail support. See [provider configuration](configuration.md#provider-connection).
+
+Supply exactly one of `image_url` and `file_id`; `detail` can be `"low"`, `"high"`, `"auto"`, or `"original"`:
 
 ```python
 remote_reply = ToolOutput.image("https://example.com/preview.png", detail="low")
 uploaded_reply = ToolOutput.image(file_id="file-your-uploaded-image")
 ```
 
-These helpers preserve the reference for the model provider. They do not fetch URLs or upload files. Local filesystem paths are unsupported.
+These helpers preserve the reference without fetching URLs or uploading files. The native runtime checks the current route, model, and detail before publishing the result. Local filesystem paths are unsupported.
 
 `ToolOutput.error(...)` returns a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can declare `output_type=ToolOutput` and submit these values through a live request.
 
