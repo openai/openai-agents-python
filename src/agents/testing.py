@@ -52,3 +52,11 @@ from _agents_codex.testing import (
 )
 
 __all__ = ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
+
+from _agents_codex.testing_realtime import (
+    RealtimeConnectCall as RealtimeConnectCall,
+    RealtimeStep as RealtimeStep,
+    ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
+)
+
+__all__ += ["RealtimeConnectCall", "RealtimeStep", "ScriptedRealtimeAdapter"]
