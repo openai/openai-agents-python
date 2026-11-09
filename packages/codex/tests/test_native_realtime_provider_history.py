@@ -20,6 +20,11 @@ from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 from tests.test_native_realtime_transports import CallPeer, call_peer as call_peer
 
+_VALID_PNG_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+)
+
 
 async def test_native_sip_projection_matches_connection_configuration(
     realtime_peer: RealtimePeer,
@@ -466,7 +471,7 @@ async def test_native_correcting_user_message_preserves_following_assistant_audi
 @pytest.mark.parametrize(
     ("role", "content"),
     [
-        ("system", [{"type": "input_image", "image_url": "data:image/png;base64,AQACAA=="}]),
+        ("system", [{"type": "input_image", "image_url": _VALID_PNG_DATA_URI}]),
         ("assistant", [{"type": "input_audio", "audio": "AQACAA=="}]),
         pytest.param(
             "user",
@@ -492,6 +497,27 @@ async def test_native_correcting_user_message_preserves_following_assistant_audi
             "user",
             [{"type": "input_audio", "audio": "not-valid-base64!"}],
             id="user-invalid-audio-base64",
+        ),
+        pytest.param("user", [{"type": "input_audio", "audio": ""}], id="user-empty-audio"),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/png;base64,"}],
+            id="user-empty-image",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/png;base64,AQID"}],
+            id="user-arbitrary-base64-as-png",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+            id="user-truncated-png",
+        ),
+        pytest.param(
+            "user",
+            [{"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/4AAQSkZJRgA="}],
+            id="user-truncated-jpeg",
         ),
     ],
 )
@@ -1992,3 +2018,145 @@ async def test_native_external_tool_deletion_does_not_settle_host_execution(
             assert not peer.disconnected.is_set()
         finally:
             release.set()
+
+
+async def test_native_create_ack_conflicting_text_rejects_edit_until_terminal_provider_error(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    first = {
+        "id": "conflicting-content-first",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Requested accepted text"}],
+    }
+    second = {**first, "id": "conflicting-content-never-created"}
+    wrong = {**first, "content": [{"type": "input_text", "text": "Different provider text"}]}
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-content-ack-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Reject conclusive content mismatches.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        cursor = len(peer.frames)
+        updating = asyncio.create_task(voice.update_history([first, second]))
+        try:
+            creation = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.create", after=cursor
+            )
+            cursor = peer.frames.index(creation, cursor) + 1
+            assert creation["item"] == first
+            await observe_item(peer, events, wrong)
+            with pytest.raises(RuntimeError):
+                await updating
+            assert not any(
+                frame["type"] == "conversation.item.create" for frame in peer.frames[cursor:]
+            )
+            assert not peer.disconnected.is_set()
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "synthetic_conflicting_create_ack",
+                        "message": "Synthetic terminal provider error after conflicting receipt",
+                    },
+                }
+            )
+            await peer.disconnected.wait()
+            assert not any(
+                frame["type"] == "conversation.item.create" for frame in peer.frames[cursor:]
+            )
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize("media", ["audio", "image"])
+@pytest.mark.parametrize("receipt", ["omitted", "null"])
+async def test_native_create_ack_allows_unreported_media_fields(
+    realtime_peer: RealtimePeer, media: str, receipt: str
+) -> None:
+    peer = realtime_peer
+    part = (
+        {"type": "input_audio", "audio": "AQACAA=="}
+        if media == "audio"
+        else {"type": "input_image", "image_url": _VALID_PNG_DATA_URI}
+    )
+    field = "audio" if media == "audio" else "image_url"
+    first = {
+        "id": "optional-media-first",
+        "type": "message",
+        "role": "user",
+        "content": [part],
+    }
+    second = {
+        "id": "optional-media-second",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Following accepted message"}],
+    }
+    acknowledged_part: dict[str, Any] = {"type": part["type"]}
+    if receipt == "null":
+        acknowledged_part[field] = None
+    acknowledged = {**first, "content": [acknowledged_part]}
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-optional-media-ack-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Accept provider receipts that omit media.", provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        cursor = len(peer.frames)
+        updating = asyncio.create_task(voice.update_history([first, second]))
+        try:
+            creation = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.create", after=cursor
+            )
+            cursor = peer.frames.index(creation, cursor) + 1
+            assert creation["item"] == first
+            await observe_item(peer, events, acknowledged)
+            creation = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.create", after=cursor
+            )
+            cursor = peer.frames.index(creation, cursor) + 1
+            assert creation["item"] == second
+            await observe_item(peer, events, second, previous_item_id=first["id"])
+            await updating
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                for item in (first, second):
+                    request = await peer.frame(
+                        lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                    )
+                    cursor = peer.frames.index(request, cursor) + 1
+                    assert request["item_id"] == item["id"]
+                    assert peer.socket is not None
+                    await peer.socket.send_json(
+                        {"type": "conversation.item.retrieved", "item": item}
+                    )
+                assert await retrieving == [first, second]
+                assert not peer.disconnected.is_set()
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)

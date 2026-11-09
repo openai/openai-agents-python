@@ -1092,10 +1092,10 @@ index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..97cb28ea2bd3deeae323d533d9dd520d
          state.settle_call("native-call");
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a4ce4aa95
+index 0000000000000000000000000000000000000000..c126a475034656e93dbebc8c3a30eb4dacd14566
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
-@@ -0,0 +1,1238 @@
+@@ -0,0 +1,1313 @@
 +//! Current-generation provider identities and acknowledged history operations.
 +//! Item bodies, including media, live only for an explicit retrieval operation.
 +use super::*;
@@ -1184,7 +1184,7 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +fn valid_base64(value: &str) -> bool {
 +    base64::engine::general_purpose::STANDARD
 +        .decode(value)
-+        .is_ok()
++        .is_ok_and(|bytes| !bytes.is_empty())
 +}
 +fn valid_image_data_uri(value: &str) -> bool {
 +    let Some((header, data)) = value.split_once(',') else {
@@ -1196,9 +1196,25 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +    let Some((mime, encoding)) = header.split_once(';') else {
 +        return false;
 +    };
-+    (mime.eq_ignore_ascii_case("image/png") || mime.eq_ignore_ascii_case("image/jpeg"))
-+        && encoding.eq_ignore_ascii_case("base64")
-+        && valid_base64(data)
++    let format = if mime.eq_ignore_ascii_case("image/png") {
++        image::ImageFormat::Png
++    } else if mime.eq_ignore_ascii_case("image/jpeg") {
++        image::ImageFormat::Jpeg
++    } else {
++        return false;
++    };
++    if !encoding.eq_ignore_ascii_case("base64") {
++        return false;
++    }
++    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
++        return false;
++    };
++    if bytes.is_empty() {
++        return false;
++    }
++    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
++    reader.limits(image::Limits::default());
++    reader.decode().is_ok()
 +}
 +
 +fn mutable_message(item: &Value) -> bool {
@@ -1283,6 +1299,38 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +    Ok(
 +        serde_json::json!({"id": item["id"], "type": "message", "role": item["role"], "content": parts}),
 +    )
++}
++
++// Server receipts may omit optional media or add defaults. Only contradictory
++// writable fields that are actually present establish a different item.
++fn creation_receipt_conflicts(expected: &Value, actual: &Value) -> bool {
++    for field in ["type", "role"] {
++        if actual
++            .get(field)
++            .is_some_and(|value| !value.is_null() && value != &expected[field])
++        {
++            return true;
++        }
++    }
++    let Some(content) = actual.get("content").filter(|value| !value.is_null()) else {
++        return false;
++    };
++    let (Some(expected), Some(actual)) = (expected["content"].as_array(), content.as_array())
++    else {
++        return true;
++    };
++    expected.len() != actual.len()
++        || expected.iter().zip(actual).any(|(expected, actual)| {
++            let Some(fields) = expected.as_object() else {
++                return true;
++            };
++            !actual.is_object()
++                || fields.iter().any(|(name, expected)| {
++                    actual
++                        .get(name)
++                        .is_some_and(|value| !value.is_null() && value != expected)
++                })
++        })
 +}
 +
 +/// Preserve authoritative tool/control rows and their stable anchors. Within each
@@ -1678,6 +1726,12 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +            return Ok(None);
 +        };
 +        if item_id(expected)? != id {
++            return Ok(None);
++        }
++        if creation_receipt_conflicts(expected, item) {
++            self.interrupt(invalid(
++                "Provider create receipt conflicts with the requested message",
++            ));
 +            return Ok(None);
 +        }
 +        if !position_observed {
@@ -2278,12 +2332,23 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +            "data:image/webp;base64,AQID",
 +            "data:image/png;base64,invalid!",
 +            "data:image/jpeg,AAAA",
++            "data:image/png;base64,",
++            "data:image/png;base64,AQID",
++            "data:image/jpeg;base64,AQID",
 +        ] {
 +            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":image}]});
 +            assert!(creation_item(&item).is_err());
 +        }
-+        for mime in ["png", "jpeg"] {
-+            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":format!("data:image/{mime};base64,AQID")}]});
++        for (mime, format) in [
++            ("png", image::ImageFormat::Png),
++            ("jpeg", image::ImageFormat::Jpeg),
++        ] {
++            let mut output = std::io::Cursor::new(Vec::new());
++            image::DynamicImage::new_rgb8(1, 1)
++                .write_to(&mut output, format)
++                .unwrap();
++            let encoded = base64::engine::general_purpose::STANDARD.encode(output.into_inner());
++            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":format!("data:image/{mime};base64,{encoded}")}]});
 +            assert!(creation_item(&item).is_ok());
 +        }
 +        let audio = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"invalid!"}]});
@@ -2293,6 +2358,16 @@ index 0000000000000000000000000000000000000000..e073b7f159527d05a06172e1ae42bf9a
 +                .unwrap()
 +                .is_empty()
 +        );
++    }
++    #[test]
++    fn creation_receipts_compare_present_fields_and_allow_omitted_media() {
++        let expected = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"AAA=","transcript":"requested"}]});
++        let omitted = json!({"id":"audio","object":"realtime.item","status":"completed","type":"message","role":"user","content":[{"type":"input_audio","audio":null,"transcript":null}]});
++        assert!(!creation_receipt_conflicts(&expected, &omitted));
++        let conflict = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","transcript":"different"}]});
++        assert!(creation_receipt_conflicts(&expected, &conflict));
++        let empty = json!({"id":"empty","type":"message","role":"user","content":[{"type":"input_audio","audio":""}]});
++        assert!(creation_item(&empty).is_err());
 +    }
 +    #[test]
 +    fn absent_position_marks_unsolicited_observations_incomplete() {

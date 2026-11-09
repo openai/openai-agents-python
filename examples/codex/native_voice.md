@@ -66,7 +66,7 @@ Here, `session` is your open Session, `call_id` comes from the verified webhook,
 
 Configure hosted MCP follow-ups on the `RealtimeConfig` used for attachment. The builder rejects `automatically_trigger_response_for_mcp_tool_calls=False`, because the HTTP accept body cannot carry this SDK option.
 
-The [SIP example](native_realtime_sip.py) shows call acceptance, attachment, and history retrieval. It requires a call ID from an incoming-call webhook your application has verified. Nonempty client audio is rejected; a commit-only call can control audio already buffered by the provider. An SDK-created WebRTC call has different ownership: closing its native owner also hangs up that created call.
+The [SIP example](native_realtime_sip.py) shows call acceptance, attachment, history retrieval, and hangup. It requires a call ID from an incoming-call webhook your application has verified. Nonempty client audio is rejected; a commit-only call can control audio already buffered by the provider. An SDK-created WebRTC call has different ownership: closing its native owner also hangs up that created call.
 
 WebRTC SDP offers are limited to 1 MiB of UTF-8 text. Oversized offers are rejected before credentials are resolved or a connection is opened.
 
