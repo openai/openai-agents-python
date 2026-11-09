@@ -198,3 +198,13 @@ def test_shared_sandbox_limits_preserve_classic_class_identity_and_pickle() -> N
     assert LegacyConcurrency is SandboxConcurrencyLimits
     assert SandboxArchiveLimits.__module__ == "agents.classic.run_config"
     assert type(pickle.loads(pickle.dumps(SandboxArchiveLimits()))) is LegacyArchive
+
+
+@pytest.mark.parametrize("name", ["", " ", "\t\n"])
+def test_native_codex_rejects_empty_name_before_declaration(name: str) -> None:
+    with pytest.raises(ValueError, match="name must be a nonempty string"):
+        codex_tool(name=name)
+
+
+def test_native_codex_preserves_valid_custom_name() -> None:
+    assert codex_tool(name="engineer").name == "engineer"
