@@ -1598,9 +1598,9 @@ def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Ma
             backing.update(deepcopy(dict(original), memo))
         return MappingProxyType(deepcopy(arguments, memo))
     except Exception as error:
-        identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
+        tool_identity = f"{tool.namespace}.{tool.name}" if tool.namespace else tool.name
         raise TypeError(
-            f"Tool {identity!r} requires deep-copyable validated arguments for "
+            f"Tool {tool_identity!r} requires deep-copyable validated arguments for "
             "ToolContext.effective_arguments, including private model state"
         ) from error
 
