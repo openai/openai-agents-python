@@ -271,3 +271,34 @@ async def test_deferred_restore_denial_still_expires_original_grant_and_starts_n
         assert len(responses.requests) == 1 and exits == ["joined"]
     finally:
         await connection.aclose()
+
+
+async def test_deferred_start_inherits_complete_observation_retention(responses, monkeypatch):
+    from agents.observation import EventGap, OutputTextDelta
+    from tests.test_native_agent_observation import text_response
+
+    jobs, manual = declared(Journal(), Provider([done()]))
+    responses.respond(function_call("render", {"pages": 2}, "retained-render"))
+    responses.respond(*text_response("retained-output", *["x"] * 350))
+    agent = Agent(instructions="Render, then answer.", tools=[manual], provider=provider(responses))
+    async with timeout(30), agent.session(observation_retention="all") as original:
+        original_turn = await original.submit("Render.")
+        request = await next_request(original.interactions(), manual)
+        session_factory = agent.session
+
+        @asynccontextmanager
+        async def hook(*, state, context):
+            async with session_factory(state=state, context=context) as restored:
+                yield restored
+
+        monkeypatch.setattr(agent, "session", hook)
+        async with jobs.start(original, request) as (_, resumed):
+            assert (await resumed.get_result()).final_output == "x" * 350
+            events = [event async for event in resumed.events()]
+            assert not any(isinstance(event, EventGap) for event in events)
+            assert (
+                "".join(event.delta for event in events if isinstance(event, OutputTextDelta))
+                == "x" * 350
+            )
+        with pytest.raises(InteractionRequired):
+            await original_turn.get_result()

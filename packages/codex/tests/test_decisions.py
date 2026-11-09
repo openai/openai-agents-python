@@ -152,7 +152,20 @@ async def test_boolean_schema_rejects_coercion_and_transport_wrappers(value):
         )
 
 
-@pytest.mark.parametrize("value", [{}, {"allow": "yes"}, {"allow": True, "extra": 1}])
+class _CoercingRecord(dict[str, object]):
+    def __getitem__(self, key: str) -> object:
+        return True if key == "allow" else super().__getitem__(key)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        {"allow": "yes"},
+        {"allow": True, "extra": 1},
+        pytest.param(_CoercingRecord(allow="yes"), id="serialized-value"),
+    ],
+)
 async def test_required_defaulted_fields_cannot_be_fabricated(value):
     class Gate(BaseModel):
         allow: bool = True
@@ -358,9 +371,14 @@ async def test_completed_errors_keep_only_trustworthy_metadata(compiler, reason,
     assert caught.value.__context__ is None
 
 
-@pytest.mark.parametrize("entry", ["provider", "agent", "bound"])
 @pytest.mark.parametrize(
-    "body", [b'{"PRIVATE_RESPONSE', b'"PRIVATE_RESPONSE"', b'["PRIVATE_RESPONSE"]']
+    "body,entry",
+    [
+        pytest.param(b'{"PRIVATE_RESPONSE', "provider", id="malformed-provider"),
+        pytest.param(b'{"PRIVATE_RESPONSE', "agent", id="malformed-agent"),
+        pytest.param(b'{"PRIVATE_RESPONSE', "bound", id="malformed-bound"),
+        pytest.param(b'["PRIVATE_RESPONSE"]', "provider", id="non-object-provider"),
+    ],
 )
 async def test_generated_raw_response_boundary_sanitizes_malformed_200(compiler, body, entry):
     async def handle(request):

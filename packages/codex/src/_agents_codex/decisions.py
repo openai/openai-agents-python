@@ -241,8 +241,11 @@ async def _decide(
             raise
         try:
             text = json.dumps(response.value, allow_nan=False)
+            # Validate the same JSON snapshot that the application parser consumes.
+            raw_value = json.loads(text)
         except (TypeError, ValueError, RecursionError):
             text = None
+            raw_value = None
         if text is None:
             failure = DecisionError(
                 "invalid_response",
@@ -252,13 +255,13 @@ async def _decide(
             )
             del response
             raise failure from None
-        if not validator.is_valid(response.value):
+        if not validator.is_valid(raw_value):
             raise OutputValidationError(text)
         validated = output.validate(text)
         if choices is not None:
             # Pydantic Literal unions can coerce 0 to False. Match the raw
             # scalar by JSON type before returning the original declared value.
-            selected = _choice_key(response.value)
+            selected = _choice_key(raw_value)
             for choice in choices:
                 if _choice_key(choice) == selected:
                     return choice
