@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING, Any, cast
 from openai.types.responses import ResponseFunctionToolCall
 
 from ._tool_identity import get_tool_call_namespace, tool_trace_name
-from ._tool_invocation import tool_invocation_identity, tool_invocation_identity_and_scope
+from ._tool_invocation import tool_invocation_identity_and_scope
 from .agent_tool_state import (
     get_agent_tool_state_scope,
     peek_agent_tool_run_result,
+    record_agent_tool_resume_state,
     set_agent_tool_state_scope,
 )
 from .exceptions import UserError
@@ -124,87 +125,65 @@ class ToolContext(RunContextWrapper[TContext]):
         """Return the tool name qualified by namespace when available."""
         return tool_trace_name(self.tool_name, self.tool_namespace) or self.tool_name
 
-    def _find_nested_approval_target(
-        self,
-        approval_item: ToolApprovalItem,
-    ) -> tuple[RunContextWrapper[Any], ToolApprovalItem] | None:
-        """Find a pending nested agent-tool context that owns an approval item."""
-        if self.tool_call is None:
-            return None
-        pending_result = peek_agent_tool_run_result(
-            self.tool_call,
-            scope_id=get_agent_tool_state_scope(self),
-        )
-        interruptions = getattr(pending_result, "interruptions", None)
-        to_state = getattr(pending_result, "to_state", None)
-        if not isinstance(interruptions, list) or not callable(to_state):
-            return None
-        nested_context = getattr(to_state(), "_context", None)
-        if not isinstance(nested_context, RunContextWrapper) or nested_context is self:
-            return None
-
-        target_identity = tool_invocation_identity(
-            approval_item.raw_item,
-            tool_lookup_key=approval_item.tool_lookup_key,
-            tool_name=approval_item.tool_name,
-        )
+    def _owns_pending_approval(self, approval_item: ToolApprovalItem) -> bool:
         target_identity_and_scope = tool_invocation_identity_and_scope(
             approval_item.raw_item,
             tool_lookup_key=approval_item.tool_lookup_key,
             tool_name=approval_item.tool_name,
         )
-        current_context_owns_approval = False
-        if target_identity_and_scope is not None:
-            invocation_type, call_id, approval_scope, fingerprint = target_identity_and_scope
-            current_record = self._tool_invocations.get(call_id)
-            current_context_owns_approval = current_record is not None and (
-                not current_record.completed
-                and current_record.invocation_type == invocation_type
-                and current_record.approval_scope == approval_scope
-                and current_record.fingerprint == fingerprint
-            )
+        if target_identity_and_scope is None:
+            return False
+        invocation_type, call_id, approval_scope, fingerprint = target_identity_and_scope
+        record = self._tool_invocations.get(call_id)
+        return (
+            record is not None
+            and not record.completed
+            and record.invocation_type == invocation_type
+            and record.approval_scope == approval_scope
+            and record.fingerprint == fingerprint
+        )
 
-        exact_match: ToolApprovalItem | None = None
-        canonical_matches: list[ToolApprovalItem] = []
-        for candidate in interruptions:
-            if candidate is approval_item:
-                exact_match = candidate
-                continue
-            candidate_identity = tool_invocation_identity(
-                candidate.raw_item,
-                tool_lookup_key=candidate.tool_lookup_key,
-                tool_name=candidate.tool_name,
+    def _apply_tool_context_decision(
+        self,
+        approval_item: ToolApprovalItem,
+        *,
+        approve: bool,
+        always: bool,
+        rejection_message: str | None = None,
+    ) -> None:
+        from .result import RunResultBase
+
+        scope_id = get_agent_tool_state_scope(self)
+        pending = (
+            peek_agent_tool_run_result(self.tool_call, scope_id=scope_id)
+            if self.tool_call is not None
+            else None
+        )
+        state = pending.to_state() if pending is not None else None
+        target = state._find_current_approval_item(approval_item) if state is not None else None
+        if target is None or state is None:
+            self._apply_approval_decision(
+                approval_item, approve=approve, always=always, rejection_message=rejection_message
             )
-            if target_identity is not None and candidate_identity == target_identity:
-                canonical_matches.append(candidate)
-        if current_context_owns_approval and (exact_match is not None or canonical_matches):
+            return
+        if self._owns_pending_approval(approval_item):
             raise UserError(
                 "Cannot apply approval because the same tool invocation identity belongs to both "
                 "the current run and a nested agent-tool run."
             )
-        if exact_match is not None:
-            return (nested_context, exact_match)
-        if len(canonical_matches) == 1:
-            return (nested_context, canonical_matches[0])
-        if len(canonical_matches) > 1:
-            raise UserError(
-                "Cannot apply approval because multiple nested agent-tool calls contain the same "
-                "tool invocation identity. Use distinct call IDs."
+        if approve:
+            state.approve(target, always_approve=always)
+        else:
+            state.reject(target, always_reject=always, rejection_message=rejection_message)
+        # Retain the decided checkpoint because a live result's next to_state() copies again.
+        if isinstance(pending, RunResultBase) and self.tool_call is not None:
+            record_agent_tool_resume_state(
+                self.tool_call, state, scope_id=scope_id, approval_items=pending.interruptions
             )
-        return None
 
     def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
         """Approve this context's call or route a surfaced nested approval to its owner."""
-        nested_target = self._find_nested_approval_target(approval_item)
-        if nested_target is None:
-            super().approve_tool(approval_item, always_approve=always_approve)
-            return
-        nested_context, nested_item = nested_target
-        RunContextWrapper.approve_tool(
-            nested_context,
-            nested_item,
-            always_approve=always_approve,
-        )
+        self._apply_tool_context_decision(approval_item, approve=True, always=always_approve)
 
     def reject_tool(
         self,
@@ -213,20 +192,8 @@ class ToolContext(RunContextWrapper[TContext]):
         rejection_message: str | None = None,
     ) -> None:
         """Reject this context's call or route a surfaced nested rejection to its owner."""
-        nested_target = self._find_nested_approval_target(approval_item)
-        if nested_target is None:
-            super().reject_tool(
-                approval_item,
-                always_reject=always_reject,
-                rejection_message=rejection_message,
-            )
-            return
-        nested_context, nested_item = nested_target
-        RunContextWrapper.reject_tool(
-            nested_context,
-            nested_item,
-            always_reject=always_reject,
-            rejection_message=rejection_message,
+        self._apply_tool_context_decision(
+            approval_item, approve=False, always=always_reject, rejection_message=rejection_message
         )
 
     @classmethod
