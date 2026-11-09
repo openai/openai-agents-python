@@ -523,8 +523,8 @@ async def test_source_child_failure_fences_and_joins_before_executor_release(
                 def __getattr__(self, name: str) -> Any:
                     return getattr(self.inner, name)
 
-                async def _start_initial_replaceable_thread(self, *args: Any) -> Any:
-                    result = await self.inner._start_initial_replaceable_thread(*args)
+                async def _start_initial_replaceable_thread(self, *args: Any, **kwargs: Any) -> Any:
+                    result = await self.inner._start_initial_replaceable_thread(*args, **kwargs)
                     at_native.set()
                     await allow_open.wait()
                     return result

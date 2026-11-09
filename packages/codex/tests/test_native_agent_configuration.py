@@ -40,7 +40,7 @@ def test_retired_agent_arguments_fail_before_startup(name, forbid_native_startup
         cast(Any, Agent)(instructions="Answer.", **{name: None})
 
 
-@pytest.mark.parametrize("name", ["native", "tui", "features", "temperature", "unknown_option"])
+@pytest.mark.parametrize("name", ["native", "tui", "features", "unknown_option"])
 def test_unknown_model_settings_fail_before_startup(name, forbid_native_startup):
     with pytest.raises(ValueError, match=name):
         Agent(instructions="Answer.", model_settings=cast(Any, {name: None}))

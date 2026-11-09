@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "34dbd839e7afb22bd39835828ddf9b5aa753432c",
+  "baseline_commit": "837b98c0b83a99c9b5b8397614a752817cc815c1",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -45,6 +45,7 @@
           "from .completion import _BeforeComplete",
           "from .input import InitialMessage",
           "from .model_context import _ContextTransform",
+          "from .tools import ToolRef",
           "from .usage import RunBudget",
           "from ._function_tools import Tool",
           "from .canonical_storage import CustomStorage",
@@ -56,8 +57,7 @@
           "from .schema import OutputSpec",
           "from .session import Completed, Session, _BeforeStep, _InteractionHandler",
           "from .state import LocalStorage, SessionState",
-          "from .telemetry import TraceOptions",
-          "from .tools import ToolRef"
+          "from .telemetry import TraceOptions"
         ],
         "references": {
           "Completed": "agents.session.Completed",

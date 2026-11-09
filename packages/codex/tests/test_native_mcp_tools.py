@@ -382,7 +382,7 @@ async def test_replacement_failure_preserves_or_fences_native_ownership(
                         raise OSError("synthetic lost native acknowledgement")
                     return receipt
 
-                async def _replace_tools(self, generation: int, specs: str):
+                async def _replace_tools(self, *args: Any, **kwargs: Any):
                     raise RuntimeError("synthetic Python publication rejection")
 
             monkeypatch.setattr(session, "_native", Failure())

@@ -21,7 +21,19 @@ from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
 from ._events import Failure as Failure, TokenUsage as TokenUsage
 from ._public import preserve_module_identity as _preserve_module_identity
-from .response_facts import RecordedResponseFact as RecordedResponseFact
+from .response_facts import (
+    CaptureTruncatedFact as CaptureTruncatedFact,
+    MalformedProbabilitiesFact as MalformedProbabilitiesFact,
+    ProbabilityAlternative as ProbabilityAlternative,
+    ProbabilityToken as ProbabilityToken,
+    RecordedResponseFact as RecordedResponseFact,
+    RecordedResponseFactSummary as RecordedResponseFactSummary,
+    RefusalFact as RefusalFact,
+    ResponseFact as ResponseFact,
+    ResponseFactContentSummary as ResponseFactContentSummary,
+    ResponseFactSummary as ResponseFactSummary,
+    TextProbabilitiesFact as TextProbabilitiesFact,
+)
 from .turn_receipt import TurnReceipt as TurnReceipt
 
 

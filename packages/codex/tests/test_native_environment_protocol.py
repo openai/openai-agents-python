@@ -196,7 +196,7 @@ async def test_repeated_native_home_failure_recovers_managed_opening(
         def __init__(self, engine):
             self.engine = engine
 
-        def _start_initial_replaceable_thread(self, *args):
+        def _start_initial_replaceable_thread(self, *args, **kwargs):
             raise RuntimeError("controlled thread publication failure")
 
     def create(config, runtime, **kwargs):

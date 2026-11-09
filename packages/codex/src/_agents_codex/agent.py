@@ -51,6 +51,7 @@ from .completion import _BeforeComplete
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
+from .tools import ToolRef
 from .usage import RunBudget
 
 if TYPE_CHECKING:
@@ -76,7 +77,6 @@ if TYPE_CHECKING:
     )
     from .state import LocalStorage, SessionState
     from .telemetry import TraceOptions
-    from .tools import ToolRef
     from .turn import Turn
 
 ContextT = TypeVar("ContextT", default=None)
@@ -145,7 +145,6 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
             raise ValueError(
                 "invocation_timeout_ms must be an integer in the range 1..=4294967295 or None"
             )
-    from .tools import ToolRef
 
     captured: dict[str, Any] = dict(settings)
     for key, value in captured.items():
