@@ -1321,12 +1321,21 @@ async def test_native_history_uses_provider_predecessors_and_rejects_unresolved_
                 await voice.aclose()
             await asyncio.gather(retrieving, return_exceptions=True)
         if unknown_position == "done_only":
+            from agents.realtime import RealtimeResponse
+
             assert peer.socket is not None
             await peer.socket.send_json({"type": "conversation.item.done", "item": unknown})
+            # An unseen Done has no thin observation; use a later provider response as a barrier.
+            await peer.socket.send_json(
+                {"type": "response.created", "response": {"id": "done-only-barrier"}}
+            )
+            await peer.socket.send_json(
+                {"type": "response.done", "response": {"id": "done-only-barrier"}}
+            )
             async for event in events:
                 if (
-                    isinstance(event, RealtimeConversationItemObserved)
-                    and event.item_id == unknown["id"]
+                    isinstance(event, RealtimeResponse)
+                    and event.response_id == "done-only-barrier"
                     and event.status == "done"
                 ):
                     break
