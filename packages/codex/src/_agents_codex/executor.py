@@ -31,7 +31,7 @@ from typing import (
 )
 from urllib.parse import unquote as unquote, urlsplit as urlsplit
 
-from typing_extensions import TypeVar as TypeVar
+from typing_extensions import Self as Self, TypeVar as TypeVar
 
 from ._options import (
     RuntimeEnvironment as RuntimeEnvironment,
@@ -123,6 +123,27 @@ class NetworkPolicy:
         denied = _domain_rules("denied_domains", self.denied_domains)
         object.__setattr__(self, "allowed_domains", tuple(sorted(allowed - denied)))
         object.__setattr__(self, "denied_domains", tuple(sorted(denied)))
+
+    @classmethod
+    def allow_all(
+        cls,
+        *,
+        denied_domains: Sequence[str] = (),
+        allow_all_unix_sockets: bool = False,
+        allow_local_binding: bool = False,
+    ) -> Self:
+        """Allow outbound connections to any public host through the managed proxy.
+
+        Sandboxed commands can upload and download data over these connections.
+        Explicit ``denied_domains`` take precedence. Linux executors require
+        ``allow_all_unix_sockets=True`` for this policy.
+        """
+        return cls(
+            allowed_domains=("**",),
+            denied_domains=denied_domains,
+            allow_all_unix_sockets=allow_all_unix_sockets,
+            allow_local_binding=allow_local_binding,
+        )
 
     def _to_native(self) -> RuntimeNetworkPolicy:
         return {

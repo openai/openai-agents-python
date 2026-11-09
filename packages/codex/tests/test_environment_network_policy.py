@@ -49,6 +49,41 @@ def test_empty_policy_is_distinct_from_the_default() -> None:
     }
 
 
+def test_allow_all_preserves_wildcard_wire_and_checkpoint_identity() -> None:
+    assert NetworkPolicy.allow_all() == NetworkPolicy(allowed_domains=("**",))
+    denied_domains = ("Blocked.Example.Invalid.",)
+    legacy = Environment(
+        url="wss://executor.invalid",
+        cwd="/job",
+        tools=["exec_command"],
+        network=NetworkPolicy(
+            allowed_domains=("**",),
+            denied_domains=denied_domains,
+            allow_all_unix_sockets=True,
+            allow_local_binding=True,
+        ),
+    )
+    preset = replace(
+        legacy,
+        network=NetworkPolicy.allow_all(
+            denied_domains=denied_domains,
+            allow_all_unix_sockets=True,
+            allow_local_binding=True,
+        ),
+    )
+    for environment in (legacy, preset):
+        assert environment._to_native()["network"] == {
+            "allowed_domains": ["**"],
+            "denied_domains": ["blocked.example.invalid"],
+            "allow_all_unix_sockets": True,
+            "allow_local_binding": True,
+        }
+        assert (
+            environment._network_policy_digest()
+            == "b1fd32b6e5f1aafc3515f32948a8b513c41c35c858629e195d328a3fc8f2f06d"
+        )
+
+
 @pytest.mark.parametrize("typed", [True, False], ids=["policy", "dictionary"])
 def test_environment_captures_network_policy(typed: bool) -> None:
     allowed = ["api.example.invalid", "BLOCKED.example.invalid."]
