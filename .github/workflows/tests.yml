@@ -784,14 +784,21 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
-  native-macos-sandbox:
+  native-macos-sandbox-shards:
     if: ${{ !inputs.native_only }}
     needs: native-macos
     runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15' || 'macos-latest' }}
     timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     env:
       OPENAI_API_KEY: fake-for-tests
-      PYTEST_ADDOPTS: "-rA"
+      PYTEST_ADDOPTS: >-
+        -rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+        --max-worker-restart=0
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -814,15 +821,33 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run native SDK tests on macOS
+        id: parallel-tests
         if: steps.changes.outputs.run == 'true'
         timeout-minutes: 20
         env:
-          PYTEST_ADDOPTS: "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
-          PYTHONUNBUFFERED: "1"
-        run: make tests
+          CI_SHARD: ${{ matrix.shard }}
+        # The Linux test matrix already runs the platform-independent API checker tests.
+        run: >-
+          PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p tests.ci_shard --ci-shard $CI_SHARD
+          --ignore=packages/codex/tests/test_released_api_contract.py" make tests-parallel
+      - name: Run serial tests after the first shard's workers exit
+        if: steps.parallel-tests.outcome == 'success' && matrix.shard == 0
+        timeout-minutes: 20
+        run: make tests-serial
       - name: Skip native macOS sandbox tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping native macOS sandbox tests for non-code changes."
+
+  native-macos-sandbox:
+    # Release readiness consumes this check name.
+    needs: native-macos-sandbox-shards
+    if: ${{ !inputs.native_only && !cancelled() && needs.native-macos-sandbox-shards.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both macOS shards to pass
+        env:
+          SHARDS_RESULT: ${{ needs.native-macos-sandbox-shards.result }}
+        run: test "$SHARDS_RESULT" = success
 
   tests-windows:
     if: ${{ !inputs.native_only }}
