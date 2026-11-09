@@ -1,6 +1,7 @@
 """Observable regressions for optional Classic examples."""
 
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,50 @@ async def test_mongodb_example_closes_client_when_initial_ping_fails(monkeypatch
                 await client.admin.command("ping")
         finally:
             await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["create", "start"])
+async def test_docker_mount_example_handles_setup_failure(monkeypatch, capsys, phase):
+    pytest.importorskip("docker")
+    from agents.classic.sandbox.errors import MountCommandError
+    from examples.classic.sandbox.docker.mounts import mount_smoke as example
+
+    live_sessions = []
+    error = (
+        RuntimeError("sandbox operation failed while using a protected mount configuration")
+        if phase == "create"
+        else MountCommandError(command="mount", stderr="mount failed")
+    )
+
+    async def start():
+        raise error
+
+    async def create(**_kwargs):
+        if phase == "create":
+            raise error
+        session = SimpleNamespace(start=start)
+        live_sessions.append(session)
+        return session
+
+    async def delete(session):
+        live_sessions.remove(session)
+
+    client = SimpleNamespace(create=create, delete=delete)
+    monkeypatch.setattr(example, "ensure_mount_image", lambda: None)
+    monkeypatch.setattr(example.docker, "from_env", lambda: object())
+    monkeypatch.setattr(example, "DockerSandboxClient", lambda _docker: client)
+
+    with pytest.raises(type(error)) as caught:
+        await example.run_mount_smoke_test(provider="test", agent_name="test", mount_cases=[])
+
+    assert caught.value is error
+    assert not live_sessions
+    output = capsys.readouterr()
+    if phase == "create":
+        assert "docker plugin ls" in output.err
+    else:
+        assert "mount stderr: mount failed" in output.out
 
 
 @pytest.mark.asyncio

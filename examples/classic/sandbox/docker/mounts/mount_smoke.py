@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -134,19 +135,21 @@ async def run_mount_smoke_test(
             manifest=manifest,
             options=DockerSandboxClientOptions(image=IMAGE),
         )
-    except docker.errors.NotFound as exc:
-        if 'plugin "rclone" not found' in str(exc):
-            raise SystemExit("rclone Docker volume plugin not found") from exc
+    except RuntimeError:
+        print(
+            "Docker could not create the mount sandbox. Run 'docker plugin ls' on the Docker "
+            "host and check that the rclone volume plugin is enabled.",
+            file=sys.stderr,
+        )
         raise
 
     try:
-        await sandbox.start()
-    except MountCommandError as exc:
-        print(f"mount command: {exc.context.get('command')}")
-        print(f"mount stderr: {exc.context.get('stderr')}")
-        raise
-
-    try:
+        try:
+            await sandbox.start()
+        except MountCommandError as exc:
+            print(f"mount command: {exc.context.get('command')}")
+            print(f"mount stderr: {exc.context.get('stderr')}")
+            raise
         for mount_case in mount_cases:
             await _check_case(sandbox, agent, provider, mount_case)
     finally:
