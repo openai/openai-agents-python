@@ -4,9 +4,9 @@
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, RootModel
 from typing_extensions import assert_type
 
 import agents
@@ -1053,3 +1053,61 @@ async def typed_decision_helpers(
     async with deciding_agent.session(decisions=decision_provider):
         pass
     assert_type(await deciding_agent.run("Answer", decisions=decision_provider), Completed[str])
+
+
+Probability = Annotated[float, Field(ge=0, le=1)]
+
+
+async def typed_scalar_decision_schemas(
+    agent: Agent[Application, str],
+    turn: Turn[str],
+    completion: CompletionContext[Application],
+    tool: ToolContext[Application],
+    child: ChildStepContext[Application],
+) -> None:
+    assert_type(await agent.decide("Assess", input="Evidence"), bool)
+    assert_type(await agent.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await agent.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    agent_probability: float = await agent.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(agent_probability, float)
+    assert_type(
+        await agent.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await turn.decide("Assess", input="Evidence"), bool)
+    assert_type(await turn.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await turn.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    turn_probability: float = await turn.decide("Assess", input="Evidence", output_type=Probability)
+    assert_type(turn_probability, float)
+    assert_type(
+        await turn.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await completion.decide("Assess", input="Evidence"), bool)
+    assert_type(await completion.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await completion.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    completion_probability: float = await completion.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(completion_probability, float)
+    assert_type(
+        await completion.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await tool.decide("Assess", input="Evidence"), bool)
+    assert_type(await tool.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await tool.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    tool_probability: float = await tool.decide("Assess", input="Evidence", output_type=Probability)
+    assert_type(tool_probability, float)
+    assert_type(
+        await tool.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await child.decide("Assess", input="Evidence"), bool)
+    assert_type(await child.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await child.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    child_probability: float = await child.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(child_probability, float)
+    assert_type(
+        await child.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )

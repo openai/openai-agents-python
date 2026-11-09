@@ -247,6 +247,17 @@ class ChildStepContext(Generic[_ContextT_co]):
         choices: None = None,
     ) -> _DecisionT: ...
 
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: Any,
+        choices: None = None,
+    ) -> Any: ...
+
     async def decide(
         self,
         question: str,

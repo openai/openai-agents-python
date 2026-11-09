@@ -36,6 +36,8 @@ asyncio.run(main())
 
 Omit `output_type` for a boolean. Pass `choices=["billing", "technical", "other"]` to return one of those values. `choices` and `output_type` are mutually exclusive. Every call requires explicit `input`: text or a sequence of model input items. The SDK does not add conversation history or Agent instructions implicitly.
 
+`output_type` also accepts Pydantic schema expressions such as `Annotated[float, Field(ge=0, le=1)]` and `Literal["yes", "no"]`. Type checkers may infer `Any` for these expressions; use an explicit result annotation when you need a narrower type. Class schemas keep their inferred result type.
+
 The built-in provider uses the supported Decisions backend without a model-selection option. A boolean answer uses a probability threshold of `0.5`. Typed objects can contain supported finite choices, booleans, bounded scores, and nested records. The provider rejects unsupported schemas before sending a request.
 
 ## Bind a provider to an Agent
@@ -76,7 +78,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Await the call directly in that callback's task. Calls from another task or after the callback returns are rejected. Completed usage contributes to the owning turn; child usage stays with the child. Run budgets check limits before admitting a root model step. An admitted request may finish after reaching a limit. Decision calls do not add root request admissions. Cancellation joins started work. The helper does not append its question or answer to the conversation.
+`turn.decide()` in `before_step` or `prepare_request`, `ToolContext.decide()` in a function tool or native-agent approval, and `CompletionContext.decide()` inherit the captured provider. Await each call directly in that callback's task. Calls from another task or after the callback returns are rejected, including calls started with `asyncio.gather()`, `asyncio.create_task()`, or `TaskGroup`. Completed usage contributes to the owning turn; child usage stays with the child. Run budgets check limits before admitting a root model step. An admitted request may finish after reaching a limit. Decision calls do not add root request admissions. Cancellation joins started work. The helper does not append its question or answer to the conversation.
 
 Completion feedback does enter the conversation. Already streamed text remains visible and recorded. See [completion checks](../../docs/sdk/configuration.md#check-a-proposed-completion) for timing and continuation limits.
 
