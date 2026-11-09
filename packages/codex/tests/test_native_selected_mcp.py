@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 from contextlib import AsyncExitStack
 from dataclasses import replace
@@ -858,3 +859,94 @@ async def test_selected_mcp_manual_run_rejects_before_session_factory_or_provide
         assert stopped.value.state is None
         assert entries == [] and not responses.requests and not peer.calls
         assert {tool.name for tool in await client.list_tools()} == {"search", "excluded"}
+
+
+@pytest.mark.parametrize("result_kind", ["text", "image", "structured"])
+async def test_selected_mcp_results_work_in_a_fresh_process(
+    responses: ResponsesFixture, result_kind: str
+) -> None:
+    image = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
+        "AAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+    )
+    result = (
+        {"content": [{"type": "image", "data": image, "mimeType": "image/png"}]}
+        if result_kind == "image"
+        else {
+            "content": [{"type": "text", "text": "fresh-text"}],
+            "structuredContent": {"label": "fresh-structured"},
+        }
+    )
+    peer = Peer(names=("search",), call_result=result)
+    responses.respond(mcp_call("search", "catalog", "fresh-call"))
+    responses.respond(assistant_output("fresh result accepted"))
+    program = """
+import asyncio
+import sys
+
+from agents import Agent, NativeProvider
+from agents.classic.mcp import MCPServerStreamableHttp
+from agents.migration.mcp import MCPNamespace, select_mcp_tools
+
+
+async def main():
+    async with MCPServerStreamableHttp(
+        params={"url": sys.argv[1]},
+        use_structured_content=sys.argv[3] == "structured",
+    ) as client:
+        context = object()
+        selected = await select_mcp_tools(
+            MCPNamespace("catalog", client), context=context, tool_names=["search"]
+        )
+        async with NativeProvider(
+            base_url=sys.argv[2], api_key="synthetic-fresh-mcp"
+        ) as provider:
+            agent = Agent(instructions="Read the record.", tools=selected, provider=provider)
+            completed = await agent.run("Read.", context=context)
+            assert completed.final_output == "fresh result accepted"
+
+
+asyncio.run(main())
+"""
+    async with timeout(30), peer.serve() as url:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-c",
+            program,
+            url,
+            responses.url,
+            result_kind,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await process.communicate()
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
+        assert process.returncode == 0, (stdout.decode(), stderr.decode())
+
+    assert len(peer.calls) == 1
+    assert peer.calls[0]["name"] == "search"
+    assert peer.calls[0]["arguments"] == {"key": "43"}
+    assert len(responses.requests) == 2
+    if result_kind == "image":
+        output = next(
+            item["output"]
+            for item in responses.requests[1]["input"]
+            if item.get("type") == "function_call_output" and item.get("call_id") == "fresh-call"
+        )
+        assert any(
+            item.get("type") == "input_image"
+            and item.get("image_url", "").startswith("data:image/")
+            for item in output
+        )
+    elif result_kind == "structured":
+        assert json.loads(tool_output(responses.requests[1], "fresh-call")) == {
+            "label": "fresh-structured"
+        }
+    else:
+        assert tool_output(responses.requests[1], "fresh-call") == "fresh-text"

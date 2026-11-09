@@ -4,7 +4,9 @@
 
 ## Set up and run
 
-`CustomStorage` was added after `0.24.0-alpha.6`. Follow the [development-branch setup](../../../docs/sdk/installation.md#examples-and-upgrades) and use the example files from the same build. The reference adapter requires a trusted local POSIX filesystem. Provide your current model credentials through the normal provider configuration; model requests can incur charges. Run from the repository root with that build's Python environment active:
+`CustomStorage` requires `0.24.0-alpha.7` or later. Install a [matching preview wheel and example files](../../../docs/sdk/installation.md#examples-and-upgrades).
+
+The reference adapter requires a trusted local POSIX filesystem. Supply model credentials through the normal provider configuration; requests can incur charges. Run from the matching source archive's root with that wheel's Python environment active:
 
 ```sh
 python examples/codex/canonical_storage/main.py ./conversation.sqlite
@@ -58,7 +60,7 @@ This preview supports root Sessions with automatic Python tools and provider-hos
 
 Portable `SessionState` and custom canonical storage cannot be combined. Thread listing, archival, forks, and local rollout-path access are unsupported. Use `LocalStorage` for its other [supported combinations](../../../docs/sdk/state.md#choose-how-to-store-a-conversation).
 
-In development builds after alpha.6, `LocalStorage` also rejects `programmatic_tool_calling=True`. Nested tool calls lack durable intent and result receipts, so the SDK rejects this combination before storage acquisition or model/tool work. Nonpersistent code mode remains available. Use the matching build and example files described in [setup](#set-up-and-run).
+In alpha.7 or later, `LocalStorage` also rejects `programmatic_tool_calling=True`. Nested tool calls lack durable intent and result receipts, so the SDK rejects this combination before storage acquisition or model/tool work. Nonpersistent code mode remains available. Use the matching build and example files described in [setup](#set-up-and-run).
 
 Snapshots check native schema version 1, the Python SDK family and the pinned Codex revision. These checks do not prove compatibility with a different SDK binding revision. Snapshots are opaque backend values. Do not edit their JSON or assume compatibility across SDK versions or between Python and JavaScript. Keep the matching SDK build when reopening saved history; upgrade and migration qualification are separate work. The application owns storage access, encryption, retention and backups.
 

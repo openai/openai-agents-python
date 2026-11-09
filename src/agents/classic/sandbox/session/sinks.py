@@ -162,7 +162,7 @@ class WorkspaceJsonlSink(EventSink):
         on_error: OnErrorPolicy = "log",
         payload_policy: EventPayloadPolicy | None = None,
         flush_every: int = 1,
-        max_bytes: int | None = None,
+        max_bytes: int | None = 8 * 1024 * 1024,
     ) -> None:
         """
         Args:
@@ -174,8 +174,10 @@ class WorkspaceJsonlSink(EventSink):
                 Example:
                     Path("logs/events-{session_id}.jsonl")
             max_bytes: Optional maximum replacement-file and pending-buffer size in bytes.
-                The default `None` preserves unlimited delivery and whole-file reads.
-                Set a positive budget to bound acquisition of workload-modifiable logs.
+                Defaults to 8 MiB to bound acquisition of workload-modifiable logs.
+                Set a positive value to choose a different finite budget. Explicitly
+                pass `None` only for trusted workloads that require unlimited delivery
+                and whole-file reads.
                 Exceeding either budget clears pending events
                 and permanently stops this sink, reporting one error through
                 `on_error`. Subsequent events are ignored, including after rebind.
