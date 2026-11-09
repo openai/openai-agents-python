@@ -2802,6 +2802,23 @@ class TestRunState:
         assert new_state._context.is_tool_approved(tool_name="tool2", call_id="cid2") is False
         assert new_state._context.get_rejection_message("tool2", "cid2") is None
 
+    async def test_missing_function_approval_owner_reports_user_error(self):
+        reviewer = Agent(name="Reviewer")
+        desk = Agent(name="Desk", handoffs=[reviewer])
+        state = make_state(desk, context=RunContextWrapper(context=None))
+        state.approve(make_tool_approval_item(reviewer), always_approve=True)
+        checkpoint = state.to_string()
+
+        await RunState.from_string(desk, checkpoint)
+        updated_desk = desk.clone(handoffs=[])
+        message = "Function approval owner is absent from the restored graph."
+        with pytest.raises(UserError) as json_error:
+            await RunState.from_json(updated_desk, json.loads(checkpoint))
+        assert str(json_error.value) == message
+        with pytest.raises(UserError) as string_error:
+            await RunState.from_string(updated_desk, checkpoint)
+        assert str(string_error.value) == message
+
     @pytest.mark.parametrize("sticky_approved", [True, False], ids=["approve", "reject"])
     async def test_exact_call_override_round_trips_with_sticky_default(
         self,

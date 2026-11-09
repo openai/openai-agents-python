@@ -5619,6 +5619,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state tool output guardrail result boundary requires schema 1.20.",
         "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
+        "Function approval owner is absent from the restored graph.",
         (
             "RunState context was serialized from a custom type; provide context_deserializer "
             "or context_override to restore it."
