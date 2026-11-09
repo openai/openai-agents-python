@@ -241,3 +241,72 @@ async def test_mouse_modifiers_allow_positional_only_and_older_drivers(keys):
         {"action": {"type": "click", "x": 1, "y": 2, "button": "left", "keys": keys}},
     )
     assert driver.calls == [("click", 1, 2, "left"), ("screenshot",)]
+
+
+@pytest.mark.parametrize("completed", [False, True])
+async def test_cancelled_sync_factory_joins_issued_future_before_disposal(completed):
+    driver, disposed = Driver(), []
+    entered, release = threading.Event(), threading.Event()
+    future = asyncio.get_running_loop().create_future()
+    if completed:
+        future.set_result(driver)
+
+    def create(_):
+        entered.set()
+        assert release.wait(5)
+        return future
+
+    resources = _ComputerResources()
+    task = asyncio.create_task(
+        invoke(
+            computer_tool(ComputerProvider(create, disposed.append)),
+            resources,
+            {"actions": [{"type": "wait"}]},
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    if not completed:
+        await asyncio.sleep(0)
+        assert not task.done()
+        future.set_result(driver)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert disposed == []
+    assert driver.calls == []
+    await resources.close()
+    await resources.close()
+    assert disposed == [driver]
+
+
+async def test_cancelled_sync_factory_does_not_start_unentered_coroutine():
+    entered, release = threading.Event(), threading.Event()
+    started, disposed = [], []
+
+    async def acquire():
+        started.append(True)
+        return Driver()
+
+    def create(_):
+        entered.set()
+        assert release.wait(5)
+        return acquire()
+
+    resources = _ComputerResources()
+    task = asyncio.create_task(
+        invoke(
+            computer_tool(ComputerProvider(create, disposed.append)),
+            resources,
+            {"actions": [{"type": "wait"}]},
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    await resources.close()
+    assert started == disposed == []

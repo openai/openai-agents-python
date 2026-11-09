@@ -223,3 +223,73 @@ async def test_computer_provider_receipt_never_grants_device_authority(responses
         assert not driver.calls
     finally:
         await provider.aclose()
+
+
+@pytest.mark.parametrize("policy_kind", ["approve", "on_safety_check"])
+async def test_native_queued_policy_observes_preceding_device_effect(responses, policy_kind):
+    entered, queued, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    observations, effects, disposed = [], [], []
+    screen = 0
+
+    class StatefulDriver(Driver):
+        async def wait(self):
+            nonlocal screen
+            entered.set()
+            await release.wait()
+            effects.append(screen)
+            screen += 1
+
+    driver = StatefulDriver()
+
+    async def policy(*_):
+        observations.append(screen)
+        return screen == 0
+
+    checks = [{"id": "check", "code": "screen", "message": "Confirm screen"}]
+    responses.respond(
+        computer_call(
+            action={"type": "wait"},
+            pending_safety_checks=checks if policy_kind == "on_safety_check" else [],
+        ),
+        computer_call(
+            id="cu_queued",
+            call_id="queued-computer",
+            action={"type": "wait"},
+            pending_safety_checks=checks if policy_kind == "on_safety_check" else [],
+        ),
+    )
+    responses.respond(assistant_output("done"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    agent = Agent(
+        instructions="Use computer.",
+        provider=provider,
+        model="gpt-5",
+        tools=[
+            computer_tool(
+                ComputerProvider(lambda _: driver, disposed.append), **{policy_kind: policy}
+            )
+        ],
+    )
+    async with agent.session() as session:
+        turn = await session.submit("Use the device twice")
+
+        async def observe():
+            async for event in turn.events():
+                if event.type == "tool_started" and event.call_id == "queued-computer":
+                    queued.set()
+
+        reader = asyncio.create_task(observe())
+        try:
+            await asyncio.wait_for(asyncio.gather(entered.wait(), queued.wait()), 10)
+            release.set()
+            with pytest.raises(ComputerSafetyError, match="not approved|require acknowledgment"):
+                await turn.get_result()
+        finally:
+            release.set()
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+    await provider.aclose()
+    assert observations == [0, 1]
+    assert effects == [0]
+    assert disposed == [driver]
+    assert len(responses.requests) == 1

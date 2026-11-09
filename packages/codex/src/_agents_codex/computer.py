@@ -190,18 +190,20 @@ class _CapturedComputer(_CapturedFunction):
             return result
 
         actions = _actions(call)
-        if self.computer.approve is not None:
-            if await invoke(self.computer.approve, context, deepcopy(actions)) is not True:
-                raise ComputerSafetyError("Computer call was not approved")
         pending = deepcopy(call.pending_safety_checks)
-        if pending:
-            policy = self.computer.on_safety_check
-            if policy is None or await invoke(policy, context, deepcopy(pending)) is not True:
-                raise ComputerSafetyError("Pending computer safety checks require acknowledgment")
         lease = resources.lease(self.computer)
         async with lease.lock:
             if not admit():
                 raise asyncio.CancelledError
+            if self.computer.approve is not None:
+                if await invoke(self.computer.approve, context, deepcopy(actions)) is not True:
+                    raise ComputerSafetyError("Computer call was not approved")
+            if pending:
+                policy = self.computer.on_safety_check
+                if policy is None or await invoke(policy, context, deepcopy(pending)) is not True:
+                    raise ComputerSafetyError(
+                        "Pending computer safety checks require acknowledgment"
+                    )
             if lease.driver is None:
                 source = self.computer.source
                 if isinstance(source, ComputerProvider):
@@ -212,17 +214,43 @@ class _CapturedComputer(_CapturedFunction):
                         lease.disposer = source.dispose
                         return driver
 
+                    created: Awaitable[Computer] | None = None
+
                     def create_owned() -> Any:
+                        nonlocal created
                         value = source.create(context)
                         if inspect.isawaitable(value):
+                            created = value
 
                             async def acquire() -> Computer:
+                                if asyncio.isfuture(value):
+                                    return retain(await asyncio.shield(value))
                                 return retain(await value)
 
                             return acquire()
                         return retain(value)
 
-                    await _call_callback(create_owned, admit)
+                    try:
+                        await _call_callback(create_owned, admit)
+                    finally:
+                        # A worker can return an already-issued acquisition after
+                        # cancellation. Keep its original Future visible even if
+                        # the callback runner closes our unentered wrapper.
+                        if asyncio.isfuture(created) and lease.driver is None:
+                            cancelled: asyncio.CancelledError | None = None
+                            while not created.done():
+                                try:
+                                    await asyncio.shield(created)
+                                except asyncio.CancelledError as error:
+                                    cancelled = cancelled or error
+                            retain(created.result())
+                            if cancelled is not None:
+                                raise cancelled
+                        elif (
+                            inspect.iscoroutine(created)
+                            and inspect.getcoroutinestate(created) == inspect.CORO_CREATED
+                        ):
+                            created.close()
                 else:
                     lease.driver = source
                 if not admit():
