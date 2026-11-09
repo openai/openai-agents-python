@@ -558,8 +558,10 @@ async def test_post_turn_compaction_preserves_completed_answer(
     from agents import _native
 
     create_engine = _native.create_engine
+    open_conversation = _native._open_conversation
+    configured_paths = []
 
-    async def configured_engine(config_json, *args, **kwargs):
+    def configured_json(config_json):
         # The facade does not expose compaction thresholds. Keep the actual
         # engine and public operation path, configuring only this test's budget.
         config = json.loads(config_json)
@@ -568,9 +570,18 @@ async def test_post_turn_compaction_preserves_completed_answer(
             model_auto_compact_token_limit=10_000,
             model_post_turn_compact_threshold_percent=1,
         )
-        return await create_engine(json.dumps(config), *args, **kwargs)
+        return json.dumps(config)
+
+    async def configured_engine(config_json, *args, **kwargs):
+        configured_paths.append("ordinary")
+        return await create_engine(configured_json(config_json), *args, **kwargs)
+
+    async def configured_conversation(config_json, *args, **kwargs):
+        configured_paths.append("atomic")
+        return await open_conversation(configured_json(config_json), *args, **kwargs)
 
     monkeypatch.setattr(_native, "create_engine", configured_engine)
+    monkeypatch.setattr(_native, "_open_conversation", configured_conversation)
     preparations = []
 
     def edit(turn, request, *, preparation_index, recovery_attempt):
@@ -586,10 +597,11 @@ async def test_post_turn_compaction_preserves_completed_answer(
     responses.before_event = completed_usage
     responses.respond(assistant_output("completed answer"))
     responses.respond(assistant_output("synthetic compaction summary"))
-    async with timeout(30):
-        result = await Agent(
-            model="gpt-5.5", instructions="Answer", provider=provider(responses)
-        ).run("Complete", prepare_request=edit if enabled else None)
+    async with timeout(30), provider(responses) as current_provider:
+        result = await Agent(model="gpt-5.5", instructions="Answer", provider=current_provider).run(
+            "Complete", prepare_request=edit if enabled else None
+        )
+    assert configured_paths == ["ordinary" if enabled else "atomic"]
     assert result.final_output == "completed answer"
     assert len(responses.requests) == (1 if enabled else 2)
     assert preparations == ([(0, 0)] if enabled else [])

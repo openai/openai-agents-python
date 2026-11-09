@@ -118,7 +118,7 @@ async def test_one_shot_uses_route_captured_before_agent_provider_changes(
 
     acquired = asyncio.Event()
     publish = asyncio.Event()
-    original_create = _native.create_engine
+    original_create = _native._open_conversation
 
     async def hold_after_native_acquisition(*args: Any, **kwargs: Any) -> Any:
         native_owner = await original_create(*args, **kwargs)
@@ -126,7 +126,7 @@ async def test_one_shot_uses_route_captured_before_agent_provider_changes(
         await publish.wait()
         return native_owner
 
-    monkeypatch.setattr(_native, "create_engine", hold_after_native_acquisition)
+    monkeypatch.setattr(_native, "_open_conversation", hold_after_native_acquisition)
     async with timeout(20), completed_peer() as (peer, provider):
         # This provider is only an updated future Agent declaration. The run
         # already opening belongs to the original captured HTTP provider.

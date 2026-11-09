@@ -173,9 +173,11 @@ async fn close_engine_owner(owner: Arc<std::sync::Mutex<EngineOwner>>) -> PyResu
         inner.release_native_threads();
         let mut state = owner.lock().map_err(py_error)?;
         if state.live.is_some() {
-            state.remote_drain =
-                environment::selected_executor(&inner.manager.environment_manager())
-                    .and_then(|environment| environment.subscribe_connection_state());
+            if inner.owns_runtime_services() {
+                state.remote_drain =
+                    environment::selected_executor(&inner.manager.environment_manager())
+                        .and_then(|environment| environment.subscribe_connection_state());
+            }
             state.live.take();
         }
     }
@@ -226,6 +228,11 @@ impl Engine {
 
 #[pymethods]
 impl Engine {
+    #[getter]
+    fn _runtime_is_shared(&self) -> PyResult<bool> {
+        Ok(!self.current()?.owns_runtime_services())
+    }
+
     #[pyo3(signature = (payload_json, options_json="{}", specs_json=None))]
     fn restore_checkpoint<'py>(
         &self,
@@ -479,9 +486,11 @@ impl Engine {
                 inner.release_native_threads();
                 let mut state = owner.lock().map_err(py_error)?;
                 if state.live.is_some() {
-                    state.remote_drain =
-                        environment::selected_executor(&inner.manager.environment_manager())
-                            .and_then(|environment| environment.subscribe_connection_state());
+                    if inner.owns_runtime_services() {
+                        state.remote_drain =
+                            environment::selected_executor(&inner.manager.environment_manager())
+                                .and_then(|environment| environment.subscribe_connection_state());
+                    }
                     state.live.take();
                 }
             }
@@ -3264,6 +3273,104 @@ impl ContextChange {
 }
 
 #[pyfunction]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false))]
+fn _open_conversation<'py>(
+    py: Python<'py>,
+    config_json: String,
+    runtime_json: String,
+    options_json: &str,
+    specs_json: &str,
+    settings_json: &str,
+    api_key: String,
+    provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
+    _share_model_http: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let options: options::ThreadOptions =
+        config::decode(serde_json::from_str(options_json).map_err(py_error)?).map_err(py_error)?;
+    if !options.permits_initial_config()
+        || options.agent_profiles.is_some()
+        || !options.manual_tool_slots.is_empty()
+        || options.transform_context
+        || options.before_compact
+        || options.before_complete
+    {
+        return Err(PyValueError::new_err(
+            "atomic opening requires a fresh ordinary conversation",
+        ));
+    }
+    let instructions = options.application_instructions.clone().unwrap_or_default();
+    let files = options.sdk_instruction_files.clone().unwrap_or_default();
+    let specs = serde_json::from_str(specs_json).map_err(py_error)?;
+    let settings_value: serde_json::Value = serde_json::from_str(settings_json)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let has_settings = settings_value
+        .as_object()
+        .is_some_and(|fields| !fields.is_empty());
+    let settings = ops::model_settings(settings_value)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let lease = provider_lease.inner.clone();
+    async_bridge::future_factory_into_py(py, move || async move {
+        let (state, generated_home) = lease
+            .conversation_engine(config_json, runtime_json, api_key, _share_model_http)
+            .await?;
+        let mut engine = Engine::new(state);
+        lease.register_engine(engine.inner.clone())?;
+        engine.managed_lease = Some(Arc::downgrade(&lease));
+        let inner = engine.current()?;
+        let _operation = inner.operation(false).map_err(py_error)?;
+        let thread = inner
+            .start_with_tools(options, None, Some(specs), true)
+            .await
+            .map_err(py_error)?;
+        lease.register_thread(thread.inner.clone())?;
+        let state = thread.current()?;
+        if has_settings {
+            if let Some(model) = &settings.model {
+                inner
+                    .validate_hosted_search_model(model)
+                    .await
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            }
+            inner
+                .validate_request_controls(&state.thread, &settings)
+                .await
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        if !inner.owns_runtime_services() {
+            let initialization =
+                application_instructions::initial_turn(&state.thread, instructions, files)
+                    .map_err(py_error)?;
+            *state.initial_turn.lock().map_err(py_error)? = Some(Arc::new(ops::InitialTurn {
+                settings,
+                initialization,
+            }));
+        } else {
+            // A changed key or ineligible configuration uses ordinary startup.
+            if has_settings {
+                state
+                    .thread
+                    .update_thread_settings(settings)
+                    .await
+                    .map_err(|error| {
+                        if matches!(
+                            error.details(),
+                            codex_protocol::error::CodexErrorDetails::InvalidRequest(_)
+                        ) {
+                            PyValueError::new_err(error.to_string())
+                        } else {
+                            py_error(error)
+                        }
+                    })?;
+            }
+            application_instructions::publish_with_files(&state.thread, instructions, files)
+                .await
+                .map_err(py_error)?;
+        }
+        Ok((engine, thread, generated_home))
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None, _capture_initial_config=false, _share_model_http=false))]
 fn create_engine<'py>(
     py: Python<'py>,
@@ -3681,6 +3788,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decisions::_decision_questions, module)?)?;
     module.add_function(wrap_pyfunction!(decisions::_decision_result, module)?)?;
     module.add_function(wrap_pyfunction!(create_engine, module)?)?;
+    module.add_function(wrap_pyfunction!(_open_conversation, module)?)?;
     module.add_function(wrap_pyfunction!(reconcile_canonical_store, module)?)?;
     module.add_function(wrap_pyfunction!(create_checkpoint_engine, module)?)?;
     module.add_function(wrap_pyfunction!(config_schema, module)?)?;

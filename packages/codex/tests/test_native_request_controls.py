@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,6 +19,11 @@ from tests.native_fixtures import (
 )
 
 MODEL = "fixture-unlisted-request-controls"
+CAPTURED_METADATA = {
+    "workflow": "captured",
+    **{f"tag-{index}": "value" for index in range(16)},
+    "k" * 65: "v" * 513,
+}
 WIRE_FIELDS = (
     "max_output_tokens",
     "temperature",
@@ -43,7 +50,7 @@ def check_values(
     assert request["top_p"] == 0.7
     assert request["parallel_tool_calls"] is False
     assert request["text"]["verbosity"] == "high"
-    assert request["metadata"] == {"workflow": "captured"}
+    assert request["metadata"] == CAPTURED_METADATA
     assert request["store"] is True
     assert request["prompt_cache_retention"] == "24h"
     assert request["prompt_cache_options"] == {"ttl": "12h"}
@@ -55,7 +62,7 @@ async def test_native_wire_capture_updates_and_restores_values_and_explicit_clea
 ) -> None:
     for _ in range(5):
         responses.respond(assistant_output("finished"))
-    metadata = {"workflow": "captured"}
+    metadata = dict(CAPTURED_METADATA)
     settings: ModelSettings = {
         "max_output_tokens": 23,
         "temperature": 0.4,
@@ -138,16 +145,17 @@ async def test_native_cache_controls_remain_independent_and_omission_stays_omitt
 @pytest.mark.parametrize(
     "settings",
     [
-        {"max_output_tokens": 0},
+        {"max_output_tokens": -1},
         {"max_output_tokens": True},
-        {"max_output_tokens": 2**53},
+        {"max_output_tokens": 2**64},
+        {"top_logprobs": 256},
         {"temperature": math.nan},
-        {"temperature": 2.01},
-        {"top_p": -0.1},
+        {"temperature": 10**400},
+        {"top_p": True},
         {"parallel_tool_calls": 1},
         {"store": "true"},
         {"verbosity": "LOUD"},
-        {"metadata": {"x": "v" * 513}},
+        {"metadata": {"x": 1}},
         {"prompt_cache_ttl": "24h"},
         {"prompt_cache_retention": "12h"},
     ],
@@ -155,6 +163,82 @@ async def test_native_cache_controls_remain_independent_and_omission_stays_omitt
 def test_invalid_request_controls_fail_at_declaration(settings):
     with pytest.raises((ValueError, TypeError)):
         Agent(instructions="Never open resources.", model_settings=settings)
+
+
+@pytest.mark.parametrize("cap,alternatives", [(0, 21), (2**64 - 1, 255)])
+async def test_provider_owned_ranges_reach_the_wire_without_numeric_loss(
+    responses: ResponsesFixture, cap: int, alternatives: int
+) -> None:
+    # This controlled provider accepts the request. Actual providers own semantic
+    # ranges; these assertions only qualify the SDK's existing wire types.
+    responses.respond(assistant_output("provider accepted"))
+    async with timeout(25), provider_for(responses) as provider:
+        result = await Agent(
+            model=MODEL,
+            instructions="Answer.",
+            provider=provider,
+            model_settings={
+                "max_output_tokens": cap,
+                "top_logprobs": alternatives,
+                "temperature": 2.01,
+                "top_p": -0.1,
+            },
+        ).run("Forward the caller's controls.")
+    assert result.final_output == "provider accepted"
+    assert len(responses.requests) == 1
+    request = responses.requests[0]
+    assert type(request["max_output_tokens"]) is int
+    assert request["max_output_tokens"] == cap
+    assert request["top_logprobs"] == alternatives
+    assert request["temperature"] == 2.01
+    assert request["top_p"] == -0.1
+
+
+@pytest.mark.parametrize("ordinary", [False, True], ids=["atomic", "ordinary"])
+async def test_explicit_verbosity_reaches_provider_despite_catalog_support_flag(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, ordinary: bool
+) -> None:
+    from agents import _native
+
+    catalog = Path(__file__).parent / "fixtures" / "request-control-models.json"
+    model = json.loads(catalog.read_text())["models"][0]
+    assert model["slug"] == "gpt-5.5"
+    assert model["support_verbosity"] is False
+    assert model["use_responses_lite"] is False
+    assert "used_fallback_model_metadata" not in model
+    create_engine = _native.create_engine
+    open_conversation = _native._open_conversation
+    configured_paths: list[str] = []
+
+    def configured_json(config_json: str) -> str:
+        config = json.loads(config_json)
+        assert "model_catalog_json" not in config
+        config["model_catalog_json"] = str(catalog)
+        return json.dumps(config)
+
+    def configured_engine(config_json: str, *args: Any, **kwargs: Any) -> Any:
+        configured_paths.append("ordinary")
+        return create_engine(configured_json(config_json), *args, **kwargs)
+
+    def configured_conversation(config_json: str, *args: Any, **kwargs: Any) -> Any:
+        configured_paths.append("atomic")
+        return open_conversation(configured_json(config_json), *args, **kwargs)
+
+    monkeypatch.setattr(_native, "create_engine", configured_engine)
+    monkeypatch.setattr(_native, "_open_conversation", configured_conversation)
+    responses.respond(assistant_output("provider accepted verbosity"))
+    async with timeout(25), provider_for(responses) as provider:
+        result = await Agent(
+            model="gpt-5.5",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"verbosity": "high"},
+        ).run("Forward explicit verbosity.", initial_messages=[] if ordinary else None)
+    assert configured_paths == ["ordinary" if ordinary else "atomic"]
+    assert result.final_output == "provider accepted verbosity"
+    assert len(responses.requests) == 1
+    assert responses.requests[0]["model"] == "gpt-5.5"
+    assert responses.requests[0]["text"]["verbosity"] == "high"
 
 
 @pytest.mark.parametrize("namespace", [None, "crm"])

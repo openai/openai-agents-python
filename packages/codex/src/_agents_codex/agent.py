@@ -27,7 +27,11 @@ from dataclasses import (
 )
 from pathlib import Path as Path
 from threading import RLock as RLock
-from types import MappingProxyType as MappingProxyType, TracebackType as TracebackType
+from types import (
+    MappingProxyType as MappingProxyType,
+    MethodType as MethodType,
+    TracebackType as TracebackType,
+)
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -107,8 +111,9 @@ class ModelSettings(TypedDict, total=False, closed=True):
     ``"auto"``. A ``ToolRef`` selects one currently admitted eager leaf and
     requires it without adding authority. ``None`` clears the target to auto.
     New request controls accept ``None`` to clear their SDK override. The response
-    cap is a positive safe integer for ordinary sampling, not internal compaction
-    or reviewers. Request TTL (30m/12h) and retention (in_memory/24h) remain
+    cap uses an unsigned 64-bit integer for ordinary sampling, not internal
+    compaction or reviewers. Providers own numeric ranges and metadata quotas.
+    Request TTL (30m/12h) and retention (in_memory/24h) remain
     independent; omission injects neither default. Providers own model support
     and cache behavior. Known formatting loss fails locally. ``store=True``
     requires API-key authentication.
@@ -158,19 +163,18 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         if value is None:
             continue
         if key == "max_output_tokens":
-            if type(value) is not int or not 1 <= value <= 9_007_199_254_740_991:
-                raise ValueError("max_output_tokens must be a positive safe integer")
+            if type(value) is not int or not 0 <= value <= 18_446_744_073_709_551_615:
+                raise ValueError("max_output_tokens must be an unsigned 64-bit integer")
         elif key == "top_logprobs":
-            if type(value) is not int or not 0 <= value <= 20:
-                raise ValueError("top_logprobs must be an integer between zero and 20")
+            if type(value) is not int or not 0 <= value <= 255:
+                raise ValueError("top_logprobs must be an unsigned 8-bit integer")
         elif key in ("temperature", "top_p"):
-            upper = 2.0 if key == "temperature" else 1.0
-            if (
-                type(value) not in (int, float)
-                or not 0 <= value <= upper
-                or not math.isfinite(value)
-            ):
-                raise ValueError(f"{key} must be finite and between zero and {upper}")
+            try:
+                finite = type(value) in (int, float) and math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{key} must be a finite 64-bit number")
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
@@ -183,18 +187,10 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
             if value not in allowed:
                 raise ValueError(f"Unsupported {key}")
         elif key == "metadata":
-            if (
-                not isinstance(value, Mapping)
-                or len(value) > 16
-                or any(
-                    not isinstance(k, str) or not isinstance(v, str) or len(k) > 64 or len(v) > 512
-                    for k, v in value.items()
-                )
+            if not isinstance(value, Mapping) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
             ):
-                raise ValueError(
-                    "metadata allows at most 16 string pairs, "
-                    "64 characters per key and 512 per value"
-                )
+                raise ValueError("metadata must be a mapping of strings to strings")
             captured[key] = MappingProxyType(dict(value))
         elif key == "tool_choice":
             if isinstance(value, ToolRef):
@@ -1131,7 +1127,58 @@ class Agent(Generic[ContextT, OutputT]):
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
-        initial_messages = _capture_initial_messages(initial_messages, state=state, resume=resume)
+        try:
+            initial_messages = _capture_initial_messages(
+                initial_messages, state=state, resume=resume
+            )
+            async with self._session_context(
+                context=context,
+                state=state,
+                restored_output_type=restored_output_type,
+                initial_messages=initial_messages,
+                storage=storage,
+                resume=resume,
+                provider=provider,
+                decisions=decisions,
+                model=model,
+                model_settings=model_settings,
+                environment=environment,
+                tools=tools,
+                instruction_files=instruction_files,
+                reconciled_calls=reconciled_calls,
+                parent_trace=parent_trace,
+                trace_options=trace_options,
+                on_interaction=on_interaction,
+                max_function_concurrency=max_function_concurrency,
+            ) as session:
+                yield session
+        finally:
+            del trace_options
+
+    @asynccontextmanager
+    async def _session_context(
+        self: Agent[SessionContextT, OutputT],
+        *,
+        context: SessionContextT | None = None,
+        state: SessionState | None = None,
+        restored_output_type: OutputSpec[Any] | None = None,
+        initial_messages: Sequence[InitialMessage] | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
+        resume: str | None = None,
+        provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[SessionContextT] | None = None,
+        tools: Sequence[Tool[SessionContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        on_interaction: _InteractionHandler | None = None,
+        max_function_concurrency: int | None = None,
+        _atomic_first_turn: bool = False,
+    ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Session
@@ -1162,6 +1209,7 @@ class Agent(Generic[ContextT, OutputT]):
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 parent_trace=parent_trace,
+                _atomic_first_turn=_atomic_first_turn,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -1471,6 +1519,24 @@ class Agent(Generic[ContextT, OutputT]):
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
+            if (
+                isinstance(session_factory, MethodType)
+                and session_factory.__self__ is self
+                and session_factory.__func__ is _BUILTIN_SESSION_FACTORY
+                and state is None
+                and initial_messages is None
+                and input is not None
+                and tools is None
+                and environment is None
+                and before_step is None
+                and prepare_request is None
+                and on_interaction is None
+                and budget is None
+            ):
+                # Only the built-in one-shot opening may defer its initial
+                # instruction receipt to the first ordinary submission.
+                session_factory = self._session_context
+                options["_atomic_first_turn"] = True
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
@@ -1727,4 +1793,5 @@ class Agent(Generic[ContextT, OutputT]):
 
 
 _protect_mcp_methods(Agent, lambda owner: (owner, *owner.tools))
+_BUILTIN_SESSION_FACTORY = Agent.session
 _preserve_module_identity(globals(), "agents.agent")

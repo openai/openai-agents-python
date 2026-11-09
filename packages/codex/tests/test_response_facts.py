@@ -55,7 +55,7 @@ def test_probability_selection_preserves_zero_and_clear(value: int | None) -> No
     assert _copy_model_settings({"top_logprobs": value}) == {"top_logprobs": value}
 
 
-@pytest.mark.parametrize("value", [-1, 21, 1.5, True, "1"])
+@pytest.mark.parametrize("value", [-1, 256, 1.5, True, "1"])
 def test_probability_selection_rejects_invalid_local_shapes(value: object) -> None:
     with pytest.raises((TypeError, ValueError), match="top_logprobs"):
         _copy_model_settings({"top_logprobs": value})

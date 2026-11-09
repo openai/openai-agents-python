@@ -329,9 +329,17 @@
       "sha256": "dfeefbabe843edd1bee2c2fc93fb771d955daf5b1a500eff7565c737bf1c42eb"
     },
     {
+      "path": "0097-provider-owned-request-validation.patch",
+      "sha256": "54574b90d443e0c9eeb2b13d8259d3c6e894bf3f259783547c7d05ed803f77cb"
+    },
+    {
+      "path": "0068-sdk-managed-execution-lifecycle.patch",
+      "sha256": "52945f0edebef94ea997e61240936bef8d0b870169742ebd23d6242c2c1fd1f0"
+    },
+    {
       "path": "0068-decisions.patch",
-      "sha256": "6eec09428b96bf3b22119f7cea0ad1a48340d9a74f2963aabf6d6c4522dc9704"
+      "sha256": "eb30e3fddcb54d8eb8ad12487037a0c4eef707d0aa660a6e7925626decb003ec"
     }
   ],
-  "result_tree": "50bbdd83979a6250df112bfeaa9747c9ced484e7"
+  "result_tree": "02e50dcebfdddd4e558df976e8a2e2c6fb0b19d5"
 }

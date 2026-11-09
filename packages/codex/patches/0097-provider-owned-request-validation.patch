@@ -1,0 +1,75 @@
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -51,7 +51,7 @@
+     #[ts(optional = nullable, as = "Option<f64>")]
+     #[schemars(with = "Option<f64>")]
+     pub top_p: Option<Option<f64>>,
+-    /// Request chosen-token probabilities and up to this many alternatives (0..=20).
++    /// Request chosen-token probabilities and this many alternatives.
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -171,33 +171,12 @@
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
+-        if self
+-            .max_output_tokens
+-            .flatten()
+-            .is_some_and(|value| value == 0 || value > 9_007_199_254_740_991)
+-        {
+-            return Err("max_output_tokens must be a positive safe integer".into());
+-        }
+-        if self.top_logprobs.flatten().is_some_and(|value| value > 20) {
+-            return Err("top_logprobs must be an integer between zero and 20".into());
+-        }
+-        for (name, value, upper) in [
+-            ("temperature", self.temperature.flatten(), 2.0),
+-            ("top_p", self.top_p.flatten(), 1.0),
++        for (name, value) in [
++            ("temperature", self.temperature.flatten()),
++            ("top_p", self.top_p.flatten()),
+         ] {
+-            if value.is_some_and(|value| !value.is_finite() || !(0.0..=upper).contains(&value)) {
+-                return Err(format!(
+-                    "{name} must be finite and between zero and {upper}"
+-                ));
+-            }
+-        }
+-        if let Some(Some(metadata)) = &self.metadata {
+-            if metadata.len() > 16
+-                || metadata
+-                    .iter()
+-                    .any(|(key, value)| key.chars().count() > 64 || value.chars().count() > 512)
+-            {
+-                return Err("metadata allows at most 16 string pairs, 64 characters per key and 512 per value".into());
++            if value.is_some_and(|value| !value.is_finite()) {
++                return Err(format!("{name} must be finite"));
+             }
+         }
+         if let Some(Some(target)) = &self.named_tool_choice {
+@@ -221,12 +200,6 @@
+             return Err(
+                 "explicit request controls require standard Responses, not Responses Lite".into(),
+             );
+-        }
+-        if self.verbosity.flatten().is_some()
+-            && !model.support_verbosity
+-            && !model.used_fallback_model_metadata
+-        {
+-            return Err("the selected model metadata explicitly excludes verbosity".into());
+         }
+         Ok(())
+     }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1190,7 +1190,6 @@
+             }
+         }
+         let verbosity = if let Some(explicit) = controls.verbosity.flatten() {
+-            // validate_profile rejects authoritative false; fallback metadata is unknown.
+             Some(explicit)
+         } else if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)

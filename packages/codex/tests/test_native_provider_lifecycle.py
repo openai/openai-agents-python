@@ -296,20 +296,30 @@ async def test_failed_session_close_retains_lease_for_retry(monkeypatch):
 @pytest.mark.asyncio
 async def test_provider_across_threads_and_fresh_event_loops(monkeypatch):
     original = _native.create_engine
+    original_atomic = _native._open_conversation
     owners = []
+    threads = []
 
     async def capture(*args, **kwargs):
         owner = await original(*args, **kwargs)
         owners.append(owner)
         return owner
 
+    async def capture_atomic(*args, **kwargs):
+        opened = await original_atomic(*args, **kwargs)
+        owners.append(opened[0])
+        return opened
+
     monkeypatch.setattr(_native, "create_engine", capture)
+    monkeypatch.setattr(_native, "_open_conversation", capture_atomic)
     async with peer() as remote:
         provider = NativeProvider(base_url=remote.url, api_key="local", supports_websockets=False)
 
         def run_one(index):
             agent = Agent(instructions=f"thread-{index}", model="gpt-5.1-codex", provider=provider)
-            return agent.run_sync(f"input-{index}").final_output
+            completed = agent.run_sync(f"input-{index}")
+            threads.append(completed.turn._session._native)
+            return completed.final_output
 
         assert await asyncio.gather(*(asyncio.to_thread(run_one, i) for i in range(2))) == [
             TEXT,
@@ -319,6 +329,10 @@ async def test_provider_across_threads_and_fresh_event_loops(monkeypatch):
         for owner in owners:
             with pytest.raises(RuntimeError, match="closed"):
                 await owner.start_thread()
+        assert len(threads) == 2 and len({thread.id for thread in threads}) == 2
+        for thread in threads:
+            with pytest.raises(RuntimeError, match="closed"):
+                await thread.read_goal()
         await provider.aclose()
         assert len(remote.requests) == 2
 

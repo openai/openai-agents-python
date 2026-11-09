@@ -1,6 +1,6 @@
 //! One application instruction owner, published through Core's native history.
 
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use anyhow::{Context, Result, ensure};
 use codex_core_api::CodexThread;
@@ -420,8 +420,51 @@ pub(crate) fn prepare(
     Ok((envelope, accepted))
 }
 
+/// Stage a first-turn publication. Core commits and flushes before invoking the
+/// receipt callback; pending instructions never contribute to world state.
+pub(crate) fn initial_turn(
+    thread: &Arc<CodexThread>,
+    text: String,
+    files: Vec<InstructionFile>,
+) -> Result<Arc<codex_core::InitialTurnInitialization>> {
+    let (envelope, _) = prepare(thread, &text, files)?;
+    let committed = envelope.clone();
+    let weak = Arc::downgrade(thread);
+    let commit: Arc<
+        dyn Fn() -> futures_util::future::BoxFuture<'static, Result<()>> + Send + Sync,
+    > = Arc::new(move || {
+        let thread = weak.upgrade();
+        let envelope = committed.clone();
+        Box::pin(async move {
+            let thread = thread.context("initial instruction owner was closed")?;
+            confirm_publication(&thread, envelope, None).await
+        })
+    });
+    Ok(Arc::new(codex_core::InitialTurnInitialization::new(
+        vec![envelope],
+        commit,
+    )))
+}
+
 /// Confirm the published envelope before assigning the file sources for future sampling.
 pub(crate) async fn publish_item(
+    thread: &CodexThread,
+    envelope: ResponseItemEnvelope,
+    current_files: Option<Vec<InstructionFile>>,
+) -> Result<()> {
+    thread
+        .thread_extension_data()
+        .get::<Instructions>()
+        .context("application instruction updates require a managed Session")?;
+    accepted_envelope(&envelope)?.context("missing application instructions publication")?;
+    thread
+        .inject_response_item_envelopes(vec![envelope.clone()])
+        .await?;
+    thread.flush_rollout().await?;
+    confirm_publication(thread, envelope, current_files).await
+}
+
+async fn confirm_publication(
     thread: &CodexThread,
     envelope: ResponseItemEnvelope,
     current_files: Option<Vec<InstructionFile>>,
@@ -432,10 +475,6 @@ pub(crate) async fn publish_item(
         .context("application instruction updates require a managed Session")?;
     let accepted =
         accepted_envelope(&envelope)?.context("missing application instructions publication")?;
-    thread
-        .inject_response_item_envelopes(vec![envelope.clone()])
-        .await?;
-    thread.flush_rollout().await?;
     let live = thread.conversation_history_snapshot().await;
     receipt(live.items(), &envelope.item)?;
     let stored = thread.load_history(true).await?;

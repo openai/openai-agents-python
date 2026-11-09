@@ -1,0 +1,950 @@
+diff --git a/codex-rs/core/src/config/execution.rs b/codex-rs/core/src/config/execution.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcd8b12192ca85577abc4e70d391efc6eccf3d10
+--- /dev/null
++++ b/codex-rs/core/src/config/execution.rs
+@@ -0,0 +1,372 @@
++//! Cold admission for resolved, file-free managed execution configuration.
++//!
++//! The ordinary loader owns resolution. This token checks its captured inputs
++//! and capability ceiling without retaining configuration or ambient authority.
++
++use super::Config;
++use codex_config::{ConfigLayerSource, ConfigRequirementsToml};
++use codex_features::Feature;
++use std::ffi::OsString;
++
++/// A checked opening ceiling. SDK callers still bind fresh tool declarations.
++#[derive(Clone, Debug)]
++pub struct ManagedExecution {
++    _private: (),
++}
++
++/// Proof that ordinary cold resolution admitted the managed execution ceiling.
++pub struct ExecutionConfig {
++    profile: ManagedExecution,
++}
++
++/// Opaque ambient inputs captured before ordinary cold configuration loading.
++#[derive(PartialEq, Eq)]
++pub struct ExecutionAmbientInputs(Vec<Option<OsString>>);
++
++// These values affect cold resolution, including unused built-in OSS providers.
++// Credential values are resolved by fresh AuthManager/request owners, not stored here.
++const AMBIENT: &[&str] = &[
++    "HOME",
++    "USERPROFILE",
++    "HOMEDRIVE",
++    "HOMEPATH",
++    "TMPDIR",
++    "TMP",
++    "TEMP",
++    "CODEX_OSS_PORT",
++    "CODEX_OSS_BASE_URL",
++];
++
++fn ambient() -> ExecutionAmbientInputs {
++    ExecutionAmbientInputs(AMBIENT.iter().map(std::env::var_os).collect())
++}
++
++impl ExecutionConfig {
++    pub fn ambient_inputs() -> ExecutionAmbientInputs {
++        ambient()
++    }
++
++    pub fn try_new(config: Config, inputs: ExecutionAmbientInputs) -> Result<Self, Config> {
++        if ambient() != inputs || Self::ineligibility(&config).is_some() {
++            return Err(config);
++        }
++        Ok(Self {
++            profile: ManagedExecution { _private: () },
++        })
++    }
++
++    pub fn profile(&self) -> ManagedExecution {
++        self.profile.clone()
++    }
++
++    /// A diagnostic reason contains no input values or credential material.
++    pub fn ineligibility(config: &Config) -> Option<&'static str> {
++        if !cfg!(target_os = "linux") {
++            return Some("managed execution currently requires Linux");
++        }
++        if config.config_layer_stack.cloud_config_binding().is_some()
++            || config.config_layer_stack.requirements_toml() != &ConfigRequirementsToml::default()
++            || !config
++                .config_layer_stack
++                .ignore_user_and_project_exec_policy_rules()
++        {
++            return Some("managed execution requires empty isolated requirements");
++        }
++        if !Self::capabilities_eligible(config) {
++            return Some("managed execution has host capabilities");
++        }
++        if config.explicit_permission_profile_mode
++            || !config.custom_permission_profiles.is_empty()
++            || config.workspace_roots_explicit
++            || config.permissions.network.is_some()
++            || config.active_project.trust_level.is_some()
++            || config.model_catalog.is_some()
++            || !config.startup_warnings.is_empty()
++        {
++            return Some("managed execution has non-template policy or model inputs");
++        }
++        if config.model_provider.experimental_bearer_token.is_some()
++            || config.model_provider.auth.is_some()
++            || config.model_provider.gateway_oauth.is_some()
++            || config.model_provider.aws.is_some()
++        {
++            return Some("managed execution requires freshly bound API-key authority");
++        }
++        for layer in config.config_layer_stack.all_layers_low_to_high() {
++            if layer.is_disabled() {
++                return Some("managed execution has disabled layers");
++            }
++            match &layer.name {
++                ConfigLayerSource::PackagedDefaults { .. } => {}
++                ConfigLayerSource::System { .. }
++                | ConfigLayerSource::User { profile: None, .. }
++                    if layer.config.as_table().is_some_and(|t| t.is_empty()) => {}
++                ConfigLayerSource::SessionFlags if supported_flags(&layer.config) => {}
++                _ => return Some("managed execution has unsupported configuration sources"),
++            }
++        }
++        // A configured absolute policy path must not retain the previous private home.
++        for entry in config
++            .permissions
++            .permission_profile()
++            .file_system_sandbox_policy()
++            .entries
++        {
++            if let codex_protocol::permissions::FileSystemPath::Path { path } = entry.path
++                && let Ok(path) = path.to_abs_path()
++                && (path.as_path().starts_with(config.codex_home.as_path())
++                    || path.as_path().starts_with(config.cwd.as_path()))
++            {
++                return Some("managed execution has conversation-relative policy paths");
++            }
++        }
++        None
++    }
++
++    pub(crate) fn capabilities_eligible(config: &Config) -> bool {
++        !config.include_environment_context
++            && !config.include_permissions_instructions
++            && !config.agents_enabled
++            && config.mcp_servers.get().is_empty()
++            && config.project_doc_max_bytes == 0
++            && !config.bundled_skills_enabled()
++            && config.features.enabled(Feature::SkipHostSkillDiscovery)
++            && !config.features.enabled(Feature::CodeMode)
++            && !config.features.enabled(Feature::MemoryTool)
++            && !config.features.enabled(Feature::Goals)
++            && !config.update_plan_enabled
++            && config.web_search_mode.value()
++                == codex_protocol::config_types::WebSearchMode::Disabled
++    }
++}
++
++impl ManagedExecution {
++    pub(crate) fn accepts(&self, config: &Config) -> bool {
++        ExecutionConfig::capabilities_eligible(config)
++    }
++}
++
++fn supported_flags(value: &toml::Value) -> bool {
++    let Some(table) = value.as_table() else {
++        return false;
++    };
++    table.iter().all(|(key, value)| match key.as_str() {
++        "model"
++        | "model_provider"
++        | "openai_base_url"
++        | "model_reasoning_effort"
++        | "model_reasoning_summary"
++        | "model_verbosity"
++        | "service_tier"
++        | "include_environment_context"
++        | "include_permissions_instructions"
++        | "project_doc_max_bytes"
++        | "web_search" => true,
++        "model_providers" => value.as_table().is_some_and(|providers| {
++            providers.values().all(|provider| {
++                only_keys(
++                    provider,
++                    &[
++                        "name",
++                        "base_url",
++                        "wire_api",
++                        "requires_openai_auth",
++                        "supports_websockets",
++                        "supports_standalone_web_search",
++                        "env_key",
++                        "env_http_headers",
++                    ],
++                )
++            })
++        }),
++        "otel" => {
++            only_keys(
++                value,
++                &[
++                    "exporter",
++                    "log_user_prompt",
++                    "log_agent_responses",
++                    "tool_result",
++                ],
++            ) && value.get("exporter").and_then(toml::Value::as_str) == Some("none")
++                && value.get("log_user_prompt").and_then(toml::Value::as_bool) == Some(false)
++                && value
++                    .get("log_agent_responses")
++                    .and_then(toml::Value::as_bool)
++                    == Some(false)
++                && value.get("tool_result").is_some_and(|v| {
++                    only_keys(v, &["max_bytes"])
++                        && v.get("max_bytes").and_then(toml::Value::as_integer) == Some(0)
++                })
++        }
++        "mcp_servers" => value.as_table().is_some_and(|v| v.is_empty()),
++        "agents" => only_keys(value, &["enabled"]),
++        "analytics" => only_keys(value, &["enabled"]),
++        "skills" => {
++            only_keys(value, &["bundled"])
++                && value
++                    .get("bundled")
++                    .is_some_and(|v| only_keys(v, &["enabled"]))
++        }
++        "tools" => {
++            only_keys(value, &["update_plan"])
++                && value
++                    .get("update_plan")
++                    .is_some_and(|v| only_keys(v, &["enabled"]))
++        }
++        "features" => {
++            only_keys(
++                value,
++                &[
++                    "skip_host_skill_discovery",
++                    "shell_snapshot",
++                    "api_key_model_discovery",
++                    "goals",
++                    "non_prefixed_mcp_tool_names",
++                    "code_mode",
++                    "code_mode_interrupt",
++                    "standalone_web_search",
++                ],
++            ) && value.get("code_mode").is_none_or(|v| {
++                v.is_bool() || only_keys(v, &["enabled", "direct_only_tool_namespaces"])
++            })
++        }
++        _ => false,
++    })
++}
++
++fn only_keys(value: &toml::Value, keys: &[&str]) -> bool {
++    value
++        .as_table()
++        .is_some_and(|table| table.keys().all(|key| keys.contains(&key.as_str())))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::config::{ConfigBuilder, ConfigOverrides, LoaderOverrides};
++
++    async fn resolve(root: &std::path::Path, file_input: bool) -> Config {
++        let home = root.join("home");
++        let cwd = home.join("workspace");
++        std::fs::create_dir_all(&cwd).unwrap();
++        let absent = root.join("absent-sources");
++        let loader = LoaderOverrides {
++            managed_config_path: Some(absent.join("managed_config_path")),
++            system_config_path: Some(absent.join("system_config_path")),
++            system_requirements_path: Some(absent.join("system_requirements_path")),
++            ignore_user_config: true,
++            ignore_project_config: true,
++            ignore_user_and_project_exec_policy_rules: true,
++            ignore_managed_requirements: true,
++            ignore_login_requirements: true,
++            ..Default::default()
++        };
++        let flags: toml::Value = toml::from_str(
++            r#"
++model = "gpt-5.2"
++model_provider = "native_agent"
++include_environment_context = false
++include_permissions_instructions = false
++project_doc_max_bytes = 0
++web_search = "disabled"
++[model_providers.native_agent]
++name = "Synthetic test provider"
++base_url = "http://127.0.0.1:9/v1"
++wire_api = "responses"
++requires_openai_auth = true
++supports_websockets = false
++supports_standalone_web_search = false
++[agents]
++enabled = false
++[mcp_servers]
++[features]
++skip_host_skill_discovery = true
++shell_snapshot = false
++api_key_model_discovery = false
++goals = false
++code_mode = false
++[tools.update_plan]
++enabled = false
++[skills.bundled]
++enabled = false
++[analytics]
++enabled = false
++[otel]
++exporter = "none"
++log_user_prompt = false
++log_agent_responses = false
++[otel.tool_result]
++max_bytes = 0
++"#,
++        )
++        .unwrap();
++        let mut overrides: Vec<_> = flags.as_table().unwrap().clone().into_iter().collect();
++        if file_input {
++            overrides.push((
++                "log_dir".into(),
++                toml::Value::String("/tmp/execution-test-log".into()),
++            ));
++        }
++        ConfigBuilder::default()
++            .codex_home(home)
++            .cli_overrides(overrides)
++            .loader_overrides(loader)
++            .harness_overrides(ConfigOverrides {
++                cwd: Some(cwd),
++                base_instructions: Some("Synthetic base instructions".into()),
++                ..Default::default()
++            })
++            .build()
++            .await
++            .unwrap()
++    }
++
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    async fn ordinary_managed_shape_is_admitted_and_later_capabilities_are_checked() {
++        let root = tempfile::tempdir().unwrap();
++        let inputs = ExecutionConfig::ambient_inputs();
++        let config = resolve(root.path(), false).await;
++        assert_eq!(ExecutionConfig::ineligibility(&config), None);
++        let admission = ExecutionConfig::try_new(config.clone(), inputs)
++            .unwrap_or_else(|_| panic!("ordinary managed shape rejected"));
++        let profile = admission.profile();
++        assert!(profile.accepts(&config));
++        let mut changed = config;
++        changed.include_environment_context = true;
++        assert!(!profile.accepts(&changed));
++    }
++
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    async fn unsupported_file_input_and_changed_ambient_snapshot_are_rejected() {
++        let root = tempfile::tempdir().unwrap();
++        let config = resolve(root.path(), true).await;
++        assert_eq!(
++            ExecutionConfig::ineligibility(&config),
++            Some("managed execution has unsupported configuration sources")
++        );
++        assert!(ExecutionConfig::try_new(config, ExecutionConfig::ambient_inputs()).is_err());
++        let config = resolve(root.path(), false).await;
++        let original = config.clone();
++        // A different snapshot cannot authorize reuse; no process environment is mutated.
++        let rejected = ExecutionConfig::try_new(config, ExecutionAmbientInputs(Vec::new()));
++        match rejected {
++            Err(config) => assert_eq!(config, original),
++            Ok(_) => panic!("changed ambient snapshot admitted"),
++        }
++    }
++
++    #[cfg(not(target_os = "linux"))]
++    #[tokio::test]
++    async fn unsupported_platform_uses_the_ordinary_path() {
++        let root = tempfile::tempdir().unwrap();
++        let config = resolve(root.path(), false).await;
++        assert_eq!(
++            ExecutionConfig::ineligibility(&config),
++            Some("managed execution currently requires Linux")
++        );
++        assert!(ExecutionConfig::try_new(config, ExecutionConfig::ambient_inputs()).is_err());
++    }
++}
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index f273e41e3ff48e6455e35f03be04b314f84778d3..74dcc9a2c084b62a1ab066ffdf63c549b8339d39 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -164,6 +164,8 @@ use toml::Value as TomlValue;
+ use toml_edit::DocumentMut;
+ 
+ mod auth_keyring;
++mod execution;
++pub use execution::{ExecutionAmbientInputs, ExecutionConfig, ManagedExecution};
+ pub mod edit;
+ mod managed_features;
+ mod metrics;
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index da5ef81136a5da40aa499b5fcda1ebcbdf7bb9a7..c68f8863c20437e7157801d7d96e62e04832c392 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -158,6 +158,7 @@ pub use codex_protocol::config_types::ModelProviderAuthInfo;
+ mod event_mapping;
+ pub use codex_prompts as review_prompts;
+ mod thread_manager;
++pub use session::initial_turn::InitialTurnInitialization;
+ pub(crate) mod web_search;
+ pub(crate) mod windows_sandbox_read_grants;
+ pub use thread_manager::AgentTreeShutdown;
+diff --git a/codex-rs/core/src/session/initial_turn.rs b/codex-rs/core/src/session/initial_turn.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d102fb16a468c38e87fd73a65b920c4fcc482d79
+--- /dev/null
++++ b/codex-rs/core/src/session/initial_turn.rs
+@@ -0,0 +1,101 @@
++//! One-shot canonical initial publication using the first real sampling context.
++use super::session::Session;
++use super::step_context::StepContext;
++use super::turn_context::TurnContext;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use futures::future::BoxFuture;
++use std::sync::Arc;
++use tokio::sync::Mutex;
++use tokio_util::sync::CancellationToken;
++
++type Commit = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
++
++/// A staged publication for an eligible fresh managed conversation.
++///
++/// The callback confirms receipts and updates the SDK publication owner only after
++/// Core's canonical durability barrier. A failed or cancelled attempt cannot replay.
++/// Attach this value as `Arc<InitialTurnInitialization>` in the turn initializer.
++pub struct InitialTurnInitialization {
++    state: Mutex<State>,
++}
++struct State {
++    pending: Option<(Vec<ResponseItemEnvelope>, Commit)>,
++    attempted: bool,
++    completed: bool,
++}
++impl InitialTurnInitialization {
++    pub fn new(items: Vec<ResponseItemEnvelope>, commit: Commit) -> Self {
++        Self {
++            state: Mutex::new(State {
++                pending: Some((items, commit)),
++                attempted: false,
++                completed: false,
++            }),
++        }
++    }
++
++    pub(crate) async fn prepare(
++        &self,
++        session: &Arc<Session>,
++        turn: Arc<TurnContext>,
++        cancellation: &CancellationToken,
++    ) -> CodexResult<Option<Arc<StepContext>>> {
++        let mut state = self.state.lock().await;
++        if state.completed {
++            return Ok(None);
++        }
++        if state.attempted {
++            return Err(CodexErr::InvalidRequest(
++                "initial publication already failed or was cancelled".to_owned(),
++            ));
++        }
++        state.attempted = true;
++        let (items, commit) = state.pending.take().ok_or_else(|| {
++            CodexErr::InvalidRequest("initial publication has no payload".to_owned())
++        })?;
++        if items.is_empty() || items.iter().any(|envelope| !matches!(&envelope.item,
++            codex_protocol::models::ResponseItem::Message { id: Some(_), role, .. } if role == "developer")) {
++            return Err(CodexErr::InvalidRequest("initial publication requires identified developer messages".to_owned()));
++        }
++        if !session
++            .services
++            .thread_extension_data
++            .get::<crate::config::ManagedExecution>()
++            .is_some_and(|profile| profile.accepts(&turn.config))
++        {
++            return Err(CodexErr::InvalidRequest(
++                "initial publication requires managed execution".to_owned(),
++            ));
++        }
++        if session.reference_context_item().await.is_some() {
++            return Err(CodexErr::InvalidRequest(
++                "initial publication requires fresh context".to_owned(),
++            ));
++        }
++        let step = session
++            .capture_step_context(Arc::clone(&turn), cancellation)
++            .await?;
++        session
++            .record_context_updates_and_set_reference_context_item(step.as_ref())
++            .await?;
++        // This is deliberately a direct record: active-turn injection queues the
++        // items behind user input, which would violate the publication ordering.
++        session
++            .record_annotated_conversation_items(&turn, &step.settings.model_info, items)
++            .await;
++        session.ensure_rollout_durable().await?;
++        // No history, persistence or active-turn lock is held during the callback.
++        // Do not race the commit acknowledgment against cancellation: once durable,
++        // complete its receipt/owner update before returning control to the task.
++        commit().await.map_err(|error| {
++            CodexErr::Fatal(format!("initial publication receipt failed: {error}"))
++        })?;
++        state.completed = true;
++        if cancellation.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        Ok(Some(step))
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index f42bb684dc889e1f9220f251db40105a9cf69cd1..a7006f0b1c6b827e800c25e695fe4ffd1f82d66f 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -241,6 +241,7 @@ pub(crate) mod extension_metrics;
+ mod guardian_checkpoint;
+ mod handlers;
+ mod inject;
++pub(crate) mod initial_turn;
+ mod reasoning_effort;
+ mod submission;
+ pub(crate) use reasoning_effort::RequestEffortUsage;
+@@ -3976,6 +3977,12 @@ impl Session {
+         );
+         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
+         let environments = environments.or_cancel(cancellation_token).await?;
++        let managed_execution = self.uses_managed_execution(&turn_context.config)
++            && environments.all_selections().is_empty()
++            && required_servers.is_empty()
++            && required_plugins.is_empty()
++            && realtime_source.is_none()
++            && settings.agent_profile.is_none();
+         // Keep both preparation futures off caller stacks while they are live together.
+         let load_agents_md = Box::pin(async {
+             let (loaded_agents_md, warnings) = self
+@@ -3991,18 +3998,24 @@ impl Session {
+             // Native discovery has not dispatched SDK step callbacks and remains
+             // cancelable. Once selectors start, their exact host release must join.
+             let native_preparation = async {
+-                let selected_capability_roots = self
+-                    .resolve_selected_capability_roots_for_step(&environments)
+-                    .await;
++                let selected_capability_roots = if managed_execution {
++                    Vec::new()
++                } else {
++                    self.resolve_selected_capability_roots_for_step(&environments)
++                        .await
++                };
+                 let ready_selected_capability_roots =
+                     Self::ready_selected_capability_roots(&selected_capability_roots);
+-                let executor_capability_discovery = self
+-                    .executor_capability_discovery_for_step(
++                let executor_capability_discovery = if managed_execution {
++                    None
++                } else {
++                    self.executor_capability_discovery_for_step(
+                         &turn_context.config,
+                         &ready_selected_capability_roots,
+                         &environments,
+                     )
+-                    .await;
++                    .await
++                };
+                 let extension_data = codex_extension_api::ExtensionData::new_with_init(
+                     turn_context.sub_id.clone(),
+                     realtime_source
+@@ -4081,6 +4094,13 @@ impl Session {
+                                 .await
+                                 .map(Arc::new)
+                                 .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
++                        } else if managed_execution {
++                            Ok(Arc::new(codex_mcp::McpBinding::empty(Arc::new(
++                                turn_context.config.to_mcp_config_with_loaded_plugins(
++                                    &codex_core_plugins::PluginLoadOutcome::default(),
++                                    std::iter::empty(),
++                                ),
++                            ))))
+                         } else {
+                             Ok(self
+                                 .mcp_runtime_for_step(
+@@ -4105,6 +4125,8 @@ impl Session {
+                         extension_data
+                             .insert(codex_extension_api::SelectedPluginSnapshot::default());
+                     }
++                } else if managed_execution {
++                    extension_data.insert(codex_extension_api::SelectedPluginSnapshot::default());
+                 } else {
+                     let selected_plugins = self
+                         .services
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 28220c9657937233dc92c36e857b65aa51e1e70e..a631ed32731b833f7918711fafdf58f103133504 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -664,6 +664,20 @@ async fn warm_plugins_and_skills_for_session_init(
+ }
+ 
+ impl Session {
++    pub(super) fn uses_managed_execution(&self, config: &Config) -> bool {
++        self.services
++            .thread_extension_data
++            .get::<crate::config::ManagedExecution>()
++            .is_some_and(|profile| profile.accepts(config))
++            && self
++                .services
++                .extensions
++                .mcp_server_contributors()
++                .is_empty()
++            && !self.services.extensions.requires_host_skill_discovery()
++            && !self.services.auth_manager.current_auth_uses_codex_backend()
++    }
++
+     /// Returns the concrete identity for this thread.
+     pub(crate) fn thread_id(&self) -> ThreadId {
+         self.thread_id
+@@ -808,6 +822,29 @@ impl Session {
+             captured_mcp.as_deref(),
+         )?;
+         let sdk_mcp_source_required = captured_mcp.is_some();
++        let profile = thread_extension_init.get::<crate::config::ManagedExecution>();
++        let managed_execution = profile.is_some();
++        if let Some(profile) = profile
++            && (!profile.accepts(&config)
++                || sdk_mcp_source_required
++                || !extensions.mcp_server_contributors().is_empty()
++                || extensions.requires_host_skill_discovery()
++                || auth_manager.current_auth_uses_codex_backend()
++                || !environment_selections.is_empty()
++                || inherited_environments
++                    .as_ref()
++                    .is_some_and(|value| !value.all_selections().is_empty())
++                || !matches!(initial_history, InitialHistory::New)
++                || session_configuration.session_source.is_non_root_agent()
++                || thread_extension_init
++                    .get::<Vec<SelectedCapabilityRoot>>()
++                    .is_some_and(|roots| !roots.is_empty()))
++        {
++            return Err(CodexErr::InvalidRequest(
++                "managed execution received incompatible thread capabilities".to_owned(),
++            )
++            .into());
++        }
+         debug!(
+             "Configuring session: model={}; provider={:?}",
+             session_configuration
+@@ -1193,7 +1230,7 @@ impl Session {
+             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
+         let auth_and_mcp_fut = async move {
+             let auth = mcp_auth.await;
+-            if config_for_mcp.features.plugin_recommendations_enabled() {
++            if !managed_execution && config_for_mcp.features.plugin_recommendations_enabled() {
+                 let plugins_config = config_for_mcp.plugins_config_input();
+                 let auth_for_prewarm = auth.clone();
+                 // Fetch the catalog while MCP and plugin/skill initialization continue.
+@@ -1207,22 +1244,33 @@ impl Session {
+                         .await;
+                 });
+             }
+-            let mcp_projection = mcp_manager_for_mcp
+-                .runtime_config_for_step(
+-                    &config_for_mcp,
+-                    mcp_thread_init_for_startup,
+-                    thread_extension_data_for_mcp,
+-                    McpThreadIdentity {
+-                        auth_changed: false,
+-                        session_source: &mcp_session_source,
+-                        originator: &mcp_originator,
+-                        disabled_plugin_ids: &mcp_disabled_plugin_ids,
+-                        environments: McpEnvironmentScope::Selected(environment_selections),
+-                    },
+-                    /*ready_selected_capability_roots*/ &[],
+-                    /*executor_capability_discovery*/ None,
+-                )
+-                .await;
++            let mcp_projection = if managed_execution {
++                crate::mcp::McpRuntimeProjection {
++                    config: config_for_mcp.to_mcp_config_with_loaded_plugins(
++                        &codex_core_plugins::PluginLoadOutcome::default(),
++                        std::iter::empty(),
++                    ),
++                    plugins_available: false,
++                    selected_plugins: Default::default(),
++                }
++            } else {
++                mcp_manager_for_mcp
++                    .runtime_config_for_step(
++                        &config_for_mcp,
++                        mcp_thread_init_for_startup,
++                        thread_extension_data_for_mcp,
++                        McpThreadIdentity {
++                            auth_changed: false,
++                            session_source: &mcp_session_source,
++                            originator: &mcp_originator,
++                            disabled_plugin_ids: &mcp_disabled_plugin_ids,
++                            environments: McpEnvironmentScope::Selected(environment_selections),
++                        },
++                        /*ready_selected_capability_roots*/ &[],
++                        /*executor_capability_discovery*/ None,
++                    )
++                    .await
++            };
+             (auth, mcp_projection)
+         }
+         .instrument(info_span!(
+@@ -1513,14 +1561,17 @@ impl Session {
+             session_configuration.environments = turn_environments.selections();
+             let resolved_environments = turn_environments.snapshot().await;
+             let agents_md_manager = Arc::new(AgentsMdManager::new(instructions));
+-            let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
++            let plugin_skill_warmup = async {
++                if managed_execution { return Vec::new(); }
++                warm_plugins_and_skills_for_session_init(
+                 Arc::clone(&config),
+                 Arc::clone(&plugins_manager),
+                 Arc::clone(&skills_service),
+                 &resolved_environments,
+                 extensions.as_ref(),
+                 &session_configuration.session_source,
+-            )
++            ).await
++            }
+             .instrument(info_span!(
+                 "session_init.plugin_skill_warmup",
+                 otel.name = "session_init.plugin_skill_warmup",
+@@ -1645,13 +1696,13 @@ impl Session {
+             let mcp_runtime = Arc::new(McpRuntime::empty(
+                 mcp_projection.config.prefix_mcp_tool_names,
+             ));
+-            let hooks_config = build_hooks_config(
++            let hooks_config = if managed_execution { HooksConfig::default() } else { build_hooks_config(
+                 &config,
+                 plugins_manager.as_ref(),
+                 resolved_environments.single_local_environment(),
+                 &session_configuration.disabled_plugin_ids,
+             )
+-            .await;
++            .await };
+             let (hooks, async_hook_results) = Hooks::new(
+                 hooks_config,
+                 thread_id,
+@@ -1991,13 +2042,17 @@ impl Session {
+                     .map_err(|error| CodexErr::InvalidRequest(format!("Native child startup cleanup failed: {error}")))?;
+                 sess.mark_mcp_runtime_dirty();
+             }
+-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
++            if !managed_execution {
++                sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
++            }
+             sess.follow_inherited_environment_configurations(
+                 &inherited_environments,
+                 &session_configuration.environments,
+             );
+-            sess.schedule_startup_prewarm(super::startup_prewarm::PrewarmInput::Base)
+-                .await;
++            if !managed_execution {
++                sess.schedule_startup_prewarm(super::startup_prewarm::PrewarmInput::Base)
++                    .await;
++            }
+             let session_start_source = match &initial_history {
+                 InitialHistory::Forked(_) if forked_from_id.is_some() => {
+                     codex_hooks::SessionStartSource::Fork
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 40057631c4d965bb6da9a24602a7986cc8ee64d2..f54a12115256fc758b36fac5a608e8c371536ebe 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -173,6 +173,7 @@ pub(crate) async fn run_turn(
+     mut input: Vec<TurnInput>,
+     mcp_startup_requirements: &mut McpStartupRequirements,
+     prewarmed_client_session: Option<ModelClientSession>,
++    mut initial_step: Option<Arc<StepContext>>,
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<Option<String>> {
+     sess.check_agent_profile_admission()?;
+@@ -184,6 +185,11 @@ pub(crate) async fn run_turn(
+ 
+     let mut client_session =
+         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
++    let initial_window = if initial_step.is_some() {
++        Some(sess.current_window().await)
++    } else {
++        None
++    };
+     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
+     // new user message are recorded. Estimate pending incoming items (context
+     // diffs/full reinjection + user input) and trigger compaction preemptively
+@@ -207,6 +213,11 @@ pub(crate) async fn run_turn(
+         return Ok(None);
+     }
+ 
++    if let Some(window) = initial_window {
++        if sess.current_window().await != window {
++            initial_step = None;
++        }
++    }
+     let user_input = turn_user_input(&input);
+     let allow_plugin_mentions =
+         !crate::guardian::is_basic_session_source(&turn_context.session_source);
+@@ -241,15 +252,24 @@ pub(crate) async fn run_turn(
+     required_servers.dedup();
+ 
+     // run_turn owns the step used to seed context and make the first sampling request.
+-    let first_step_context = match sess
+-        .capture_step_context_with_required_mcp_servers(
+-            Arc::clone(&turn_context),
+-            &cancellation_token,
+-            required_servers,
+-            required_plugins,
+-        )
+-        .await
+-    {
++    let reusable_initial_step = initial_step.filter(|step| {
++        required_servers.is_empty()
++            && required_plugins.is_empty()
++            && Arc::ptr_eq(&step.settings, &turn_context.next_step_settings.load_full())
++    });
++    let first_capture = match reusable_initial_step {
++        Some(step) => Ok(step),
++        None => {
++            sess.capture_step_context_with_required_mcp_servers(
++                Arc::clone(&turn_context),
++                &cancellation_token,
++                required_servers,
++                required_plugins,
++            )
++            .await
++        }
++    };
++    let first_step_context = match first_capture {
+         Ok(step_context) => step_context,
+         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+             let _ = run_hooks_and_record_inputs(
+@@ -1109,13 +1129,17 @@ async fn required_mcp_servers_for_input(
+ 
+     // Plugin capabilities depend on authentication, so project them only after
+     // the runtime has aligned the plugin manager with its current account.
+-    sess.refresh_mcp_if_dirty().await;
+-    let loaded_plugins = sess
+-        .services
+-        .plugins_manager
+-        .plugins_for_config(&turn_context.config.plugins_config_input())
+-        .await
+-        .without_plugins(&turn_context.disabled_plugin_ids);
++    let managed_execution = sess.uses_managed_execution(&turn_context.config);
++    let loaded_plugins = if managed_execution {
++        codex_core_plugins::PluginLoadOutcome::default()
++    } else {
++        sess.refresh_mcp_if_dirty().await;
++        sess.services
++            .plugins_manager
++            .plugins_for_config(&turn_context.config.plugins_config_input())
++            .await
++            .without_plugins(&turn_context.disabled_plugin_ids)
++    };
+     let current_config = sess.services.mcp_runtime.current_config();
+     let mentioned_plugins =
+         collect_explicit_plugin_mentions(user_input, loaded_plugins.capability_summaries());
+@@ -2183,6 +2207,12 @@ pub(crate) async fn prepare_tool_recommendations(
+     sess: &Session,
+     turn_context: &TurnContext,
+ ) -> PreparedToolRecommendations {
++    if sess.uses_managed_execution(&turn_context.config) {
++        return PreparedToolRecommendations {
++            auth: None,
++            endpoint_candidates: None,
++        };
++    }
+     let loaded_plugins = sess
+         .services
+         .plugins_manager
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index d87b3e6913c21b2848650cedeb0f17d316a2dddf..90afc11e595df7abbce6595c9c8008d9ea01f681 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1427,13 +1427,18 @@ impl Session {
+                 )
+             }
+         };
+-        let plugins_input = per_turn_config.plugins_config_input();
+-        let plugin_outcome = self
+-            .services
+-            .plugins_manager
+-            .plugins_for_config(&plugins_input)
+-            .await
+-            .without_plugins(&session_configuration.disabled_plugin_ids);
++        let managed_execution = self.uses_managed_execution(&per_turn_config)
++            && turn_environments.all_selections().is_empty();
++        let plugins_input = (!managed_execution).then(|| per_turn_config.plugins_config_input());
++        let plugin_outcome = if let Some(plugins_input) = &plugins_input {
++            self.services
++                .plugins_manager
++                .plugins_for_config(plugins_input)
++                .await
++                .without_plugins(&session_configuration.disabled_plugin_ids)
++        } else {
++            codex_core_plugins::PluginLoadOutcome::default()
++        };
+         let trusted_plugin_roots = TrustedPluginRoots::from_plugin_load_outcome(
+             &plugin_outcome,
+             per_turn_config.codex_home.as_path(),
+@@ -1448,6 +1453,9 @@ impl Session {
+             // Executor and orchestrator catalogs are supplied independently of host skills.
+             HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
+         } else {
++            let plugins_input = plugins_input
++                .as_ref()
++                .expect("host skill discovery requires ordinary preparation");
+             let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+             let plugin_skill_snapshots = self
+                 .services
+diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
+index 68eebb777c25b1ce10de5a7b7000a0103d657535..32ae3148675c735b4df11ed41210292b6943152a 100644
+--- a/codex-rs/core/src/tasks/regular.rs
++++ b/codex-rs/core/src/tasks/regular.rs
+@@ -45,6 +45,29 @@ impl SessionTask for RegularTask {
+         cancellation_token: CancellationToken,
+     ) -> SessionTaskResult {
+         let run_turn_span = trace_span!("run_turn");
++        let mut initial_step = match ctx
++            .extension_data
++            .get::<Arc<crate::InitialTurnInitialization>>()
++        {
++            Some(initialization) => match initialization
++                .prepare(&sess, Arc::clone(&ctx), &cancellation_token)
++                .await
++            {
++                Ok(step) => step,
++                Err(error) => {
++                    let _ = run_hooks_and_record_inputs(
++                        &sess,
++                        &ctx,
++                        &ctx.capture_current_model_info(),
++                        &input,
++                        PersistContext::Standard,
++                    )
++                    .await;
++                    return Err(error);
++                }
++            },
++            None => None,
++        };
+         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
+         // not wait on startup prewarm resolution.
+         let prewarmed_client_session = async {
+@@ -112,6 +135,7 @@ impl SessionTask for RegularTask {
+                 next_input,
+                 &mut mcp_startup_requirements,
+                 prewarmed_client_session.take(),
++                initial_step.take(),
+                 cancellation_token.child_token(),
+             )
+             .instrument(run_turn_span.clone())

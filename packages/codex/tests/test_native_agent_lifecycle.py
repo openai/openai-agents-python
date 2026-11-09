@@ -496,12 +496,13 @@ async def test_cancelled_open_joins_late_cleanup_and_preserves_cancellation(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     native = importlib.import_module("agents._native")
-    create_engine = native.create_engine
+    open_conversation = native._open_conversation
     creation_started = asyncio.Event()
     creation_release = asyncio.Event()
     close_started = asyncio.Event()
     close_release = asyncio.Event()
     cleanup_error = OSError("late engine cleanup failed")
+    owners = []
     homes = []
 
     close_orphan = native.NativeProviderLease.close_orphan
@@ -513,12 +514,17 @@ async def test_cancelled_open_joins_late_cleanup_and_preserves_cancellation(
         raise cleanup_error
 
     async def create(*args: Any, **kwargs: Any) -> Any:
-        homes.append(Path(json.loads(args[1])["codex_home"]))
         creation_started.set()
         await creation_release.wait()
-        return await create_engine(*args, **kwargs)
+        opened = await open_conversation(*args, **kwargs)
+        engine, thread, home = opened
+        assert (home is None) == engine._runtime_is_shared
+        owners.append((engine, thread))
+        if home is not None:
+            homes.append(Path(home.name))
+        return opened
 
-    monkeypatch.setattr(native, "create_engine", create)
+    monkeypatch.setattr(native, "_open_conversation", create)
     monkeypatch.setattr(native.NativeProviderLease, "close_orphan", delayed_retirement)
     agent = Agent(instructions="Answer briefly.", provider=provider(responses))
     async with timeout(30):
@@ -543,8 +549,16 @@ async def test_cancelled_open_joins_late_cleanup_and_preserves_cancellation(
             creation_release.set()
             close_release.set()
             await asyncio.gather(opening, return_exceptions=True)
-    assert len(homes) == 1 and not homes[0].exists()
+    assert len(owners) == 1
+    for engine, thread in owners:
+        with pytest.raises(RuntimeError, match="closed"):
+            await engine.start_thread()
+        with pytest.raises(RuntimeError, match="closed"):
+            await thread.read_goal()
+    # Shared runtime homes belong to the Provider; dedicated homes belong to this acquisition.
+    assert all(not home.exists() for home in homes)
     await agent.provider.aclose()
+    assert agent.provider._closed and agent.provider._transport is None
     assert responses.requests == []
 
 
@@ -1120,17 +1134,17 @@ async def test_session_captures_instructions_before_native_creation_suspends(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     native = importlib.import_module("agents._native")
-    create_engine = native.create_engine
+    open_conversation = native._open_conversation
     creating = asyncio.Event()
     creation_release = asyncio.Event()
 
-    async def gated_create_engine(*args: Any, **kwargs: Any) -> Any:
+    async def gated_open_conversation(*args: Any, **kwargs: Any) -> Any:
         creating.set()
         await creation_release.wait()
-        return await create_engine(*args, **kwargs)
+        return await open_conversation(*args, **kwargs)
 
     # Suspend acquisition without replacing the native engine or its requests.
-    monkeypatch.setattr(native, "create_engine", gated_create_engine)
+    monkeypatch.setattr(native, "_open_conversation", gated_open_conversation)
     responses.respond(assistant_output("first result"))
     responses.respond(assistant_output("later result"))
     agent = Agent(instructions="Original captured instructions.", provider=provider(responses))
@@ -1152,6 +1166,7 @@ async def test_session_captures_instructions_before_native_creation_suspends(
         finally:
             creation_release.set()
             await asyncio.gather(opening, return_exceptions=True)
+            await agent.provider.aclose()
 
 
 async def test_native_admission_rejection_prevents_validator_and_callback_effects(

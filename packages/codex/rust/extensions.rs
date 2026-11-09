@@ -102,6 +102,7 @@ pub fn build(
     auth: Arc<AuthManager>,
     goals: Option<&crate::goals::GoalBackend>,
     local_store: bool,
+    managed_execution: bool,
     manager: Weak<ThreadManager>,
     environment: Arc<EnvironmentManager>,
     events: Arc<Events>,
@@ -216,11 +217,13 @@ pub fn build(
         config.http_client_factory(),
     );
     codex_guardian_v2::install(&mut builder, auth.clone(), manager);
-    codex_mcp_extension::install(&mut builder);
-    codex_mcp_extension::install_plugins(&mut builder, environment.clone());
-    // Explicit application registrations must follow generic Apps defaults so
-    // their validated source wins when both contribute the reserved server.
-    builder.mcp_server_contributor(Arc::new(crate::verification::Contributor));
+    if !managed_execution {
+        codex_mcp_extension::install(&mut builder);
+        codex_mcp_extension::install_plugins(&mut builder, environment.clone());
+        // Explicit application registrations must follow generic Apps defaults so
+        // their validated source wins when both contribute the reserved server.
+        builder.mcp_server_contributor(Arc::new(crate::verification::Contributor));
+    }
     let mut media_registry = ExtensionRegistryBuilder::with_event_sink(builder.event_sink());
     codex_web_search_extension::install(&mut media_registry, auth.clone());
     install_audited_extensions(

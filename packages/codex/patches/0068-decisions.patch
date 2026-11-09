@@ -891,7 +891,7 @@ index 0000000000000000000000000000000000000000..c85f9b88f50d2a5a324aeeea1925fb4e
 +    );
 +}
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index e2da8fdae1e6cfbac62eeda44bb8a46bff4aec9e..692bb689ea920ddb5abcc14d77f61830fdb77dc1 100644
+index 5188fd100baacaf82d395bec206d581bf3d8333c..087659a5a38b151acb92eb74d71691e3933906a4 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -2,6 +2,7 @@ pub(crate) mod api_bridge;
@@ -903,7 +903,7 @@ index e2da8fdae1e6cfbac62eeda44bb8a46bff4aec9e..692bb689ea920ddb5abcc14d77f61830
  pub(crate) mod error;
  pub(crate) mod files;
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 29a81a8139d2a2132aed8717bee5a1939ad565b6..e8dbd78c98e14bc27209b20a7d53927b9e9dda4c 100644
+index e3d34d016d65cd56949f8cc0f5df9702535e6b0b..f5f26556c89b76fbf3d621c68b281c6214d36f94 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1888,6 +1888,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
@@ -1011,7 +1011,7 @@ index 0000000000000000000000000000000000000000..579b75b4c1f38a5eff6b8a23fc66aeb8
 +    }
 +}
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 9d31ca78fa394c91c046bbd78c3d0ab90a6cb7ce..25b5a0aa933058ee9f88c19093811aa9c44193ec 100644
+index 439b7ed3fc7b28e10bc56ffed440cc5536ebac30..d24a43a36d6c78c4fdcfbd17a644d84746e3793c 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -1607,6 +1607,7 @@ async fn summarize_memories_returns_empty_for_empty_input() {
@@ -1023,10 +1023,10 @@ index 9d31ca78fa394c91c046bbd78c3d0ab90a6cb7ce..25b5a0aa933058ee9f88c19093811aa9
          incomplete_reason: None,
          usage: None,
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index b62d90a66a8329cf8b149738c5f18e3867762896..f2be6e1db31167dc23071955d4b29a4905e95a84 100644
+index fe4eb5e8c742696428d3d0786c31d33107d5c637..99fb80563680468cc0c2c331728f6000fdf38b1d 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -328,6 +328,26 @@ impl CodexThread {
+@@ -333,6 +333,26 @@ impl CodexThread {
          &self.session.services.thread_extension_data
      }
  
@@ -1054,10 +1054,10 @@ index b62d90a66a8329cf8b149738c5f18e3867762896..f2be6e1db31167dc23071955d4b29a49
      pub async fn current_turn_extension_data<T>(&self, expected_turn_id: &str) -> Option<Arc<T>>
      where
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 31b999ba1d69c1a60165a34e38d90a2d4bc2751e..a4e7a21719f75476452309fb59c106de0f395a74 100644
+index c68f8863c20437e7157801d7d96e62e04832c392..e44fb43f2238acae7dea69def447b7cbfc393b86 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -33,6 +33,7 @@ pub use codex_protocol::turn_input::TurnInputSubmission;
+@@ -37,6 +37,7 @@ pub use codex_protocol::turn_input::TurnInputSubmission;
  pub use codex_protocol::turn_input::TurnStartOptions;
  pub use responses_metadata::CodexResponsesMetadata;
  pub use turn_metadata::detached_memory_responses_metadata;
@@ -1065,7 +1065,7 @@ index 31b999ba1d69c1a60165a34e38d90a2d4bc2751e..a4e7a21719f75476452309fb59c106de
  mod codex_thread;
  mod turn_extension_data;
  pub use turn_extension_data::WithTurnExtensionData;
-@@ -41,6 +42,7 @@ mod compact_remote_history;
+@@ -45,6 +46,7 @@ mod compact_remote_history;
  mod compact_remote_v2;
  mod compact_token_budget;
  mod thread_startup_metadata;
@@ -1074,10 +1074,10 @@ index 31b999ba1d69c1a60165a34e38d90a2d4bc2751e..a4e7a21719f75476452309fb59c106de
  pub use codex_network_proxy::NetworkDomainPermission;
  pub use codex_network_proxy::NetworkDomainPermissionEntry;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 2509db45f4c9537d23c4d465335c07db8d4e1a52..4b770f4087c0959ba297ca81bda2134ae6505980 100644
+index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..7f152f98e10ecae6ad0dd19244c19deb6447a855 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -5085,6 +5085,70 @@ impl Session {
+@@ -5243,6 +5243,70 @@ impl Session {
              .await;
      }
  
@@ -1149,10 +1149,10 @@ index 2509db45f4c9537d23c4d465335c07db8d4e1a52..4b770f4087c0959ba297ca81bda2134a
          &self,
          turn_context: &TurnContext,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index a7e22212a197501eaf0f27c20e25524bfd935613..1370c37c5e3723142487e6d292fc17afa5d79c66 100644
+index 2a9513bf249c9c068cd8a99394fae947451b1fc1..30eb6ae9f552398a939d1fd1a33d6b4537369ba7 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13896,3 +13896,99 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
+@@ -13914,3 +13914,99 @@ async fn interrupting_regular_error_publication_uses_the_abort_owner() {
  
  #[path = "terminal_tool_tests.rs"]
  mod terminal_tool_tests;

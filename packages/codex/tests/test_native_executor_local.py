@@ -1261,3 +1261,96 @@ async def test_macos_local_command_cannot_delegate_execution_to_launchd(
         stopped = launchctl("bootout", service)
         if stopped.returncode:
             assert launchctl("print", service).returncode != 0, stopped.stderr
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+@pytest.mark.parametrize("login", [None, False], ids=["omitted", "false"])
+async def test_local_bash_uses_non_login_shell(
+    responses: ResponsesFixture, tmp_path: Path, login: bool | None
+) -> None:
+    marker = tmp_path / "login-mode.txt"
+    arguments: dict[str, str | bool] = {
+        "cmd": (
+            'set -eu; test -n "$BASH_VERSION"; '
+            "if shopt -q login_shell; then exit 17; fi; "
+            "printf 'once\\n' >> login-mode.txt; printf 'NONLOGIN\\n'"
+        ),
+        "shell": "/bin/bash",
+    }
+    if login is not None:
+        arguments["login"] = login
+    responses.respond(function_call("exec_command", arguments, "login-mode"))
+    responses.respond(assistant_output("done"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    async with (
+        timeout(30),
+        provider,
+        agent.session(
+            environment=Environment.local(cwd=tmp_path, tools=["exec_command"])
+        ) as session,
+    ):
+        assert (
+            await (await session.submit("Inspect Bash login mode.")).get_result()
+        ).final_output == "done"
+    assert len(responses.requests) == 2
+    output = tool_output(responses.requests[1], "login-mode")
+    assert "Process exited with code 0" in output
+    assert re.findall(r"(?m)^NONLOGIN$", output) == ["NONLOGIN"]
+    assert marker.read_text() == "once\n"
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+async def test_local_login_shell_rejection_has_no_command_effect(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    forbidden = tmp_path / "forbidden-login"
+    healthy = tmp_path / "healthy-command"
+    responses.respond(
+        function_call(
+            "exec_command",
+            {"cmd": "printf forbidden > forbidden-login", "shell": "/bin/bash", "login": True},
+            "forbidden-login",
+        )
+    )
+    responses.respond(assistant_output("rejected"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    async with (
+        timeout(30),
+        provider,
+        agent.session(
+            environment=Environment.local(cwd=tmp_path, tools=["exec_command"])
+        ) as session,
+    ):
+        rejected = await session.submit("Request a login shell.")
+        assert (await rejected.get_result()).final_output == "rejected"
+        assert len(responses.requests) == 2
+        assert "login shell is disabled by config; omit `login` or set it to false." in tool_output(
+            responses.requests[1], "forbidden-login"
+        )
+        assert not forbidden.exists()
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": "printf healthy > healthy-command", "shell": "/bin/bash", "login": False},
+                "healthy-command",
+            )
+        )
+        responses.respond(assistant_output("healthy"))
+        resumed = await session.submit("Run an ordinary command in the same Session.")
+        assert (await resumed.get_result()).final_output == "healthy"
+    assert len(responses.requests) == 4
+    assert "Process exited with code 0" in tool_output(responses.requests[3], "healthy-command")
+    assert healthy.read_text() == "healthy"
+    assert not forbidden.exists()
