@@ -73,13 +73,38 @@ impl Drop for NativeRun {
 
 #[pyclass(frozen, module = "agents._native")]
 pub(crate) struct NativeRunArchive {
-    events: Vec<Value>,
+    events: Vec<u8>,
+    count: usize,
+}
+
+impl Default for NativeRunArchive {
+    fn default() -> Self {
+        Self {
+            events: b"[]".to_vec(),
+            count: 0,
+        }
+    }
+}
+
+impl NativeRunArchive {
+    fn push(&mut self, event: &Value) -> PyResult<usize> {
+        let _ = self.events.pop();
+        if self.count != 0 {
+            self.events.push(b',');
+        }
+        let start = self.events.len();
+        serde_json::to_writer(&mut self.events, event).map_err(py_error)?;
+        let bytes = self.events.len() - start;
+        self.events.push(b']');
+        self.count += 1;
+        Ok(bytes)
+    }
 }
 
 #[pymethods]
 impl NativeRunArchive {
-    fn json(&self) -> PyResult<String> {
-        serde_json::to_string(&self.events).map_err(py_error)
+    fn json(&self) -> PyResult<&str> {
+        std::str::from_utf8(&self.events).map_err(py_error)
     }
 }
 
@@ -216,9 +241,7 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
         scope: Some(scope),
         info: json!({"status": "unsubmitted", "thread_id": state.id.to_string(),
             "receipt": null, "retired": {"thread": false, "engine": false}}),
-        archive: NativeRunArchive {
-            events: Vec::with_capacity(32),
-        },
+        archive: NativeRunArchive::default(),
         failures: Vec::new(),
     };
     let (engine, thread, home) = output.scope.as_ref().expect("opened scope is retained");
@@ -260,7 +283,6 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
     }
     let turn_id = turn_id.expect("checked turn identity");
     let mut bytes = 0;
-    let mut scratch = Vec::new();
     let text = loop {
         let event = tokio::select! {
             biased;
@@ -298,13 +320,13 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
             None
         };
         let supported = passive(&event) && (!terminal || text.is_some());
+        // Keep the bytes already needed for the limit, not long-lived event
+        // trees that retain allocator space across held Completed results.
+        let event_bytes = output.archive.push(&event)?;
         if supported {
-            scratch.clear();
-            serde_json::to_writer(&mut scratch, &event).map_err(py_error)?;
-            bytes += scratch.len();
+            bytes += event_bytes;
         }
-        output.archive.events.push(event);
-        if !supported || bytes > MAX_BYTES || output.archive.events.len() >= MAX_EVENTS {
+        if !supported || bytes > MAX_BYTES || output.archive.count >= MAX_EVENTS {
             return Ok(output);
         }
         if let Some(text) = text {
@@ -338,6 +360,32 @@ async fn execute(inputs: Inputs, cancelled: CancellationToken) -> PyResult<RunOu
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_preserves_events_and_counts_utf8_payload_bytes() {
+        let mut archive = NativeRunArchive::default();
+        assert_eq!(archive.json().unwrap(), "[]");
+        let events = vec![
+            json!({"msg": {"type": "warning", "message": "quotes: \"\n☃"}}),
+            json!({"msg": {"type": "_sdk_callback", "arguments": [null, 1, true]}}),
+        ];
+        for event in &events {
+            assert_eq!(
+                archive.push(event).unwrap(),
+                serde_json::to_vec(event).unwrap().len()
+            );
+        }
+        assert_eq!(archive.count, events.len());
+        assert_eq!(
+            serde_json::from_str::<Vec<Value>>(archive.json().unwrap()).unwrap(),
+            events
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
