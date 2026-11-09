@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from agents import CustomStorage, SQLAlchemySessionStore
+from agents import Agent, CustomStorage, NativeProvider, SQLAlchemySessionStore
+from tests.native_fixtures import assistant_output, responses as responses
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="SQLite adapter requires POSIX locks")
 
@@ -76,5 +77,31 @@ async def test_sqlalchemy_pool_is_usable_on_native_style_worker_threads(tmp_path
             assert await asyncio.to_thread(store.read, "thread", token) == payload
         finally:
             await asyncio.to_thread(store.release, "thread", token)
+    finally:
+        engine.dispose()
+
+
+async def test_sqlalchemy_native_session_restores_canonical_context(
+    tmp_path: Path, responses
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'native.sqlite'}")
+    store = SQLAlchemySessionStore(engine)
+    responses.respond(assistant_output("first answer"))
+    responses.respond(assistant_output("second answer"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")
+    try:
+        async with provider:
+            agent = Agent(instructions="Answer.", provider=provider)
+            async with agent.session(storage=CustomStorage(store)) as session:
+                identity = session.id
+                result = await (await session.submit("remember this input")).get_result()
+                assert result.final_output == "first answer"
+            async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
+                assert restored.id == identity
+                result = await (await restored.submit("Continue.")).get_result()
+                assert result.final_output == "second answer"
+        assert len(responses.requests) == 2
+        assert "remember this input" in json.dumps(responses.requests[1])
+        assert "first answer" in json.dumps(responses.requests[1])
     finally:
         engine.dispose()

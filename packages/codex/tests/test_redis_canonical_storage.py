@@ -10,7 +10,8 @@ import pytest
 from redis import Redis
 from redis.exceptions import ConnectionError, ResponseError
 
-from agents import CustomStorage, RedisSessionStore
+from agents import Agent, CustomStorage, NativeProvider, RedisSessionStore
+from tests.native_fixtures import assistant_output, responses as responses
 
 
 @pytest.fixture
@@ -195,3 +196,26 @@ def test_redis_owned_client_lifetime_and_prefix_ttl(redis_client) -> None:
     borrowed = RedisSessionStore(redis_client)
     borrowed.close()
     assert redis_client.ping()
+
+
+async def test_redis_native_session_restores_canonical_context(redis_client, responses) -> None:
+    store = RedisSessionStore(redis_client)
+    responses.respond(assistant_output("first answer"))
+    responses.respond(assistant_output("second answer"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-native-store")
+    try:
+        async with provider:
+            agent = Agent(instructions="Answer.", provider=provider)
+            async with agent.session(storage=CustomStorage(store)) as session:
+                identity = session.id
+                result = await (await session.submit("remember this input")).get_result()
+                assert result.final_output == "first answer"
+            async with agent.session(storage=CustomStorage(store), resume=identity) as restored:
+                assert restored.id == identity
+                result = await (await restored.submit("Continue.")).get_result()
+                assert result.final_output == "second answer"
+        assert len(responses.requests) == 2
+        assert "remember this input" in json.dumps(responses.requests[1])
+        assert "first answer" in json.dumps(responses.requests[1])
+    finally:
+        store.close()
