@@ -10,6 +10,7 @@ from collections.abc import Iterator as Iterator, Mapping as Mapping
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from datetime import date as date, datetime as datetime
+from decimal import Decimal as Decimal
 from email.errors import HeaderParseError as HeaderParseError
 from email.headerregistry import Address as Address
 from typing import (
@@ -37,7 +38,7 @@ from ._mcp_errors import _protect_mcp_methods
 from ._public import preserve_module_identity as _preserve_module_identity
 
 if TYPE_CHECKING:
-    from jsonschema import Draft202012Validator
+    from jsonschema.protocols import Validator
 
     from ._function_tools import FunctionTool
     from .mcp import ChatGPTAppsMCP, HostedVerificationMCP
@@ -141,18 +142,45 @@ def _primitive_form_schema(schema: Any) -> bool:
     return True
 
 
-def _general_form_validator(schema: Any) -> Draft202012Validator:
+def _is_absolute_uri(value: str) -> bool:
+    """Check component syntax without imposing network URL or port-range rules."""
+    if re.search(r"[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]|%(?![0-9A-Fa-f]{2})", value):
+        return False
+    uri = urlsplit(value)
+    if not uri.scheme:
+        return False
+    component_chars = r"A-Za-z0-9._~!$&'()*+,;=%-"
+    if not re.fullmatch(f"[{component_chars}:@/]*", uri.path) or any(
+        not re.fullmatch(f"[{component_chars}:@/?]*", component)
+        for component in (uri.query, uri.fragment)
+    ):
+        return False
+    authority = uri.netloc
+    if "@" in authority:
+        userinfo, authority = authority.split("@", 1)
+        if not re.fullmatch(f"[{component_chars}:]*", userinfo):
+            return False
+    # urlsplit checks IPv6 addresses. IPvFuture has a separate literal grammar.
+    ip_literal = r"[0-9A-Fa-f:.]+|v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+"
+    return (
+        re.fullmatch(f"(?:\\[(?:{ip_literal})\\]|[{component_chars}]*)(?::[0-9]*)?", authority)
+        is not None
+    )
+
+
+def _general_form_validator(schema: Any) -> Validator:
     """Support one draft and single-hop references to local definitions only.
 
     Formats are annotations on general forms. Regex keywords are unsupported.
     Standard primitive forms keep their strict types and format checks.
     No schema loads a resource.
     """
-    from jsonschema import Draft202012Validator
+    from jsonschema import Draft202012Validator, validators
+    from jsonschema.exceptions import ValidationError as SchemaValidationError
     from referencing import Registry, Resource
     from referencing.jsonschema import DRAFT202012
 
-    validator = None
+    validator: Validator | None = None
     try:
         Draft202012Validator.check_schema(schema)
         if not isinstance(schema, dict) or schema.get("type") != "object":
@@ -178,6 +206,11 @@ def _general_form_validator(schema: Any) -> Draft202012Validator:
                 set(node) - allowed or node.get("$schema", _FORM_DRAFT) != _FORM_DRAFT
             ):
                 raise ValueError
+        # The draft is fixed above. Keep nested draft annotations from selecting
+        # the library's default validator instead of the decimal-aware variant.
+        for node in nodes:
+            if isinstance(node, dict):
+                node.pop("$schema", None)
         resource = Resource.from_contents(schema, default_specification=DRAFT202012)
         # An explicit empty Registry has no retriever; the library refuses
         # missing resources instead of using jsonschema's default downloader.
@@ -193,7 +226,18 @@ def _general_form_validator(schema: Any) -> Draft202012Validator:
             Draft202012Validator.check_schema(target)
             if any(isinstance(child, dict) and "$ref" in child for child in _schema_nodes(target)):
                 raise ValueError
-        validator = Draft202012Validator(schema, registry=registry)
+
+        def multiple_of(validator: Any, divisor: Any, instance: Any, schema: Any) -> Iterator[Any]:
+            if not validator.is_type(instance, "number"):
+                return
+            # JSON numbers use their decimal spelling, without a rounding tolerance.
+            numerator, denominator = Decimal(str(instance)).as_integer_ratio()
+            divisor_numerator, divisor_denominator = Decimal(str(divisor)).as_integer_ratio()
+            if (numerator * divisor_denominator) % (denominator * divisor_numerator):
+                yield SchemaValidationError("Number is not a multiple of the divisor")
+
+        decimal_validator = validators.extend(Draft202012Validator, {"multipleOf": multiple_of})
+        validator = decimal_validator(schema, registry=registry)
     except Exception:
         # Library errors can contain private schema data. Retain none of them.
         pass
@@ -464,7 +508,7 @@ class _ElicitationRequest(_NativeQuestion):
     """
 
     type: Literal["elicitation_request"] = field(default="elicitation_request", init=False)
-    _validator: Draft202012Validator | None = field(default=None, repr=False, compare=False)
+    _validator: Validator | None = field(default=None, repr=False, compare=False)
     _url_completion: asyncio.Future[bool] | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -619,11 +663,7 @@ class _ElicitationRequest(_NativeQuestion):
                     if not address.username or not address.domain:
                         raise ValueError("MCP form email needs a mailbox and domain")
                 elif form_format == "uri":
-                    uri = urlsplit(parsed)
-                    if not uri.scheme or re.search(
-                        r"[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]|%(?![0-9A-Fa-f]{2})",
-                        parsed,
-                    ):
+                    if not _is_absolute_uri(parsed):
                         raise ValueError("MCP form requires an absolute URI")
                 elif form_format == "date":
                     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", parsed):
@@ -636,6 +676,8 @@ class _ElicitationRequest(_NativeQuestion):
                         parsed,
                     ):
                         raise ValueError("MCP form requires an ISO date-time with offset")
+                    if int(parsed[11:13]) > 23:
+                        raise ValueError("MCP form date-time has an invalid hour")
                     if parsed[-1] not in "Zz" and (
                         int(parsed[-5:-3]) > 23 or int(parsed[-2:]) > 59
                     ):

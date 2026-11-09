@@ -14,8 +14,8 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::mcp::RequestId;
 use codex_protocol::mcp_approval_meta::{PERSIST_ALWAYS, PERSIST_KEY, PERSIST_SESSION};
 use codex_protocol::models::{
-    ActivePermissionProfile, PermissionProfile, PermissionProfileSnapshot, ProfileWorkspaceRoot,
-    ContentItem, ResponseItem,
+    ActivePermissionProfile, ContentItem, PermissionProfile, PermissionProfileSnapshot,
+    ProfileWorkspaceRoot, ResponseItem,
 };
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::*;
@@ -73,6 +73,10 @@ pub const OPERATIONS: &[&str] = &[
     "realtime_tool_selection_sdk",
     "realtime_conversation_start_sdk",
     "realtime_conversation_prepare_sdk",
+    "realtime_conversation_config_sdk",
+    "realtime_conversation_update_history_sdk",
+    "realtime_conversation_retrieve_item_sdk",
+    "realtime_conversation_retrieve_history_sdk",
     "realtime_conversation_activate_sdk",
     "realtime_conversation_update_sdk",
     "realtime_conversation_audio_sdk",
@@ -1543,6 +1547,55 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .await?;
             return Ok(serde_json::to_value(result.await??)?);
         }
+        "realtime_conversation_update_history_sdk" => {
+            let p: RealtimeSdkHistory = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationUpdateHistorySdk {
+                    generation: p.generation,
+                    items: p.items,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_retrieve_item_sdk" => {
+            let p: RealtimeSdkDeleteItem = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationRetrieveItemSdk {
+                    generation: p.generation,
+                    item_id: p.item_id,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_retrieve_history_sdk" => {
+            let p: RealtimeSdkGeneration = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationRetrieveHistorySdk {
+                    generation: p.generation,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
+        "realtime_conversation_config_sdk" => {
+            let p: RealtimeSdkConfig = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationConfigSdk {
+                    params: p.params.into(),
+                    settings: p.settings,
+                    function_tools: realtime_function_tools(p.function_tools),
+                    expected_selection_id: p.expected_selection_id,
+                    reply,
+                })
+                .await?;
+            return Ok(result.await??);
+        }
         "realtime_conversation_prepare_sdk" => {
             let p: RealtimeSdkStart = decode(params)?;
             let function_tools = realtime_function_tools(p.function_tools);
@@ -1778,6 +1831,15 @@ params!(RealtimeSdkStart {
     #[serde(default = "realtime_auto_response_default")]
     hosted_mcp_auto_response: bool
 });
+params!(RealtimeSdkConfig {
+    params: RealtimeStart,
+    #[serde(default)]
+    settings: Option<codex_protocol::realtime_settings::RealtimeV2SessionSettings>,
+    #[serde(default)]
+    function_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolFunctionSpec>>,
+    #[serde(default)]
+    expected_selection_id: Option<String>
+});
 pub(crate) async fn prepare_realtime(
     thread: &CodexThread,
     params: Value,
@@ -1863,6 +1925,7 @@ params!(RealtimeSdkAudio {
     generation: String,
     frame: RealtimeAudioFrame
 });
+params!(RealtimeSdkHistory { generation: String, items: Vec<Value> });
 params!(RealtimeSdkDeleteItem {
     generation: String,
     item_id: String
