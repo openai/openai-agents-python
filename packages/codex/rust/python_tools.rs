@@ -2732,7 +2732,7 @@ impl PythonTools {
         ensure!(
             key.reply.thread == owner
                 && key.reply.instance == self.instance
-                && key.reply.generation == self.snapshot().id,
+                && self.resolve_generation(key.reply.generation).is_some(),
             "Expired or invalid managed Python tool request"
         );
         let mut pending = self.pending.lock().expect("Python replies poisoned");

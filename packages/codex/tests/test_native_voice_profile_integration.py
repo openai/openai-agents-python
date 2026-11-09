@@ -46,6 +46,7 @@ async def test_handoff_terminal_tool_survives_replacement_and_restore(responses,
             assert second.tool_call.call_id == "second-finish"
     if restore:
         responses.respond(function_call("done", {}, "second-finish"))
+        responses.respond(assistant_output("Unexpected continuation after terminal tool"))
         async with (
             timeout(25),
             root.session(state=SessionState.from_json(saved.to_json())) as session,
@@ -83,6 +84,16 @@ async def test_handoff_profile_uses_its_mcp_request_metadata(responses, tmp_path
         turn = await session.submit("Search through Leaf.")
         assert (await turn.get_result()).final_output == "leaf complete"
         assert await session.get_active_agent() is leaf
+        calls = [
+            row["message"]["params"]
+            for row in records(log)
+            if row.get("message", {}).get("method") == "tools/call"
+        ]
+        assert len(calls) == 1, [
+            item.get("output")
+            for item in responses.requests[-1]["input"]
+            if item.get("type") == "function_call_output"
+        ]
         assert len(seen) == 1
         assert seen[0].submission is turn
         assert seen[0].call.call_id == "leaf-search"
@@ -98,10 +109,16 @@ async def test_handoff_profile_uses_its_mcp_request_metadata(responses, tmp_path
 
 @pytest.mark.parametrize("override", [False, True])
 async def test_terminal_handoff_uses_leaf_output_and_completion_policy(responses, override):
+    class RootResult(BaseModel):
+        model_config = {"title": "TerminalResult"}
+        value: int
+
     class LeafResult(BaseModel):
+        model_config = {"title": "TerminalResult"}
         value: int
 
     class OverrideResult(BaseModel):
+        model_config = {"title": "TerminalResult"}
         value: int
 
     seen = []
@@ -132,6 +149,7 @@ async def test_terminal_handoff_uses_leaf_output_and_completion_policy(responses
         instructions="Hand off to Leaf.",
         handoffs=[leaf],
         before_complete=root_complete,
+        output_type=RootResult,
         provider=provider(responses),
     )
     responses.respond(function_call("transfer_to_leaf", {}, "typed-handoff"))

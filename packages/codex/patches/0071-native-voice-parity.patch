@@ -11079,10 +11079,58 @@ index 49265322d7c60c97284aba07d9a8fd0114821ec3..1aea71744a4c9abed9e033401392ca31
 +    }
 +}
 diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
-index 591851b8ca91a3022849caed75929ff5203f0d44..6ce541c9a2c896d7c71f5dfc99bda7983045a99e 100644
+index 591851b8ca91a3022849caed75929ff5203f0d44..8c50ac91f4bc6dd639638cccc42bb438a72f81f1 100644
 --- a/codex-rs/core/src/mcp_tool_call.rs
 +++ b/codex-rs/core/src/mcp_tool_call.rs
-@@ -631,13 +631,20 @@ async fn handle_approved_mcp_tool_call(
+@@ -486,10 +486,20 @@ async fn handle_approved_mcp_tool_call(
+                     .call_with_preparation(/*requested_timeout*/ None, || async {
+                         // Resolve application data inside this exact catalog lease, after
+                         // approval but before persistent decisions, uploads or tools/call.
+-                        let mcp_tool = McpToolContext::from_prepared_call(
+-                            &prepared_call,
+-                            turn_context.config.mcp_servers.get().get(&server),
+-                        );
++                        let server_config =
++                            if crate::realtime_conversation::uses_retained_mcp_binding(
++                                &step_context,
++                            ) {
++                                prepared_call
++                                    .config()
++                                    .mcp_server_catalog
++                                    .server(&server)
++                                    .map(|registration| registration.config())
++                            } else {
++                                turn_context.config.mcp_servers.get().get(&server)
++                            };
++                        let mcp_tool =
++                            McpToolContext::from_prepared_call(&prepared_call, server_config);
+                         let is_cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+                             let token = cancellation_token.clone();
+                             Arc::new(move || token.is_cancelled())
+@@ -503,8 +513,8 @@ async fn handle_approved_mcp_tool_call(
+                                         session_store: &sess.services.session_extension_data,
+                                         thread_store: &sess.services.thread_extension_data,
+                                         turn_store: turn_context.extension_data.as_ref(),
+-                                    step_store: Some(&step_context.extension_data),
+-                                    is_cancelled: Arc::clone(&is_cancelled),
++                                        step_store: Some(&step_context.extension_data),
++                                        is_cancelled: Arc::clone(&is_cancelled),
+                                         turn_id: &turn_context.sub_id,
+                                         call_id,
+                                         model: &step_context.settings.model_info.slug,
+@@ -534,7 +544,10 @@ async fn handle_approved_mcp_tool_call(
+                             }
+                         }
+                         // A callback reply is data; only the exact still-live call may dispatch.
+-                        anyhow::ensure!(!metadata_claimed || !is_cancelled(), "MCP request metadata call was cancelled");
++                        anyhow::ensure!(
++                            !metadata_claimed || !is_cancelled(),
++                            "MCP request metadata call was cancelled"
++                        );
+                         if let McpToolApprovalApplication::Apply { decision, policy } =
+                             &approval_application
+                         {
+@@ -631,13 +644,20 @@ async fn handle_approved_mcp_tool_call(
                  let trusted_auth_plan = auth_plan_for_call(call_id, Some(&metadata), &result);
                  elicitation_type =
                      mcp_tool_call_auth_elicitation_type(&server, connector_id, &result);

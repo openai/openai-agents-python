@@ -2652,6 +2652,14 @@ class Session(Generic[ContextT, OutputT]):
                 programmatic_tool_calling=programmatic_tool_calling,
             )
             _complete_profile_mcp(profiles, profile_roster, executor)
+            has_host_mcp = any(
+                isinstance(server, StdioMCP) and server.location == "host"
+                for declarations in (
+                    allowed_mcp,
+                    *(profile.declaration.tools for profile in profiles),
+                )
+                for server in declarations
+            )
             profile_fingerprint = (
                 native._agent_profiles_fingerprint(json.dumps(profile_roster), profiles[0].id)
                 if profiles
@@ -2684,10 +2692,7 @@ class Session(Generic[ContextT, OutputT]):
             _configure_storage_runtime(runtime, storage, resume, goals)
             if executor is not None:
                 native_environment = executor._to_native()
-                native_environment["local_mcp"] = any(
-                    isinstance(server, StdioMCP) and server.location == "host"
-                    for server in allowed_mcp
-                )
+                native_environment["local_mcp"] = has_host_mcp
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
                 _configure_project_search(runtime, executor, native_environment["cwd"])
@@ -2701,9 +2706,7 @@ class Session(Generic[ContextT, OutputT]):
                         else "codex-code-mode-host"
                     )
                 )
-            if (executor is not None and executor._is_local) or any(
-                isinstance(server, StdioMCP) and server.location == "host" for server in allowed_mcp
-            ):
+            if (executor is not None and executor._is_local) or has_host_mcp:
                 # Provision the helper for an explicit local executor or host MCP.
                 helpers = _package_files("agents") / "bin"
                 runtime["codex_self_exe"] = str(
@@ -2886,7 +2889,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_application_instructions": instructions,
                     "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
-                    "_terminal_tool_slots": catalog.finish_slots(),
+                    "_terminal_tool_slots": restored_catalog.finish_slots(),
                     **(
                         {
                             "_native_agent_roles": [

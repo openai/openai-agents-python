@@ -228,7 +228,8 @@ async def test_handoff_uses_leaf_captured_model_request_controls(responses) -> N
     leaf = Agent(
         name="Leaf",
         instructions="Use the selected leaf tool.",
-        model="fixture-unlisted-request-controls",
+        # Live handoffs require qualified metadata for retained approval authority.
+        model="gpt-5.5",
         tools=[selected, excluded],
         model_settings={
             "max_output_tokens": 23,
@@ -251,7 +252,7 @@ async def test_handoff_uses_leaf_captured_model_request_controls(responses) -> N
         Agent(
             name="Root",
             instructions="Hand off to Leaf.",
-            model="fixture-unlisted-request-controls",
+            model="gpt-5.5",
             handoffs=[leaf],
             provider=native_provider,
             model_settings={"max_output_tokens": 11, "invocation_timeout_ms": 50_000},
