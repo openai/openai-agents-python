@@ -11,6 +11,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -330,6 +331,47 @@ class RealtimeHostedMcpToolsListed:
     item_id: str
     server_label: str
     tools: tuple[RealtimeHostedMcpTool, ...]
+
+
+# This is an allocation policy, not a provider protocol catalog limit.
+_MAX_HOSTED_MCP_TOOLS = 1024
+
+
+def _hosted_mcp_schema_size(value: Any, limit: int, depth: int = 0) -> int:
+    # Conservatively charge JSON containers/scalars and object keys, including
+    # their allocator overhead, without serializing or copying the schema.
+    size = 256
+    if depth > 128 or size > limit:
+        raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
+    if isinstance(value, str):
+        size += 4 * len(value)
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            size += 128 + 4 * len(key)
+            size += _hosted_mcp_schema_size(child, limit - size, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            size += _hosted_mcp_schema_size(child, limit - size, depth + 1)
+    if size > limit:
+        raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
+    return size
+
+
+def _hosted_mcp_catalog_size(
+    item_id: str,
+    server_label: str,
+    tools: Iterable[tuple[str, str | None, Any]],
+    limit: int,
+) -> int:
+    size = 512 + 4 * (len(item_id) + len(server_label))
+    for count, (name, description, schema) in enumerate(tools, 1):
+        if count > _MAX_HOSTED_MCP_TOOLS:
+            raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
+        size += 256 + 4 * (len(name) + len(description or ""))
+        size += _hosted_mcp_schema_size(schema, limit - size)
+    if size > limit:
+        raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
+    return size
 
 
 @dataclass(frozen=True)
@@ -998,10 +1040,14 @@ class RealtimeSession:
 
     @staticmethod
     def _buffer_size(event: RealtimeEvent | RealtimeHistoryItem) -> int:
-        values = list(vars(event).values())
         if isinstance(event, RealtimeHostedMcpToolsListed):
-            for tool in event.tools:
-                values.extend((tool.name, tool.description, json.dumps(tool.input_schema)))
+            return _hosted_mcp_catalog_size(
+                event.item_id,
+                event.server_label,
+                ((tool.name, tool.description, tool.input_schema) for tool in event.tools),
+                RealtimeSession._BUFFER_BYTES_LIMIT,
+            )
+        values = list(vars(event).values())
         for value in tuple(values):
             if isinstance(
                 value, (RealtimeHistoryItem, RealtimeGuardrailInput, RealtimePlaybackPosition)
@@ -2064,6 +2110,17 @@ class RealtimeSession:
             self._mcp_approvals[request] = value["approval_id"]
             self._emit(request)
         elif name == "HostedMcpToolsListed":
+            if len(value["tools"]) > _MAX_HOSTED_MCP_TOOLS:
+                raise RuntimeError("Realtime hosted MCP catalog capacity exceeded")
+            _hosted_mcp_catalog_size(
+                value["item_id"],
+                value["server_label"],
+                (
+                    (tool["name"], tool.get("description"), tool["input_schema"])
+                    for tool in value["tools"]
+                ),
+                self._BUFFER_BYTES_LIMIT - self._queue_bytes,
+            )
             self._emit(
                 RealtimeHostedMcpToolsListed(
                     value["item_id"],

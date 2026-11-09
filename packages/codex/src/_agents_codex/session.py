@@ -3627,7 +3627,7 @@ class Session(Generic[ContextT, OutputT]):
             return [], None
         snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
         receipt = snapshot["profile_receipt"]
-        self._agent_for_profile(receipt)
+        source_agent = self._agent_for_profile(receipt)
         generation = snapshot["catalog_generation"]
         if isinstance(generation, str) and generation.isdecimal():
             generation = int(generation)
@@ -3650,7 +3650,12 @@ class Session(Generic[ContextT, OutputT]):
         for tool in tools:
             if not isinstance(tool, FunctionTool):
                 raise TypeError("Realtime tools must be captured FunctionTool declarations")
-            if not any(tool is declared for declared in bindings):
+            # An explicit selector may retain the opening declaration after an
+            # accepted replacement. Its ref still resolves only in this source's
+            # current native catalog; another Agent's same-ref tool grants nothing.
+            if not any(tool is declared for declared in bindings) and not any(
+                tool is declared for declared in source_agent.tools
+            ):
                 if allow_missing:
                     continue
                 raise ValueError("Realtime tool was not admitted in this captured source")

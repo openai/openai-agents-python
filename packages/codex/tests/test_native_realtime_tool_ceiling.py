@@ -240,3 +240,65 @@ async def test_realtime_tool_choice_uses_real_ack_and_preserves_accepted_subset(
         before = len(peer.frames)
         await voice.update({"output_speed": 1.2})
         await peer.frame(lambda f: f["type"] == "session.update", after=before)
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("graph", [False, True])
+async def test_realtime_original_selector_uses_replaced_binding(realtime_peer, reopen, graph):
+    from dataclasses import replace
+
+    peer = realtime_peer
+
+    @function_tool
+    def included() -> str:
+        return "included"
+
+    @function_tool
+    def excluded() -> str:
+        raise AssertionError("Excluded function must never execute")
+
+    fresh = replace(included, description="Accepted replacement binding")
+    unrelated = replace(included, description="Other Agent same-ref declaration")
+    target = Agent(name="Other", instructions="Other source.", tools=[unrelated])
+    config = RealtimeConfig(model="fixture-realtime", tools=(included,))
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-original-selector",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="Root",
+            instructions="Use selected tools.",
+            tools=[included, excluded],
+            handoffs=[target] if graph else [],
+            provider=provider,
+        ).session() as session,
+    ):
+        async with session.realtime(config=config):
+            initial = await peer.frame(lambda f: f["type"] == "session.update")
+            before = len(peer.frames)
+            await session.update(tools=[fresh, excluded])
+            updated = await peer.frame(lambda f: f["type"] == "session.update", after=before)
+            advertised = updated["session"]["tools"]
+            functions = {tool["name"]: tool for tool in advertised}
+            assert "included" in functions
+            assert "excluded" not in functions
+            assert functions["included"]["description"] == "Accepted replacement binding"
+            original = next(
+                tool for tool in initial["session"]["tools"] if tool["name"] == "included"
+            )
+            assert original["description"] != functions["included"]["description"]
+
+        # Matching a ref from another Agent never grants source authority.
+        with pytest.raises(ValueError, match="not admitted in this captured source"):
+            async with session.realtime(
+                config=RealtimeConfig(model="fixture-realtime", tools=(unrelated,))
+            ):
+                pytest.fail("Unrelated declaration was admitted")
+        if reopen:
+            before = len(peer.frames)
+            async with session.realtime(config=config):
+                opened = await peer.frame(lambda f: f["type"] == "session.update", after=before)
+                assert opened["session"]["tools"] == advertised

@@ -1050,10 +1050,10 @@ index 0000000000000000000000000000000000000000..5ac57176697eae74bfcac71d538cde82
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7999db60e
+index 0000000000000000000000000000000000000000..7b2158b6e4186c350d84988de5dc9fc5dab73cb1
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,708 @@
 +//! Provider-hosted MCP observations and receipts inside the connection owner.
 +use super::readiness::{ActiveResponse, RealtimeAcceptedConfiguration};
 +use codex_protocol::protocol::{
@@ -1063,6 +1063,82 @@ index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7
 +use serde_json::{Value, json};
 +use std::collections::VecDeque;
 +use std::sync::Arc;
++
++// Allocation policy, not a provider protocol catalog limit.
++pub(super) const MAX_HOSTED_MCP_TOOLS: usize = 1024;
++
++fn charge(bytes: &mut usize, additional: usize) -> Result<(), ObserveError> {
++    *bytes = bytes.saturating_add(additional);
++    if *bytes > super::methods::SDK_WIRE_BYTES_CAPACITY {
++        return Err(ObserveError::Capacity);
++    }
++    Ok(())
++}
++
++fn schema_bytes(value: &Value, bytes: &mut usize, depth: usize) -> Result<(), ObserveError> {
++    // Bound container/scalar/key allocations without serializing or cloning.
++    if depth > 128 {
++        return Err(ObserveError::Capacity);
++    }
++    charge(bytes, 256)?;
++    match value {
++        Value::String(text) => charge(bytes, text.len().saturating_mul(4))?,
++        Value::Array(values) => {
++            for value in values {
++                schema_bytes(value, bytes, depth + 1)?;
++            }
++        }
++        Value::Object(values) => {
++            for (key, value) in values {
++                charge(bytes, 128usize.saturating_add(key.len().saturating_mul(4)))?;
++                schema_bytes(value, bytes, depth + 1)?;
++            }
++        }
++        _ => {}
++    }
++    Ok(())
++}
++
++fn catalog_bytes(item_id: &str, label: &str) -> Result<usize, ObserveError> {
++    let mut bytes = 512;
++    charge(&mut bytes, item_id.len().saturating_mul(4))?;
++    charge(&mut bytes, label.len().saturating_mul(4))?;
++    Ok(bytes)
++}
++
++fn listed_tool_bytes(
++    name: &str,
++    description: Option<&str>,
++    schema: &Value,
++    bytes: &mut usize,
++) -> Result<(), ObserveError> {
++    charge(bytes, 256)?;
++    charge(bytes, name.len().saturating_mul(4))?;
++    charge(bytes, description.map_or(0, str::len).saturating_mul(4))?;
++    schema_bytes(schema, bytes, 0)
++}
++
++pub(super) fn event_bytes(event: &RealtimeEvent) -> Result<usize, ObserveError> {
++    if let RealtimeEvent::HostedMcpToolsListed(catalog) = event {
++        if catalog.tools.len() > MAX_HOSTED_MCP_TOOLS {
++            return Err(ObserveError::Capacity);
++        }
++        let mut bytes = catalog_bytes(&catalog.item_id, &catalog.server_label)?;
++        for tool in &catalog.tools {
++            listed_tool_bytes(
++                &tool.name,
++                tool.description.as_deref(),
++                &tool.input_schema,
++                &mut bytes,
++            )?;
++        }
++        Ok(bytes)
++    } else {
++        serde_json::to_vec(event)
++            .map(|value| value.len())
++            .map_err(|_| ObserveError::Invalid)
++    }
++}
 +
 +#[derive(Default)]
 +pub(super) struct HostedMcpState {
@@ -1212,6 +1288,7 @@ index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7
 +        };
 +        let mut candidates = Vec::new();
 +        let mut observations = Vec::new();
++        let mut catalog_export_bytes = 0;
 +        for item in items {
 +            let item_kind = match kind {
 +                "response.function_call_arguments.done" => "function_call",
@@ -1225,10 +1302,30 @@ index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7
 +                    && let Some(label) = item["server_label"].as_str()
 +                    && config.hosted_declaration(label).is_some()
 +                {
-+                    let tools = item["tools"]
++                    let raw_tools = item["tools"]
 +                        .as_array()
-+                        .into_iter()
-+                        .flatten()
++                        .map(Vec::as_slice)
++                        .unwrap_or_default();
++                    if raw_tools.len() > MAX_HOSTED_MCP_TOOLS {
++                        return Err(ObserveError::Capacity);
++                    }
++                    let mut allocation =
++                        catalog_bytes(item["id"].as_str().unwrap_or_default(), label)?;
++                    for tool in raw_tools {
++                        if let (Some(name), Some(schema)) =
++                            (tool["name"].as_str(), tool.get("input_schema"))
++                        {
++                            listed_tool_bytes(
++                                name,
++                                tool["description"].as_str(),
++                                schema,
++                                &mut allocation,
++                            )?;
++                        }
++                    }
++                    charge(&mut catalog_export_bytes, allocation)?;
++                    let tools = raw_tools
++                        .iter()
 +                        .filter_map(|tool| {
 +                            Some(RealtimeHostedMcpListedTool {
 +                                name: tool["name"].as_str()?.to_owned(),
@@ -1419,10 +1516,7 @@ index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7
 +        }
 +        let mut bytes = self.bytes();
 +        let mut count = self.records.len();
-+        let mut exported_bytes = observations
-+            .iter()
-+            .map(|event| serde_json::to_vec(event).map_or(usize::MAX, |value| value.len()))
-+            .sum::<usize>();
++        let mut exported_bytes = catalog_export_bytes;
 +        for c in &candidates {
 +            if let Some(old) = self.records.iter().find(|r| r.item_id == c.id) {
 +                bytes = bytes
@@ -1669,7 +1763,7 @@ index 0000000000000000000000000000000000000000..42714609dc49ac5aa8bf8fc3074889e7
 +    event.to_string()
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e402b74ac9 100644
+index 33cba07f28b965beb7d163f0f56cf5bcee408812..2c25aba04c60973fe1318fdb6cf96be5a451a4cf 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 @@ -1,3 +1,7 @@
@@ -1718,7 +1812,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
  }
  
  impl QueuedWireMessage {
-@@ -88,13 +98,44 @@ impl QueuedWireMessage {
+@@ -88,13 +98,49 @@ impl QueuedWireMessage {
          Ok(Self {
              message,
              _permit: permit,
@@ -1734,9 +1828,14 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
 +        budget: Option<Arc<tokio::sync::Semaphore>>,
 +    ) -> Result<(), ()> {
 +        if !events.is_empty() {
-+            let bytes = serde_json::to_vec(&events).map_err(|_| ())?.len();
-+            if bytes > SDK_WIRE_BYTES_CAPACITY {
-+                return Err(());
++            let mut bytes = events.len().saturating_add(1);
++            for event in &events {
++                bytes = bytes
++                    .checked_add(super::hosted_mcp::event_bytes(event).map_err(|_| ())?)
++                    .ok_or(())?;
++                if bytes > SDK_WIRE_BYTES_CAPACITY {
++                    return Err(());
++                }
 +            }
 +            if let Some(budget) = budget {
 +                let extra = budget
@@ -1763,7 +1862,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          }
      }
  }
-@@ -105,9 +146,41 @@ struct WsStream {
+@@ -105,9 +151,41 @@ struct WsStream {
      pump_abort: tokio::task::AbortHandle,
      terminal_policy_error: tokio::sync::watch::Receiver<Option<NetworkPolicyDenied>>,
      ingress_overflow: Arc<AtomicBool>,
@@ -1805,7 +1904,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      Send {
          message: Message,
          tx_result: oneshot::Sender<Result<(), WsError>>,
-@@ -118,10 +191,64 @@ enum WsCommand {
+@@ -118,10 +196,64 @@ enum WsCommand {
  }
  
  impl WsStream {
@@ -1870,7 +1969,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          let (tx_command, mut rx_command) = mpsc::channel::<WsCommand>(32);
          let (tx_message, rx_message) = if bounded_events {
              async_channel::bounded::<QueuedWireMessage>(SDK_WIRE_EVENTS_CAPACITY)
-@@ -135,6 +262,9 @@ impl WsStream {
+@@ -135,6 +267,9 @@ impl WsStream {
  
          let (terminal_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
          let pump_task = tokio::spawn(async move {
@@ -1880,7 +1979,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              let mut inner = inner;
              let report_write_policy_error = |error: &WsError| {
                  if let Some(denied) = codex_websocket_client::network_policy_denial(error) {
-@@ -151,9 +281,78 @@ impl WsStream {
+@@ -151,9 +286,78 @@ impl WsStream {
                              break;
                          };
                          match command {
@@ -1959,7 +2058,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                                  let should_break = result.is_err();
                                  if let Err(err) = &result {
                                      error!("realtime websocket send failed: {err}");
-@@ -217,10 +416,24 @@ impl WsStream {
+@@ -217,10 +421,24 @@ impl WsStream {
                                      Message::Ping(_) | Message::Pong(_) => {}
                                  }
                                  if bounded_events {
@@ -1985,7 +2084,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                                      match tx_message.try_send(queued) {
                                          Ok(()) => {},
                                          Err(async_channel::TrySendError::Full(_)) => {
-@@ -229,7 +442,14 @@ impl WsStream {
+@@ -229,7 +447,14 @@ impl WsStream {
                                          },
                                          Err(async_channel::TrySendError::Closed(_)) => break,
                                      }
@@ -2001,7 +2100,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                                  if is_close {
                                      break;
                                  }
-@@ -262,15 +482,18 @@ impl WsStream {
+@@ -262,15 +487,18 @@ impl WsStream {
                  pump_abort,
                  terminal_policy_error,
                  ingress_overflow,
@@ -2023,7 +2122,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          let (tx_result, rx_result) = oneshot::channel();
          if self.tx_command.send(make_command(tx_result)).await.is_err() {
              return Err(self.closed_error());
-@@ -303,9 +526,21 @@ impl WsStream {
+@@ -303,9 +531,21 @@ impl WsStream {
      async fn abort_and_join(&self) {
          self.pump_abort.abort();
          self.pump_task.clone().await;
@@ -2045,7 +2144,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          self.request(|tx_result| WsCommand::Close { tx_result })
              .await
      }
-@@ -334,7 +569,14 @@ pub struct RealtimeWebsocketWriter {
+@@ -334,7 +574,14 @@ pub struct RealtimeWebsocketWriter {
  pub struct RealtimeWebsocketEvents {
      ingress_overflow: Arc<AtomicBool>,
      rx_message: async_channel::Receiver<QueuedWireMessage>,
@@ -2061,7 +2160,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      transcript_state: RealtimeTranscriptState,
      event_parser: RealtimeEventParser,
      is_closed: Arc<AtomicBool>,
-@@ -353,6 +595,58 @@ struct ActiveTranscriptState {
+@@ -353,6 +600,58 @@ struct ActiveTranscriptState {
  }
  
  impl RealtimeWebsocketConnection {
@@ -2120,7 +2219,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      pub async fn send_audio_frame(&self, frame: RealtimeAudioFrame) -> Result<(), ApiError> {
          self.writer.send_audio_frame(frame).await
      }
-@@ -419,6 +713,150 @@ impl RealtimeWebsocketConnection {
+@@ -419,6 +718,150 @@ impl RealtimeWebsocketConnection {
  }
  
  impl RealtimeWebsocketWriter {
@@ -2271,7 +2370,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      /// End the owned socket pump and join it, including concurrent close callers.
      /// Bytes already dispatched before cancellation cannot be retracted.
      pub async fn abort_and_join(&self) {
-@@ -443,6 +881,30 @@ impl RealtimeWebsocketWriter {
+@@ -443,6 +886,30 @@ impl RealtimeWebsocketWriter {
          self.send_json(&message).await
      }
  
@@ -2302,7 +2401,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      pub async fn send_conversation_item_create(
          &self,
          text: String,
-@@ -514,12 +976,14 @@ impl RealtimeWebsocketWriter {
+@@ -514,12 +981,14 @@ impl RealtimeWebsocketWriter {
                  message: "Public V2 settings require the RealtimeV2 protocol".to_string(),
              });
          }
@@ -2323,7 +2422,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      }
  
      pub async fn send_session_update(
-@@ -545,6 +1009,14 @@ impl RealtimeWebsocketWriter {
+@@ -545,6 +1014,14 @@ impl RealtimeWebsocketWriter {
      }
  
      pub async fn close(&self) -> Result<(), ApiError> {
@@ -2338,7 +2437,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          if self.is_closed.swap(true, Ordering::SeqCst) {
              return Ok(());
          }
-@@ -640,6 +1112,22 @@ impl RealtimeWebsocketEvents {
+@@ -640,6 +1117,22 @@ impl RealtimeWebsocketEvents {
      }
  
      pub async fn next_event(&self) -> Result<Option<RealtimeEvent>, ApiError> {
@@ -2361,7 +2460,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          if self.is_closed.load(Ordering::SeqCst) {
              return Ok(None);
          }
-@@ -650,8 +1138,8 @@ impl RealtimeWebsocketEvents {
+@@ -650,8 +1143,8 @@ impl RealtimeWebsocketEvents {
                  "SDK Realtime wire event queue capacity exceeded".into(),
              ));
          }
@@ -2372,7 +2471,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          }
  
          loop {
-@@ -661,42 +1149,109 @@ impl RealtimeWebsocketEvents {
+@@ -661,42 +1154,109 @@ impl RealtimeWebsocketEvents {
                      "SDK Realtime wire event queue capacity exceeded".into(),
                  ));
              }
@@ -2510,7 +2609,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      }
                      debug!("realtime websocket ignored unsupported text frame");
                  }
-@@ -723,8 +1278,11 @@ impl RealtimeWebsocketEvents {
+@@ -723,8 +1283,11 @@ impl RealtimeWebsocketEvents {
                      };
                  }
                  Message::Binary(_) => {
@@ -2524,7 +2623,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      )));
                  }
                  Message::Frame(_) | Message::Ping(_) | Message::Pong(_) => {}
-@@ -740,7 +1298,7 @@ impl RealtimeWebsocketEvents {
+@@ -740,7 +1303,7 @@ impl RealtimeWebsocketEvents {
          };
          match &event {
              RealtimeEvent::SessionUpdated { .. } => {
@@ -2533,7 +2632,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  Ok(())
              }
              RealtimeEvent::Error(message) => Err(ApiError::Stream(message.clone())),
-@@ -820,7 +1378,15 @@ impl RealtimeWebsocketEvents {
+@@ -820,7 +1383,15 @@ impl RealtimeWebsocketEvents {
              | RealtimeEvent::ResponseCancelled(_)
              | RealtimeEvent::ResponseDone(_)
              | RealtimeEvent::ConversationItemDone { .. }
@@ -2549,7 +2648,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              | RealtimeEvent::ConversationItemAdded(_)
              | RealtimeEvent::Error(_)
              | RealtimeEvent::HistoryItemStarted(_)
-@@ -961,6 +1527,10 @@ pub struct RealtimeWebsocketClient {
+@@ -961,6 +1532,10 @@ pub struct RealtimeWebsocketClient {
      http_client_factory: HttpClientFactory,
      webrtc_sideband_base_url: String,
      bounded_events: bool,
@@ -2560,7 +2659,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
  }
  
  #[derive(Clone, Copy)]
-@@ -977,9 +1547,45 @@ impl RealtimeWebsocketClient {
+@@ -977,9 +1552,45 @@ impl RealtimeWebsocketClient {
              http_client_factory,
              webrtc_sideband_base_url: OPENAI_REALTIME_API_BASE_URL.to_string(),
              bounded_events: false,
@@ -2606,7 +2705,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
      /// Bound unread wire events for SDK-owned voice. Overflow ends the connection.
      pub fn with_bounded_events(mut self) -> Self {
          self.bounded_events = true;
-@@ -1150,71 +1756,144 @@ impl RealtimeWebsocketClient {
+@@ -1150,71 +1761,144 @@ impl RealtimeWebsocketClient {
          session_initialization: RealtimeSessionInitialization,
          transcript_state: RealtimeTranscriptState,
      ) -> Result<RealtimeWebsocketConnection, ApiError> {
@@ -2805,7 +2904,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          let initialize_session = match session_initialization {
              RealtimeSessionInitialization::NewSession => true,
              RealtimeSessionInitialization::LegacyWebrtcSideband => {
-@@ -1250,6 +1929,10 @@ impl RealtimeWebsocketClient {
+@@ -1250,6 +1934,10 @@ impl RealtimeWebsocketClient {
          {
              connection.events.wait_for_session_started().await?;
          }
@@ -2816,7 +2915,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          Ok(connection)
      }
  }
-@@ -1502,6 +2185,12 @@ mod tests {
+@@ -1502,6 +2190,12 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::AudioOut(RealtimeAudioFrame {
@@ -2829,7 +2928,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AAA=".to_string(),
                  sample_rate: 48000,
                  num_channels: 1,
-@@ -1554,6 +2243,7 @@ mod tests {
+@@ -1554,6 +2248,7 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
@@ -2837,7 +2936,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  handoff_id: "handoff_123".to_string(),
                  item_id: "item_123".to_string(),
                  input_transcript: "delegate this".to_string(),
-@@ -1577,10 +2267,18 @@ mod tests {
+@@ -1577,10 +2272,18 @@ mod tests {
          assert_eq!(events.take_transcript_tail().await, vec![]);
  
          let mut covered = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
@@ -2856,7 +2955,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              handoff_id: "handoff_1".to_string(),
              item_id: "item_1".to_string(),
              input_transcript: "already handed off".to_string(),
-@@ -1590,6 +2288,7 @@ mod tests {
+@@ -1590,6 +2293,7 @@ mod tests {
          assert_eq!(
              handoff,
              RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
@@ -2864,7 +2963,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  handoff_id: "handoff_1".to_string(),
                  item_id: "item_1".to_string(),
                  input_transcript: "already handed off".to_string(),
-@@ -1601,6 +2300,13 @@ mod tests {
+@@ -1601,6 +2305,13 @@ mod tests {
          );
  
          let mut tail = RealtimeEvent::OutputTranscriptDelta(RealtimeTranscriptDelta {
@@ -2878,7 +2977,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              delta: "tail".to_string(),
          });
          events.update_active_transcript(&mut tail).await;
-@@ -1627,6 +2333,13 @@ mod tests {
+@@ -1627,6 +2338,13 @@ mod tests {
              is_closed: Arc::new(AtomicBool::new(false)),
          };
          let mut partial = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
@@ -2892,7 +2991,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              delta: "hello wor".to_string(),
          });
          first_events.update_active_transcript(&mut partial).await;
-@@ -1641,6 +2354,13 @@ mod tests {
+@@ -1641,6 +2359,13 @@ mod tests {
              is_closed: Arc::new(AtomicBool::new(false)),
          };
          let mut done = RealtimeEvent::InputTranscriptDone(RealtimeTranscriptDone {
@@ -2906,7 +3005,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              text: "hello world".to_string(),
          });
          second_events.update_active_transcript(&mut done).await;
-@@ -1667,6 +2387,13 @@ mod tests {
+@@ -1667,6 +2392,13 @@ mod tests {
              is_closed: Arc::new(AtomicBool::new(false)),
          };
          let mut oversized = RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
@@ -2920,7 +3019,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              delta: format!("old{}new", "x".repeat(MAX_ACTIVE_TRANSCRIPT_BYTES)),
          });
          events.update_active_transcript(&mut oversized).await;
-@@ -1833,6 +2560,13 @@ mod tests {
+@@ -1833,6 +2565,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::InputTranscriptDelta(
                  RealtimeTranscriptDelta {
@@ -2934,7 +3033,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      delta: "hello ".to_string(),
                  }
              ))
-@@ -1853,6 +2587,13 @@ mod tests {
+@@ -1853,6 +2592,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::InputTranscriptDelta(
                  RealtimeTranscriptDelta {
@@ -2948,7 +3047,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      delta: "hello".to_string(),
                  }
              ))
-@@ -1872,6 +2613,13 @@ mod tests {
+@@ -1872,6 +2618,13 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::InputTranscriptDone(RealtimeTranscriptDone {
@@ -2962,7 +3061,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  text: "hello world".to_string(),
              }))
          );
-@@ -1888,6 +2636,13 @@ mod tests {
+@@ -1888,6 +2641,13 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::InputTranscriptDone(RealtimeTranscriptDone {
@@ -2976,7 +3075,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  text: "hello realtime".to_string(),
              }))
          );
-@@ -1905,6 +2660,13 @@ mod tests {
+@@ -1905,6 +2665,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::OutputTranscriptDelta(
                  RealtimeTranscriptDelta {
@@ -2990,7 +3089,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      delta: "hi".to_string(),
                  }
              ))
-@@ -1923,6 +2685,13 @@ mod tests {
+@@ -1923,6 +2690,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::OutputTranscriptDelta(
                  RealtimeTranscriptDelta {
@@ -3004,7 +3103,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      delta: "hi".to_string(),
                  }
              ))
-@@ -1941,6 +2710,13 @@ mod tests {
+@@ -1941,6 +2715,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
              Some(RealtimeEvent::OutputTranscriptDone(
                  RealtimeTranscriptDone {
@@ -3018,7 +3117,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      text: "hi there".to_string(),
                  }
              ))
-@@ -1988,6 +2764,7 @@ mod tests {
+@@ -1988,6 +2769,7 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
@@ -3026,7 +3125,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  handoff_id: "call_123".to_string(),
                  item_id: "item_123".to_string(),
                  input_transcript: "delegate this".to_string(),
-@@ -2033,6 +2810,13 @@ mod tests {
+@@ -2033,6 +2815,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::InputTranscriptDelta(
                  RealtimeTranscriptDelta {
@@ -3040,7 +3139,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      delta: "hello".to_string(),
                  }
              ))
-@@ -2051,6 +2835,15 @@ mod tests {
+@@ -2051,6 +2840,15 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::OutputTranscriptDone(
                  RealtimeTranscriptDone {
@@ -3056,7 +3155,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      text: "hello there".to_string(),
                  }
              ))
-@@ -2069,6 +2862,13 @@ mod tests {
+@@ -2069,6 +2867,13 @@ mod tests {
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::OutputTranscriptDone(
                  RealtimeTranscriptDone {
@@ -3070,7 +3169,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      text: "hello there".to_string(),
                  }
              ))
-@@ -2126,6 +2926,12 @@ mod tests {
+@@ -2126,6 +2931,12 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::AudioOut(RealtimeAudioFrame {
@@ -3083,7 +3182,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AQID".to_string(),
                  sample_rate: 24_000,
                  num_channels: 1,
-@@ -2140,13 +2946,19 @@ mod tests {
+@@ -2140,13 +2951,19 @@ mod tests {
          let payload = json!({
              "type": "response.audio.delta",
              "delta": "AQID",
@@ -3104,7 +3203,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AQID".to_string(),
                  sample_rate: 24_000,
                  num_channels: 1,
-@@ -2211,6 +3023,7 @@ mod tests {
+@@ -2211,6 +3028,7 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
@@ -3112,7 +3211,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  response_id: None
              }))
          );
-@@ -2227,6 +3040,7 @@ mod tests {
+@@ -2227,6 +3045,7 @@ mod tests {
          assert_eq!(
              parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::ResponseCreated(RealtimeResponseCreated {
@@ -3120,7 +3219,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  response_id: Some("resp_created_1".to_string())
              }))
          );
-@@ -2681,6 +3495,7 @@ mod tests {
+@@ -2681,6 +3500,7 @@ mod tests {
          let connection = client
              .connect(
                  RealtimeSessionConfig {
@@ -3128,7 +3227,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      v2: None,
                      instructions: "backend prompt".to_string(),
                      initial_items: Vec::new(),
-@@ -2713,6 +3528,12 @@ mod tests {
+@@ -2713,6 +3533,12 @@ mod tests {
  
          connection
              .send_audio_frame(RealtimeAudioFrame {
@@ -3141,7 +3240,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AQID".to_string(),
                  sample_rate: 48000,
                  num_channels: 1,
-@@ -2751,6 +3572,12 @@ mod tests {
+@@ -2751,6 +3577,12 @@ mod tests {
          assert_eq!(
              audio_event,
              RealtimeEvent::AudioOut(RealtimeAudioFrame {
@@ -3154,7 +3253,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AQID".to_string(),
                  sample_rate: 48000,
                  num_channels: 1,
-@@ -2767,6 +3594,13 @@ mod tests {
+@@ -2767,6 +3599,13 @@ mod tests {
          assert_eq!(
              input_delta_event,
              RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
@@ -3168,7 +3267,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  delta: "delegate ".to_string(),
              })
          );
-@@ -2779,6 +3613,13 @@ mod tests {
+@@ -2779,6 +3618,13 @@ mod tests {
          assert_eq!(
              input_delta_event,
              RealtimeEvent::InputTranscriptDelta(RealtimeTranscriptDelta {
@@ -3182,7 +3281,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  delta: "now".to_string(),
              })
          );
-@@ -2791,6 +3632,13 @@ mod tests {
+@@ -2791,6 +3637,13 @@ mod tests {
          assert_eq!(
              output_delta_event,
              RealtimeEvent::OutputTranscriptDelta(RealtimeTranscriptDelta {
@@ -3196,7 +3295,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  delta: "working".to_string(),
              })
          );
-@@ -2803,6 +3651,7 @@ mod tests {
+@@ -2803,6 +3656,7 @@ mod tests {
          assert_eq!(
              added_event,
              RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
@@ -3204,7 +3303,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  handoff_id: "handoff_1".to_string(),
                  item_id: "item_2".to_string(),
                  input_transcript: "delegate now".to_string(),
-@@ -3008,6 +3857,7 @@ mod tests {
+@@ -3008,6 +3862,7 @@ mod tests {
          let connection = client
              .connect(
                  RealtimeSessionConfig {
@@ -3212,7 +3311,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      v2: None,
                      instructions: "backend prompt".to_string(),
                      initial_items: Vec::new(),
-@@ -3136,6 +3986,7 @@ mod tests {
+@@ -3136,6 +3991,7 @@ mod tests {
          let connection = client
              .connect(
                  RealtimeSessionConfig {
@@ -3220,7 +3319,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      v2: None,
                      instructions: "backend prompt".to_string(),
                      initial_items: Vec::new(),
-@@ -3168,6 +4019,12 @@ mod tests {
+@@ -3168,6 +4024,12 @@ mod tests {
  
          connection
              .send_audio_frame(RealtimeAudioFrame {
@@ -3233,7 +3332,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                  data: "AQID".to_string(),
                  sample_rate: 24_000,
                  num_channels: 1,
-@@ -3243,6 +4100,7 @@ mod tests {
+@@ -3243,6 +4105,7 @@ mod tests {
          let connection = client
              .connect(
                  RealtimeSessionConfig {
@@ -3241,7 +3340,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      v2: None,
                      instructions: "backend prompt".to_string(),
                      initial_items: Vec::new(),
-@@ -3336,6 +4194,7 @@ mod tests {
+@@ -3336,6 +4199,7 @@ mod tests {
          let connection = client
              .connect(
                  RealtimeSessionConfig {
@@ -3249,7 +3348,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                      v2: None,
                      instructions: "backend prompt".to_string(),
                      initial_items: Vec::new(),
-@@ -3358,6 +4217,12 @@ mod tests {
+@@ -3358,6 +4222,12 @@ mod tests {
                  tokio::time::timeout(
                      Duration::from_millis(200),
                      connection.send_audio_frame(RealtimeAudioFrame {
@@ -3262,7 +3361,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
                          data: "AQID".to_string(),
                          sample_rate: 48000,
                          num_channels: 1,
-@@ -3510,9 +4375,26 @@ mod tests {
+@@ -3510,9 +4380,26 @@ mod tests {
              assert_eq!(first["session"]["audio"]["output"]["voice"], "marin");
              assert_eq!(first["session"]["audio"]["output"]["speed"], 0.75);
              assert!(first["session"].get("id").is_none());
@@ -3290,7 +3389,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              assert_eq!(
                  second,
                  json!({"type": "session.update", "session": {
-@@ -3535,6 +4417,7 @@ mod tests {
+@@ -3535,6 +4422,7 @@ mod tests {
              stream_idle_timeout: Duration::from_secs(5),
          });
          let config = RealtimeSessionConfig {
@@ -3298,7 +3397,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
              v2: Some(RealtimeV2SessionSettings {
                  turn_detection: Some(None),
                  output_speed: Some(0.75),
-@@ -3554,6 +4437,7 @@ mod tests {
+@@ -3554,6 +4442,7 @@ mod tests {
              .connect(config.clone(), HeaderMap::new(), HeaderMap::new())
              .await
              .unwrap();
@@ -3306,7 +3405,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          connection
              .writer()
              .send_session_patch(&RealtimeSessionUpdate {
-@@ -3619,12 +4503,16 @@ mod tests {
+@@ -3619,12 +4508,16 @@ mod tests {
          .boxed()
          .shared();
          let (_policy_tx, terminal_policy_error) = tokio::sync::watch::channel(None);
@@ -3323,7 +3422,7 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
          };
          let (_events_tx, events_rx) = async_channel::bounded(1);
          let connection = RealtimeWebsocketConnection::new(
-@@ -3653,4 +4541,771 @@ mod tests {
+@@ -3653,4 +4546,812 @@ mod tests {
          );
          writer.abort_and_join().await;
      }
@@ -3703,6 +3802,47 @@ index 33cba07f28b965beb7d163f0f56cf5bcee408812..82f180622d6e4f43c64d4b0f48b4d1e4
 +        connection.close().await.unwrap();
 +        server.await.unwrap();
 +    }
++    #[test]
++    fn hosted_catalog_structures_share_queue_permits_and_release_on_drop() {
++        use codex_protocol::protocol::{RealtimeHostedMcpListedTool, RealtimeHostedMcpToolsListed};
++        let event = RealtimeEvent::HostedMcpToolsListed(RealtimeHostedMcpToolsListed {
++            item_id: "catalog".into(),
++            server_label: "docs".into(),
++            tools: vec![
++                RealtimeHostedMcpListedTool {
++                    name: "x".into(),
++                    description: None,
++                    input_schema: serde_json::json!({}),
++                };
++                1024
++            ],
++        });
++        let budget = Arc::new(tokio::sync::Semaphore::new(SDK_WIRE_BYTES_CAPACITY));
++        let mut queued = Vec::new();
++        let mut rejected = false;
++        for _ in 0..17 {
++            let mut message =
++                QueuedWireMessage::new(Ok(Message::Text("{}".into())), Some(Arc::clone(&budget)))
++                    .unwrap();
++            if message
++                .charge_hosted_events(vec![event.clone()], Some(Arc::clone(&budget)))
++                .is_err()
++            {
++                rejected = true;
++                break;
++            }
++            queued.push(message);
++        }
++        assert!(
++            rejected,
++            "compact catalogs must charge their retained structure"
++        );
++        assert!(queued.len() > 1);
++        assert!(budget.available_permits() < SDK_WIRE_BYTES_CAPACITY);
++        drop(queued);
++        assert_eq!(budget.available_permits(), SDK_WIRE_BYTES_CAPACITY);
++    }
++
 +    #[test]
 +    fn four_tiny_final_frames_charge_derived_identity_to_shared_queue_bytes() {
 +        use super::super::readiness::SessionReadiness;
@@ -4651,10 +4791,10 @@ index ee0bba99461438b5ae24a1f3d283ab043546e1a3..492ed911fee8a17f692b020d268cd640
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dc7b32036482d3b2c6ae28b3a746b2d01bfb6aaa
+index 0000000000000000000000000000000000000000..45ef150f70d1b2151b2803b8ad25c07c59a0e8e9
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-@@ -0,0 +1,3312 @@
+@@ -0,0 +1,3353 @@
 +//! Connection-owned accepted configuration and its single pending revision.
 +use crate::ApiError;
 +use codex_protocol::agent_profile::AgentProfileReceipt;
@@ -7533,6 +7673,47 @@ index 0000000000000000000000000000000000000000..dc7b32036482d3b2c6ae28b3a746b2d0
 +            );
 +        }
 +    }
++    #[test]
++    fn hosted_catalog_rejects_compact_entry_and_schema_expansion() {
++        for tools in [
++            vec![json!({"name":"x","input_schema":{}}); 1025],
++            vec![json!({"name":"x","input_schema":{"anyOf":vec![json!({});33_000]}})],
++            // Count raw entries before filtering malformed tool declarations.
++            vec![json!({}); 1025],
++        ] {
++            let observer = accepted_hosted_observer();
++            let events = hosted_event(
++                &observer,
++                "conversation.item.done",
++                None,
++                json!({"type":"mcp_list_tools","id":"catalog","server_label":"docs","tools":tools}),
++            );
++            assert!(events.is_empty());
++            assert!(observer.mismatched());
++        }
++    }
++
++    #[test]
++    fn hosted_catalog_accepts_bounded_tools_without_changing_schemas() {
++        let observer = accepted_hosted_observer();
++        let schema = json!({"type":"object","properties":{"query":{"type":"string"}}});
++        let tools = vec![json!({"name":"search","input_schema":schema}); 1024];
++        let events = hosted_event(
++            &observer,
++            "conversation.item.done",
++            None,
++            json!({"type":"mcp_list_tools","id":"catalog","server_label":"docs","tools":tools}),
++        );
++        let [codex_protocol::protocol::RealtimeEvent::HostedMcpToolsListed(catalog)] =
++            events.as_slice()
++        else {
++            panic!("bounded catalog must remain observable");
++        };
++        assert_eq!(catalog.tools.len(), 1024);
++        assert_eq!(catalog.tools[0].input_schema, schema);
++        assert!(!observer.mismatched());
++    }
++
 +    #[test]
 +    fn hosted_export_budget_counts_repeated_retained_response_identity_before_cloning() {
 +        let observer = accepted_hosted_observer();
