@@ -64,12 +64,12 @@ def completed_event():
     }
 
 
-def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity():
+async def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity():
     with collector([503, 200]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(
             api_key="synthetic-key", endpoint=endpoint, max_retries=1
         )
-        exporter.on_trace_event(completed_event())
+        await exporter.on_trace_event(completed_event())
     assert len(received) == 2
     assert received[-1]["headers"]["Authorization"] == "Bearer synthetic-key"
     assert received[-1]["headers"]["OpenAI-Beta"] == "traces=v1"
@@ -83,27 +83,30 @@ def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity():
 
 
 @pytest.mark.parametrize("status", [302, 403, 429])
-def test_exporter_rejects_redirects_and_terminal_failure_without_secret_diagnostics(status):
+async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_diagnostics(status):
     with collector([status]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(
             api_key="synthetic-private-key", endpoint=endpoint, max_retries=3
         )
         with pytest.raises(RuntimeError) as failure:
-            exporter.on_trace_event(completed_event())
+            await exporter.on_trace_event(completed_event())
         assert str(failure.value) == "Native OpenAI trace export failed"
         assert failure.value.__cause__ is None
         assert len(received) == 1
 
 
-def test_real_native_capture_policy_and_openai_export():
+@pytest.mark.parametrize("case_name", ["native_case", "native_deadline_case"])
+def test_real_native_capture_policy_and_openai_export(case_name):
     env = dict(os.environ)
     env.pop("OPENAI_API_KEY", None)
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import asyncio; "
-            "from tests.test_native_trace_exporter import native_case; asyncio.run(native_case())",
+            "import asyncio, sys; "
+            "from tests import test_native_trace_exporter as cases; "
+            "asyncio.run(getattr(cases, sys.argv[1])())",
+            case_name,
         ],
         env=env,
         text=True,
@@ -176,3 +179,151 @@ async def native_case():
         assert exported["parent_id"] == "span_" + completed["parent_span_id"].rjust(24, "0")
         assert "synthetic completion" in exported["span_data"]["data"]["sdk.outcome.data"]
         await telemetry.shutdown()
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_export_deadline_and_cancellation_close_trickling_connection(cancelled):
+    import asyncio
+    import time
+
+    peer_closed = asyncio.Event()
+    handler_done = asyncio.Event()
+    request_started = asyncio.Event()
+
+    async def trickle(reader, writer):
+        eof = None
+        try:
+            header = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":", 1)[1])
+                for line in header.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            await reader.readexactly(length)
+            request_started.set()
+            writer.write(b"HTTP/1.1 200 OK\r\n")
+            await writer.drain()
+            eof = asyncio.create_task(reader.read())
+            for _ in range(30):
+                done, _ = await asyncio.wait((eof,), timeout=0.02)
+                if done:
+                    assert eof.result() == b""
+                    peer_closed.set()
+                    break
+                writer.write(b"X-Synthetic: header\r\n")
+                await writer.drain()
+            else:
+                writer.write(b"Content-Length: 0\r\n\r\n")
+                await writer.drain()
+        finally:
+            if eof is not None and not eof.done():
+                eof.cancel()
+                await asyncio.gather(eof, return_exceptions=True)
+            writer.close()
+            await writer.wait_closed()
+            handler_done.set()
+
+    server = await asyncio.start_server(trickle, "127.0.0.1", 0)
+    endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    exporter = telemetry.OpenAITraceExporter(
+        api_key="synthetic-key", endpoint=endpoint, timeout_ms=900 if cancelled else 50
+    )
+    started = time.monotonic()
+    delivery = asyncio.create_task(exporter.on_trace_event(completed_event()))
+    try:
+        if cancelled:
+            await asyncio.wait_for(request_started.wait(), 1)
+            delivery.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await delivery
+        else:
+            with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
+                await delivery
+        # The old per-read timeout could succeed after roughly 600 ms of headers.
+        assert time.monotonic() - started < 0.4
+        await asyncio.wait_for(peer_closed.wait(), 0.3)
+        await asyncio.wait_for(handler_done.wait(), 0.3)
+        assert delivery.done()
+        # The current callback loop remains usable for a subsequent delivery.
+        with collector() as (healthy_endpoint, requests):
+            recovered = telemetry.OpenAITraceExporter(
+                api_key="synthetic-key", endpoint=healthy_endpoint
+            )
+            await recovered.on_trace_event(completed_event())
+            assert len(requests) == 1
+    finally:
+        if not delivery.done():
+            delivery.cancel()
+            await asyncio.gather(delivery, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
+        await asyncio.wait_for(handler_done.wait(), 1)
+
+
+async def native_deadline_case():
+    import asyncio
+
+    requests = []
+    first_closed = asyncio.Event()
+    handlers = set()
+
+    async def receive(reader, writer):
+        handler = asyncio.current_task()
+        handlers.add(handler)
+        eof = None
+        try:
+            header = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":", 1)[1])
+                for line in header.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            requests.append(json.loads(await reader.readexactly(length)))
+            writer.write(b"HTTP/1.1 200 OK\r\n")
+            if len(requests) == 1:
+                eof = asyncio.create_task(reader.read())
+                for _ in range(30):
+                    done, _ = await asyncio.wait((eof,), timeout=0.02)
+                    if done:
+                        assert eof.result() == b""
+                        first_closed.set()
+                        return
+                    writer.write(b"X-Synthetic: header\r\n")
+                    await writer.drain()
+            writer.write(b"Content-Length: 0\r\n\r\n")
+            await writer.drain()
+        finally:
+            if eof is not None and not eof.done():
+                eof.cancel()
+                await asyncio.gather(eof, return_exceptions=True)
+            writer.close()
+            await writer.wait_closed()
+            handlers.discard(handler)
+
+    server = await asyncio.start_server(receive, "127.0.0.1", 0)
+    endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    try:
+        exporter = telemetry.OpenAITraceExporter(
+            api_key="synthetic-key", endpoint=endpoint, timeout_ms=50
+        )
+        await telemetry.configure(processors=[exporter])
+        with telemetry.trace("deadline-first"):
+            pass
+        flushed = await telemetry.force_flush()
+        assert flushed.status == "partial"
+        assert flushed.failed_deliveries >= 1
+        await asyncio.wait_for(first_closed.wait(), 0.3)
+        with telemetry.trace("recovered-after-deadline"):
+            pass
+        await telemetry.force_flush()
+        records = [record for request in requests for record in request["data"]]
+        assert any(
+            record.get("span_data", {}).get("name") == "recovered-after-deadline"
+            for record in records
+        )
+        await telemetry.shutdown()
+    finally:
+        server.close()
+        await server.wait_closed()
+        if handlers:
+            await asyncio.wait_for(asyncio.gather(*handlers), 1)

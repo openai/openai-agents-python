@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import http.client
+import asyncio
 import json
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -41,9 +41,11 @@ class OpenAITraceExporter:
     Pass an instance in configure(processors=[...]). Native flush barriers also
     wait for these deliveries. Each completed native span becomes a custom
     dashboard span with its native attributes, IDs and exact timestamps. The
-    processor performs bounded synchronous HTTP in its existing private worker;
-    no background queue, Classic span objects or additional runtime is created.
-    Failures are reported by the native processor delivery/flush counters.
+    Install ``openai-agents[tracing]`` to use this HTTP exporter. Each delivery
+    awaits one client and its transport cleanup within the existing processor
+    worker loop. No client is shared across loops and no background queue or
+    Classic span objects are created. Failures are reported by the native
+    processor delivery/flush counters.
     """
 
     def __init__(
@@ -83,6 +85,11 @@ class OpenAITraceExporter:
             or not 0 <= max_retries <= 3
         ):
             raise ValueError("max_retries must be an integer from 0 through 3")
+        try:
+            import httpx2
+        except ImportError:
+            raise ImportError("Install openai-agents[tracing] to use OpenAITraceExporter") from None
+        self._httpx = httpx2
         self._headers = {"Content-Type": "application/json", "OpenAI-Beta": "traces=v1"}
         self.set_api_key(api_key)
         for name, value in (("OpenAI-Organization", organization), ("OpenAI-Project", project)):
@@ -108,7 +115,7 @@ class OpenAITraceExporter:
         self._validate_header(api_key)
         self._headers["Authorization"] = "Bearer " + api_key
 
-    def on_trace_event(self, event: Mapping[str, Any]) -> None:
+    async def on_trace_event(self, event: Mapping[str, Any]) -> None:
         trace_id = "trace_" + event["trace_id"]
         records: list[dict[str, Any]] = []
         if trace_id not in self._traces:
@@ -146,42 +153,37 @@ class OpenAITraceExporter:
         if not records:
             return
         payload = json.dumps({"data": records}, allow_nan=False).encode()
-        self._send(payload, dict(self._headers))
+        deadline = monotonic() + self._timeout
+        try:
+            await asyncio.wait_for(self._send(payload, dict(self._headers)), timeout=self._timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Native OpenAI trace export failed") from None
+        if monotonic() > deadline:
+            raise RuntimeError("Native OpenAI trace export failed") from None
         self._traces[trace_id] = None
         self._traces.move_to_end(trace_id)
         if len(self._traces) > 1024:
             self._traces.popitem(last=False)
 
-    def _send(self, payload: bytes, headers: dict[str, str]) -> None:
-        deadline = monotonic() + self._timeout
-        for attempt in range(self._max_retries + 1):
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                break
-            connection_type = (
-                http.client.HTTPSConnection
-                if self._address.scheme == "https"
-                else http.client.HTTPConnection
-            )
-            connection = connection_type(
-                self._address.hostname, self._address.port, timeout=remaining
-            )
-            retry = False
-            try:
-                path = self._address.path or "/"
-                if self._address.query:
-                    path += "?" + self._address.query
-                connection.request("POST", path, payload, headers)
-                response = connection.getresponse()
-                if 200 <= response.status < 300:
-                    return
-                retry = response.status >= 500
-            except (OSError, http.client.HTTPException):
-                retry = True
-            finally:
-                connection.close()
-            if not retry or attempt == self._max_retries:
-                break
+    async def _send(self, payload: bytes, headers: dict[str, str]) -> None:
+        # Keep the client inside the delivery's timeout and cancellation scope.
+        # Streaming reads only headers; remote response bodies are never retained.
+        async with self._httpx.AsyncClient(
+            timeout=self._timeout, follow_redirects=False, trust_env=False
+        ) as client:
+            for attempt in range(self._max_retries + 1):
+                retry = False
+                try:
+                    async with client.stream(
+                        "POST", self._address.geturl(), content=payload, headers=headers
+                    ) as response:
+                        if 200 <= response.status_code < 300:
+                            return
+                        retry = response.status_code >= 500
+                except self._httpx.HTTPError:
+                    retry = True
+                if not retry or attempt == self._max_retries:
+                    break
         # Avoid exposing endpoints, request bodies, response bodies or credentials.
         raise RuntimeError("Native OpenAI trace export failed") from None
 
