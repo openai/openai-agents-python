@@ -69,7 +69,6 @@ async def test_committed_history_flush_failure_retires_live_session(responses, t
                 await (await restored.submit("continue")).get_result()
             ).final_output == "restored replacement"
         assert stale is None, "durable replacement failed but the old live history remained usable"
-    backend.close()
 
 
 async def test_atomic_canonical_history_replacement_and_restore(responses):
