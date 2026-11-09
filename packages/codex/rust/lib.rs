@@ -1360,6 +1360,7 @@ impl NativeThread {
                         | "inject_if_running"
                         | "inject_response_items"
                         | "realtime_conversation_prepare_sdk"
+                        | "realtime_conversation_config_sdk"
                 ) || (operation == "realtime_conversation_update_sdk"
                     && params
                         .get("profile")
