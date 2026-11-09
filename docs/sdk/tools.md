@@ -145,6 +145,8 @@ Choose what happens after a timeout.
 
 In result mode, supply `timeout_error_function(context, error)` to return your own error text after cleanup. The formatter can be synchronous or asynchronous. If it raises, the turn fails.
 
+A formatter whose first parameter is `ToolContext[Application]` uses the Session's application context. Pass `context=...` when you open the Session or run the Agent, even if the tool callback takes no context.
+
 ## Application context
 
 When a function needs application state, use `ToolContext[Application]` as its first parameter. The SDK supplies that parameter and excludes it from the schema the model receives. Pass the application value when opening or running the agent.
