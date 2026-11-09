@@ -14,9 +14,46 @@ When opening a Session:
 - Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
 - [Portable restore](state.md#save-and-restore-a-portable-checkpoint) keeps the saved model and settings instead.
 
-SDK version `0.24.0-alpha.7` or later also supports `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. This setting does not select a specific tool or add tool permissions. Use the [matching preview wheel](installation.md) for this option.
+SDK version `0.24.0-alpha.7` or later also supports `tool_choice` in `ModelSettings`, for example `model_settings={"tool_choice": "auto"}`. The default is `"auto"`. `"auto"` lets the model choose whether to call tools; `"none"` disables model tool calls; `"required"` requires a call to an offered tool. These string modes do not select a specific tool or add tool permissions. Use the [matching preview wheel](installation.md) for this option.
 
 An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
+
+### Additional controls in development builds
+
+The controls in this section require a [build from matching development source](installation.md#preview-availability). The alpha.7 wheel does not include these controls.
+
+Pass these fields through `model_settings` on the Agent, when opening a Session, or in an idle `session.update(model_settings=...)`. Omitted keys preserve the accepted settings. `None` clears the corresponding SDK override. Providers still determine which settings their models support and which numeric ranges they accept.
+
+| Setting | Value and effect |
+| --- | --- |
+| `max_output_tokens` | An integer from `0` through `2**64 - 1` for the output cap on an ordinary model request. Internal compaction and reviewer requests do not use this cap. This is separate from a run's total usage budget. |
+| `temperature`, `top_p` | Finite numbers forwarded as sampling controls. The provider owns their supported ranges and combinations. |
+| `top_logprobs` | An integer from `0` through `255`, requesting token alternatives where the provider supports them. |
+| `parallel_tool_calls` | A bool controlling model-side parallel tool calls. It does not set Python callback concurrency. |
+| `verbosity` | `"low"`, `"medium"`, or `"high"`, forwarded as response verbosity. |
+| `metadata` | A mapping of strings to strings attached to model requests. Keep credentials and private application data out of this mapping. |
+| `store` | A bool requesting provider-side response storage. `True` requires API-key authentication. Provider policy determines retention. |
+| `prompt_cache_retention` | `"in_memory"` or `"24h"`. |
+| `prompt_cache_ttl` | `"30m"` or `"12h"`, sent as `prompt_cache_options.ttl`. TTL and retention are independent; omitting one does not set the other. The provider determines cache behavior. |
+| `invocation_timeout_ms` | A positive integer through `4_294_967_295` setting a local deadline for each model invocation, including its internal waits and retries. |
+
+For example, this declaration requests a response cap and a local invocation deadline. It starts no model work:
+
+```python
+from agents import Agent
+
+agent = Agent(
+    instructions="Answer briefly.",
+    model="gpt-5.5",
+    model_settings={"max_output_tokens": 512, "invocation_timeout_ms": 30_000},
+)
+```
+
+Use a standard Responses model for the additional wire controls; known Responses Lite combinations fail locally rather than silently dropping settings. A provider rejection remains a failed request. The SDK does not remove a rejected setting and replay the work.
+
+An invocation deadline raises `NativeError` with `code="model_invocation_deadline_exceeded"`. It is separate from an application deadline for an entire turn: Python tool execution and application waits can outlast a model invocation. Cleanup can also finish after the deadline. An accepted terminal response disarms that invocation's clock before Python result settlement. Check earlier tool effects before retrying. To limit the whole wait, see [bound a wait and stop owned work](troubleshooting.md#bound-a-wait-and-stop-owned-work).
+
+Development builds also accept a `ToolRef` for `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
 
 ## Choose tools and workspace access
 

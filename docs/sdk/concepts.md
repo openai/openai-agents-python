@@ -4,7 +4,7 @@ The Agents SDK lets you build applications that use a model to reason and tools 
 
 The **Codex harness** is the runtime around the model. The model chooses what to do next; the harness carries out those choices through the capabilities you allow. You get Codex's execution model through a library that runs in a process you control.
 
-The native v1 API is under development. These guides describe `0.24.0-alpha.7` or later. Use the [guides for your installed build](versions.md). The [v0 comparison](#compare-with-v0240) below uses stable v0.24.0.
+The native v1 API is under development. These guides use `0.24.0-alpha.7` as the installation baseline and identify features that need a newer development build. Use the [guides for your installed build](versions.md). The [v0 comparison](#compare-with-v0240) below uses stable v0.24.0.
 
 ## What you can build
 
@@ -32,13 +32,13 @@ For one async answer, `await agent.run(input)` opens and closes its own Session.
 
 ## What runs in your worker
 
-Public `agents` imports forward to the private `_agents_codex` Python implementation. Python manages Sessions, validates values, and invokes application callbacks. The PyO3 extension connects Python to the embedded Codex Rust runtime. These components ship in one `openai-agents` distribution.
+The Python layer manages Sessions, validates values, and invokes your callbacks. A compiled extension connects it to the embedded Codex runtime. Both ship in the `openai-agents` distribution.
 
 ```mermaid
 flowchart TB
     subgraph Worker["Application process"]
         App["Application: Agent, Session, Turn"] --> SDK["Python runtime: validation and callbacks"]
-        SDK <--> Binding["PyO3 extension"]
+        SDK <--> Binding["Compiled extension"]
         Binding <--> Core["Codex: loop, context, conversation history"]
         SDK <--> Functions["Python functions and application context"]
     end
@@ -105,7 +105,9 @@ Application [`context`](tools.md#application-context) holds Python objects such 
 
 An ordinary Session lives in memory. Choose [storage](state.md#choose-how-to-store-a-conversation) before opening it. Portable `SessionState` captures eligible idle conversations or supported settled manual requests. Restore requires a matching Codex revision, compatible tools, and current callbacks, credentials, context, and permissions. Workspace files and live processes do not transfer.
 
-`LocalStorage` retains a native profile and Session ID; it cannot export portable checkpoints and rejects Code Mode on this branch. `CustomStorage` supports root conversations with automatic Python tools; it excludes MCP, workspace executors, and native children. Check [storage and capture limits](choosing.md#choose-feature-combinations) before combining capabilities.
+`LocalStorage` retains a native profile and Session ID; it cannot export portable checkpoints and rejects Code Mode on this branch.
+
+`CustomStorage` supports root conversations with automatic Python tools. It excludes MCP, workspace executors, and native children. Check [storage and capture limits](choosing.md#choose-feature-combinations) before combining capabilities.
 
 If a process stops after an external action but before its result is recorded, history cannot establish whether the action occurred. Check application records and [reconcile unknown effects](state.md#recover-after-interruption) before continuing. Use durable business operation IDs to deduplicate actions; storage does not guarantee exactly-once effects.
 

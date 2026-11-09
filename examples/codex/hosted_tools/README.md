@@ -1,6 +1,6 @@
 # Provider-hosted tools
 
-These examples use the native Agent loop with OpenAI Responses. The hosted tool declarations were added after `0.24.0-alpha.6`. Follow the [development-branch setup](../../../docs/sdk/installation.md#examples-and-upgrades), activate that Python environment, and use example files from the same build. Run the commands from the repository root. Supply `OPENAI_API_KEY` through your environment. Live requests can incur charges.
+These examples use the native Agent loop with OpenAI Responses. They are included in `0.24.0-alpha.7`. Follow the [installation guide](../../../docs/sdk/installation.md), install the preview wheel, and use the source archive from the same release. Activate that Python environment and run the commands from the archive root. Supply `OPENAI_API_KEY` through your environment. Live requests can incur charges.
 
 Each example selects `gpt-5.2` with OpenAI Responses. Account access and supported
 tool options can vary. This does not establish support for
