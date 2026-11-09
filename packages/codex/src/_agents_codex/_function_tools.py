@@ -49,6 +49,7 @@ from .manual import (
 from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
 from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
+from .realtime_result import BackgroundResult as BackgroundResult
 from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
@@ -147,9 +148,15 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
         ]
         | None
     ) = field(default=None, repr=False)
-    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None = (
-        field(default=None, repr=False)
-    )
+    after: (
+        Callable[
+            [ToolContext[Any], ToolOutput],
+            ToolOutput
+            | BackgroundResult[ToolOutput]
+            | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+        ]
+        | None
+    ) = field(default=None, repr=False)
     defer_loading: bool = False
     timeout_behavior: ToolTimeoutBehavior = "raise_exception"
     timeout_error_function: (
@@ -351,7 +358,10 @@ _BeforePolicy: TypeAlias = Callable[
     Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
 ]
 _AfterPolicy: TypeAlias = Callable[
-    [ToolContext[PolicyContextT], ToolOutput], ToolOutput | Awaitable[ToolOutput]
+    [ToolContext[PolicyContextT], ToolOutput],
+    ToolOutput
+    | BackgroundResult[ToolOutput]
+    | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
 ]
 _TimeoutFormatter: TypeAlias = Callable[
     [ToolContext[PolicyContextT], ToolTimeoutError], str | Awaitable[str]
@@ -496,7 +506,12 @@ def function_tool(
         Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments],
     ]
     | None = None,
-    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]]
+    after: Callable[
+        [ToolContext[Any], ToolOutput],
+        ToolOutput
+        | BackgroundResult[ToolOutput]
+        | Awaitable[ToolOutput | BackgroundResult[ToolOutput]],
+    ]
     | None = None,
     defer_loading: bool = False,
     timeout_behavior: ToolTimeoutBehavior = "raise_exception",

@@ -24,9 +24,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def cargo_build_options(
-    root: Path, environment: dict[str, str]
-) -> tuple[list[str], str | None]:
+def cargo_build_options(root: Path, environment: dict[str, str]) -> tuple[list[str], str | None]:
     """Use the same target and Codex CRT settings for every native artifact."""
     target = environment.get("CARGO_BUILD_TARGET")
     if sys.platform != "win32":
@@ -41,9 +39,7 @@ def cargo_build_options(
             check=True,
         ).stdout
         target = next(
-            line.removeprefix("host: ")
-            for line in rustc.splitlines()
-            if line.startswith("host: ")
+            line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: ")
         )
     return [
         "--config",
@@ -54,9 +50,7 @@ def cargo_build_options(
 
 
 def _checksums(path: Path) -> dict[str, str]:
-    return dict(
-        line.split()[::-1] for line in path.read_text().splitlines() if line.strip()
-    )
+    return dict(line.split()[::-1] for line in path.read_text().splitlines() if line.strip())
 
 
 def _download(url: str, destination: Path, checksum: str) -> Path:
@@ -64,7 +58,7 @@ def _download(url: str, destination: Path, checksum: str) -> Path:
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {destination.name}", file=sys.stderr)
-    for attempt in range(1, 4):
+    for attempt in range(3):
         try:
             with tempfile.NamedTemporaryFile(
                 dir=destination.parent, suffix=".part", delete=False
@@ -83,10 +77,10 @@ def _download(url: str, destination: Path, checksum: str) -> Path:
                     temporary.unlink(missing_ok=True)
             break
         except urllib.error.HTTPError as error:
-            if error.code not in (502, 503, 504) or attempt == 3:
+            if error.code not in {502, 503, 504} or attempt == 2:
                 raise
             error.close()
-            time.sleep(attempt)
+            time.sleep(attempt + 1)
     return destination
 
 
@@ -120,21 +114,15 @@ def build_environment(root: Path) -> dict[str, str]:
         check=True,
     ).stdout
     target = next(
-        line.removeprefix("host: ")
-        for line in rustc.splitlines()
-        if line.startswith("host: ")
+        line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: ")
     )
     if environment.get("CARGO_BUILD_TARGET", target) != target:
         raise ValueError("Automatic V8 downloads support native host builds only")
     with (root / "Cargo.lock").open("rb") as source:
         packages = tomllib.load(source)["package"]
-    version = next(
-        package["version"] for package in packages if package["name"] == "v8"
-    )
+    version = next(package["version"] for package in packages if package["name"] == "v8")
     manifest = (
-        root
-        / ".upstream/codex/third_party/v8"
-        / f"rusty_v8_{version.replace('.', '_')}.sha256"
+        root / ".upstream/codex/third_party/v8" / f"rusty_v8_{version.replace('.', '_')}.sha256"
     )
     checksums = _checksums(manifest)
     archive = (
@@ -149,9 +137,7 @@ def build_environment(root: Path) -> dict[str, str]:
     if binding not in checksums and keys[1] not in environment:
         # Windows binding digests are pinned indirectly via Codex's release manifests.
         release = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
-        release_pins = _checksums(
-            manifest.with_name(f"{manifest.stem}_release_manifests.sha256")
-        )
+        release_pins = _checksums(manifest.with_name(f"{manifest.stem}_release_manifests.sha256"))
         verified = _download(
             f"{base_url}/{release}", root / ".cache/v8" / release, release_pins[release]
         )
@@ -160,9 +146,7 @@ def build_environment(root: Path) -> dict[str, str]:
         if key in environment:
             continue
         # Upstream renames Windows downloads in its checksum manifest.
-        remote = filename.replace(
-            "rusty_v8_release_", "rusty_v8_ptrcomp_sandbox_release_"
-        )
+        remote = filename.replace("rusty_v8_release_", "rusty_v8_ptrcomp_sandbox_release_")
         path = _download(
             f"{base_url}/{remote}",
             root / ".cache/v8" / filename,

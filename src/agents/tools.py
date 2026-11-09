@@ -7,6 +7,7 @@ from _agents_codex.tools import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     Awaitable as Awaitable,
+    BackgroundResult as BackgroundResult,
     BaseModel as BaseModel,
     Callable as Callable,
     Checklist as Checklist,

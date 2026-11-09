@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
@@ -186,6 +188,83 @@ def test_supported_submodule_removal_fails(candidate: Path) -> None:
     assert result.returncode != 0
 
 
+def test_public_owner_maps_only_existing_facades(candidate: Path) -> None:
+    owner = runpy.run_path(str(SCRIPT))["_public_owner"]
+    owner.__globals__["ROOT"] = candidate
+    for name in ("agent", "_events", "_function_tools", "realtime", "voice.workflow"):
+        assert owner(f"_agents_codex.{name}") == f"agents.{name}"
+    for name in ("realtime_adapter", "realtime_guardrails", "realtime_result", "realtime_settings"):
+        assert owner(f"_agents_codex.{name}") == f"_agents_codex.{name}"
+    assert owner("typing") == "typing"
+
+
+def test_realtime_facade_captures_exports_and_actual_leaf_references(candidate: Path) -> None:
+    contract = runpy.run_path(str(SCRIPT))["_module_contract"]
+    contract.__globals__["ROOT"] = candidate
+    facade = importlib.import_module("agents.realtime")
+    result = contract(facade)
+    assert set(result["exports"]) == set(facade.__all__)
+    assert result["exports"]["background_result"] == "agents.realtime.background_result"
+    assert result["exports"]["NativeRealtimeAdapter"] == "agents.realtime.NativeRealtimeAdapter"
+    assert result["references"]["NativeRealtimeAdapter"] == (
+        "_agents_codex.realtime_adapter.NativeRealtimeAdapter"
+    )
+    assert result["references"]["RealtimeOutputGuardrail"] == (
+        "_agents_codex.realtime_guardrails.RealtimeOutputGuardrail"
+    )
+    assert result["references"]["NativeRealtimeSettings"] == (
+        "_agents_codex.realtime_settings.NativeRealtimeSettings"
+    )
+    assert result["references"]["background_result"] == (
+        "_agents_codex.realtime_result.background_result"
+    )
+
+
+@pytest.mark.parametrize(
+    ("leaf", "name", "before", "after"),
+    [
+        ("realtime_adapter", "NativeRealtimeAdapter", "model: str | None", "model: bytes | None"),
+        (
+            "realtime_guardrails",
+            "RealtimeOutputGuardrail",
+            "content_index: int",
+            "content_index: str",
+        ),
+        (
+            "realtime_settings",
+            "NativeRealtimeSessionUpdate",
+            "output_speed: float",
+            "output_speed: int",
+        ),
+        (
+            "realtime_result",
+            "background_result",
+            "def background_result(value: _ResultT)",
+            "def background_result(value: str)",
+        ),
+    ],
+)
+def test_private_realtime_leaf_schema_changes_are_retained(
+    candidate: Path, leaf: str, name: str, before: str, after: str
+) -> None:
+    contract = runpy.run_path(str(SCRIPT))["_module_contract"]
+    contract.__globals__["ROOT"] = candidate
+    # The traversal reads private owners with no public exports, selecting only
+    # declarations referenced from the facade or another retained declaration.
+    module = ModuleType(f"_agents_codex.{leaf}")
+    source = implementation(candidate, f"{leaf}.py")
+    module.__file__ = str(source)
+    module.__package__ = "_agents_codex"
+    original = contract(module, set(), include={name})
+    assert any(before in declaration for declaration in original["declarations"])
+    text = source.read_text()
+    assert before in text
+    source.write_text(text.replace(before, after, 1))
+    changed = contract(module, set(), include={name})
+    assert changed != original
+    assert any(after in declaration for declaration in changed["declarations"])
+
+
 @pytest.mark.parametrize(
     "replacement",
     ["from .agent import Agent as NativeProvider", "from .input import InputText as UserInput"],
@@ -349,6 +428,19 @@ def test_current_snapshot_covers_native_methods_and_types(candidate: Path) -> No
     assert {"ManualTool", "FunctionCallOutput"}.isdisjoint(api["root_exports"])
     assert "agents.observation" in api["modules"]
     assert "agents.state" in api["modules"]
+    assert {"background_result", "NativeRealtimeAdapter", "RealtimeConfig"} <= set(
+        api["modules"]["agents.realtime"]["exports"]
+    )
+    for leaf, declaration in (
+        ("realtime_adapter", "class NativeRealtimeAdapter("),
+        ("realtime_guardrails", "class RealtimeOutputGuardrail:"),
+        ("realtime_result", "def background_result("),
+        ("realtime_settings", "class NativeRealtimeSettings("),
+    ):
+        assert any(
+            declaration in item
+            for item in api["root_definitions"][f"_agents_codex.{leaf}"]["declarations"]
+        )
     assert api["modules"]["agents.input"]["exports"]["UserInput"] == "UserInput"
     assert api["modules"]["agents.observation"]["exports"]["Observation"] == "Observation"
     session_api = "\n".join(api["modules"]["agents.session"]["declarations"])

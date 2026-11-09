@@ -1008,10 +1008,10 @@ async def test_revoked_environment_cannot_issue_after_catalog_publication(
                         def __getattr__(self, name):
                             return getattr(native, name)
 
-                        async def _replace_tools(self, *args):
+                        async def _replace_tools(self, *args, **kwargs):
                             # Hold after Core really publishes, before Python receives the
                             # acknowledgement. Never replace the native generation receipt.
-                            self.receipt = await native._replace_tools(*args)
+                            self.receipt = await native._replace_tools(*args, **kwargs)
                             published.set()
                             await release.wait()
                             return self.receipt

@@ -51,6 +51,23 @@ pub struct Checkpoint {
     managed_tool_specs: Option<Value>,
 }
 
+/// Rebind the accepted active catalog to current declarations before allocation.
+pub(crate) fn restore_specs(
+    payload: &Value,
+    options: &mut options::ThreadOptions,
+    specs: Option<Vec<DynamicToolSpec>>,
+) -> anyhow::Result<Option<Vec<DynamicToolSpec>>> {
+    let Some(opening) = &options.agent_profiles else {
+        return Ok(specs);
+    };
+    ensure!(specs.is_some(), "Agent profiles require managed tools");
+    let history: Vec<RolloutItem> = serde_json::from_value(payload["history"].clone())?;
+    let (specs, manual_slots) =
+        opening.restore_catalog(&history, &payload["managed_tool_specs"])?;
+    options.manual_tool_slots = manual_slots;
+    Ok(Some(specs))
+}
+
 impl Checkpoint {
     fn check_revision(&self) -> anyhow::Result<()> {
         ensure!(
@@ -205,18 +222,19 @@ struct Descendant {
 }
 
 pub async fn export(state: &ThreadState, pending: Option<&Value>) -> anyhow::Result<Value> {
-    export_inner(state, pending, false, None).await
+    export_inner(state, pending, false, None, None).await
 }
 
 pub(crate) async fn export_suspended(
     state: &ThreadState,
     code_states: &CodeStates,
+    managed_specs: &Value,
 ) -> anyhow::Result<Value> {
     ensure!(
         matches!(state.thread.agent_status().await, AgentStatus::Shutdown),
         "Manual checkpoint requires a closed Core writer"
     );
-    export_inner(state, None, true, Some(code_states)).await
+    export_inner(state, None, true, Some(code_states), Some(managed_specs)).await
 }
 
 // The manual owner holds the native mutation gate and validates its live
@@ -234,7 +252,7 @@ pub(crate) async fn export_restored_manual(state: &ThreadState) -> anyhow::Resul
             ),
         "Manual reentry requires an idle, open Core thread"
     );
-    export_inner(state, None, true, None).await
+    export_inner(state, None, true, None, None).await
 }
 
 struct ManualDescendants {
@@ -481,6 +499,7 @@ async fn export_inner(
     pending: Option<&Value>,
     suspended: bool,
     captured_code: Option<&CodeStates>,
+    captured_specs: Option<&Value>,
 ) -> anyhow::Result<Value> {
     let tools = state
         .thread
@@ -492,7 +511,13 @@ async fn export_inner(
         } else if !suspended {
             tools.check_idle(&state.thread).await?;
         }
-        Some(tools.current_specs()?)
+        Some(match captured_specs {
+            Some(specs) => specs.clone(),
+            None => match crate::agent_profiles::active_specs(&state.thread).await? {
+                Some(specs) => specs,
+                None => tools.current_specs()?,
+            },
+        })
     } else {
         if let Some(key) = pending {
             check_capture(state, key)?;
@@ -769,11 +794,25 @@ pub async fn restore(
             Ok(_) => anyhow::bail!("checkpoint thread already exists in this engine"),
         }
     }
-    let application_instructions = options
-        .application_instructions
-        .as_deref()
-        .map(|expected| crate::application_instructions::validate(&checkpoint.history, expected))
-        .transpose()?;
+    let agent_profiles = options.agent_profiles.take();
+    let has_agent_profiles = agent_profiles.is_some();
+    ensure!(
+        !has_agent_profiles || python_specs.is_some(),
+        "Agent profiles require managed tools"
+    );
+    let application_instructions = match &agent_profiles {
+        Some(profiles) => Some(crate::agent_profiles::validate_restored(
+            profiles,
+            &checkpoint.history,
+        )?),
+        None => options
+            .application_instructions
+            .as_deref()
+            .map(|expected| {
+                crate::application_instructions::validate(&checkpoint.history, expected)
+            })
+            .transpose()?,
+    };
     let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let transform_context = options.transform_context;
@@ -806,6 +845,13 @@ pub async fn restore(
             history_revision: None,
             rollout_path: None,
         });
+        if let Some(profiles) = agent_profiles {
+            crate::agent_profiles::install_opening(
+                &mut startup,
+                profiles,
+                current_files.clone().unwrap_or_default(),
+            )?;
+        }
         crate::python_tools::PythonTools::install_manual(
             &mut startup,
             specs,
@@ -835,19 +881,23 @@ pub async fn restore(
     // Core's public injection API. Core creates its real context before it
     // records and acknowledges the same receipt. Native and nonempty histories
     // keep their original reconstruction path.
-    let initial_receipt = application_instructions.as_ref().and_then(|accepted| {
-        crate::application_instructions::take_initial_receipt(
-            &mut checkpoint.history,
-            accepted,
-            root,
-        )
-    });
+    let initial_receipt = application_instructions
+        .as_ref()
+        .filter(|_| !has_agent_profiles)
+        .and_then(|accepted| {
+            crate::application_instructions::take_initial_receipt(
+                &mut checkpoint.history,
+                accepted,
+                root,
+            )
+        });
     if initial_receipt.is_none() {
-        if let Some(accepted) = application_instructions {
+        if let Some(mut accepted) = application_instructions {
+            if !has_agent_profiles {
+                accepted = accepted.with_current_files(current_files.take());
+            }
             startup.thread_extension_init.insert(
-                crate::application_instructions::Instructions::restored(
-                    accepted.with_current_files(current_files.take()),
-                ),
+                crate::application_instructions::Instructions::restored(accepted),
             );
         }
     }
@@ -999,6 +1049,7 @@ async fn import(
         .store
         .create_checkpoint_thread(
             CreateThreadParams {
+                sdk_mcp_source_required: meta.sdk_mcp_source_required,
                 creator_user_id: meta.creator_user_id,
                 creator_account_id: meta.creator_account_id,
                 session_id: meta.session_id,

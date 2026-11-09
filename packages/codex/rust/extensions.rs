@@ -139,6 +139,9 @@ pub fn build(
     builder.tool_contributor(python_tools.clone());
     builder.thread_lifecycle_contributor(python_tools.clone());
     builder.turn_lifecycle_contributor(python_tools.clone());
+    let agent_profiles = Arc::new(crate::agent_profiles::Contributor);
+    builder.tool_contributor(agent_profiles.clone());
+    builder.turn_lifecycle_contributor(agent_profiles);
     builder.turn_lifecycle_contributor(Arc::new(crate::python_tools::GraphFenceContributor {
         manager: manager.clone(),
     }));

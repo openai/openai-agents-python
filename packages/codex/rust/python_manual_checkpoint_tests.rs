@@ -116,7 +116,7 @@ async fn automatic_reply_waits_for_core_terminal_before_sealing() {
                 let response: DynamicToolResponse = serde_json::from_value(json!({
                     "contentItems":[{"type":"inputText","text":"known-B"}], "success":true
                 })).unwrap();
-                sender.send(response).unwrap();
+                sender.send(response.into()).unwrap();
             }
         }
         hold.entered.acquire().await.unwrap().forget();

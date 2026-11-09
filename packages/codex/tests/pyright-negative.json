@@ -1,6 +1,7 @@
 {
   "include": [
-    "test_native_agent_typing_errors.py"
+    "test_native_agent_typing_errors.py",
+    "test_agent_profile_typing.py"
   ],
   "extraPaths": [
     "../../../src",

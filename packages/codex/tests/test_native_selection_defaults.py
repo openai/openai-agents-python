@@ -278,8 +278,8 @@ async def test_cancelled_update_joins_native_receipt_before_default_publication(
 
         # The real native generation is accepted first. Only the receipt delivery
         # is held: this boundary cannot be controlled by a provider response.
-        async def delayed(native, *args):
-            receipt = await original(native, *args)
+        async def delayed(native, *args, **kwargs):
+            receipt = await original(native, *args, **kwargs)
             accepted.set()
             await release.wait()
             return receipt

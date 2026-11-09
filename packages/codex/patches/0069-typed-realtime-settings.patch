@@ -1,0 +1,1062 @@
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index e846ffec067f08a72319286f2e2ac5c60cbadac6..f2e43cd1804fa5999259c157706b422187a993c7 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -33,3 +33,24 @@ pub use responses_websocket::ResponsesWebsocketClose;
+ pub use responses_websocket::ResponsesWebsocketConnection;
+ pub use responses_websocket::ResponsesWebsocketProbe;
+ pub use search::SearchClient;
++
++pub use realtime_websocket::RealtimeAudioFormat;
++pub use realtime_websocket::RealtimeImageDetail;
++pub use realtime_websocket::RealtimeMaxOutputTokens;
++pub use realtime_websocket::RealtimeNoiseReduction;
++pub use realtime_websocket::RealtimeOutputVoice;
++pub use realtime_websocket::RealtimePrompt;
++pub use realtime_websocket::RealtimePromptContent;
++pub use realtime_websocket::RealtimePromptVariable;
++pub use realtime_websocket::RealtimeProviderTracing;
++pub use realtime_websocket::RealtimeReasoning;
++pub use realtime_websocket::RealtimeSessionUpdate;
++pub use realtime_websocket::RealtimeTracingAuto;
++pub use realtime_websocket::RealtimeTracingConfig;
++pub use realtime_websocket::RealtimeTranscription;
++pub use realtime_websocket::RealtimeTranscriptionDelay;
++pub use realtime_websocket::RealtimeTurnDetection;
++pub use realtime_websocket::RealtimeUnlimitedTokens;
++pub use realtime_websocket::RealtimeV2SessionSettings;
++pub use realtime_websocket::RealtimeVadEagerness;
++pub use realtime_websocket::realtime_v2_session_update_json;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+index b43e02d9b037a1b665e058fbd804e000486ae7e8..d8e7c58c82d90fb6208b03934e07c89a59ee42d8 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+@@ -387,6 +387,7 @@ mod tests {
+ 
+     fn realtime_session_config(session_id: &str) -> RealtimeSessionConfig {
+         RealtimeSessionConfig {
++            v2: None,
+             instructions: "hi".to_string(),
+             initial_items: Vec::new(),
+             delegation_ack_filler: None,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 1b09a358545d7946322dfaa0c6757a3870df39c0..33cba07f28b965beb7d163f0f56cf5bcee408812 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -504,6 +504,24 @@ impl RealtimeWebsocketWriter {
+             .await
+     }
+ 
++    /// Apply only named public V2 settings through this connection's writer.
++    pub async fn send_session_patch(
++        &self,
++        update: &super::settings::RealtimeSessionUpdate,
++    ) -> Result<(), ApiError> {
++        if self.event_parser != RealtimeEventParser::RealtimeV2 {
++            return Err(ApiError::InvalidRequest {
++                message: "Public V2 settings require the RealtimeV2 protocol".to_string(),
++            });
++        }
++        let payload = super::settings::realtime_v2_session_update_json(update).map_err(|err| {
++            ApiError::InvalidRequest {
++                message: err.to_string(),
++            }
++        })?;
++        self.send_payload(payload.to_string()).await
++    }
++
+     pub async fn send_session_update(
+         &self,
+         instructions: String,
+@@ -1132,6 +1150,19 @@ impl RealtimeWebsocketClient {
+         session_initialization: RealtimeSessionInitialization,
+         transcript_state: RealtimeTranscriptState,
+     ) -> Result<RealtimeWebsocketConnection, ApiError> {
++        // Validate settings and encode the initial update before creating a transport.
++        let v2_initial_update = if config.v2.is_some() {
++            // This identifier is a request header, not a provider session ID.
++            let mut initial_config = config.clone();
++            initial_config.session_id = None;
++            let session = super::methods_common::session_update_session_json(initial_config)
++                .map_err(|err| ApiError::InvalidRequest {
++                    message: err.to_string(),
++                })?;
++            Some(serde_json::json!({"type": "session.update", "session": session}).to_string())
++        } else {
++            None
++        };
+         ensure_rustls_crypto_provider();
+ 
+         let mut request = ws_url
+@@ -1196,17 +1227,21 @@ impl RealtimeWebsocketClient {
+                 session_id = config.session_id.as_deref().unwrap_or("<none>"),
+                 "realtime websocket sending session.update"
+             );
+-            connection
+-                .writer
+-                .send_session_update(
+-                    config.instructions,
+-                    config.initial_items,
+-                    config.session_mode,
+-                    config.output_modality,
+-                    config.voice,
+-                    config.delegation_ack_filler,
+-                )
+-                .await?;
++            if let Some(payload) = v2_initial_update {
++                connection.writer.send_payload(payload).await?;
++            } else {
++                connection
++                    .writer
++                    .send_session_update(
++                        config.instructions,
++                        config.initial_items,
++                        config.session_mode,
++                        config.output_modality,
++                        config.voice,
++                        config.delegation_ack_filler,
++                    )
++                    .await?;
++            }
+         }
+         if matches!(
+             session_initialization,
+@@ -2646,6 +2681,7 @@ mod tests {
+         let connection = client
+             .connect(
+                 RealtimeSessionConfig {
++                    v2: None,
+                     instructions: "backend prompt".to_string(),
+                     initial_items: Vec::new(),
+                     delegation_ack_filler: None,
+@@ -2972,6 +3008,7 @@ mod tests {
+         let connection = client
+             .connect(
+                 RealtimeSessionConfig {
++                    v2: None,
+                     instructions: "backend prompt".to_string(),
+                     initial_items: Vec::new(),
+                     delegation_ack_filler: None,
+@@ -3099,6 +3136,7 @@ mod tests {
+         let connection = client
+             .connect(
+                 RealtimeSessionConfig {
++                    v2: None,
+                     instructions: "backend prompt".to_string(),
+                     initial_items: Vec::new(),
+                     delegation_ack_filler: None,
+@@ -3205,6 +3243,7 @@ mod tests {
+         let connection = client
+             .connect(
+                 RealtimeSessionConfig {
++                    v2: None,
+                     instructions: "backend prompt".to_string(),
+                     initial_items: Vec::new(),
+                     delegation_ack_filler: None,
+@@ -3297,6 +3336,7 @@ mod tests {
+         let connection = client
+             .connect(
+                 RealtimeSessionConfig {
++                    v2: None,
+                     instructions: "backend prompt".to_string(),
+                     initial_items: Vec::new(),
+                     delegation_ack_filler: None,
+@@ -3450,6 +3490,114 @@ mod tests {
+             .unwrap();
+         server.abort();
+     }
++
++    #[tokio::test]
++    async fn public_v2_settings_use_the_existing_writer_without_resetting_other_fields() {
++        use super::super::settings::RealtimeSessionUpdate;
++        use super::super::settings::RealtimeV2SessionSettings;
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (stream, _) = listener.accept().await.unwrap();
++            let mut ws = accept_async(stream).await.unwrap();
++            let first: Value =
++                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
++                    .unwrap();
++            assert_eq!(
++                first["session"]["audio"]["input"]["turn_detection"],
++                Value::Null
++            );
++            assert_eq!(first["session"]["audio"]["output"]["voice"], "marin");
++            assert_eq!(first["session"]["audio"]["output"]["speed"], 0.75);
++            assert!(first["session"].get("id").is_none());
++            let second: Value =
++                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
++                    .unwrap();
++            assert_eq!(
++                second,
++                json!({"type": "session.update", "session": {
++                    "type": "realtime", "audio": {"output": {"speed": 1.25}}
++                }})
++            );
++        });
++        let client = test_client(Provider {
++            name: "test".into(),
++            base_url: format!("http://{addr}"),
++            query_params: None,
++            headers: HeaderMap::new(),
++            retry: crate::provider::RetryConfig {
++                max_attempts: 1,
++                base_delay: Duration::from_millis(1),
++                retry_429: false,
++                retry_5xx: false,
++                retry_transport: false,
++            },
++            stream_idle_timeout: Duration::from_secs(5),
++        });
++        let config = RealtimeSessionConfig {
++            v2: Some(RealtimeV2SessionSettings {
++                turn_detection: Some(None),
++                output_speed: Some(0.75),
++                ..Default::default()
++            }),
++            instructions: "brief".into(),
++            initial_items: vec![],
++            delegation_ack_filler: None,
++            model: Some("gpt-realtime".into()),
++            session_id: Some("native-conversation".into()),
++            event_parser: RealtimeEventParser::RealtimeV2,
++            session_mode: RealtimeSessionMode::Conversational,
++            output_modality: RealtimeOutputModality::Audio,
++            voice: RealtimeVoice::Marin,
++        };
++        let connection = client
++            .connect(config.clone(), HeaderMap::new(), HeaderMap::new())
++            .await
++            .unwrap();
++        connection
++            .writer()
++            .send_session_patch(&RealtimeSessionUpdate {
++                settings: RealtimeV2SessionSettings {
++                    output_speed: Some(1.25),
++                    ..Default::default()
++                },
++                ..Default::default()
++            })
++            .await
++            .unwrap();
++        server.await.unwrap();
++
++        // Invalid settings must fail before an otherwise valid transport accepts anything.
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let client = test_client(Provider {
++            name: "test".into(),
++            base_url: format!("http://{}", listener.local_addr().unwrap()),
++            query_params: None,
++            headers: HeaderMap::new(),
++            retry: crate::provider::RetryConfig {
++                max_attempts: 1,
++                base_delay: Duration::from_millis(1),
++                retry_429: false,
++                retry_5xx: false,
++                retry_transport: false,
++            },
++            stream_idle_timeout: Duration::from_secs(5),
++        });
++        let mut invalid = config;
++        invalid.v2.as_mut().unwrap().output_speed = Some(f64::NAN);
++        assert!(matches!(
++            client
++                .connect(invalid, HeaderMap::new(), HeaderMap::new())
++                .await,
++            Err(ApiError::InvalidRequest { .. })
++        ));
++        assert!(
++            tokio::time::timeout(Duration::from_millis(20), listener.accept())
++                .await
++                .is_err()
++        );
++    }
++
+     #[tokio::test]
+     async fn sdk_wire_overflow_survives_pending_write_ack_and_closed_fast_path() {
+         let (tx_command, mut rx_command) = mpsc::channel(1);
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+index e5482e013467bafe2506cbc6ccb3af8a51d9e6dc..62e2fcc715415dca33aff50db189ead8dca57f6e 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+@@ -138,6 +138,11 @@ pub(super) fn session_update_message(
+ }
+ 
+ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<Value> {
++    if config.v2.is_some() && config.event_parser != RealtimeWireAdapter::RealtimeV2 {
++        return Err(serde::ser::Error::custom(
++            "Public V2 settings require the RealtimeV2 protocol",
++        ));
++    }
+     match config.event_parser {
+         RealtimeWireAdapter::V1 | RealtimeWireAdapter::RealtimeV2 => {
+             let mut session = match config.event_parser {
+@@ -154,7 +159,11 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
+             };
+             session.id = config.session_id;
+             session.model = config.model;
+-            to_value(session)
++            let mut session = to_value(session)?;
++            if let Some(settings) = &config.v2 {
++                settings.apply(session.as_object_mut().expect("typed session object"))?;
++            }
++            Ok(session)
+         }
+         RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(
+             config.model,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+index e954e489a57b2612b7c306d48307d26148560a4a..22e99e57f8deb1daa88f55e6be39813b755e0698 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+@@ -8,6 +8,7 @@ mod protocol_common;
+ mod protocol_frameless_bidi;
+ mod protocol_v1;
+ mod protocol_v2;
++mod settings;
+ 
+ pub use methods::RealtimeTranscriptState;
+ pub use methods::RealtimeWebsocketClient;
+@@ -20,3 +21,24 @@ pub use protocol::RealtimeEventParser;
+ pub use protocol::RealtimeOutputModality;
+ pub use protocol::RealtimeSessionConfig;
+ pub use protocol::RealtimeSessionMode;
++
++pub use settings::RealtimeAudioFormat;
++pub use settings::RealtimeImageDetail;
++pub use settings::RealtimeMaxOutputTokens;
++pub use settings::RealtimeNoiseReduction;
++pub use settings::RealtimeOutputVoice;
++pub use settings::RealtimePrompt;
++pub use settings::RealtimePromptContent;
++pub use settings::RealtimePromptVariable;
++pub use settings::RealtimeProviderTracing;
++pub use settings::RealtimeReasoning;
++pub use settings::RealtimeSessionUpdate;
++pub use settings::RealtimeTracingAuto;
++pub use settings::RealtimeTracingConfig;
++pub use settings::RealtimeTranscription;
++pub use settings::RealtimeTranscriptionDelay;
++pub use settings::RealtimeTurnDetection;
++pub use settings::RealtimeUnlimitedTokens;
++pub use settings::RealtimeV2SessionSettings;
++pub use settings::RealtimeVadEagerness;
++pub use settings::realtime_v2_session_update_json;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+index b7fc073dfa2a6294c92499c9270b04e4d843dc5d..9d37cd19957e382d3353bceb2ca630456cef7af1 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+@@ -34,8 +34,10 @@ pub enum RealtimeContextAppendChannel {
+     Commentary,
+ }
+ 
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq)]
+ pub struct RealtimeSessionConfig {
++    /// Public V2 settings; None preserves the legacy protocol defaults.
++    pub v2: Option<super::settings::RealtimeV2SessionSettings>,
+     pub instructions: String,
+     pub initial_items: Vec<ConversationTextParams>,
+     pub delegation_ack_filler: Option<bool>,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8346fff5f84228e69529bbc11aeaca6c3796992
+--- /dev/null
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -0,0 +1,579 @@
++//! Typed public Realtime V2 settings. Omitted update fields retain provider state.
++use std::collections::BTreeMap;
++
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Map;
++use serde_json::Value;
++
++use super::protocol::RealtimeOutputModality;
++
++// serde's ordinary nested Option decoding collapses a present null into None.
++fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++    T: Deserialize<'de>,
++{
++    Option::<T>::deserialize(deserializer).map(Some)
++}
++
++/// Optional initial overrides and sparse updates. Nullable fields distinguish omission from disabling.
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeV2SessionSettings {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub input_format: Option<RealtimeAudioFormat>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_format: Option<RealtimeAudioFormat>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub noise_reduction: Option<Option<RealtimeNoiseReduction>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub transcription: Option<Option<RealtimeTranscription>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub turn_detection: Option<Option<RealtimeTurnDetection>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_voice: Option<RealtimeOutputVoice>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_speed: Option<f64>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub prompt: Option<Option<RealtimePrompt>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        deserialize_with = "present_nullable"
++    )]
++    pub tracing: Option<Option<RealtimeProviderTracing>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub max_output_tokens: Option<RealtimeMaxOutputTokens>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub parallel_tool_calls: Option<bool>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub reasoning: Option<RealtimeReasoning>,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeSessionUpdate {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub instructions: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_modality: Option<RealtimeOutputModality>,
++    #[serde(flatten)]
++    pub settings: RealtimeV2SessionSettings,
++}
++
++/// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeAudioFormat {
++    #[serde(rename = "pcm16")]
++    Pcm24k,
++    #[serde(rename = "g711_ulaw")]
++    G711Ulaw,
++    #[serde(rename = "g711_alaw")]
++    G711Alaw,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimeNoiseReduction {
++    NearField,
++    FarField,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeTranscription {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub language: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub prompt: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub keywords: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub languages: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub delay: Option<RealtimeTranscriptionDelay>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeTranscriptionDelay {
++    Minimal,
++    Low,
++    Medium,
++    High,
++    Xhigh,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeVadEagerness {
++    Auto,
++    Low,
++    Medium,
++    High,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeImageDetail {
++    Auto,
++    Low,
++    High,
++    Original,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimeTurnDetection {
++    ServerVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        create_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        interrupt_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        threshold: Option<f64>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        prefix_padding_ms: Option<u32>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        silence_duration_ms: Option<u32>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        idle_timeout_ms: Option<u32>,
++    },
++    SemanticVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        create_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        interrupt_response: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        eagerness: Option<RealtimeVadEagerness>,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeOutputVoice {
++    Named(String),
++    Custom { id: String },
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RealtimePrompt {
++    pub id: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub version: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub variables: Option<BTreeMap<String, RealtimePromptVariable>>,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimePromptVariable {
++    String(String),
++    Content(RealtimePromptContent),
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum RealtimePromptContent {
++    InputText {
++        text: String,
++    },
++    InputImage {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        image_url: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_id: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        detail: Option<RealtimeImageDetail>,
++    },
++    InputFile {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_url: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_id: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        file_data: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        filename: Option<String>,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeProviderTracing {
++    Auto(RealtimeTracingAuto),
++    Config(RealtimeTracingConfig),
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeTracingAuto {
++    #[serde(rename = "auto")]
++    Auto,
++}
++
++/// Provider trace configuration, independent of client span export. Group IDs correlate traces.
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeTracingConfig {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub workflow_name: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub group_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub metadata: Option<Value>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(untagged)]
++pub enum RealtimeMaxOutputTokens {
++    Count(u32),
++    Unlimited(RealtimeUnlimitedTokens),
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++pub enum RealtimeUnlimitedTokens {
++    #[serde(rename = "inf")]
++    Inf,
++}
++
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++pub struct RealtimeReasoning {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub effort: Option<String>,
++}
++
++fn put<T: Serialize>(
++    map: &mut Map<String, Value>,
++    key: &str,
++    value: &Option<T>,
++) -> serde_json::Result<()> {
++    if let Some(value) = value {
++        map.insert(key.to_string(), serde_json::to_value(value)?);
++    }
++    Ok(())
++}
++
++fn format_value(format: RealtimeAudioFormat) -> Value {
++    match format {
++        RealtimeAudioFormat::Pcm24k => serde_json::json!({"type": "audio/pcm", "rate": 24000}),
++        RealtimeAudioFormat::G711Ulaw => serde_json::json!({"type": "audio/pcmu"}),
++        RealtimeAudioFormat::G711Alaw => serde_json::json!({"type": "audio/pcma"}),
++    }
++}
++
++impl RealtimeV2SessionSettings {
++    pub(super) fn validate(&self) -> serde_json::Result<()> {
++        let threshold = match &self.turn_detection {
++            Some(Some(RealtimeTurnDetection::ServerVad { threshold, .. })) => *threshold,
++            _ => None,
++        };
++        if self.output_speed.is_some_and(|speed| !speed.is_finite())
++            || threshold.is_some_and(|value| !value.is_finite())
++        {
++            return Err(serde::ser::Error::custom(
++                "Realtime numeric settings must be finite",
++            ));
++        }
++        Ok(())
++    }
++
++    // Only named leaves are replaced; initial defaults and sparse updates use
++    // the same mapping without maintaining another copy of session state.
++    pub(super) fn apply(&self, session: &mut Map<String, Value>) -> serde_json::Result<()> {
++        self.validate()?;
++        put(session, "prompt", &self.prompt)?;
++        put(session, "tracing", &self.tracing)?;
++        put(session, "max_output_tokens", &self.max_output_tokens)?;
++        put(session, "parallel_tool_calls", &self.parallel_tool_calls)?;
++        put(session, "reasoning", &self.reasoning)?;
++        let mut input = Map::new();
++        if let Some(format) = self.input_format {
++            input.insert("format".into(), format_value(format));
++        }
++        put(&mut input, "noise_reduction", &self.noise_reduction)?;
++        put(&mut input, "transcription", &self.transcription)?;
++        put(&mut input, "turn_detection", &self.turn_detection)?;
++        let mut output = Map::new();
++        if let Some(format) = self.output_format {
++            output.insert("format".into(), format_value(format));
++        }
++        put(&mut output, "voice", &self.output_voice)?;
++        put(&mut output, "speed", &self.output_speed)?;
++        if !input.is_empty() || !output.is_empty() {
++            let audio = session
++                .entry("audio")
++                .or_insert_with(|| Value::Object(Map::new()));
++            let audio = audio.as_object_mut().expect("typed audio object");
++            for (name, fields) in [("input", input), ("output", output)] {
++                if !fields.is_empty() {
++                    let section = audio
++                        .entry(name)
++                        .or_insert_with(|| Value::Object(Map::new()));
++                    section
++                        .as_object_mut()
++                        .expect("typed audio section")
++                        .extend(fields);
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++/// Build a sparse public V2 session.update event without connecting to a provider.
++/// Only supplied fields are sent. The provider owns phase-dependent mutability.
++pub fn realtime_v2_session_update_json(
++    update: &RealtimeSessionUpdate,
++) -> serde_json::Result<Value> {
++    let mut session = Map::new();
++    session.insert("type".into(), Value::String("realtime".into()));
++    put(&mut session, "model", &update.model)?;
++    put(&mut session, "instructions", &update.instructions)?;
++    if let Some(modality) = update.output_modality {
++        let value = match modality {
++            RealtimeOutputModality::Text => "text",
++            RealtimeOutputModality::Audio => "audio",
++        };
++        session.insert("output_modalities".into(), serde_json::json!([value]));
++    }
++    update.settings.apply(&mut session)?;
++    Ok(serde_json::json!({"type": "session.update", "session": session}))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::endpoint::realtime_websocket::protocol::RealtimeEventParser;
++    use crate::endpoint::realtime_websocket::protocol::RealtimeSessionConfig;
++    use crate::endpoint::realtime_websocket::protocol::RealtimeSessionMode;
++    use crate::endpoint::realtime_websocket::protocol::RealtimeVoice;
++    use crate::endpoint::realtime_websocket::session_update_session_json;
++    use serde_json::json;
++
++    fn config() -> RealtimeSessionConfig {
++        RealtimeSessionConfig {
++            v2: None,
++            instructions: "Keep it brief".into(),
++            initial_items: vec![],
++            delegation_ack_filler: None,
++            model: Some("gpt-realtime".into()),
++            session_id: None,
++            event_parser: RealtimeEventParser::RealtimeV2,
++            session_mode: RealtimeSessionMode::Conversational,
++            output_modality: RealtimeOutputModality::Audio,
++            voice: RealtimeVoice::Marin,
++        }
++    }
++
++    #[test]
++    fn nullable_settings_preserve_missing_null_and_value() {
++        for (field, value) in [
++            (
++                "turn_detection",
++                json!({"type": "semantic_vad", "create_response": false}),
++            ),
++            ("noise_reduction", json!({"type": "far_field"})),
++            ("transcription", json!({"model": "gpt-transcribe"})),
++            ("tracing", json!("auto")),
++            ("prompt", json!({"id": "pmpt_123"})),
++        ] {
++            for object in [json!({}), json!({(field): null}), json!({(field): value})] {
++                let settings: RealtimeV2SessionSettings =
++                    serde_json::from_value(object.clone()).unwrap();
++                assert_eq!(serde_json::to_value(&settings).unwrap(), object);
++                let update: RealtimeSessionUpdate = serde_json::from_value(object.clone()).unwrap();
++                assert_eq!(serde_json::to_value(&update).unwrap(), object);
++            }
++        }
++    }
++
++    #[test]
++    fn speed_update_does_not_reset_other_settings() {
++        let update = RealtimeSessionUpdate {
++            settings: RealtimeV2SessionSettings {
++                output_speed: Some(1.25),
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++        assert_eq!(
++            realtime_v2_session_update_json(&update).unwrap(),
++            json!({
++                "type": "session.update", "session": { "type": "realtime", "audio": {"output": {"speed": 1.25}} }
++            })
++        );
++    }
++
++    #[test]
++    fn disabled_settings_do_not_restore_initial_defaults() {
++        let update: RealtimeSessionUpdate = serde_json::from_value(json!({
++            "turn_detection": null, "noise_reduction": null, "transcription": null, "tracing": null
++        }))
++        .unwrap();
++        assert_eq!(
++            realtime_v2_session_update_json(&update).unwrap(),
++            json!({
++                "type": "session.update", "session": {"type": "realtime", "tracing": null,
++                    "audio": {"input": {"turn_detection": null, "noise_reduction": null, "transcription": null}}}
++            })
++        );
++        let mut initial = config();
++        initial.v2 = Some(update.settings);
++        let value = session_update_session_json(initial).unwrap();
++        assert_eq!(value["audio"]["input"]["turn_detection"], Value::Null);
++        assert_eq!(value["audio"]["output"]["voice"], "marin");
++        assert_eq!(value["tracing"], Value::Null);
++    }
++
++    #[test]
++    fn each_format_has_its_provider_shape_for_both_channels() {
++        for (format, expected) in [
++            (
++                RealtimeAudioFormat::Pcm24k,
++                json!({"type": "audio/pcm", "rate": 24000}),
++            ),
++            (RealtimeAudioFormat::G711Ulaw, json!({"type": "audio/pcmu"})),
++            (RealtimeAudioFormat::G711Alaw, json!({"type": "audio/pcma"})),
++        ] {
++            let update = RealtimeSessionUpdate {
++                settings: RealtimeV2SessionSettings {
++                    input_format: Some(format),
++                    output_format: Some(format),
++                    ..Default::default()
++                },
++                ..Default::default()
++            };
++            let value = realtime_v2_session_update_json(&update).unwrap();
++            assert_eq!(value["session"]["audio"]["input"]["format"], expected);
++            assert_eq!(value["session"]["audio"]["output"]["format"], expected);
++        }
++    }
++
++    #[test]
++    fn full_settings_preserve_false_zero_and_typed_payloads() {
++        let update: RealtimeSessionUpdate = serde_json::from_value(json!({
++            "model": "gpt-realtime-2", "instructions": "Hello", "output_modality": "text",
++            "turn_detection": {"type": "server_vad", "create_response": false, "interrupt_response": false,
++                "threshold": 0.0, "prefix_padding_ms": 0, "silence_duration_ms": 0, "idle_timeout_ms": 10000},
++            "transcription": {"model": "gpt-transcribe", "language": "en", "prompt": "names",
++                "keywords": ["Codex"], "languages": ["en", "es"], "delay": "low"},
++            "output_voice": {"id": "voice_123"}, "output_speed": 0.5,
++            "noise_reduction": {"type": "near_field"},
++            "prompt": {"id": "pmpt_123", "version": "2", "variables": {
++                "city": "Paris", "text": {"type": "input_text", "text": "Hello"},
++                "image": {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "auto"},
++                "file": {"type": "input_file", "file_id": "file_123"}}},
++            "tracing": {"workflow_name": "voice", "group_id": "group_123", "metadata": {"count": 1}},
++            "max_output_tokens": "inf", "parallel_tool_calls": false, "reasoning": {"effort": "high"}
++        })).unwrap();
++        let session = realtime_v2_session_update_json(&update).unwrap()["session"].clone();
++        assert_eq!(session["output_modalities"], json!(["text"]));
++        assert_eq!(
++            session["audio"]["input"]["turn_detection"]["threshold"],
++            0.0
++        );
++        assert_eq!(
++            session["audio"]["input"]["turn_detection"]["create_response"],
++            false
++        );
++        assert_eq!(
++            session["audio"]["input"]["turn_detection"]["prefix_padding_ms"],
++            0
++        );
++        assert_eq!(
++            session["audio"]["input"]["transcription"],
++            serde_json::to_value(update.settings.transcription.unwrap().unwrap()).unwrap()
++        );
++        assert_eq!(
++            session["audio"]["output"],
++            json!({"voice": {"id": "voice_123"}, "speed": 0.5})
++        );
++        assert_eq!(
++            session["prompt"],
++            serde_json::to_value(update.settings.prompt.unwrap().unwrap()).unwrap()
++        );
++        assert_eq!(session["tracing"]["group_id"], "group_123");
++        assert_eq!(session["max_output_tokens"], "inf");
++        assert_eq!(session["parallel_tool_calls"], false);
++        assert_eq!(session["reasoning"], json!({"effort": "high"}));
++    }
++
++    #[test]
++    fn legacy_defaults_are_retained_and_only_named_overrides_replace_them() {
++        let initial = session_update_session_json(config()).unwrap();
++        let mut changed = config();
++        changed.v2 = Some(RealtimeV2SessionSettings {
++            output_speed: Some(1.25),
++            ..Default::default()
++        });
++        let mut actual = session_update_session_json(changed).unwrap();
++        assert_eq!(
++            actual["audio"]["output"]
++                .as_object_mut()
++                .unwrap()
++                .remove("speed"),
++            Some(json!(1.25))
++        );
++        assert_eq!(actual, initial);
++        assert_eq!(
++            initial["audio"]["input"]["turn_detection"]["silence_duration_ms"],
++            500
++        );
++        assert_eq!(initial["tools"].as_array().unwrap().len(), 2);
++    }
++
++    #[test]
++    fn nonfinite_settings_and_wrong_protocol_fail_before_serialization() {
++        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
++            let update = RealtimeSessionUpdate {
++                settings: RealtimeV2SessionSettings {
++                    output_speed: Some(number),
++                    ..Default::default()
++                },
++                ..Default::default()
++            };
++            assert!(realtime_v2_session_update_json(&update).is_err());
++            let mut initial = config();
++            initial.v2 = Some(update.settings);
++            assert!(session_update_session_json(initial).is_err());
++            let update = RealtimeSessionUpdate {
++                settings: RealtimeV2SessionSettings {
++                    turn_detection: Some(Some(RealtimeTurnDetection::ServerVad {
++                        threshold: Some(number),
++                        create_response: None,
++                        interrupt_response: None,
++                        prefix_padding_ms: None,
++                        silence_duration_ms: None,
++                        idle_timeout_ms: None,
++                    })),
++                    ..Default::default()
++                },
++                ..Default::default()
++            };
++            assert!(realtime_v2_session_update_json(&update).is_err());
++        }
++        for parser in [RealtimeEventParser::V1, RealtimeEventParser::FramelessBidi] {
++            let mut initial = config();
++            initial.event_parser = parser;
++            initial.v2 = Some(RealtimeV2SessionSettings::default());
++            assert!(session_update_session_json(initial).is_err());
++        }
++    }
++}
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index e2da8fdae1e6cfbac62eeda44bb8a46bff4aec9e..289791adb0743f224e0049fe9d907bcaa70116d9 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -124,3 +124,24 @@ pub use crate::telemetry::SseTelemetry;
+ pub use crate::telemetry::WebsocketTelemetry;
+ pub use codex_protocol::protocol::RealtimeAudioFrame;
+ pub use codex_protocol::protocol::RealtimeEvent;
++
++pub use crate::endpoint::RealtimeAudioFormat;
++pub use crate::endpoint::RealtimeImageDetail;
++pub use crate::endpoint::RealtimeMaxOutputTokens;
++pub use crate::endpoint::RealtimeNoiseReduction;
++pub use crate::endpoint::RealtimeOutputVoice;
++pub use crate::endpoint::RealtimePrompt;
++pub use crate::endpoint::RealtimePromptContent;
++pub use crate::endpoint::RealtimePromptVariable;
++pub use crate::endpoint::RealtimeProviderTracing;
++pub use crate::endpoint::RealtimeReasoning;
++pub use crate::endpoint::RealtimeSessionUpdate;
++pub use crate::endpoint::RealtimeTracingAuto;
++pub use crate::endpoint::RealtimeTracingConfig;
++pub use crate::endpoint::RealtimeTranscription;
++pub use crate::endpoint::RealtimeTranscriptionDelay;
++pub use crate::endpoint::RealtimeTurnDetection;
++pub use crate::endpoint::RealtimeUnlimitedTokens;
++pub use crate::endpoint::RealtimeV2SessionSettings;
++pub use crate::endpoint::RealtimeVadEagerness;
++pub use crate::endpoint::realtime_v2_session_update_json;
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+index bd6f463852c3fd9a7a0485362cbbb237fed7b5bc..a393bc86de7232df8485840c30929d0c97761ed6 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+@@ -146,6 +146,7 @@ async fn realtime_ws_e2e_session_create_and_event_flow() {
+     let connection = client
+         .connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+@@ -252,6 +253,7 @@ async fn realtime_ws_connect_webrtc_sideband_retries_join_until_server_is_availa
+     let connection = client
+         .connect_webrtc_sideband(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+@@ -327,6 +329,7 @@ async fn realtime_ws_e2e_send_while_next_event_waits() {
+     let connection = client
+         .connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+@@ -397,6 +400,7 @@ async fn realtime_ws_e2e_disconnected_emitted_once() {
+     let connection = client
+         .connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+@@ -463,6 +467,7 @@ async fn realtime_ws_e2e_ignores_unknown_text_events() {
+     let connection = client
+         .connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+@@ -572,6 +577,7 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
+     let connection = client
+         .connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "backend prompt".to_string(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_tls.rs b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
+index 5668ff669c334844ed9da65b85b5a65c29471905..5c37342773a3914d391bb00507ccd31660e16ee4 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_tls.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_tls.rs
+@@ -137,6 +137,7 @@ async fn check_connection(address: String) {
+         Duration::from_secs(/*secs*/ 20),
+         client.connect(
+             RealtimeSessionConfig {
++                v2: None,
+                 instructions: "TLS test".into(),
+                 initial_items: Vec::new(),
+                 delegation_ack_filler: None,
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 1c71ea0c60f9ef4a60041fe01a27b7c1a72b22aa..ae3220fe79d7c2e7b4f3245dca367616879697fd 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -1797,6 +1797,7 @@ pub(crate) async fn build_realtime_session_config(
+         session_mode,
+         output_modality: params.output_modality,
+         voice,
++        v2: None,
+     })
+ }
+ 
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 0ff326fef96a74deb5cd6ea987513f5687e704f5..55086b676a50f2a550ac292ecc0791dcd72dc2f8 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -564,6 +564,7 @@ async fn sdk_wire_connection() -> (
+                 session_mode: codex_api::RealtimeSessionMode::Conversational,
+                 output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
+                 voice: codex_protocol::protocol::RealtimeVoice::Marin,
++                v2: None,
+             },
+             http::HeaderMap::new(),
+             http::HeaderMap::new(),

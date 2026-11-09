@@ -49,9 +49,9 @@ fn sha256(text: &str) -> String {
 
 #[derive(Clone)]
 pub struct Accepted {
-    id: ResponseItemId,
+    pub(crate) id: ResponseItemId,
     pub(crate) text: String,
-    files: Vec<InstructionFile>,
+    pub(crate) files: Vec<InstructionFile>,
 }
 
 impl Accepted {
@@ -75,6 +75,10 @@ impl Instructions {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|accepted| accepted.files.clone())
+    }
+
+    pub(crate) fn realtime_accepted_snapshot(&self) -> Option<Accepted> {
+        self.current()
     }
 
     fn current(&self) -> Option<Accepted> {
@@ -155,6 +159,22 @@ fn accepted(item: &ResponseItem) -> Result<Option<Accepted>> {
 }
 
 pub fn validate(history: &[RolloutItem], expected: &str) -> Result<Accepted> {
+    let has_profile = |item: &ResponseItemEnvelope| {
+        item.metadata.as_ref().is_some_and(|metadata| {
+            metadata.sdk_agent_graph.is_some() || metadata.sdk_agent_profile.is_some()
+        })
+    };
+    ensure!(
+        !history.iter().any(|row| match row {
+            RolloutItem::ResponseItem(item) => has_profile(item),
+            RolloutItem::Compacted(item) => item
+                .replacement_history
+                .as_ref()
+                .is_some_and(|history| history.iter().any(has_profile)),
+            _ => false,
+        }),
+        "Restore requires the captured Agent graph for native profile history"
+    );
     let latest = latest(history)?;
     ensure!(
         latest.text == expected,
@@ -372,15 +392,32 @@ pub(crate) async fn publish_with_files(
     text: String,
     files: Vec<InstructionFile>,
 ) -> Result<()> {
-    let item = publication(&text);
-    let mut envelope = thread.annotate_client_response_item(item);
+    if crate::agent_profiles::update_active(thread, None, Some((&text, files.clone())), None)
+        .await?
+    {
+        return Ok(());
+    }
+    let (envelope, _) = prepare(thread, &text, files)?;
+    publish_item(thread, envelope, None).await
+}
+
+/// Prepare a fresh accepted instruction envelope without publishing or changing authority.
+/// Agent profile activation commits this envelope and its captured Accepted value together.
+pub(crate) fn prepare(
+    thread: &CodexThread,
+    text: &str,
+    files: Vec<InstructionFile>,
+) -> Result<(ResponseItemEnvelope, Accepted)> {
+    let mut envelope = thread.annotate_client_response_item(publication(text));
     if !files.is_empty() {
         envelope
             .metadata
             .get_or_insert_with(Default::default)
             .sdk_instruction_files = Some(serde_json::to_value(files)?);
     }
-    publish_item(thread, envelope, None).await
+    let accepted = accepted_envelope(&envelope)?
+        .context("missing prepared application instruction publication")?;
+    Ok((envelope, accepted))
 }
 
 /// Confirm the published envelope before assigning the file sources for future sampling.
@@ -459,11 +496,33 @@ impl ContextContributor for Contributor {
         Box::pin(async move {
             // Initial publication must become durable before this cache can
             // contribute. Otherwise Core's injection preparation emits it twice.
+            let captured_realtime_instructions = input
+                .step_store
+                .get::<codex_extension_api::AgentProfileInstructions>()
+                .is_some();
             let accepted = input
-                .thread_store
-                .get::<Instructions>()
-                .and_then(|owner| owner.current());
+                .step_store
+                .get::<Accepted>()
+                .map(|accepted| accepted.as_ref().clone())
+                .or_else(|| {
+                    (!captured_realtime_instructions
+                        && input
+                            .step_store
+                            .get::<codex_extension_api::CapturedAgentProfile>()
+                            .is_none())
+                    .then(|| {
+                        input
+                            .thread_store
+                            .get::<Instructions>()
+                            .and_then(|owner| owner.current())
+                    })
+                    .flatten()
+                });
             input.step_store.insert(SdkTurnReceiptSeed {
+                operation_declaration_source: input
+                    .turn_store
+                    .get::<crate::agent_profiles::OperationDeclarationSource>()
+                    .and_then(|source| source.0.clone()),
                 codex_revision: include_str!("../CODEX_REVISION").trim(),
                 codex_source_tree: CODEX_SOURCE_TREE.as_str(),
                 sha256,
@@ -484,11 +543,15 @@ impl ContextContributor for Contributor {
                             .collect(),
                     })
                     .or_else(|| {
-                        input
-                            .thread_store
-                            .get::<SdkApplicationInstructions>()
-                            .as_deref()
-                            .cloned()
+                        (!captured_realtime_instructions)
+                            .then(|| {
+                                input
+                                    .thread_store
+                                    .get::<SdkApplicationInstructions>()
+                                    .as_deref()
+                                    .cloned()
+                            })
+                            .flatten()
                     }),
             });
             let Some(accepted) = accepted else {

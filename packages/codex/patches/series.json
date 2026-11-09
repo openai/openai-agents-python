@@ -307,7 +307,27 @@
     {
       "path": "0095-host-mcp-lazy-launcher.patch",
       "sha256": "39b5e2b9736fa31ef3ced7da637bd443ed1878263976da1c8a4b2c17c5f4ca9d"
+    },
+    {
+      "path": "0068-sdk-realtime-owner.patch",
+      "sha256": "711c811ad949859e7b909f670d7e8652fc850ab957a69f346fe04f2b892cdfbe"
+    },
+    {
+      "path": "0069-typed-realtime-settings.patch",
+      "sha256": "9ef6d068910e00e8f1af4fbdf0de95148d92e6d44ca4003ce12ec8e2e37fda24"
+    },
+    {
+      "path": "0070-realtime-settings-operations.patch",
+      "sha256": "cb8ca2c0b06e7844d31f0dd26d55b4bde68c31935b10534276e78edcf0e2f59d"
+    },
+    {
+      "path": "0071-native-voice-parity.patch",
+      "sha256": "cbbd7fbdd556b8f073ab75f9e8f70e3a0911431c4969b065a9c3d656118dcdd4"
+    },
+    {
+      "path": "0092-preserve-captured-profile-model-settings.patch",
+      "sha256": "dfeefbabe843edd1bee2c2fc93fb771d955daf5b1a500eff7565c737bf1c42eb"
     }
   ],
-  "result_tree": "389a790a62d6dff37858b7fb1f22305734290415"
+  "result_tree": "f872e1737be0a9cd97c45ea51a322c3ca9b209ba"
 }
