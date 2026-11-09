@@ -759,3 +759,159 @@ async def test_cancel_model_compaction_joins_callback_and_allows_next_submission
                 await (await session.submit("After cancellation.")).get_result()
             ).final_output == "Model answer."
     assert len(requests) == 3
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("warm", [False, True])
+async def test_private_run_keeps_custom_backend_before_first_request(
+    cancel: bool, warm: bool
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    model_calls = []
+    http_calls = []
+
+    class Model:
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            model_calls.append(request)
+            entered.set()
+            if cancel and len(model_calls) == (2 if warm else 1):
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release.wait()
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Application model answer."}],
+                    }
+                ]
+            )
+
+    async def unexpected_provider(request):
+        http_calls.append(await request.json())
+        return web.json_response({"error": {"message": "Unexpected provider fallback"}}, status=400)
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", unexpected_provider)
+    async with timeout(20), TestServer(app) as server:
+        async with NativeProvider(
+            base_url=str(server.make_url("/v1")), model_backend=Model(), request_max_retries=0
+        ) as provider:
+            if warm:
+                assert (
+                    await Agent(instructions="Answer.", provider=provider).run("Warm.")
+                ).final_output == "Application model answer."
+                entered.clear()
+            running = asyncio.create_task(
+                Agent(instructions="Answer.", provider=provider).run("Hello.")
+            )
+            admission = None
+            try:
+                if cancel:
+                    admission = asyncio.create_task(entered.wait())
+                    await asyncio.wait((running, admission), return_when=asyncio.FIRST_COMPLETED)
+                    if running.done():
+                        await running
+                    await admission
+                    running.cancel()
+                    await cancelled.wait()
+                    assert not running.done()
+                    release.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await running
+                else:
+                    assert (await running).final_output == "Application model answer."
+            finally:
+                if admission is not None:
+                    admission.cancel()
+                    await asyncio.gather(admission, return_exceptions=True)
+                release.set()
+                if not running.done():
+                    running.cancel()
+                    await asyncio.gather(running, return_exceptions=True)
+    assert len(model_calls) == (2 if warm else 1)
+    assert http_calls == []
+
+
+@pytest.mark.parametrize("control", ["instructions", "extra_controls", "unknown"])
+async def test_chat_effective_request_controls(control: str) -> None:
+    seen = []
+    prepared = []
+    extras = {"response_format": {"type": "json_object"}}
+
+    async def respond(http):
+        seen.append(await http.json())
+        return web.json_response(
+            {
+                "id": "chat_prepared",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "chat-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": '{"answer":"ok"}'},
+                    }
+                ],
+            }
+        )
+
+    async def edit(turn, request, **kwargs):
+        prepared.append(request["instructions"])
+        request["instructions"] = "Effective prepared instructions."
+        return request
+
+    settings: ModelSettings = {
+        "extra_body": extras
+        if control == "extra_controls"
+        else {"unsupported_chat_control": "synthetic"}
+        if control == "unknown"
+        else {}
+    }
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", respond)
+    async with (
+        TestServer(app) as server,
+        AsyncOpenAI(api_key="synthetic", base_url=str(server.make_url("/v1"))) as client,
+        NativeProvider(model_backend=ChatCompletionsModel(client, "chat-model")) as provider,
+    ):
+        agent = Agent(
+            model="gpt-5.2",
+            instructions="Original instructions.",
+            model_settings=settings,
+            provider=provider,
+        )
+        if control == "unknown":
+            with pytest.raises(ValueError, match="unsupported request controls"):
+                await agent.run("Answer.")
+            assert seen == []
+            return
+        result = await agent.run(
+            "Answer.", **({"prepare_request": edit} if control == "instructions" else {})
+        )
+        assert result.final_output == '{"answer":"ok"}'
+    assert len(seen) == 1
+    if control == "instructions":
+        assert len(prepared) == 1
+        assert seen[0]["messages"][0] == {
+            "role": "developer",
+            "content": [{"type": "text", "text": "Effective prepared instructions."}],
+        }
+        wire = json.dumps(seen[0]["messages"])
+        assert wire.count("Effective prepared instructions.") == 1
+        content = [
+            part["text"]
+            for message in seen[0]["messages"]
+            for part in message.get("content", [])
+            if part.get("type") == "text"
+        ]
+        assert prepared[0] not in content
+        assert any("Original instructions." in text for text in content)
+    else:
+        assert all(seen[0][key] == value for key, value in extras.items())

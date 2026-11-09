@@ -201,9 +201,33 @@ class ChatCompletionsModel:
                 "safety_identifier",
                 "prediction",
                 "logprobs",
+                "response_format",
+                "prompt_cache_key",
             )
             if key in request.body
         }
+        if (
+            request.body.keys()
+            - options.keys()
+            - {
+                "model",
+                "input",
+                "tools",
+                "stream",
+                "stream_options",
+                "reasoning",
+                "text",
+                "include",
+                "client_metadata",
+                "access_programs",
+                "max_output_tokens",
+                "top_logprobs",
+                "prompt",
+                "truncation",
+                "context_management",
+            }
+        ):
+            raise ValueError("ChatCompletionsModel received unsupported request controls")
         text = request.body.get("text") or {}
         if text.get("verbosity") is not None:
             options["verbosity"] = text["verbosity"]
