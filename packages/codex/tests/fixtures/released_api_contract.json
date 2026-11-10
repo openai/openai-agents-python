@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "ebd53574320a6e9c5afee117e7ba6c71cd9da817",
+  "baseline_commit": "bd7cef2db4efafd1a1a5bdc3aae4165910fa329c",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -642,13 +642,15 @@
       "agents.models": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ModelRequest:\n    body: dict[str, Any] = field(repr=False)\n    context: Any = field(repr=False)\n    session_id: str\n    turn_id: str",
+          "class ModelRequestOptions(TypedDict, total=False):\n    headers: Mapping[str, str | None]\n    query: Mapping[str, JsonValue]\n    timeout_ms: float\n    max_retries: int",
+          "ModelRequestOptionsFactory: TypeAlias = Callable[[ModelRequest], ModelRequestOptions | None | Awaitable[ModelRequestOptions | None]]",
           "@dataclass(frozen=True)\nclass ModelResponse:\n    output: list[dict[str, Any]] = field(repr=False)\n    usage: dict[str, int] | None = None\n    response_id: str = field(default_factory=lambda: 'resp_' + uuid4().hex)",
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
-          "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
+          "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
           "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
           "@dataclass(frozen=True)\nclass AnyLLMModel(ChatCompletionsModel):\n    pass",
-          "@dataclass(frozen=True)\nclass ResponsesModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
+          "@dataclass(frozen=True)\nclass ResponsesModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n    request_options: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, repr=False, kw_only=True)\n    _request_options_source: ModelRequestOptions | ModelRequestOptionsFactory | None = field(default=None, init=False, repr=False, compare=False)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
         ],
         "exports": {
           "AnyLLMModel": "agents.models.AnyLLMModel",
@@ -656,17 +658,23 @@
           "LitellmModel": "agents.models.LitellmModel",
           "ModelProvider": "agents.models.ModelProvider",
           "ModelRequest": "agents.models.ModelRequest",
+          "ModelRequestOptions": "agents.models.ModelRequestOptions",
+          "ModelRequestOptionsFactory": "collections.abc.Callable",
           "ModelResponse": "agents.models.ModelResponse",
           "NativeModel": "agents.models.NativeModel",
           "ResponsesModel": "agents.models.ResponsesModel"
         },
         "imports": [
-          "from collections.abc import Awaitable",
+          "from collections.abc import Awaitable, Callable, Mapping",
           "from dataclasses import dataclass, field",
-          "from typing import Any, Protocol",
-          "from uuid import uuid4"
+          "from typing import Any, Protocol, TypeAlias",
+          "from uuid import uuid4",
+          "from typing_extensions import TypedDict",
+          "from .config import JsonValue"
         ],
-        "references": {}
+        "references": {
+          "JsonValue": "agents.config.JsonValue"
+        }
       },
       "agents.native_agents": {
         "declarations": [
@@ -1803,6 +1811,8 @@
       "ModelProvider": "agents.models.ModelProvider",
       "ModelRequest": "agents.models.ModelRequest",
       "ModelRequestContext": "agents.model_context.ModelRequestContext",
+      "ModelRequestOptions": "agents.models.ModelRequestOptions",
+      "ModelRequestOptionsFactory": "agents.models.ModelRequestOptionsFactory",
       "ModelResponse": "agents.models.ModelResponse",
       "ModelSettings": "agents.agent.ModelSettings",
       "MongoDBSessionStore": "agents.canonical_storage.MongoDBSessionStore",
@@ -4474,6 +4484,8 @@
       "ModelProvider",
       "ModelRequest",
       "ModelRequestContext",
+      "ModelRequestOptions",
+      "ModelRequestOptionsFactory",
       "ModelResponse",
       "ModelSettings",
       "MongoDBSessionStore",
@@ -4556,7 +4568,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelRequestOptions as ModelRequestOptions, ModelRequestOptionsFactory as ModelRequestOptionsFactory, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
