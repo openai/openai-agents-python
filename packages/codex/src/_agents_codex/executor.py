@@ -600,10 +600,14 @@ class Environment(Generic[ContextT_contra]):
                     raise ValueError("Invalid executor environment variable name")
                 if not isinstance(value, str) or "\0" in value:
                     raise ValueError("Invalid executor environment variable value")
+                valid_unicode = True
                 try:
                     name.encode("utf-8")
                     value.encode("utf-8")
                 except UnicodeError:
+                    valid_unicode = False
+                if not valid_unicode:
+                    # Raise outside the handler so its context cannot retain the rejected string.
                     raise ValueError("Executor environment must contain valid Unicode") from None
             object.__setattr__(self, "env", MappingProxyType(values))
         object.__setattr__(self, "tools", selected)

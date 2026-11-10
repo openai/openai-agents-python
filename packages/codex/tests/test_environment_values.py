@@ -111,3 +111,5 @@ def test_invalid_environment_values_fail_without_echoing_values(values: Any) -> 
     with pytest.raises((TypeError, ValueError), match="environment") as caught:
         Environment(url="wss://executor.invalid", cwd="/workspace", env=values)
     assert "private-environment-value" not in str(caught.value)
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
