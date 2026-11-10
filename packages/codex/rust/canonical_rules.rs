@@ -402,16 +402,28 @@ impl CanonicalRules {
             Some(path) => Some(trust_path(&fs, &path).await),
             None => None,
         };
-        let lookup =
-            ProjectTrustLookup::from_paths(convention, trust_path(&fs, &selection.cwd).await, repo);
+        let cwd = trust_path(&fs, &selection.cwd).await;
+        let selected_root = match selection.workspace_roots.as_slice() {
+            [root] => Some(root),
+            _ => None,
+        };
+        // Strict executors can canonicalize the workspace root while successful
+        // tool accesses retain the selected cwd's spelling.
+        let cwd_alias = selected_root
+            .filter(|root| {
+                *root != &selection.cwd
+                    && cwd
+                        .canonical
+                        .as_deref()
+                        .is_some_and(|canonical| canonical == root.inferred_native_path_string())
+            })
+            .map(|_| &selection.cwd);
+        let lookup = ProjectTrustLookup::from_paths(convention, cwd, repo);
         let project = native_config.get_active_project_for_lookup(&lookup);
         // Rules represents the explicit SDK opt-in. With no matching Core
         // trust entry, discover rules at the selected workspace root using
         // the executor's existing read authority.
-        let workspace_root = match selection.workspace_roots.as_slice() {
-            [root] if project.is_none() => Some(root),
-            _ => None,
-        };
+        let workspace_root = selected_root.filter(|_| project.is_none());
         if workspace_root.is_none() && !project.is_some_and(|project| project.is_trusted()) {
             let mut scope = rules.0.lock().expect("canonical rules scope poisoned");
             if scope.turn == input.turn_id {
@@ -453,7 +465,7 @@ impl CanonicalRules {
                 Some(root) => root.clone(),
                 None => project_root(&fs, &selection.cwd, &markers).await?,
             };
-            load_rules(&fs, &root, &paths).await
+            load_rules(&fs, &root, workspace_root.and(cwd_alias), &paths).await
         }
         .await;
         {
@@ -979,6 +991,7 @@ async fn project_root(fs: &ReadAccess<'_>, cwd: &PathUri, markers: &[String]) ->
 async fn load_rules(
     fs: &ReadAccess<'_>,
     root: &PathUri,
+    cwd_alias: Option<&PathUri>,
     paths: &HashSet<PathUri>,
 ) -> Result<String> {
     // SDK-private project metadata, separate from Core's AGENTS.md discovery.
@@ -1026,7 +1039,11 @@ async fn load_rules(
     let windows = root.infer_path_convention() == Some(PathConvention::Windows);
     let relative: Vec<_> = paths
         .iter()
-        .filter_map(|p| p.relative_path_from(root))
+        .filter_map(|path| {
+            cwd_alias
+                .and_then(|alias| path.relative_path_from(alias))
+                .or_else(|| path.relative_path_from(root))
+        })
         .map(|s| if windows { s.replace('\\', "/") } else { s })
         .collect();
     let mut result = String::new();
@@ -1132,10 +1149,14 @@ mod tests {
         } else {
             "\n.agents/rules/python.md:\nPreserve callback ordering.\n\n"
         };
-        assert_eq!(load_rules(&access, &root, &matching).await?, expected);
+        assert_eq!(load_rules(&access, &root, None, &matching).await?, expected);
 
         let nonmatching = HashSet::from([root.join("docs/session.md")?]);
-        assert!(load_rules(&access, &root, &nonmatching).await?.is_empty());
+        assert!(
+            load_rules(&access, &root, None, &nonmatching)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 }
