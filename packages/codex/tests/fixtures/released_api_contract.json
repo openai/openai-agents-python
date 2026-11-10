@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "9faeabf16dbbf723a09897f2b1186911753f3b0f",
+  "baseline_commit": "349faa4761e0a344110689f02a213c7a68c2d464",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -15,7 +15,7 @@
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
           "_MAX_FUNCTION_CONCURRENCY_UNSET: Any = object()",
           "_OBSERVATION_RETENTION_UNSET: Any = object()",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required'] | ToolRef | None\n    input_modalities: Sequence[Literal['text', 'image', 'audio']] | None\n    max_output_tokens: int | None\n    temperature: float | None\n    top_p: float | None\n    top_logprobs: int | None\n    parallel_tool_calls: bool | None\n    verbosity: Literal['low', 'medium', 'high'] | None\n    metadata: Mapping[str, str] | None\n    store: bool | None\n    prompt_cache_retention: Literal['in_memory', '24h'] | None\n    prompt_cache_ttl: Literal['30m', '12h'] | None\n    invocation_timeout_ms: int | None\n    truncation: Literal['auto', 'disabled'] | None\n    include: list[str] | None\n    context_management: list[dict[str, Any]] | None\n    extra_body: Mapping[str, Any] | None",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeProvider:\n    base_url: str | None = field(default=None, repr=False)\n    api_key: str | None = field(default=None, repr=False)\n    supports_websockets: bool | None = None\n    auth: CodexLogin | None = field(default=None, repr=False)\n    response_mode: Literal['streaming', 'buffered'] = 'streaming'\n    query_params: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)\n    organization: str | None = field(default=None, repr=False)\n    project: str | None = field(default=None, repr=False)\n    model_backend: NativeModel | ModelProvider | None = field(default=None, repr=False, hash=False)\n    request_max_retries: int | None = None\n    stream_max_retries: int | None = None\n    stream_idle_timeout_ms: int | None = field(default=None, repr=False)\n    websocket_connect_timeout_ms: int | None = field(default=None, repr=False)\n\n    async def aclose(self) -> None:\n        pass\n\n    async def __aenter__(self) -> NativeProvider:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass",
@@ -371,10 +371,11 @@
       "agents.input": {
         "declarations": [
           "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
+          "class InputAudio(TypedDict):\n    type: Literal['input_audio']\n    audio_url: str",
           "class InputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str\n    detail: NotRequired[ImageDetail | None]",
           "class InputImageFile(TypedDict):\n    type: Literal['input_image']\n    file_id: str\n    detail: NotRequired[ImageDetail | None]",
           "class InputFile(TypedDict):\n    type: Literal['input_file']\n    file_id: NotRequired[str]\n    file_data: NotRequired[str]\n    file_url: NotRequired[str]\n    filename: NotRequired[str | None]",
-          "class UserMessage(TypedDict):\n    role: Literal['user']\n    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile]\n    type: NotRequired[Literal['message']]",
+          "class UserMessage(TypedDict):\n    role: Literal['user']\n    content: str | Sequence[InputText | InputImage | InputImageFile | InputFile | InputAudio]\n    type: NotRequired[Literal['message']]",
           "UserInput: TypeAlias = str | UserMessage",
           "class AssistantMessage(TypedDict):\n    role: Literal['assistant']\n    content: str\n    type: NotRequired[Literal['message']]",
           "InitialMessage: TypeAlias = UserMessage | AssistantMessage"
@@ -382,6 +383,7 @@
         "exports": {
           "AssistantMessage": "agents.input.AssistantMessage",
           "InitialMessage": "InitialMessage",
+          "InputAudio": "agents.input.InputAudio",
           "InputFile": "agents.input.InputFile",
           "InputImage": "agents.input.InputImage",
           "InputImageFile": "agents.input.InputImageFile",
@@ -484,7 +486,7 @@
           "@dataclass(frozen=True)\nclass MCPResultContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    server_name: str\n    tool_name: str",
           "@dataclass(frozen=True)\nclass MCPCallContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call: ToolCallInfo\n    server_name: str\n    tool_name: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False, kw_only=True)",
           "@dataclass(frozen=True)\nclass MCPMetadataContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call: ToolCallInfo\n    server_name: str\n    tool_name: str\n    arguments: Mapping[str, Any] = field(repr=False)",
-          "@dataclass(frozen=True, kw_only=True)\nclass _MCP(Generic[ContextT_contra]):\n    name: str\n    tools: Sequence[str]\n    approval_mode: Literal['native', 'preapproved'] = 'native'\n    startup_timeout: float = 10\n    execution_timeout: float = 60\n    transform_result: Callable[[MCPResultContext[ContextT_contra], dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]] | None = field(default=None, repr=False)\n    transform_result_timeout: float | None = None\n    request_metadata: Callable[[MCPMetadataContext[ContextT_contra]], Mapping[str, Any] | None | Awaitable[Mapping[str, Any] | None]] | None = field(default=None, repr=False)\n    before: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], Allow | StopTurn | ReplaceArguments | Awaitable[Allow | StopTurn | ReplaceArguments]] | None = field(default=None, repr=False)\n    approval: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n\n    def tool(self, raw_name: str) -> ToolRef:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass _MCP(Generic[ContextT_contra]):\n    name: str\n    tools: Sequence[str]\n    approval_mode: Literal['native', 'preapproved'] = 'native'\n    startup_timeout: float = 10\n    execution_timeout: float = 60\n    transform_result: Callable[[MCPResultContext[ContextT_contra], dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]] | None = field(default=None, repr=False)\n    transform_result_timeout: float | None = None\n    request_metadata: Callable[[MCPMetadataContext[ContextT_contra]], Mapping[str, Any] | None | Awaitable[Mapping[str, Any] | None]] | None = field(default=None, repr=False)\n    before: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], Allow | StopTurn | ReplaceArguments | Awaitable[Allow | StopTurn | ReplaceArguments]] | None = field(default=None, repr=False)\n    approval: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    _name_tools: tuple[str, ...] | None = field(default=None, repr=False, compare=False)\n\n    def tool(self, raw_name: str) -> ToolRef:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass StdioMCP(_MCP[ContextT_contra]):\n    command: str = field(repr=False)\n    args: Sequence[str] = field(default=(), repr=False)\n    env_vars: Sequence[str] = field(default=(), repr=False)\n    cwd: str | None = field(default=None, repr=False)\n    location: Literal['host', 'environment'] = 'host'\n    env: Mapping[str, str] | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass HttpMCP(_MCP[ContextT_contra]):\n    url: str = field(repr=False)\n    bearer_token: str | None = field(default=None, repr=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass HostedVerificationMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)",
@@ -1717,6 +1719,7 @@
       "ImageDetail": "agents.input.ImageDetail",
       "ImageGeneration": "agents.tools.ImageGeneration",
       "InitialMessage": "agents.input.InitialMessage",
+      "InputAudio": "agents.input.InputAudio",
       "InputFile": "agents.input.InputFile",
       "InputImage": "agents.input.InputImage",
       "InputImageFile": "agents.input.InputImageFile",
@@ -2346,7 +2349,7 @@
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
           "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | FileSearchCallItem | CodeInterpreterCallItem | ImageGenerationCallItem)",
-          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile]",
+          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | UserMessageItem)"
         ],
         "exports": {},
@@ -2354,10 +2357,12 @@
           "from collections.abc import Sequence",
           "from typing import Literal as Literal",
           "from typing_extensions import NotRequired as NotRequired, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
-          "from .config import JsonValue as JsonValue"
+          "from .config import JsonValue as JsonValue",
+          "from .input import InputAudio as _InputAudio"
         ],
         "references": {
-          "JsonValue": "agents.config.JsonValue"
+          "JsonValue": "agents.config.JsonValue",
+          "_InputAudio": "agents.input.InputAudio"
         }
       },
       "agents._function_tools": {
@@ -4378,6 +4383,7 @@
       "ImageDetail",
       "ImageGeneration",
       "InitialMessage",
+      "InputAudio",
       "InputFile",
       "InputImage",
       "InputImageFile",
@@ -4490,7 +4496,7 @@
       "from .computer import Computer as Computer, ComputerProvider as ComputerProvider, ComputerSafetyError as ComputerSafetyError, computer_tool as computer_tool",
       "from .decisions import DecisionError as DecisionError, DecisionInput as DecisionInput, DecisionProvider as DecisionProvider, DecisionRequest as DecisionRequest, DecisionResponse as DecisionResponse, OpenAIDecisions as OpenAIDecisions",
       "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, LocalStorageMount as LocalStorageMount, NetworkPolicy as NetworkPolicy",
-      "from .input import AssistantMessage as AssistantMessage, ImageDetail as ImageDetail, InitialMessage as InitialMessage, InputFile as InputFile, InputImage as InputImage, InputImageFile as InputImageFile, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
+      "from .input import AssistantMessage as AssistantMessage, ImageDetail as ImageDetail, InitialMessage as InitialMessage, InputAudio as InputAudio, InputFile as InputFile, InputImage as InputImage, InputImageFile as InputImageFile, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",

@@ -255,14 +255,8 @@ async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_res
     assert all(header == auth_header for header in current_second.auth)
 
 
-@pytest.mark.parametrize(
-    ("name", "accepted"),
-    [("search.record", False), ("récord", False), ("x" * 119, True), ("x" * 120, False)],
-    ids=["dotted", "unicode", "128-bytes", "129-bytes"],
-)
-async def test_selected_mcp_requires_provider_compatible_identity(
-    name: str, accepted: bool
-) -> None:
+@pytest.mark.parametrize("name", ["search.record", "récord", "x" * 119, "x" * 140])
+async def test_selected_mcp_projects_peer_identity(name: str) -> None:
     peer = Peer(names=(name,))
     async with (
         timeout(10),
@@ -270,13 +264,12 @@ async def test_selected_mcp_requires_provider_compatible_identity(
         MCPServerStreamableHttp(params={"url": url}) as client,
     ):
         namespace: MCPNamespace[None] = MCPNamespace("catalog", client)
-        if accepted:
-            tools = await select_mcp_tools(namespace, context=None)
-            assert [tool.ref for tool in tools] == [ToolRef(name, "catalog")]
-        else:
-            with pytest.raises(ValueError, match="^Selected MCP tool identity") as rejected:
-                await select_mcp_tools(namespace, context=None)
-            assert name not in str(rejected.value)
+        tools = await select_mcp_tools(namespace, context=None)
+        assert len(tools) == 1
+        ref = tools[0].ref
+        assert ref.namespace == "catalog"
+        assert len(ref.namespace) + len(ref.name) + 2 <= 128
+        assert ref.name.isascii()
         assert [tool.name for tool in await client.list_tools()] == [name]
         assert not peer.calls
 

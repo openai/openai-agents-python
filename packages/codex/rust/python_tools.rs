@@ -1299,7 +1299,12 @@ impl PythonTools {
                     policy,
                 });
             } else if let Some(control) = self.interception.get().and_then(Weak::upgrade) {
-                step.get_or_init(|| control.capture_mcp_source());
+                // get_or_init holds the attachment-map lock while initializing.
+                let binding = step.get::<Arc<codex_mcp::McpBinding>>();
+                step.get_or_init(|| match binding {
+                    Some(binding) => control.capture_mcp_source_for_binding(&binding, &self.policy),
+                    None => control.capture_mcp_source(),
+                });
             }
         }
         if let Some(catalog) = step.and_then(|step| step.get::<ProfileCatalog>()) {
@@ -5191,6 +5196,15 @@ impl ToolContributor for PythonContributor {
                     .expect("Step defaults poisoned")
                     .clone(),
             };
+            let defaults = match step.get::<Arc<codex_mcp::McpBinding>>() {
+                Some(binding) => defaults.map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| tools.policy.resolve_mcp_reference(name, &binding))
+                        .collect::<Vec<_>>()
+                }),
+                None => defaults,
+            };
             let defaults = match (
                 defaults,
                 step.get::<codex_extension_api::CapturedAgentProfile>(),
@@ -5217,11 +5231,31 @@ impl ToolContributor for PythonContributor {
                         ordinary,
                         native,
                         candidates,
-                        &tools.policy,
+                        step.get::<codex_extension_api::ToolPolicy>()
+                            .as_deref()
+                            .unwrap_or(&tools.policy),
                     ))
                 }
                 (defaults, _) => defaults,
             };
+            let mcp_names = step
+                .get::<Arc<codex_mcp::McpBinding>>()
+                .map(|binding| {
+                    binding
+                        .tools()
+                        .iter()
+                        .filter_map(|tool| {
+                            let name = tool.canonical_tool_name();
+                            candidates.contains(&name).then(|| {
+                                json!({
+                                    "server": tool.server_name, "tool": tool.tool.name,
+                                    "namespace": name.namespace, "name": name.name,
+                                })
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let tracing = if tools.instance.is_some() {
                 turn.get::<codex_otel::sdk_trace::CapturedContext>()
                     .and_then(|captured| captured.context.clone())
@@ -5233,7 +5267,7 @@ impl ToolContributor for PythonContributor {
                 "msg": {"type": "_sdk_select_step", "turn_id": turn.level_id(),
                     "thread": thread.level_id(), "instance": tools.instance,
                     "step_id": id, "generation": generation.id,
-                    "native_step": step.level_id(), "candidates": candidates, "defaults": defaults}
+                    "native_step": step.level_id(), "candidates": candidates, "defaults": defaults, "mcp_names": mcp_names}
             });
             if let Some(profile) = profile {
                 request["msg"]["profile_id"] = json!(profile.profile_id);

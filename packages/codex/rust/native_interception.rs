@@ -334,6 +334,8 @@ struct Identified<'a, T> {
 #[derive(Serialize)]
 struct Notice<'a, T> {
     #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_identity: Option<&'a (String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     profile_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile_epoch: Option<u64>,
@@ -417,10 +419,24 @@ type Rules = HashMap<ToolName, (Option<Duration>, Scope, bool, Option<u64>)>;
 /// Immutable MCP callback policy from the same native Agent profile as its tool router.
 #[derive(Clone, Default)]
 pub(crate) struct ProfileMcpPolicy {
+    identities: HashMap<ToolName, (String, String)>,
     names: HashSet<ToolName>,
     rules: Rules,
 }
 impl ProfileMcpPolicy {
+    fn identities(binding: &codex_mcp::McpBinding) -> HashMap<ToolName, (String, String)> {
+        binding
+            .tools()
+            .iter()
+            .map(|tool| {
+                (
+                    tool.canonical_tool_name().with_default_namespace(),
+                    (tool.server_name.clone(), tool.tool.name.to_string()),
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn prepare(
         binding: &codex_mcp::McpBinding,
         declarations: &std::collections::BTreeMap<
@@ -459,6 +475,7 @@ impl ProfileMcpPolicy {
             });
         }
         Ok(Self {
+            identities: Self::identities(binding),
             names,
             rules: Control::compile_rules(rules)?,
         })
@@ -1026,6 +1043,44 @@ impl Control {
         Ok(())
     }
 
+    pub(crate) fn capture_mcp_source_for_binding(
+        &self,
+        binding: &codex_mcp::McpBinding,
+        policy: &codex_extension_api::ToolPolicy,
+    ) -> ProfileMcpSource {
+        let mut source = self.capture_mcp_source();
+        let Some(selectors) = &policy.allowed_mcp_tools else {
+            return source;
+        };
+        let captured = source.policy.as_ref().expect("captured MCP policy");
+        let mut rules = captured.rules.clone();
+        let mut names = captured.names.clone();
+        for (_, _, declared) in selectors {
+            rules.remove(&declared.clone().with_default_namespace());
+            names.remove(&declared.clone().with_default_namespace());
+        }
+        for tool in binding.tools() {
+            let actual = tool.canonical_tool_name().with_default_namespace();
+            names.insert(actual.clone());
+            if let Some((_, _, declared)) = selectors.iter().find(|(server, raw, _)| {
+                tool.server_name == *server && tool.tool.name.as_ref() == raw
+            }) {
+                if let Some(rule) = captured
+                    .rules
+                    .get(&declared.clone().with_default_namespace())
+                {
+                    rules.insert(actual, *rule);
+                }
+            }
+        }
+        source.policy = Some(Arc::new(ProfileMcpPolicy {
+            identities: ProfileMcpPolicy::identities(binding),
+            names,
+            rules,
+        }));
+        source
+    }
+
     fn configured_in(&self, state: &State) -> bool {
         state.timeout.is_some() && (self.root || state.scope == Scope::ThreadTree)
     }
@@ -1060,6 +1115,7 @@ impl Control {
                 .map(Arc::new),
             receipt: None,
             policy: Some(Arc::new(ProfileMcpPolicy {
+                identities: HashMap::new(),
                 names: rules.keys().cloned().collect(),
                 rules,
             })),
@@ -1676,6 +1732,11 @@ impl Control {
                 (bytes, serde_json::to_string(&notice).map_err(|_| FAILURE)?)
             } else {
                 let notice = Notice {
+                    mcp_identity: source_policy.and_then(|policy| {
+                        identity
+                            .as_ref()
+                            .and_then(|name| policy.identities.get(name))
+                    }),
                     profile_id: profile_source
                         .as_ref()
                         .and_then(|source| source.receipt.as_ref())
