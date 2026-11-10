@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
@@ -113,6 +113,10 @@ class ChatCompletionsModel:
             raise TypeError("prompt_cache_key must be a string or None")
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        audio_data: Any = None
+        audio_format: Any = None
+        audio_header: Any = None
+        audio_separator: Any = None
         call: Any = None
         choice: Any = None
         content: Any = None
@@ -155,6 +159,32 @@ class ChatCompletionsModel:
                     for part in item.get("content", []):
                         if part.get("type") in ("input_text", "output_text"):
                             content.append({"type": "text", "text": part["text"]})
+                        elif part.get("type") == "input_audio":
+                            if not isinstance(part.get("audio_url"), str):
+                                raise ValueError("Chat audio requires an inline audio data URL")
+                            audio_header, audio_separator, audio_data = part["audio_url"].partition(
+                                ","
+                            )
+                            if (
+                                not audio_separator
+                                or not audio_data
+                                or not audio_header.lower().startswith("data:audio/")
+                                or not audio_header.lower().endswith(";base64")
+                            ):
+                                raise ValueError("Chat audio requires an inline audio data URL")
+                            audio_format = audio_header[11:].split(";", 1)[0].lower()
+                            if audio_format in ("wav", "x-wav", "wave", "vnd.wave"):
+                                audio_format = "wav"
+                            elif audio_format in ("mp3", "mpeg"):
+                                audio_format = "mp3"
+                            else:
+                                raise ValueError("Chat audio requires WAV or MP3 input")
+                            content.append(
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {"data": audio_data, "format": audio_format},
+                                }
+                            )
                         elif part.get("type") == "input_image" and part.get("image_url"):
                             content.append(
                                 {
@@ -228,6 +258,8 @@ class ChatCompletionsModel:
                 else:
                     leaves = [declaration]
                 for tool in leaves:
+                    if tool.get("namespace") not in (None, "functions"):
+                        raise ValueError("Chat adapters support the default function namespace")
                     if tool.get("type") != "function":
                         raise ValueError("ChatCompletionsModel supports native function tools")
                     tools.append(
@@ -318,6 +350,22 @@ class ChatCompletionsModel:
                 )
             if "max_output_tokens" in request.body:
                 options["max_completion_tokens"] = request.body["max_output_tokens"]
+            if isinstance(options.get("tool_choice"), Mapping):
+                declaration = options["tool_choice"]
+                if declaration.get("type") != "function":
+                    raise ValueError("Chat adapters require a function tool selector")
+                tool = declaration.get("function", declaration)
+                if (
+                    declaration.get("namespace") not in (None, "functions")
+                    or not isinstance(tool, Mapping)
+                    or tool.get("namespace") not in (None, "functions")
+                    or not isinstance(tool.get("name"), str)
+                    or tool["name"] not in [item["function"].get("name") for item in tools]
+                ):
+                    raise ValueError(
+                        "Chat tool choice must select an offered default-namespace function"
+                    )
+                options["tool_choice"] = {"type": "function", "function": {"name": tool["name"]}}
             if tools:
                 options["tools"] = tools
             else:
@@ -439,6 +487,10 @@ class ChatCompletionsModel:
             # Release SDK-owned payloads before exposing any callback failure.
             del (
                 request,
+                audio_data,
+                audio_format,
+                audio_header,
+                audio_separator,
                 call,
                 choice,
                 content,
