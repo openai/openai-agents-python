@@ -153,7 +153,11 @@ async def test_history_rejection_drops_media_from_sdk_traceback(
     assert all(media not in repr(frame.f_locals) for frame in frames)
 
 
-@pytest.mark.parametrize("text", ["a" * (2 * 1024 * 1024 + 1), "\x00" * 350_000])
+@pytest.mark.parametrize(
+    "text",
+    ["a" * (2 * 1024 * 1024 + 1), "\x00" * 350_000],
+    ids=["ascii-budget", "escaped-budget"],
+)
 @pytest.mark.parametrize("outer", [tuple, UserList])
 @pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])
 async def test_history_input_budget_rejects_before_json_copy(
