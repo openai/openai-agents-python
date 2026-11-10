@@ -2858,7 +2858,7 @@ class Session(Generic[ContextT, OutputT]):
             or mcp_tools
             or environment is not None
             or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-            or any(tool._bind is None for tool in tools)
+            or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
         ):
             raise ValueError(
                 "CustomStorage preview does not support children, goals, checklist, "
@@ -7128,7 +7128,8 @@ class Session(Generic[ContextT, OutputT]):
                     if any(tool is self._native_agents for tool in selection)
                     else self._native_agents
                 ),
-                project_guidance=self._project_guidance,
+                project_guidance=self._project_guidance
+                and not any(tool is self._executor for tool in selection),
             )
             selected_refs = {tool for tool in selection if isinstance(tool, ToolRef)}
             missing_refs: list[ToolRef] = sorted(

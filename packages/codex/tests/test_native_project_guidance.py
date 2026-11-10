@@ -110,6 +110,7 @@ async def test_guidance_tool_refs_use_the_opening_grant(
                 [assistant_output("selected")],
                 [assistant_output("empty")],
                 [assistant_output("workspace")],
+                [assistant_output("updated")],
             ]
         )
         async with Agent(instructions="Answer.", provider=provider(responses)).session(
@@ -136,4 +137,9 @@ async def test_guidance_tool_refs_use_the_opening_grant(
             ).final_output == "workspace"
             assert {"read_text_file", "view_image"}.issubset(
                 {tool.get("name") for tool in function_declarations(responses.requests[2])}
+            )
+            await session.update(tools=[environment])
+            assert (await (await session.submit("Answer.")).get_result()).final_output == "updated"
+            assert {"read_text_file", "view_image"}.issubset(
+                {tool.get("name") for tool in function_declarations(responses.requests[3])}
             )
