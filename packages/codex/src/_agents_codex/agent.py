@@ -1338,6 +1338,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         options: dict[str, Any] = {}
         try:
+            from ._function_tools import FunctionTool
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
@@ -1498,7 +1499,16 @@ class Agent(Generic[ContextT, OutputT]):
 
                 if isinstance(session, Completed):
                     return session
-                if pause_manual or (prepare_request is not None and on_interaction is None):
+                if (
+                    pause_manual
+                    or (prepare_request is not None and on_interaction is None)
+                    or (
+                        session._profiles
+                        and on_interaction is None
+                        and before_step is None
+                        and prepare_request is None
+                    )
+                ):
                     # A delegating factory may change the opening roster or its
                     # default operation. Check the same effective selection that
                     # submit will capture, before it admits work or starts MCP.
@@ -1513,6 +1523,21 @@ class Agent(Generic[ContextT, OutputT]):
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
                     )
+                    # Handoff targets keep their own captured declarations. Their
+                    # bare manual requests can pause the same root Session.
+                    if on_interaction is None and before_step is None and prepare_request is None:
+                        pause_manual = (
+                            *pause_manual,
+                            *(
+                                tool
+                                for runtime in session._profiles.values()
+                                if runtime.profile.agent is not self
+                                for tool in runtime.profile.declaration.tools
+                                if isinstance(tool, FunctionTool)
+                                and tool._bind is None
+                                and not tool._requires_live_manual_session
+                            ),
+                        )
                     if budget_capture_error is not None:
                         if any(tool._bind is None for tool in selected):
                             raise budget_capture_error

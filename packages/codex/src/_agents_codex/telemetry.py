@@ -1270,7 +1270,13 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                     _processor_loss_watermark = 0
                 routes: dict[str, list[TraceLifecycleEvent]] = {}
                 for event in group:
-                    snapshot = _freeze(event)
+                    descriptors = batch.get("root_descriptors", {})
+                    descriptor = descriptors.get(str(event["sequence"])) if descriptors else None
+                    snapshot = _freeze(
+                        {**event, "root_descriptor": descriptor}
+                        if descriptor is not None
+                        else event
+                    )
                     for identifier in event.get("processor_ids", []):
                         routes.setdefault(identifier, []).append(snapshot)
                 for identifier, events in routes.items():

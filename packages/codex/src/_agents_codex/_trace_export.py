@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -74,7 +74,8 @@ class OpenAITraceExporter:
     delivered as one HTTP request before any unrelated admission error is reported;
     native acknowledgement waits for that request. Up to 1024 recent
     trace descriptors are retained. Active roots and descendants prevent eviction;
-    completed traces are retired first. New roots beyond active capacity fail
+    completed traces are retired first. Retained native contexts have been supplying
+    original closed-root descriptors after ordinary eviction. New roots beyond active capacity fail
     delivery, and unknown child-only records never fabricate a root. The metadata
     runtime key is reserved for the native marker; other flattened native
     sdk.metadata attributes are preserved without guessing their JSON types.
@@ -192,7 +193,10 @@ class OpenAITraceExporter:
             root = event.get("parent_span_id") is None
             state = self._traces.get(trace_id)
             if state is None:
-                if not root or (self._requires_root_start and event["lifecycle"] != "start"):
+                retained = event.get("root_descriptor") if not self._requires_root_start else None
+                if (not root and retained is None) or (
+                    self._requires_root_start and (not root or event["lifecycle"] != "start")
+                ):
                     admission_error = (
                         admission_error or "Native trace root descriptor is unavailable"
                     )
@@ -212,7 +216,12 @@ class OpenAITraceExporter:
                         )
                         continue
                     del self._traces[completed]
-                state = _TraceState(_descriptor(event))
+                source = (
+                    event
+                    if root
+                    else {**cast(Mapping[str, Any], retained), "trace_id": event["trace_id"]}
+                )
+                state = _TraceState(_descriptor(source), root_ended=not root)
                 self._traces[trace_id] = state
             if event["lifecycle"] == "start":
                 state.active_spans += 1

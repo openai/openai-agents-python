@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
@@ -35,6 +35,7 @@ class CallPeer:
     hangups: list[tuple[str, dict[str, str]]] = field(default_factory=list)
     frames: list[dict[str, Any]] = field(default_factory=list)
     sequence: list[str] = field(default_factory=list)
+    changed: asyncio.Condition = field(default_factory=asyncio.Condition)
     receipt_release: asyncio.Event = field(default_factory=asyncio.Event)
     sideband_connected: asyncio.Event = field(default_factory=asyncio.Event)
     disconnected: asyncio.Event = field(default_factory=asyncio.Event)
@@ -94,11 +95,22 @@ class CallPeer:
             self.sequence.append("ready")
             async for message in socket:
                 assert message.type == WSMsgType.TEXT
-                self.frames.append(json.loads(message.data))
+                async with self.changed:
+                    self.frames.append(json.loads(message.data))
+                    self.changed.notify_all()
         finally:
             self.socket = None
             self.disconnected.set()
         return socket
+
+    async def frame(
+        self, predicate: Callable[[dict[str, Any]], bool], *, after: int = 0
+    ) -> dict[str, Any]:
+        async with self.changed:
+            await self.changed.wait_for(
+                lambda: any(predicate(frame) for frame in self.frames[after:])
+            )
+            return next(frame for frame in self.frames[after:] if predicate(frame))
 
     async def hangup(self, request: web.Request) -> web.Response:
         headers = {key.lower(): value for key, value in request.headers.items()}
@@ -374,3 +386,82 @@ async def test_native_webrtc_accepts_offer_at_utf8_byte_limit(
     ):
         assert await voice.answer_sdp() == ANSWER_SDP
         assert call_peer.offers == [offer]
+
+
+async def test_native_sip_repeats_call_accept_options_without_initial_update(
+    call_peer: CallPeer,
+) -> None:
+    peer = call_peer
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-native-call-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Keep the accepted call configuration.", provider=provider
+        ).session() as session,
+    ):
+        config = RealtimeConfig(
+            model="fixture-realtime",
+            voice="marin",
+            instructions="Repeat the accepted SIP instructions.",
+            tools=(),
+        )
+        accepted = await session.build_realtime_sip_config(config=config)
+        assert accepted["model"] == "fixture-realtime"
+        assert accepted["audio"]["output"]["voice"] == "marin"
+        assert "Repeat the accepted SIP instructions." in accepted["instructions"]
+        peer.sessions["rtc_repeated_sip_options"] = accepted
+        async with session.realtime(
+            config=replace(config, transport=RealtimeSIP("rtc_repeated_sip_options"))
+        ) as voice:
+            assert voice.call_id == "rtc_repeated_sip_options"
+        await peer.disconnected.wait()
+        assert [call_id for call_id, _ in peer.sidebands] == ["rtc_repeated_sip_options"]
+        assert peer.offers == []
+        assert peer.hangups == []
+        assert not any(frame["type"] == "session.update" for frame in peer.frames)
+
+
+@pytest.mark.parametrize("mismatch", ["model", "voice", "instructions"])
+async def test_native_sip_rejects_readiness_configuration_mismatch(
+    call_peer: CallPeer, mismatch: str
+) -> None:
+    peer = call_peer
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-native-call-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Verify accepted SIP configuration.", provider=provider
+        ).session() as session,
+    ):
+        config = RealtimeConfig(
+            model="fixture-realtime",
+            voice="marin",
+            instructions="Expected accepted instructions.",
+            tools=(),
+        )
+        accepted = await session.build_realtime_sip_config(config=config)
+        if mismatch == "model":
+            accepted["model"] = "different-fixture-realtime"
+        elif mismatch == "voice":
+            accepted["audio"]["output"]["voice"] = "alloy"
+        else:
+            accepted["instructions"] = "Different provider-accepted instructions."
+        peer.sessions["rtc_mismatched_sip_options"] = accepted
+        with pytest.raises(RuntimeError):
+            async with session.realtime(
+                config=replace(config, transport=RealtimeSIP("rtc_mismatched_sip_options"))
+            ):
+                pytest.fail("Mismatched provider readiness must not admit the SIP owner")
+        await peer.disconnected.wait()
+        assert [call_id for call_id, _ in peer.sidebands] == ["rtc_mismatched_sip_options"]
+        assert peer.offers == []
+        assert peer.hangups == []
+        assert not any(frame["type"] == "session.update" for frame in peer.frames)

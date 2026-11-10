@@ -571,3 +571,82 @@ async def test_graph_mcp_exposure_tracks_active_source(
             )
             assert not source_peer.calls
             assert len(target_peer.calls) == 1
+
+
+@pytest.mark.parametrize("opening_manual", [False, True])
+async def test_live_handoff_manual_reply_uses_issuing_declaration(responses, opening_manual):
+    source, target, left, right = manual_graph(responses)
+    if not opening_manual:
+        source = Agent(
+            instructions=source.instructions,
+            name=source.name,
+            tools=[],
+            handoffs=[target],
+            provider=source.provider,
+        )
+    responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+    responses.respond(function_call("lookup", {"key": "B"}, "manual-B"))
+    responses.respond(assistant_output("B accepted"))
+    async with timeout(20), source.session() as session:
+        turn = await session.submit("Route to B and read")
+        request = await next_request(session.interactions(), right)
+        assert left.match(request) is None
+        # Reply before any API that refreshes the active profile bindings.
+        await request.respond("B reply")
+        assert (await turn.get_result()).final_output == "B accepted"
+        assert tool_output(responses.requests[-1], "manual-B") == "B reply"
+
+
+async def test_run_captures_and_resumes_destination_only_manual_tool(responses):
+    from agents import InteractionRequired
+
+    _, target, _, right = manual_graph(responses)
+    source = Agent(
+        name="A",
+        instructions="Route to B.",
+        handoffs=[target],
+        provider=provider(responses),
+    )
+    responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+    responses.respond(function_call("lookup", {"key": "B"}, "manual-B"))
+    async with timeout(20):
+        with pytest.raises(InteractionRequired) as captured:
+            await source.run("Route and read")
+        saved = captured.value.state
+        assert saved is not None
+        assert saved.native_continuation is not None
+        assert saved.native_continuation.pending_manual[0].tool == "lookup"
+        responses.respond(assistant_output("B resumed"))
+
+        def reply(request):
+            assert right.match(request) is not None
+            return request.reply("B reply")
+
+        completed = await source.run(None, state=saved, on_interaction=reply)
+        assert completed.final_output == "B resumed"
+        assert tool_output(responses.requests[-1], "manual-B") == "B reply"
+
+
+async def test_deferred_preparation_uses_handoff_issuing_catalog(responses):
+    from tests.test_deferred_jobs import Input, Journal, Output, Provider, declared
+
+    journal, backend = Journal(), Provider([])
+    jobs, right = declared(journal, backend)
+    left = FunctionTool(name="render", description="Render A", input_type=Input, output_type=Output)
+    target = Agent(name="B", instructions="Render B.", tools=[right])
+    source = Agent(
+        name="A",
+        instructions="Route to B.",
+        tools=[left],
+        handoffs=[target],
+        provider=provider(responses),
+    )
+    responses.respond(function_call("transfer_to_b", {}, "handoff-B"))
+    responses.respond(function_call("render", {"pages": 2}, "manual-B"))
+    async with timeout(20), source.session() as session:
+        await session.submit("Route and render")
+        request = await next_request(session.interactions(), right)
+        saved = await jobs.prepare(session, request)
+        assert saved.native_continuation is not None
+        assert journal.log == ["prepare"]
+        assert backend.calls == []
