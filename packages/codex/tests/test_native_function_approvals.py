@@ -47,6 +47,50 @@ class TransformedInput(BaseModel):
         return value + "!"
 
 
+class SingleUseInput(BaseModel):
+    available_tokens: ClassVar[set[str]] = set()
+    token: str
+
+    @field_validator("token")
+    @classmethod
+    def consume_token(cls, value: str) -> str:
+        if value not in cls.available_tokens:
+            raise ValueError("Input token has already been consumed")
+        cls.available_tokens.remove(value)
+        return value
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_approved_arguments_do_not_repeat_stateful_validation(responses, automatic):
+    SingleUseInput.available_tokens = {"one-use"}
+    effects = []
+
+    @function_tool(needs_approval=(lambda _: False) if automatic else True)
+    def consume(item: SingleUseInput) -> str:
+        effects.append(item.token)
+        return item.token
+
+    responses.respond(function_call("consume", {"item": {"token": "one-use"}}, "consume"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use consume.", tools=[consume], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if not automatic:
+            request = await next_request(session.interactions(), consume)
+            assert request.effective_arguments.item.token == "one-use"
+            assert SingleUseInput.available_tokens == set()
+            assert effects == []
+            await request.approve()
+        assert (await turn.get_result()).final_output == "done"
+    assert effects == ["one-use"]
+    assert SingleUseInput.available_tokens == set()
+    assert tool_output(responses.requests[1], "consume") == "one-use"
+
+
 @pytest.mark.parametrize("replace_input", [False, True])
 async def test_approval_preserves_raw_input_for_schema_transforms(responses, replace_input):
     effects = []

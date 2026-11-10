@@ -11564,10 +11564,11 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if approved is None or not approved.approved:
                     raise NativeError("Managed approval arguments are no longer available")
-            parsed = entry._parse_arguments(
-                message.get("_sdk_effective_arguments", message["arguments"])
-            )
-            if approved is not None:
+            if approved is None:
+                parsed = entry._parse_arguments(
+                    message.get("_sdk_effective_arguments", message["arguments"])
+                )
+            else:
                 parsed = deepcopy(approved.value)
             kwargs = entry._arguments(parsed)
             approved_kwargs = (
