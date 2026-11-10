@@ -1,3 +1,7 @@
+#[path = "model_producer.rs"]
+mod model_producer;
+pub(crate) use model_producer::Contributor as ModelProducerContributor;
+
 #[path = "prepared_requests.rs"]
 mod prepared_requests;
 pub(crate) use prepared_requests::Contributor as PreparedRequestContributor;
@@ -199,6 +203,7 @@ pub struct PythonTools {
     admission: Mutex<Option<Arc<TurnAdmission>>>,
     // A live native thread owns both. Keep no family-to-thread ownership cycle.
     interception: OnceLock<Weak<crate::native_interception::Control>>,
+    model_producer: Mutex<model_producer::State>,
     prepared_requests: Mutex<prepared_requests::State>,
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
@@ -1888,6 +1893,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
@@ -2023,6 +2029,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(
                 parent.selecting_steps.load(Ordering::Acquire)
@@ -2426,6 +2433,7 @@ impl PythonTools {
     }
 
     pub(crate) fn retire_steps(&self) {
+        self.retire_model_producer();
         self.retire_prepared_requests();
         let mut replies = self
             .preparation_replies
@@ -4541,6 +4549,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     receipt.terminal.store(true, Ordering::Release);
                     receipt.state.send_replace(AdmissionState::Closed);
                 }
+                tools.retire_model_producer();
                 tools.retire_prepared_requests();
                 tools.family.graph_changed.send_replace(());
                 // A callback may still retain its issuer after Core tears it
@@ -7643,6 +7652,7 @@ pub(crate) mod managed_tests {
             suspended: AtomicBool::new(false),
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             manual_restore: Mutex::new(None),
             manual_progress: watch::channel(0).0,

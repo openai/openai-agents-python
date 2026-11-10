@@ -30,6 +30,11 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         "env_headers": None,
         "organization": None,
         "project": None,
+        "model_backend": None,
+        "request_max_retries": None,
+        "stream_max_retries": None,
+        "stream_idle_timeout_ms": None,
+        "websocket_connect_timeout_ms": None,
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected
@@ -53,3 +58,20 @@ def test_provider_dataclass_declaration_does_not_load_native(response_mode):
         env=dict(os.environ),
         check=True,
     )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "request_max_retries",
+        "stream_max_retries",
+        "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_provider_retry_controls_reject_invalid_values(name, value):
+    from agents import NativeProvider
+
+    with pytest.raises(ValueError, match="unsigned 64-bit"):
+        NativeProvider(**{name: value})

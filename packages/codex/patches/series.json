@@ -371,7 +371,23 @@
     {
       "path": "0170-canonical-history-transactions.patch",
       "sha256": "e88a2db32ae35587399c2eeae49284f96ef83383399b26f60961f9748d74e779"
+    },
+    {
+      "path": "0101-native-request-extensions.patch",
+      "sha256": "fc28e524a2b71b3501d232cad8a2a3e420f8463f719c2415b89ab853b9beaa68"
+    },
+    {
+      "path": "0102-native-model-producer.patch",
+      "sha256": "3d5712a9f72e4175ed10ea59968da53986d55e0b64dfbe9f5e67245944ce2695"
+    },
+    {
+      "path": "0103-empty-extra-body-lite.patch",
+      "sha256": "8b13438eea150779e0adcb4d2b533e4192cb5e5c4539f054a8402aaaef29cf77"
+    },
+    {
+      "path": "0104-native-model-response-fidelity.patch",
+      "sha256": "6cf79cbb142fef7b1d995f3f3556b40c1d0c6be3f7ba48298ad962e72a112549"
     }
   ],
-  "result_tree": "636c3698d8a9d25684981e8bbccfee448c25c935"
+  "result_tree": "f18d85b49633a67c2e337558540f49f04abd50f3"
 }

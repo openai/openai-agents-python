@@ -60,6 +60,7 @@ from .completion import _BeforeComplete
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
+from .models import ModelProvider, NativeModel
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -138,6 +139,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
     invocation_timeout_ms: int | None
+    truncation: Literal["auto", "disabled"] | None
+    include: list[str] | None
+    context_management: list[dict[str, Any]] | None
+    extra_body: Mapping[str, Any] | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
@@ -177,6 +182,57 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
+        elif key == "truncation":
+            if value not in ("auto", "disabled"):
+                raise ValueError("truncation must be auto or disabled")
+        elif key == "include":
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise TypeError("include must be a list of strings")
+            captured[key] = list(value)
+        elif key in ("context_management", "extra_body"):
+            if key == "context_management":
+                if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                    raise TypeError("context_management must be a list of JSON objects")
+            elif not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+                raise TypeError("extra_body must be a JSON object")
+            if key == "extra_body" and set(value) & {
+                "tool_choice",
+                "client_metadata",
+                "service_tier",
+                "tools",
+                "access_programs",
+                "metadata",
+                "previous_response_id",
+                "stream",
+                "parallel_tool_calls",
+                "prompt_cache_retention",
+                "model",
+                "prompt_cache_key",
+                "stream_options",
+                "conversation",
+                "temperature",
+                "prompt_cache_options",
+                "truncation",
+                "top_p",
+                "generate",
+                "store",
+                "context_management",
+                "instructions",
+                "type",
+                "reasoning",
+                "include",
+                "input",
+                "top_logprobs",
+                "text",
+                "max_output_tokens",
+            }:
+                raise ValueError(
+                    "extra_body cannot replace native request fields; "
+                    "use the corresponding model setting"
+                )
+            captured[key] = json.loads(
+                json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
+            )
         elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
             allowed = {
                 "verbosity": ("low", "medium", "high"),
@@ -284,6 +340,11 @@ class NativeProvider:
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
+    Retry budgets and phase timeouts are native provider settings. Omission keeps
+    Core defaults. Zero disables retries or sets an immediate phase deadline.
+    Core caps request and stream retry budgets at 100 and retains retry safety,
+    cancellation, and replay ownership. Timeouts use integer milliseconds.
+
     Routing maps are captured at construction. ``env_headers`` resolves values
     once; missing/empty values stay omitted. Query pairs use URL encoding.
     Supplied routing options reject same-origin and cross-origin redirects.
@@ -318,8 +379,24 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    model_backend: NativeModel | ModelProvider | None = field(default=None, repr=False, hash=False)
+    request_max_retries: int | None = field(default=None, repr=False)
+    stream_max_retries: int | None = field(default=None, repr=False)
+    stream_idle_timeout_ms: int | None = field(default=None, repr=False)
+    websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        for name in (
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+            "websocket_connect_timeout_ms",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) is not int or not 0 <= value <= 18_446_744_073_709_551_615
+            ):
+                raise ValueError(f"{name} must be an unsigned 64-bit integer or None")
         for name in ("base_url", "api_key"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -337,6 +414,16 @@ class NativeProvider:
                 raise ValueError("Buffered Responses require API-key authentication")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
                 raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
+        if self.model_backend is not None:
+            if not any(
+                callable(getattr(self.model_backend, name, None))
+                for name in ("complete", "get_model")
+            ):
+                raise TypeError(
+                    "model_backend must implement complete(request) or get_model(model_name)"
+                )
+            if self.supports_websockets is True or self.auth is not None:
+                raise ValueError("model_backend requires HTTP mode without CodexLogin")
         self._capture_routing()
 
     def _capture_routing(self) -> None:
@@ -466,6 +553,8 @@ class NativeProvider:
 
     @property
     def _websockets_enabled(self) -> bool:
+        if self.model_backend is not None:
+            return False
         return (
             self.auth is None
             and self.response_mode == "streaming"
