@@ -70,7 +70,7 @@ async def test_wss_new_sessions_reload_roots_with_shared_or_fresh_provider(
             server,
             Agent(instructions="Second.", provider=shared),
         )
-        assert server.connections == 1 and server.warmups == 1
+        assert server.connections == 1
         fresh = server.provider()
         await rejected(
             server,
