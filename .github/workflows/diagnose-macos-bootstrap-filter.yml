@@ -1,4 +1,4 @@
-name: Stock macOS bootstrap message filter diagnostic
+name: Stock macOS plain bootstrap denial diagnostic
 
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 5
     steps:
-      - name: Compare the host and stock deny-all bootstrap filter
+      - name: Compare stock identity under the SDK base and plain bootstrap denial
         shell: bash
         run: |
           set -euo pipefail
@@ -20,7 +20,7 @@ jobs:
           /usr/bin/sw_vers
           /usr/bin/uname -m
 
-          scratch=$(/usr/bin/mktemp -d "$RUNNER_TEMP/bootstrap-filter.XXXXXXXX")
+          scratch=$(/usr/bin/mktemp -d "$RUNNER_TEMP/bootstrap-plain-deny.XXXXXXXX")
           scratch=$(cd "$scratch" && pwd -P)
           work="$scratch/work"
           outside="$scratch/outside"
@@ -41,7 +41,7 @@ jobs:
           trap cleanup EXIT
 
           clean=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/sh "HOME=$work" "TMPDIR=$work")
-          ssh=(/usr/bin/ssh -G -F /dev/null -o CanonicalizeHostname=no 127.0.0.1)
+          ssh=(/usr/bin/ssh -G -T -F /dev/null -o CanonicalizeHostname=no 127.0.0.1)
           record() {
             local name=$1 status=0
             shift
@@ -192,61 +192,75 @@ jobs:
             shift 2
             record "$name" "${clean[@]}" /usr/bin/sandbox-exec -p "$(/bin/cat "$scratch/$profile.sb")" "-DWORK=$work" -- "$@"
           }
-          probe sdk-base base /usr/bin/true
+          cp "$scratch/base.sb" "$scratch/plain-deny.sb"
+          printf '(deny mach-bootstrap)\n' >>"$scratch/plain-deny.sb"
 
-          cp "$scratch/base.sb" "$scratch/deny-if-enabled.sb"
-          cat >>"$scratch/deny-if-enabled.sb" <<'SBPL'
-          (if have_message_filtering?
-              (deny process-exec (literal "/usr/bin/true")))
-          SBPL
-          probe predicate-deny-if-enabled deny-if-enabled /usr/bin/true || true
+          base_id=0
+          base_ssh=0
+          plain_id=0
+          plain_ssh=0
+          probe sdk-base-id base /usr/bin/id -F || base_id=$?
+          probe sdk-base-ssh base "${ssh[@]}" || base_ssh=$?
+          probe plain-deny-id plain-deny /usr/bin/id -F || plain_id=$?
+          probe plain-deny-ssh plain-deny "${ssh[@]}" || plain_ssh=$?
 
-          cp "$scratch/base.sb" "$scratch/deny-if-disabled.sb"
-          cat >>"$scratch/deny-if-disabled.sb" <<'SBPL'
-          (if (not have_message_filtering?)
-              (deny process-exec (literal "/usr/bin/true")))
-          SBPL
-          probe predicate-deny-if-disabled deny-if-disabled /usr/bin/true || true
-
-          cp "$scratch/base.sb" "$scratch/bootstrap-operation.sb"
-          printf '(deny mach-bootstrap)\n' >>"$scratch/bootstrap-operation.sb"
-          probe bootstrap-operation bootstrap-operation /usr/bin/true || true
-
-          cp "$scratch/base.sb" "$scratch/service-message-filter.sb"
-          cat >>"$scratch/service-message-filter.sb" <<'SBPL'
-          (allow mach-lookup
-              (global-name "com.apple.system.opendirectoryd.libinfo")
-              (apply-message-filter (deny mach-message-send)))
-          SBPL
-          probe service-message-filter service-message-filter /usr/bin/true || true
-
-          cp "$scratch/base.sb" "$scratch/deny-all.sb"
-          cat >>"$scratch/deny-all.sb" <<'SBPL'
-          (allow mach-bootstrap (apply-message-filter (deny mach-message-send)))
-          SBPL
-          if ! probe bootstrap-deny-all deny-all /usr/bin/true; then
-            printf 'result deny-all profile did not launch the stock true control\n'
-            exit 0
-          fi
-          printf 'result deny-all profile loaded and stock true exited zero\n'
-
-          record host-outside-write "${clean[@]}" /bin/sh -c 'printf allowed > "$1"' sh "$outside/write"
-          [[ -f "$outside/write" ]]
-          /bin/rm "$outside/write"
-          probe inside-write deny-all /bin/sh -c 'printf allowed > "$1"' sh "$work/write"
-          [[ -f "$work/write" ]]
-          if probe outside-write deny-all /bin/sh -c 'printf denied > "$1"' sh "$outside/write"; then
-            printf 'outside write unexpectedly succeeded\n' >&2
+          account_matches_host() {
+            /usr/bin/cmp -s "$capture/host-id.out" "$capture/$1-id.out" &&
+              /usr/bin/cmp -s "$capture/host-ssh.out" "$capture/$1-ssh.out"
+          }
+          if [[ "$base_id" != 0 || "$base_ssh" != 0 ]] || ! account_matches_host sdk-base; then
+            printf 'result inconclusive: SDK baseline identity or offline SSH differs from host\n' >&2
             exit 1
           fi
-          [[ ! -e "$outside/write" ]]
+          printf 'SDK baseline identity and offline SSH match host\n'
+          if [[ "$plain_id" != 0 || "$plain_ssh" != 0 ]] || ! account_matches_host plain-deny; then
+            printf 'result plain mach-bootstrap denial fails stock identity or offline SSH; gated controls skipped\n'
+            exit 0
+          fi
+          printf 'plain denial identity and offline SSH match host\n'
 
-          id_status=0
-          ssh_status=0
-          probe filtered-id deny-all /usr/bin/id -F || id_status=$?
-          id_pid=$probe_pid
-          probe filtered-ssh deny-all "${ssh[@]}" || ssh_status=$?
-          ssh_pid=$probe_pid
+          result=0
+          write='printf canary > "$1"'
+          record host-outside-write "${clean[@]}" /bin/sh -c "$write" sh "$outside/host"
+          /bin/rm "$outside/host"
+          probe inside-write plain-deny /bin/sh -c "$write" sh "$work/inside"
+          [[ -f "$work/inside" ]]
+          outside_status=0
+          probe outside-write plain-deny /bin/sh -c "$write" sh "$outside/direct" || outside_status=$?
+          if [[ "$outside_status" == 0 || -e "$outside/direct" ]]; then
+            printf 'outside-write fence failed\n' >&2
+            result=1
+          else
+            printf 'outside-write fence held\n'
+          fi
+
+          # Fork, create a separate session, then exec a stock shell. Reap that exact
+          # child in both runs. This observes policy inheritance across detachment.
+          detached='
+            use POSIX qw(setsid);
+            my $pid = fork();
+            die "fork: $!" unless defined $pid;
+            if ($pid == 0) {
+              my $sid = setsid();
+              die "setsid: $!" unless defined($sid) && $sid >= 0;
+              print STDERR "descendant created a separate session\n";
+              exec "/bin/sh", "-c", q{printf canary > "$1" || exit 78
+                (printf canary > "$2")}, "sh", @ARGV;
+              die "exec: $!";
+            }
+            die "waitpid: $!" unless waitpid($pid, 0) == $pid;
+            exit(($? & 127) ? 79 : $? >> 8);
+          '
+          record host-descendant "${clean[@]}" /usr/bin/perl -e "$detached" "$work/host-child" "$outside/host-child"
+          [[ -f "$work/host-child" && -f "$outside/host-child" ]]
+          descendant_status=0
+          probe plain-deny-descendant plain-deny /usr/bin/perl -e "$detached" "$work/child" "$outside/child" || descendant_status=$?
+          if [[ "$descendant_status" != 1 || ! -f "$work/child" || -e "$outside/child" ]]; then
+            printf 'detached descendant write control failed or was inconclusive\n' >&2
+            result=1
+          else
+            printf 'detached descendant retained the outside-write fence\n'
+          fi
 
           uid=$(/usr/bin/id -u)
           domain="gui/$uid"
@@ -264,9 +278,11 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>Label</key><string>$label</string>
-            <key>ProgramArguments</key><array><string>/usr/bin/true</string></array>
+            <key>ProgramArguments</key><array><string>/usr/bin/touch</string><string>$work/job-ran</string></array>
             <key>RunAtLoad</key><false/>
             <key>KeepAlive</key><false/>
+            <key>ExitTimeOut</key><integer>2</integer>
+            <key>ThrottleInterval</key><integer>1</integer>
             $session_type
           </dict>
           </plist>
@@ -277,26 +293,62 @@ jobs:
             exit 1
           fi
           owned_service=$service
-          record host-bootstrap /bin/launchctl bootstrap "$domain" "$plist"
-          /bin/launchctl print "$service" >/dev/null
-          record host-bootout /bin/launchctl bootout "$service"
-          if probe filtered-bootstrap deny-all /bin/launchctl bootstrap "$domain" "$plist"; then
-            printf 'filtered job registration unexpectedly succeeded\n' >&2
-            exit 1
-          fi
-          if /bin/launchctl print "$service" >/dev/null 2>&1; then
-            printf 'filtered job appeared despite registration error\n' >&2
-            exit 1
-          fi
-          job_pid=$probe_pid
-          audit_predicate="eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"mach-message-send\" OR eventMessage CONTAINS \"mach-bootstrap\") AND (eventMessage CONTAINS \"id($id_pid)\" OR eventMessage CONTAINS \"ssh($ssh_pid)\" OR eventMessage CONTAINS \"launchctl($job_pid)\")"
-          if /usr/bin/log show --last 2m --style compact --predicate "$audit_predicate" >"$scratch/audit.out" 2>"$scratch/audit.err"; then
-            if /usr/bin/grep -E 'mach-message-send|mach-bootstrap' "$scratch/audit.out" >"$scratch/audit-matches"; then
-              /usr/bin/head -n 8 "$scratch/audit-matches"
-            else
-              printf 'no matching bootstrap message denial in the visible audit log\n'
+
+          job_present() {
+            /bin/launchctl print "$service" >/dev/null 2>&1
+          }
+          job_runs() {
+            /bin/launchctl print "$service" | /usr/bin/awk '$1 == "runs" && $2 == "=" {print $3}'
+          }
+          remove_job() {
+            record "$1" /bin/launchctl bootout "$service"
+            if job_present; then
+              printf 'disposable job still registered\n' >&2
+              exit 1
             fi
-          else
-            printf 'sandbox audit log unavailable\n'
-          fi
-          printf 'result filter loaded, filtered id %d, filtered ssh %d, outside-write and job registration denied\n' "$id_status" "$ssh_status"
+          }
+
+          record host-bootstrap /bin/launchctl bootstrap "$domain" "$plist"
+          [[ "$(job_runs)" == 0 && ! -e "$work/job-ran" ]]
+          record host-kickstart /bin/launchctl kickstart "$service"
+          for ((attempt=0; attempt<50; attempt++)); do
+            [[ -f "$work/job-ran" ]] && break
+            /bin/sleep 0.1
+          done
+          [[ -f "$work/job-ran" ]]
+          printf 'host kickstart created the job marker\n'
+          remove_job host-bootout
+          /bin/rm "$work/job-ran"
+
+          for profile in base plain-deny; do
+            create_status=0
+            created=no
+            probe "$profile-bootstrap" "$profile" /bin/launchctl bootstrap "$domain" "$plist" || create_status=$?
+            if job_present; then
+              created=yes
+              remove_job "$profile-reset-job"
+            fi
+            printf '%s job registered %s\n' "$profile" "$created"
+            if [[ "$profile" == plain-deny && ( "$create_status" == 0 || "$created" == yes ) ]]; then
+              result=1
+            fi
+
+            record "$profile-host-register" /bin/launchctl bootstrap "$domain" "$plist"
+            [[ "$(job_runs)" == 0 && ! -e "$work/job-ran" ]]
+            kick_status=0
+            probe "$profile-kickstart" "$profile" /bin/launchctl kickstart "$service" || kick_status=$?
+            /bin/sleep 0.25
+            runs=$(job_runs)
+            [[ "$runs" =~ ^[0-9]+$ ]]
+            marker=no
+            [[ ! -e "$work/job-ran" ]] || marker=yes
+            printf '%s existing job runs %s marker %s\n' "$profile" "$runs" "$marker"
+            if [[ "$profile" == plain-deny && ( "$kick_status" == 0 || "$runs" != 0 || "$marker" == yes ) ]]; then
+              result=1
+            fi
+            remove_job "$profile-bootout"
+            /bin/rm -f "$work/job-ran"
+          done
+          printf 'disposable job removed\n'
+          printf 'result completed gated controls with status %d\n' "$result"
+          exit "$result"
