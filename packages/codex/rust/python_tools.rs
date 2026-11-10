@@ -5408,6 +5408,32 @@ impl ToolContributor for PythonContributor {
                             .unwrap_or(&tools.policy),
                     ))
                 }
+                (Some(ordinary), None)
+                    if step
+                        .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
+                        .is_some() =>
+                {
+                    let native = step
+                        .get::<Arc<codex_mcp::McpBinding>>()
+                        .map(|binding| {
+                            binding
+                                .tools()
+                                .iter()
+                                .map(|tool| tool.canonical_tool_name())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    // Tools-only Realtime adds captured MCP defaults, not Code Mode helpers.
+                    Some(merge_profile_native_defaults(
+                        false,
+                        ordinary,
+                        native,
+                        candidates,
+                        step.get::<codex_extension_api::ToolPolicy>()
+                            .as_deref()
+                            .unwrap_or(&tools.policy),
+                    ))
+                }
                 (defaults, _) => defaults,
             };
             let mcp_names = step

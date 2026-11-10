@@ -287,7 +287,7 @@ diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regula
 index 32ae3148..29cee108 100644
 --- a/codex-rs/core/src/tasks/regular.rs
 +++ b/codex-rs/core/src/tasks/regular.rs
-@@ -45,6 +45,36 @@ impl SessionTask for RegularTask {
+@@ -45,6 +45,49 @@ impl SessionTask for RegularTask {
          cancellation_token: CancellationToken,
      ) -> SessionTaskResult {
          let run_turn_span = trace_span!("run_turn");
@@ -299,8 +299,21 @@ index 32ae3148..29cee108 100644
 +            .get::<codex_extension_api::InitialTurnInput>()
 +            .is_some_and(|initial| initial.0.is_none())
 +        {
++            // Mailbox-triggered children can start with an empty task input.
++            // Snapshot this turn's admitted queue without consuming its records.
++            let pending_input = if let Some(state) = sess
++                .input_queue
++                .turn_state_for_sub_id(&sess.active_turn, &ctx.sub_id)
++                .await
++            {
++                let pending = state.lock().await;
++                pending.pending_input.items.clone()
++            } else {
++                Vec::new()
++            };
 +            let initial = input
 +                .iter()
++                .chain(pending_input.iter())
 +                .filter(|item| {
 +                    matches!(
 +                        item,
