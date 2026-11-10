@@ -16,7 +16,7 @@ pub struct Subagent {
     name: Option<String>,
     pub parent_agent_id: ThreadId,
     pub status: &'static str,
-    runtime_loaded: bool,
+    pub runtime_loaded: bool,
     opened_at: i64,
     pub closed_at: Option<i64>,
 }

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,16 +17,20 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     Environment,
+    LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
+    NativeError,
     NativeProvider,
     NetworkPolicy,
+    ReconciledCall,
     ToolContext,
+    _native,
     function_tool,
 )
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
-from tests.native_fixtures import assistant_output, function_call, tool_output
+from tests.native_fixtures import assistant_output, function_call, native_options, tool_output
 from tests.test_native_child_agents import ChildPeer, collaboration, handles, metadata
 from tests.test_native_local_storage import _collect
 
@@ -36,6 +41,7 @@ class LocalFamilyPeer(ChildPeer):
     def __init__(self, depth: int) -> None:
         super().__init__(("default",))
         self.depth = depth
+        self.followup = False
         for release in self.release.values():
             release.set()
 
@@ -48,6 +54,22 @@ class LocalFamilyPeer(ChildPeer):
             if item.get("type") in {"function_call_output", "custom_tool_call_output"}
         }
         if self.request_headers[-1]["authorization"] == "Bearer destination":
+            if self.followup:
+                if path == "/root/alpha":
+                    assert (
+                        tool_output(body, "source-effect") == "Confirmed by the application journal"
+                    )
+                    return [function_call("lookup", {"key": "duplicate"}, "source-effect")]
+                assert path == "/root"
+                if "wake-reconciled" not in received:
+                    return [
+                        collaboration(
+                            "followup_task",
+                            {"target": "/root/alpha", "message": "Start new work."},
+                            "wake-reconciled",
+                        )
+                    ]
+                return [assistant_output("follow-up submitted")]
             assert path == "/root", "Inspecting descendants restarted old native work"
             if "fresh-current" not in received:
                 return [function_call("lookup", {"key": "fresh"}, "fresh-current")]
@@ -62,7 +84,7 @@ class LocalFamilyPeer(ChildPeer):
                         {
                             "task_name": name,
                             "message": "Record a memory.",
-                            "fork_turns": "none",
+                            "fork_turns": "all" if self.depth == 2 else "none",
                         },
                         "spawn-" + name,
                     )
@@ -184,9 +206,12 @@ async def worker() -> None:
             file.write(context.context + ":" + key + "\n")
             file.flush()
             os.fsync(file.fileno())
-        if request["mode"] == "unknown":
+        if request["mode"] in {"unknown", "hold-unknown"}:
             # Do not kill before the root has its spawn receipt and final text.
             await finished_root.wait()
+            if request["mode"] == "hold-unknown":
+                print(json.dumps({"pending_effect": key}), flush=True)
+                await asyncio.to_thread(sys.stdin.readline)
             os._exit(67)
         return context.context + ":" + key
 
@@ -210,6 +235,7 @@ async def worker() -> None:
                 context="destination" if request["resume"] else "source",
                 storage=LocalStorage(path / "profile"),
                 resume=request["resume"] or None,
+                reconciled_calls=[ReconciledCall(**row) for row in request["receipts"]],
                 environment=Environment(
                     url=request["executor"],
                     cwd=request["cwd"],
@@ -220,13 +246,43 @@ async def worker() -> None:
             ) as session,
         ):
             print(json.dumps({"opened": session.id, "pid": os.getpid()}), flush=True)
+            if request["mode"] == "inspect":
+                async for child in session.subagents():
+                    items = [item async for item in session.items(subagent_id=child.id)]
+                    turns = [turn async for turn in session.turns(subagent_id=child.id)]
+                    print(
+                        json.dumps(
+                            {
+                                "id": child.id,
+                                "is_live": child.is_live,
+                                "items": items,
+                                "turns": turns,
+                            }
+                        ),
+                        flush=True,
+                    )
+                return
             result = await (await session.submit("Run requested work.")).get_result()
             root_items = [item async for item in session.items()]
             print(json.dumps({"output": result.final_output, "root_items": root_items}), flush=True)
             finished_root.set()
-            if not request["resume"]:
+            if request["mode"] == "followup":
+                [handle] = await handles(session, 1)
+                try:
+                    await handle.get_result()
+                except NativeError:
+                    turns = [turn async for turn in session.turns(subagent_id=handle.child_id)]
+                    (failed,) = [turn for turn in turns if turn["id"] == handle.turn_id]
+                    print(json.dumps({"followup": failed}), flush=True)
+            elif not request["resume"]:
                 for handle in await handles(session, request["depth"]):
                     await handle.get_result()
+    except LocalRecoveryRequired as error:
+        print(
+            json.dumps({"uncertain": [asdict(call) for call in error.calls], "turns": error.turns}),
+            flush=True,
+        )
+        raise
     except Exception as error:
         print(json.dumps({"error": type(error).__name__, "message": str(error)}), flush=True)
         raise
@@ -243,6 +299,7 @@ async def start(
     no_children=False,
     model=DESCENDANT_MODEL,
     write_policy="legacy" if sys.platform == "win32" else "strict",
+    receipts=(),
 ):
     request = {
         "path": str(directory),
@@ -256,6 +313,7 @@ async def start(
         "executor": executor.url,
         "cwd": str(executor.root),
         "token": executor.token,
+        "receipts": [asdict(receipt) for receipt in receipts],
     }
     root = str(Path(__file__).resolve().parents[1])
     environment = {
@@ -294,6 +352,108 @@ def canonical_completed_activity(
     ]
 
 
+async def test_local_recovery_preserves_crashed_child_native_command(tmp_path, monkeypatch):
+    peer = LocalFamilyPeer(depth=1)
+    original_response = peer.response
+    arguments = {"cmd": "printf fixture-effect"}
+
+    def response():
+        body, headers = peer.requests[-1], peer.request_headers[-1]
+        if (
+            headers["authorization"] == "Bearer source"
+            and metadata(body, headers)["agent_name"] == "/root/alpha"
+        ):
+            return [function_call("exec_command", arguments, "source-command")]
+        return original_response()
+
+    effect = tmp_path / "command-journal"
+    recorded, release = asyncio.Event(), asyncio.Event()
+
+    async def apply_synthetic_effect(process_id: str) -> None:
+        with effect.open("a") as journal:
+            journal.write(process_id + "\n")
+        recorded.set()
+        await release.wait()
+
+    monkeypatch.setattr(peer, "response", response)
+    app = web.Application()
+    app.router.add_post("/v1/responses", peer.handle)
+    app.router.add_get("/v1/responses", peer.websocket)
+    app.on_shutdown.append(peer.close_sockets)
+    async with (
+        timeout(55),
+        TestServer(app, shutdown_timeout=1) as server,
+        ExecutorPeer(
+            tmp_path / "remote",
+            synthetic_process_output="fixture-effect",
+            before_synthetic_process_reply=apply_synthetic_effect,
+        ).serve() as executor,
+    ):
+        peer.url = str(server.make_url("/v1"))
+        source = await start(peer, executor, tmp_path, "known", 1)
+        try:
+            assert source.stdout is not None
+            opened, root = [json.loads(await source.stdout.readline()) for _ in range(2)]
+            assert root["output"] == "/root finished"
+            await recorded.wait()
+            source.kill()
+            code, _, err = await _collect(source)
+            assert code != 0, err
+        finally:
+            release.set()
+            if source.returncode is None:
+                source.kill()
+                await _collect(source)
+
+        [execution] = effect.read_text().splitlines()
+        child = next(
+            item["subagent_id"]
+            for item in root["root_items"]
+            if item["type"] == "create_subagent_call"
+        )
+        root_id = opened["opened"]
+        before = len(peer.requests)
+        unopened = await start(peer, executor, tmp_path, "inspect", 1, identity=root_id)
+        code, rows, err = await _collect(unopened)
+        assert code != 0 and len(rows) == 1 and "uncertain" in rows[0], (rows, err)
+        (call,) = rows[0]["uncertain"]
+        assert call["thread_id"] == child and call["turn_id"]
+        assert call["call_id"] == "source-command" and call["name"] == "exec_command"
+        assert call["arguments"] == arguments
+        receipt = ReconciledCall(
+            thread_id=child,
+            turn_id=call["turn_id"],
+            call_id="source-command",
+            outcome="applied",
+            result="fixture-effect",
+        )
+        (rollout,) = (tmp_path / "profile").rglob(f"*{child}.jsonl")
+        original = rollout.read_bytes()
+        staging = rollout.with_name(f".sdk-recovery-{child}")
+        # A process dying during publication can leave a partial staging file.
+        staging.write_bytes(original + b'{"type":"response_item"')
+        recovered = await start(
+            peer, executor, tmp_path, "inspect", 1, identity=root_id, receipts=[receipt]
+        )
+        code, rows, err = await _collect(recovered)
+        assert code == 0 and rows[0]["opened"] == root_id, (rows, err)
+        (leaf,) = rows[1:]
+        assert leaf["id"] == child and not leaf["is_live"]
+        (result,) = [item for item in leaf["items"] if item["type"] == "function_call_output"]
+        assert (result["turn_id"], result["call_id"]) == (call["turn_id"], "source-command")
+        assert result["reconciliation"] == "applied" and result["output"] == "fixture-effect"
+        assert rollout.read_bytes().startswith(original)
+        assert not staging.exists()
+        assert len(peer.requests) == before
+
+        continued = await start(peer, executor, tmp_path, "destination", 1, identity=root_id)
+        code, rows, err = await _collect(continued)
+        assert code == 0 and rows[0]["opened"] == root_id, (rows, err)
+        assert rows[1]["output"] == "destination finished"
+        assert executor.synthetic_process_starts == [execution]
+        assert effect.read_text() == execution + "\n"
+
+
 @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
 @pytest.mark.parametrize("known", [False, True], ids=["unknown", "receipted"])
 @pytest.mark.parametrize(
@@ -316,8 +476,33 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         peer.url = str(server.make_url("/v1"))
-        first = await start(peer, executor, tmp_path, "known" if known else "unknown", depth)
-        code, rows, err = await _collect(first)
+        hold_owner = not known and not no_children
+        mode = "known" if known else "hold-unknown" if hold_owner else "unknown"
+        first = await start(peer, executor, tmp_path, mode, depth)
+        rows = []
+        if hold_owner:
+            try:
+                assert first.stdout is not None
+                rows = [json.loads(await first.stdout.readline()) for _ in range(2)]
+                assert "pending_effect" in json.loads(await first.stdout.readline())
+                before = len(peer.requests)
+                competing = await start(
+                    peer, executor, tmp_path, "inspect", depth, identity=rows[0]["opened"]
+                )
+                code, refused, err = await _collect(competing)
+                assert code != 0 and len(refused) == 1, (refused, err)
+                assert "already has an active writer" in refused[0]["message"], (refused, err)
+                assert len(peer.requests) == before
+            except BaseException:
+                if first.returncode is None:
+                    first.kill()
+                await _collect(first)
+                raise
+            assert first.stdin is not None
+            first.stdin.write(b"stop\n")
+            await first.stdin.drain()
+        code, rest, err = await _collect(first)
+        rows += rest
         assert code == (0 if known else 67), (rows, err)
         assert len(rows) == 2 and rows[0].get("opened"), (rows, err)
         assert rows[1]["output"] == "/root finished"
@@ -340,6 +525,27 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
         old_effect = "source:" + origin + "\n"
         assert (tmp_path / "effects").read_text() == old_effect
         original_count = len(peer.requests)
+        if known and depth == 1 and not no_children:
+            # The root writer is available while an independent opener owns the
+            # saved child. Recovery must still acquire that child's native lease.
+            options = native_options(tmp_path, peer)
+            options["config"].update(model=DESCENDANT_MODEL, sandbox_mode="read-only")
+            options["runtime"].update(native_thread_store=str(tmp_path / "profile"))
+            owner = await _native.create_engine(
+                json.dumps(options["config"]), json.dumps(options["runtime"])
+            )
+            try:
+                child = await owner.resume_thread(direct_child)
+                competing = await start(
+                    peer, executor, tmp_path, "inspect", depth, identity=rows[0]["opened"]
+                )
+                code, refused, err = await _collect(competing)
+                assert code != 0 and len(refused) == 1, (refused, err)
+                assert "already has an active writer" in refused[0]["message"], (refused, err)
+                assert len(peer.requests) == original_count
+                await child.close()
+            finally:
+                await owner.close()
         second = await start(
             peer,
             executor,
@@ -357,11 +563,100 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             assert len(peer.requests) == original_count + 2
             assert len(canonical_completed_activity(tmp_path, rows[0]["opened"], direct_child)) == 1
         else:
-            assert code != 0 and new and new[0]["error"] == "RuntimeError", (new, err)
-            assert "cannot reconcile descendant calls" in new[0]["message"]
+            assert code != 0 and len(new) == 1 and "uncertain" in new[0], (new, err)
+            (call,) = new[0]["uncertain"]
+            assert call["thread_id"] != rows[0]["opened"]
+            if depth == 1:
+                assert call["thread_id"] == direct_child
+            else:
+                assert call["thread_id"] != direct_child
+            assert call["turn_id"] and call["call_id"] == "source-effect"
+            assert call["name"] == "lookup" and call["arguments"] == {"key": origin}
+            (original_turn,) = [turn for turn in new[0]["turns"] if turn["id"] == call["turn_id"]]
+            assert original_turn["subagent_id"] == call["thread_id"]
             assert len(peer.requests) == original_count
             assert (tmp_path / "effects").read_text() == old_effect
-            retried = await start(
+            receipt = ReconciledCall(
+                thread_id=call["thread_id"],
+                turn_id=call["turn_id"],
+                call_id=call["call_id"],
+                outcome="applied",
+                result="Confirmed by the application journal",
+            )
+            wrong_owner = await start(
+                peer,
+                executor,
+                tmp_path,
+                "inspect",
+                depth,
+                identity=rows[0]["opened"],
+                no_children=no_children,
+                receipts=[replace(receipt, thread_id=rows[0]["opened"])],
+            )
+            code, refused, err = await _collect(wrong_owner)
+            assert code != 0 and refused[0]["error"] == "ValueError", (refused, err)
+            if sys.platform != "win32" and not no_children:
+                wrong_policy = await start(
+                    peer,
+                    executor,
+                    tmp_path,
+                    "inspect",
+                    depth,
+                    identity=rows[0]["opened"],
+                    receipts=[receipt],
+                    write_policy="legacy",
+                )
+                code, refused, err = await _collect(wrong_policy)
+                assert code != 0 and "recorded executor" in refused[0]["message"], (refused, err)
+            for confirmations in ((receipt,), (), (receipt,)):
+                retry = await start(
+                    peer,
+                    executor,
+                    tmp_path,
+                    "inspect",
+                    depth,
+                    identity=rows[0]["opened"],
+                    no_children=no_children,
+                    receipts=confirmations,
+                )
+                code, recovered, err = await _collect(retry)
+                assert code == 0 and recovered[0]["opened"] == rows[0]["opened"], (recovered, err)
+                (leaf,) = [row for row in recovered[1:] if row["id"] == call["thread_id"]]
+                (invocation,) = [
+                    item
+                    for item in leaf["items"]
+                    if item.get("call_id") == call["call_id"] and item["type"] == "function_call"
+                ]
+                assert invocation["turn_id"] == call["turn_id"] and invocation["name"] == "lookup"
+                (result,) = [
+                    item
+                    for item in leaf["items"]
+                    if item.get("call_id") == call["call_id"]
+                    and item["type"] == "function_call_output"
+                ]
+                assert result["turn_id"] == call["turn_id"]
+                assert result["reconciliation"] == "applied" and result["output"] == receipt.result
+                (turn,) = [turn for turn in leaf["turns"] if turn["id"] == call["turn_id"]]
+                assert turn["status"] == "cancelled"
+                assert not leaf["is_live"]
+            conflict = await start(
+                peer,
+                executor,
+                tmp_path,
+                "inspect",
+                depth,
+                identity=rows[0]["opened"],
+                no_children=no_children,
+                receipts=[replace(receipt, result="Conflicting result")],
+            )
+            code, refused, err = await _collect(conflict)
+            assert code != 0 and "conflicts with a retained result" in refused[0]["message"], (
+                refused,
+                err,
+            )
+            assert len(peer.requests) == original_count
+            assert (tmp_path / "effects").read_text() == old_effect
+            destination = await start(
                 peer,
                 executor,
                 tmp_path,
@@ -370,10 +665,22 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 identity=rows[0]["opened"],
                 no_children=no_children,
             )
-            code, again, err = await _collect(retried)
-            assert code != 0 and again == new, (again, err)
-            assert len(peer.requests) == original_count
-            assert (tmp_path / "effects").read_text() == old_effect
+            code, finished, err = await _collect(destination)
+            assert code == 0 and finished[0]["opened"] == rows[0]["opened"], (finished, err)
+            assert finished[1]["output"] == "destination finished"
+            assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
+            assert len(peer.requests) == original_count + 2
+            if depth == 1 and not no_children:
+                peer.followup = True
+                followup = await start(
+                    peer, executor, tmp_path, "followup", depth, identity=rows[0]["opened"]
+                )
+                code, finished, err = await _collect(followup)
+                assert code == 0 and finished[1]["output"] == "follow-up submitted", (finished, err)
+                failed = finished[2]["followup"]
+                assert failed["status"] == "failed"
+                assert "Cannot reuse an original call identity" in failed["error"]["message"]
+                assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
 
 
 @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])

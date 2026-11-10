@@ -70,6 +70,7 @@ pub struct EngineState {
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
+    pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
 }
 
@@ -530,6 +531,7 @@ impl EngineState {
         } else {
             None
         };
+        let recovery = Arc::new(crate::recovery_guard::RecoveryContributor::default());
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
@@ -542,6 +544,7 @@ impl EngineState {
                 environment.clone(),
                 extension_events.clone(),
                 interception.clone(),
+                recovery.clone(),
                 local_checklist_store
                     .as_ref()
                     .map(|store| store.managed_calls.clone())
@@ -605,6 +608,7 @@ impl EngineState {
             startup_warnings: config.startup_warnings.clone(),
             codex_account,
             extension_events,
+            recovery,
             cloud_config,
             service_config: config,
             model_http_pool: None,
