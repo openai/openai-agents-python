@@ -1044,6 +1044,8 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
     handshake_failures: list[str] = []
     handshake_successes: list[bool] = []
     accepted_data: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    attempt_observed = asyncio.Event()
 
     class UntrustedProxy(socketserver.BaseRequestHandler):
         def handle(self) -> None:
@@ -1052,13 +1054,18 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
             prefix = self.request.recv(1, socket.MSG_PEEK)
             prefixes.append(prefix)
             if prefix != b"\x16":
+                loop.call_soon_threadsafe(attempt_observed.set)
                 return
             try:
                 secured = context.wrap_socket(self.request, server_side=True)
             except OSError as error:
-                handshake_failures.append(type(error).__name__)
+                handshake_failures.append(
+                    str(getattr(error, "reason", None) or type(error).__name__)
+                )
+                loop.call_soon_threadsafe(attempt_observed.set)
                 return
             handshake_successes.append(True)
+            loop.call_soon_threadsafe(attempt_observed.set)
             with secured:
                 try:
                     accepted_data.append(secured.recv(8))
@@ -1090,13 +1097,21 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
                 request_max_retries=0,
                 stream_max_retries=0,
             )
+            request = asyncio.create_task(
+                Agent(instructions="Keep proxy TLS verification.", provider=provider).run(
+                    "Do not send a request through an untrusted proxy."
+                )
+            )
             try:
-                with pytest.raises(NativeError):
-                    await Agent(instructions="Keep proxy TLS verification.", provider=provider).run(
-                        "Do not send a request through an untrusted proxy."
-                    )
+                # Observe the handshake before stopping Core's connection-retry loop.
+                await attempt_observed.wait()
             finally:
-                await provider.aclose()
+                request.cancel()
+                try:
+                    with pytest.raises((asyncio.CancelledError, NativeError)):
+                        await request
+                finally:
+                    await provider.aclose()
             assert not destination.requests
             assert not destination.http_requests
             assert not destination.upgrades
@@ -1109,6 +1124,6 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
             await asyncio.to_thread(proxy.server_close)
     assert any(prefix == b"\x16" for prefix in prefixes)
     assert all(prefix in (b"", b"\x16") for prefix in prefixes), "plaintext reached the HTTPS proxy"
-    assert handshake_failures
+    assert "TLSV1_ALERT_UNKNOWN_CA" in handshake_failures, handshake_failures
     assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
     assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"
