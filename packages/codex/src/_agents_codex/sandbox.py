@@ -66,8 +66,10 @@ from _agents_shared.snapshot_defaults import (
     default_local_snapshot_base_dir as default_local_snapshot_base_dir,
     resolve_default_local_snapshot_spec,
 )
+from agents.classic.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
 
 from ._managed_workspace import (
+    _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
     ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     _ManagedWorkspaceSource,
 )
@@ -139,6 +141,10 @@ def sandbox_environment(
     managed_workspace: bool = False,
 ) -> AbstractAsyncContextManager[Environment[_ContextT]]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
+
+    Each prepared acquisition has been supplying filesystem and mount guidance to
+    the native Session. Entry descriptions have been appearing in model context,
+    requiring text without secrets.
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
@@ -280,18 +286,25 @@ def sandbox_environment(
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
-            yield await owners.enter_async_context(connect(selected))
+            environment = await owners.enter_async_context(connect(selected))
+            setattr(
+                source_manager,
+                _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
+                _render_workspace_instructions(selected.state.manifest, environment),
+            )
+            yield environment
 
+    source_manager = source()
     if managed_workspace:
         if original_authorized_state is not None:
             authorized_payload = client.serialize_session_state(original_authorized_state)
         managed_source = _ManagedWorkspaceSource(
-            source(),
+            source_manager,
             backend_id=client.backend_id,
             authorized_payload=authorized_payload,
         )
         return managed_source
-    return source()
+    return source_manager
 
 
 @redact_mount_error_data_sync
@@ -327,6 +340,23 @@ def render_storage_layout(manifest: Manifest) -> str:
         ensure_ascii=True,
         indent=2,
     )
+
+
+def _render_workspace_instructions(manifest: Manifest, environment: Environment[Any]) -> str:
+    captured = _manifest(manifest)
+    sections = [
+        "# Current SDK workspace snapshot",
+        "This snapshot replaces all earlier SDK workspace descriptions. "
+        "Mount modes describe storage; current tool and executor grants control access.",
+        "Working directory: " + json.dumps(environment.cwd, ensure_ascii=True),
+        "Executor read-only: " + json.dumps(environment.read_only),
+        "Filesystem layout:\n" + captured.describe(depth=3),
+        "Declared storage access:\n" + render_storage_layout(captured),
+    ]
+    policy = build_remote_mount_policy_instructions(captured, allow_direct_edits=False)
+    if policy is not None:
+        sections.append(policy)
+    return "\n\n".join(sections)
 
 
 __all__ = [

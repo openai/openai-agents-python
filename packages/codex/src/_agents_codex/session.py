@@ -78,7 +78,11 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
-from ._managed_workspace import ManagedWorkspaceCheckpoint, _ManagedWorkspaceSource
+from ._managed_workspace import (
+    _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
+    ManagedWorkspaceCheckpoint,
+    _ManagedWorkspaceSource,
+)
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
@@ -2792,12 +2796,19 @@ class _EnvironmentLease:
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
         self.interrupted = False
+        self._workspace_instructions: str | None = None
         self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
         # Manager timeouts and task groups cancel this task, distinct from
         # cancellation of the borrowing application. Entry and exit stay together.
         async with source as environment:
+            if self._ready.cancelled():
+                return
+            instructions = getattr(source, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, None)
+            if instructions is not None and not isinstance(instructions, str):
+                raise TypeError("Workspace instructions must be captured text")
+            self._workspace_instructions = instructions
             self._ready.set_result(environment)
             try:
                 await asyncio.shield(self._retired)
@@ -2821,6 +2832,7 @@ class _EnvironmentLease:
             # Before successful entry, the source owns rollback. Cancellation must
             # join that entry and must never start native work from a late result.
             if not self._ready.done():
+                self._ready.cancel()
                 cancel_once(self._owner)
             await _close_after_error(error, lambda: _release_environment(self))
             self.raise_if_interrupted(error)
@@ -3646,6 +3658,11 @@ class Session(Generic[ContextT, OutputT]):
                 options = {
                     "_hosted_tools": hosted_tools,
                     **guidance_options,
+                    **(
+                        {"user_instructions_appendix": lease._workspace_instructions}
+                        if lease is not None and lease._workspace_instructions is not None
+                        else {}
+                    ),
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,

@@ -19,6 +19,7 @@ from agents.classic.sandbox.session.sandbox_client import BaseSandboxClientOptio
 from agents.classic.testing.sandbox import scripted_sandbox_session
 from agents.sandbox import (
     BaseSandboxClient,
+    Dir,
     DockerVolumeMountStrategy,
     Manifest,
     S3Mount,
@@ -1122,3 +1123,124 @@ async def test_borrowed_failed_authority_preserves_limits(failure: str) -> None:
             pytest.fail("Rejected authority must not yield")
     assert session._archive_limits == archive
     assert session._max_manifest_entry_concurrency == 7
+
+
+async def test_workspace_guidance_captures_prepared_resource_without_private_values() -> None:
+    from _agents_codex.session import _EnvironmentLease, _release_environment
+
+    class PreparedClient(Client):
+        async def create(self, *, manifest=None, options, snapshot=None):
+            selected = await super().create(manifest=manifest, options=options, snapshot=snapshot)
+            start = selected.start
+
+            async def prepare():
+                await start()
+                selected.state.manifest.root = "/prepared"
+
+            selected.start = prepare
+            return selected
+
+    client = PreparedClient([])
+    manifest = Manifest(
+        entries={
+            "data": declaration(read_only=False, secret_access_key="SYNTHETIC_MOUNT_SECRET"),
+            "notes": Dir(),
+        },
+        environment={"value": {"PRIVATE": "SYNTHETIC_ENV_SECRET"}},
+        remote_mount_command_allowlist=["cat"],
+    )
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected.state.manifest.root == "/prepared"
+        yield Environment(
+            url="wss://synthetic-executor.invalid",
+            headers={"Authorization": "SYNTHETIC_HEADER_SECRET"},
+            cwd="/prepared/project",
+            read_only=True,
+        )
+
+    source = sandbox_environment(
+        client,
+        manifest=manifest,
+        options=Options(labels={"private": "SYNTHETIC_PROVIDER_SECRET"}),
+        connect=connect,
+    )
+    manifest.entries.clear()
+    lease = _EnvironmentLease(source)
+    try:
+        await lease.acquire()
+        text = lease._workspace_instructions
+        assert isinstance(text, str)
+        assert text.count("# Current SDK workspace snapshot") == 1
+        assert '"workspace": "/prepared"' in text
+        assert 'Working directory: "/prepared/project"' in text
+        assert "Executor read-only: true" in text
+        assert "/prepared/data" in text and "read+write" in text
+        assert "/prepared/notes" in text
+        assert "untrusted data" in text and "`cat`" in text
+        assert "copy it back" in text
+        assert "Use `apply_patch` directly" not in text
+        for secret in (
+            "SYNTHETIC_MOUNT_SECRET",
+            "SYNTHETIC_ENV_SECRET",
+            "SYNTHETIC_HEADER_SECRET",
+            "SYNTHETIC_PROVIDER_SECRET",
+            "synthetic-executor.invalid",
+        ):
+            assert secret not in text
+        assert client.session is not None
+        client.session.state.manifest.root = "/later"
+        assert lease._workspace_instructions == text
+    finally:
+        await _release_environment(lease)
+    assert client.events == ["create", "start", "close", "delete"]
+
+
+async def test_failed_gateway_does_not_publish_workspace_guidance() -> None:
+    from _agents_codex.session import _EnvironmentLease
+
+    client = Client([])
+
+    @asynccontextmanager
+    async def connect(selected):
+        raise RuntimeError("gateway failed")
+        yield Environment(url="wss://synthetic.invalid", cwd="/workspace")
+
+    lease = _EnvironmentLease(
+        sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect)
+    )
+    with pytest.raises(RuntimeError, match="gateway failed"):
+        await lease.acquire()
+    assert lease._workspace_instructions is None
+    assert client.events == ["create", "start", "close", "delete"]
+
+
+async def test_cancelled_gateway_cannot_publish_late_workspace_guidance() -> None:
+    from _agents_codex.session import _EnvironmentLease
+
+    client = Client([])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def connect(selected):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        yield Environment(url="wss://synthetic.invalid", cwd="/workspace")
+
+    lease = _EnvironmentLease(
+        sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect)
+    )
+    opening = asyncio.create_task(lease.acquire())
+    await entered.wait()
+    opening.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert lease._workspace_instructions is None
+    assert client.events == ["create", "start", "close", "delete"]

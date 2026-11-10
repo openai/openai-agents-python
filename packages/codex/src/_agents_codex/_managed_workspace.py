@@ -94,6 +94,9 @@ class ManagedWorkspaceCheckpoint:
         return cls(conversation, workspace, _association(conversation, workspace))
 
 
+_WORKSPACE_INSTRUCTIONS_ATTRIBUTE = "_sdk_workspace_instructions"
+
+
 class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
     """Existing source lifetime plus one explicitly requested retirement receipt."""
 
@@ -114,6 +117,10 @@ class _ManagedWorkspaceSource(AbstractAsyncContextManager["Environment[Any]"]):
         self.capture_requested = False
         self.receipt: str | None = None
         self.capture_task: asyncio.Task[ManagedWorkspaceCheckpoint] | None = None
+
+    @property
+    def _sdk_workspace_instructions(self) -> str | None:
+        return cast(str | None, getattr(self._source, _WORKSPACE_INSTRUCTIONS_ATTRIBUTE, None))
 
     def validate_resume(self, checkpoint: ManagedWorkspaceCheckpoint) -> None:
         # Association validation precedes resource acquisition and native restore.
