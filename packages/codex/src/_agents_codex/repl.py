@@ -28,8 +28,11 @@ async def run_demo_loop(
     """Read terminal input until exit, quit, EOF, or Ctrl+C between turns.
 
     One native Session retains the conversation and selected handoff profile.
-    Streaming prints assistant deltas and tool-status notices. Non-streaming
-    prints accepted final output. Each turn uses the supplied native RunBudget.
+    Streaming prints assistant deltas and tool-status notices, then recorded
+    function, MCP and command outputs after the turn settles. Agent notices show
+    the admitted starting Agent and the final committed Agent when it changes;
+    they do not report intermediate handoffs within a turn. Non-streaming prints
+    accepted final output only. Each turn uses the supplied native RunBudget.
     on_interaction follows Agent.session's callback contract. Without a handler,
     a live request fails the turn instead of granting approval or waiting forever.
     The helper closes its Session and leaves an injected Provider open.
@@ -39,6 +42,7 @@ async def run_demo_loop(
         on_interaction=(_unsupported_interaction if on_interaction is None else on_interaction),
     ) as session:
         del context
+        displayed_outputs: set[tuple[str, str]] = set()
         while True:
             try:
                 # Keep terminal input on the main thread for immediate Ctrl+C.
@@ -52,6 +56,9 @@ async def run_demo_loop(
                 continue
             turn = result = event = None
             try:
+                current_agent = await session.get_active_agent()
+                if stream:
+                    print(f"\n[Agent updated: {current_agent.name}]", flush=True)
                 turn = await session.submit(user_input, budget=budget)
                 printed_text = False
                 if stream:
@@ -65,6 +72,26 @@ async def run_demo_loop(
                             elif isinstance(event, ToolFinished):
                                 print(f"\n[tool {event.status}]", flush=True)
                 result = await turn.get_result()
+                if stream:
+                    async for item in session.items():
+                        if item["type"] not in {
+                            "function_call_output",
+                            "mcp_call",
+                            "command_execution",
+                        }:
+                            continue
+                        key = (item["turn_id"], item["id"])
+                        if key in displayed_outputs:
+                            continue
+                        output = item.get("output")
+                        if output is None:
+                            output = item.get("error")
+                        if output is not None:
+                            displayed_outputs.add(key)
+                            print(f"\n[tool output: {output}]", flush=True)
+                    active_agent = await session.get_active_agent()
+                    if active_agent is not current_agent:
+                        print(f"\n[Agent updated: {active_agent.name}]", flush=True)
                 if not printed_text and result.final_output is not None:
                     print(result.final_output)
                 elif printed_text:

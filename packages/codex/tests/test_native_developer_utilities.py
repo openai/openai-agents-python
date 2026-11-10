@@ -135,11 +135,11 @@ async def test_demo_loop_prints_streamed_deltas_without_repeating_final_text(mon
             text("live answer", item_id="msg_stream"),
         ]
     ) as peer:
-        await run_demo_loop(Agent(instructions="Respond.", provider=peer.provider))
-        assert capsys.readouterr().out == "live answer\n"
+        await run_demo_loop(Agent(name="Stream", instructions="Respond.", provider=peer.provider))
+        assert capsys.readouterr().out == "\n[Agent updated: Stream]\nlive answer\n"
 
 
-async def test_demo_loop_prints_native_tool_status(monkeypatch, capsys):
+async def test_demo_loop_prints_native_tool_output_once_across_turns(monkeypatch, capsys):
     calls = []
 
     @function_tool
@@ -148,16 +148,44 @@ async def test_demo_loop_prints_native_tool_status(monkeypatch, capsys):
         calls.append("lookup")
         return "synthetic value"
 
-    inputs = iter(["synthetic question", "quit"])
+    inputs = iter(["synthetic question", "follow-up", "quit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
     async with ScriptedResponses(
-        [tool_call("lookup", {}, call_id="call_lookup")], [text("accepted answer")]
+        [tool_call("lookup", {}, call_id="call_lookup")],
+        [text("accepted answer")],
+        [text("follow-up answer")],
     ) as peer:
         await run_demo_loop(Agent(instructions="Respond.", provider=peer.provider, tools=[lookup]))
         output = capsys.readouterr().out
         assert calls == ["lookup"]
         assert "[tool called]" in output and "[tool completed]" in output
-        assert "accepted answer" in output
+        assert output.count("[tool output: synthetic value]") == 1
+        assert "accepted answer" in output and "follow-up answer" in output
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_demo_loop_reports_settled_agent_and_keeps_destination(monkeypatch, capsys, stream):
+    inputs = iter(["route", "continue", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    destination = Agent(name="Destination", instructions="Respond as destination.")
+    async with ScriptedResponses(
+        [tool_call("transfer_to_destination", {}, call_id="route-destination")],
+        [text("destination answer")],
+        [text("destination continuation")],
+    ) as peer:
+        source = Agent(
+            name="Source", instructions="Route.", provider=peer.provider, handoffs=[destination]
+        )
+        await run_demo_loop(source, stream=stream)
+        output = capsys.readouterr().out
+        assert "destination answer" in output and "destination continuation" in output
+        if stream:
+            assert output.count("[Agent updated: Source]") == 1
+            assert output.count("[Agent updated: Destination]") == 2
+        else:
+            assert "[Agent updated:" not in output
+            assert "[tool output:" not in output
+        assert "Respond as destination." in json.dumps(peer.requests[2])
 
 
 async def test_demo_loop_refuses_unhandled_approval_without_retiring_provider(monkeypatch):
