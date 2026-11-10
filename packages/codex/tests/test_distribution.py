@@ -9,6 +9,10 @@ import csv
 import hashlib
 import io
 import os
+import platform
+import re
+import shutil
+import subprocess
 import sys
 from email.parser import BytesParser
 from pathlib import Path
@@ -156,6 +160,47 @@ def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
     wheel = BytesParser().parsebytes(archive.read(wheel_path))
     assert wheel["Root-Is-Purelib"] == "false"
     assert set(wheel.get_all("Tag", [])) == {str(tag) for tag in tags}
+    if sys.platform == "linux" and platform.machine() == "aarch64":
+        assert wheel.get_all("Tag") == ["cp310-abi3-manylinux_2_39_aarch64"]
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or platform.machine() != "aarch64",
+    reason="requires a Linux ARM64 wheel and readelf",
+)
+def test_linux_arm64_native_payload(sdk_wheel, tmp_path):
+    _, archive = sdk_wheel
+    scratch = tmp_path / "payload"
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        with archive.open(info) as source:
+            magic = source.read(4)
+            required_elf = info.filename.startswith("agents/bin/") or (
+                ".so" in Path(info.filename).suffixes
+            )
+            if not required_elf and magic != b"\x7fELF":
+                continue
+            with scratch.open("wb") as target:
+                target.write(magic)
+                shutil.copyfileobj(source, target)
+        result = subprocess.check_output(
+            ["readelf", "--file-header", "--version-info", "--dynamic", "--wide", scratch],
+            env={**os.environ, "LC_ALL": "C"},
+            text=True,
+        )
+        assert re.search(r"^\s*Class:\s+ELF64$", result, re.MULTILINE), info.filename
+        assert re.search(r"^\s*Machine:\s+AArch64$", result, re.MULTILINE), info.filename
+        glibc = [
+            tuple(map(int, version.split(".")))
+            for version in re.findall(r"Name: GLIBC_(\d+(?:\.\d+)+)", result)
+        ]
+        assert all(version <= (2, 39) for version in glibc), (info.filename, glibc)
+        libraries = re.findall(r"\(NEEDED\).*\[(.*?)\]", result)
+        print(
+            f"{info.filename}: AArch64 ELF64, GLIBC up to {max(glibc, default=None)}, {libraries}"
+        )
+    scratch.unlink()
 
 
 def test_sdk_record_owns_each_archive_file_once(sdk_wheel):

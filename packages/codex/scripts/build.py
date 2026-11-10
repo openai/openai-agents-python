@@ -137,6 +137,10 @@ def main():
         environment["UV_FROZEN"] = "true"
         environment["UV_NO_DEFAULT_GROUPS"] = "true"
         cargo_options = [*cargo_options, "--target", host, "--pgo"]
+    manylinux = environment.get("OPENAI_AGENTS_NATIVE_MANYLINUX")
+    if mode == "build" and manylinux:
+        # Qualify the same Linux glibc baseline even if Maturin detects an older one.
+        output.extend(["--compatibility", manylinux])
     subprocess.run(
         ["maturin", mode, "--locked", *cargo_options, *flags, *output],
         cwd=project,

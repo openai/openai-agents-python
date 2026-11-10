@@ -1249,11 +1249,11 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. An unknown root tool outcome raises LocalRecoveryRequired.
+        provider. An unknown root or descendant tool outcome raises LocalRecoveryRequired.
         Check the effect using application records and pass reconciled_calls
-        on reopen. The SDK records those outcomes without running those
-        calls. An unknown descendant tool outcome raises RuntimeError because
-        descendant calls cannot be reconciled. Local storage and portable
+        with the original root Session ID. The SDK records each result in the
+        owning thread without restarting the interrupted work. Read descendant
+        results with ``session.items(subagent_id=call.thread_id)``. Local storage and portable
         ``state`` cannot be combined. Local storage rejects code mode because
         individual nested tool identities lack durable intent and result receipts.
 

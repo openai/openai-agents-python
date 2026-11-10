@@ -1,6 +1,6 @@
 # Preview releases on GitHub
 
-Publish SDK previews from `feat/codex-harness` as GitHub prereleases in `openai/openai-agents-python`. Attach the three qualified wheels and `SHA256SUMS`. The package remains `openai-agents`, with `agents` imports. Do not publish previews to PyPI or mark them as the latest stable release. The PyPI publisher and automatic release tagger remain disabled.
+Publish SDK previews from `feat/codex-harness` as GitHub prereleases in `openai/openai-agents-python`. Attach the four qualified wheels and `SHA256SUMS`. The package remains `openai-agents`, with `agents` imports. Do not publish previews to PyPI or mark them as the latest stable release. The PyPI publisher and automatic release tagger remain disabled.
 
 Use `X.Y.Z-alpha.N` in source metadata and `vX.Y.Z-alpha.N` for the Git tag. Wheel filenames use the equivalent PEP 440 spelling, `X.Y.ZaN`. Never move a published tag or replace released assets. Publish a new version instead.
 
@@ -20,7 +20,7 @@ The historical private-preview preparation skills do not apply to this public br
 
 ### Check the Tests run
 
-Wait for the candidate's **Tests** push run to complete successfully. It must include successful native builds for Linux, macOS, and Windows, all Python test matrices, native macOS sandbox tests, lint, and type checks. A skipped build or a successful documentation-only run cannot qualify a release.
+Wait for the candidate's **Tests** push run to complete successfully. It must include successful native qualification for Linux x86_64, Linux ARM64, macOS ARM64, and Windows x64. It also requires all Python test matrices, native macOS sandbox tests, lint, and type checks. A skipped build or a successful documentation-only run cannot qualify a release.
 
 The distribution qualifier requires the latest Tests push run for the exact commit and source branch. It checks the version change, every required job's latest execution, artifact producer times, commit identities, and archive digests. It then validates wheel names, native platform tags, and package versions. Unless you explicitly select the preview branch, the qualifier preserves the existing `main` behavior.
 
@@ -39,13 +39,13 @@ python -I .github/scripts/release_automation.py qualify-distributions \
   --file "$RELEASE_STAGE/qualification.json"
 ```
 
-The collector retains three wheels and the Linux source distribution. Only the wheels are release assets. Retain the qualification record. Before publication, inspect the source/build and installed-wheel receipts from the selected artifacts. Confirm that the packaged Python source and native inputs match the candidate. Do not substitute a locally built wheel or an artifact from a different repository or commit.
+The collector retains four wheels and the source distribution from the Linux x86_64 artifact. Only the wheels are release assets. Retain the qualification record. Before publication, inspect the source/build and installed-wheel receipts from the selected artifacts. For Linux ARM64, confirm that the local Session test passed at both Python endpoints. Confirm that the packaged Python source and native inputs match the candidate. Do not substitute a locally built wheel or an artifact from a different repository or commit.
 
-Current wheels support standard CPython 3.10–3.14 on Linux x86_64 with glibc 2.39 or newer, Windows x64, and macOS 11 or newer on Apple Silicon. They do not support Intel Macs, ARM Linux, ARM Windows, Alpine/musl, PyPy or free-threaded Python.
+New preview candidates target standard CPython 3.10–3.14 on Linux x86_64 and ARM64 with glibc 2.39 or newer, Windows x64, and macOS 11 or newer on Apple Silicon.
 
 ### Create wheel checksums
 
-Create the checksums for the three reviewed wheel files:
+Create the checksums for the four reviewed wheel files.
 
 ```sh
 python - <<'PY'
@@ -55,7 +55,7 @@ from pathlib import Path
 
 root = Path(os.environ["RELEASE_STAGE"]) / "dist"
 wheels = sorted(root.glob("*.whl"))
-assert len(wheels) == 3
+assert len(wheels) == 4
 (root / "SHA256SUMS").write_text("".join(
     f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n"
     for wheel in wheels
@@ -106,13 +106,13 @@ After an uncertain write, inspect the existing tag, release, and assets before r
 
 ## Verify the downloads and update documentation
 
-The installation workflow has a narrow branch push trigger to register it without changing `main`. That event skips installation. Confirm that GitHub has registered the workflow, then dispatch its six installation checks:
+The installation workflow has a narrow branch push trigger to register it without changing `main`. That event skips installation. Confirm that GitHub has registered the workflow, then dispatch the installation checks.
 
 ```sh
 gh workflow run alpha-install.yml --repo "$GITHUB_REPOSITORY" \
   --ref feat/codex-harness -f tag="$RELEASE_TAG"
 ```
 
-The workflow downloads the actual release wheels and checksums, then installs them with `pip --only-binary=:all:`. It exercises the SDK and native runtime on CPython 3.10 and 3.14 across all three platforms. It needs no source checkout or Rust compilation. The verifier comes from the reviewed workflow commit. The tag selects the wheels.
+The workflow downloads the release wheels and checksums, then installs them with `pip --only-binary=:all:`. It exercises the SDK and native runtime on CPython 3.10 and 3.14 for each wheel. It needs no source checkout or Rust compilation. The verifier comes from the reviewed workflow commit. The tag selects the wheels. The published `v0.24.0-alpha.6` and `v0.24.0-alpha.7` releases use six checks for their three wheels.
 
-Require all six checks and inspect their receipts before advertising the release. Add the successful installation run to the release notes. Then update the README and installation guide with the exact release and wheel links. Mark the topic index published and date the changelog entry. Keep historical release notes intact. The hosted stable documentation on `main` is a separate deployment.
+Require all eight checks for a new preview release. Inspect their receipts before advertising the release. Add the successful installation run to the release notes. Then update the README and installation guide with the exact release and wheel links. Mark the topic index published and date the changelog entry. Keep historical release notes intact. The hosted stable documentation on `main` is a separate deployment.

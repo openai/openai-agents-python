@@ -3922,21 +3922,52 @@ class Session(Generic[ContextT, OutputT]):
         # The writer is held. Read the saved graph, including
         # cold descendants, before publishing current tools.
         descendants = json.loads(await self._publish_startup(self._native.call("list_subagents")))
+        if any(child["runtime_loaded"] for child in descendants):
+            raise RuntimeError("Native local history has a live descendant writer")
+        children = {child["id"]: child for child in descendants}
+        histories: dict[str, dict[str, Any]] = {}
+        projected: dict[str, tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall]]] = {}
+        for subagent_id in [None, *children]:
+            read_history = (
+                self._native.read_thread_history(None)
+                if subagent_id is None
+                else self._native.read_thread_history(subagent_id, for_reconciliation=True)
+            )
+            encoded = await self._publish_startup(read_history)
+            thread_id = subagent_id if subagent_id is not None else self.id
+            calls: list[UncertainCall] = []
+            turns, items = project_history(
+                json.loads(encoded), self.id, subagent_id, uncertain_calls=calls
+            )
+            if subagent_id is not None:
+                child = children[subagent_id]
+                histories[subagent_id] = {
+                    "digest": hashlib.sha256(encoded.encode()).hexdigest(),
+                    "parent": child["parent_agent_id"],
+                    "status": child["status"],
+                    "interrupted": [],
+                }
+            projected[thread_id] = turns, items, calls
+
         recorded: dict[str, list[RecordedTurn]] = {}
         recorded_items: list[SessionItem] = []
         unknown: list[UncertainCall] = []
-        for subagent_id in [None, *(child["id"] for child in descendants)]:
-            history = json.loads(
-                await self._publish_startup(self._native.read_thread_history(subagent_id))
-            )
-            turns, items = project_history(history, self.id, subagent_id, uncertain_calls=unknown)
-            thread_id = subagent_id if subagent_id is not None else self.id
+        prior: set[tuple[str, str, str]] = set()
+        for thread_id, (turns, items, calls) in projected.items():
+            if thread_id in children:
+                # Forks can retain parent turns. Only their owner can reconcile them.
+                parent = children[thread_id]["parent_agent_id"]
+                inherited = {turn["id"] for turn in projected[parent][0]}
+                turns = [turn for turn in turns if turn["id"] not in inherited]
+                items = [item for item in items if item["turn_id"] not in inherited]
+                calls = [call for call in calls if call.turn_id not in inherited]
             recorded[thread_id] = turns
             recorded_items.extend(items)
-        if any(call.thread_id != self.id for call in unknown):
-            raise RuntimeError(
-                "Native local history has an unknown tool outcome in a descendant; "
-                "local recovery cannot reconcile descendant calls"
+            unknown.extend(calls)
+            prior.update(
+                (thread_id, item["turn_id"], item["call_id"])
+                for item in items
+                if item["type"] == "function_call_output" and "reconciliation" in item
             )
         if unknown and not reconciliation:
             raise LocalRecoveryRequired(
@@ -3944,30 +3975,49 @@ class Session(Generic[ContextT, OutputT]):
                 tuple(turn for turns in recorded.values() for turn in turns),
                 tuple(recorded_items),
             )
+        missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+        supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
+        if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
+            raise ValueError("Reconciliation must cover every unresolved call once")
+        recovery_turns = {(thread, turn) for thread, turn, _ in missing}
+        recovery_lineage: dict[str, str] = {}
+        for thread, _, _ in supplied:
+            while thread in children and thread not in recovery_lineage:
+                parent = children[thread]["parent_agent_id"]
+                recovery_lineage[thread] = parent
+                thread = parent
+        # The crashed owner's spawning turn can still be open when its child
+        # records an effect. Use the completed spawn to identify that exact turn.
+        if recovery_lineage:
+            for item in recorded_items:
+                if (
+                    item["type"] == "create_subagent_call"
+                    and item["status"] == "completed"
+                    and (spawned := item["subagent_id"]) is not None
+                    and recovery_lineage.get(spawned) == item["agent_id"]
+                ):
+                    recovery_turns.add((item["agent_id"], item["turn_id"]))
         for child in descendants:
-            if child["status"] == "closed":
-                continue
+            child_id = child["id"]
             # An open edge can outlive settled native work. Parent
             # turns inherited at fork do not prove child completion.
-            parent_ids = {turn["id"] for turn in recorded[child["parent_agent_id"]]}
-            own_turns = [turn for turn in recorded[child["id"]] if turn["id"] not in parent_ids]
-            if not own_turns or any(turn["status"] == "in_progress" for turn in own_turns):
+            own_turns = recorded[child_id]
+            unfinished = [turn["id"] for turn in own_turns if turn["status"] == "in_progress"]
+            interrupted = [turn for turn in unfinished if (child_id, turn) in recovery_turns]
+            if child["status"] != "closed" and (not own_turns or unfinished != interrupted):
                 raise RuntimeError(
                     "Native local history has an active descendant; its runtime cannot be restored"
                 )
+            histories[child_id]["interrupted"] = interrupted
         if isinstance(self._storage, LocalStorage):
-            missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
-            supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
-            prior = {
-                (self.id, item["turn_id"], item["call_id"])
-                for item in recorded_items
-                if item["type"] == "function_call_output" and "reconciliation" in item
-            }
-            if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
-                raise ValueError("Reconciliation must cover every unresolved call once")
             await self._publish_startup(
                 self._native._reconcile_local_calls(
-                    json.dumps([asdict(call) for call in reconciliation])
+                    json.dumps(
+                        {
+                            "receipts": [asdict(call) for call in reconciliation],
+                            "histories": histories,
+                        }
+                    )
                 )
             )
 

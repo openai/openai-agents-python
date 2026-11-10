@@ -61,7 +61,13 @@ class ReconciledCall:
 
 
 class LocalRecoveryRequired(RuntimeError):
-    """Local recovery stopped before model work because root tool outcomes are unknown."""
+    """Local recovery stopped before model work because tool outcomes are unknown.
+
+    Each call identifies its owning thread and original turn. With ``LocalStorage``,
+    reopen the root Session with verified results for all listed calls. With
+    ``CustomStorage``, record the results through ``CustomStorage.reconcile()``
+    before reopening.
+    """
 
     def __init__(
         self,

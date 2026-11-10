@@ -1037,6 +1037,7 @@ pub struct LocalChecklistStore {
     inner: LocalThreadStore,
     graph: Arc<MemoryAgentGraph>,
     directory: PathBuf,
+    recovery_locks: Arc<codex_rollout::WriterLockCoordinator>,
     // Serialize through native writer release. Native itself owns cross-process
     // exclusion; this gate only closes the append/shutdown race in this wrapper.
     writers: Mutex<HashMap<ThreadId, ChecklistWriter>>,
@@ -1441,7 +1442,7 @@ fn checklist_path(directory: &Path, id: ThreadId) -> PathBuf {
 // std operation: File::open lacks directory flags, and a read directory handle
 // is not a FlushFileBuffers contract. Do not report its absence as write failure
 // or promise POSIX directory crash durability there.
-fn sync_checklist_directory(directory: &Path) -> ThreadStoreResult<()> {
+fn sync_local_directory(directory: &Path) -> ThreadStoreResult<()> {
     #[cfg(not(windows))]
     std::fs::File::open(directory)
         .and_then(|dir| dir.sync_all())
@@ -1490,6 +1491,9 @@ impl LocalChecklistStore {
         graph: Arc<MemoryAgentGraph>,
     ) -> Self {
         let directory = config.codex_home.join(LOCAL_CHECKLIST_DIRECTORY);
+        let recovery_locks = Arc::new(codex_rollout::WriterLockCoordinator::new(
+            &config.codex_home,
+        ));
         let cleanup_directory = directory.clone();
         // Called by native delete only after its reference and writer checks, for
         // both single and bulk delete. A failure leaves native deletion retryable.
@@ -1522,6 +1526,7 @@ impl LocalChecklistStore {
             inner,
             graph,
             directory,
+            recovery_locks,
             writers: Mutex::new(HashMap::new()),
             managed_calls: Arc::new(ManagedCalls::default()),
             resume_model: OnceLock::new(),
@@ -1650,7 +1655,7 @@ impl LocalChecklistStore {
             temp.as_file().sync_all().map_err(checklist_error)?;
             temp.persist(checklist_path(&directory, id))
                 .map_err(checklist_error)?;
-            sync_checklist_directory(&directory)
+            sync_local_directory(&directory)
         })
     }
 
@@ -1714,7 +1719,7 @@ impl LocalChecklistStore {
                     temp.flush().map_err(checklist_error)?;
                     temp.as_file().sync_all().map_err(checklist_error)?;
                     temp.persist(&path).map_err(checklist_error)?;
-                    sync_checklist_directory(&directory)?;
+                    sync_local_directory(&directory)?;
                     return Ok(Some(turn));
                 }
                 // A consumed native approval cannot establish "not started".
@@ -1809,16 +1814,95 @@ impl LocalChecklistStore {
         // Checkpoint reads run after the caller flushes. Keep shutdown excluded
         // while reading the exact rollout selected by this native writer.
         let path = self.inner.live_rollout_path(id).await?;
-        let (items, owner, parse_errors) =
-            codex_rollout::RolloutRecorder::load_rollout_items(&path)
-                .await
-                .map_err(checklist_error)?;
+        Self::read_recovery_rollout(id, &path).await
+    }
+
+    async fn read_recovery_rollout(
+        id: ThreadId,
+        path: &Path,
+    ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        let (items, owner, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_items(path)
+            .await
+            .map_err(checklist_error)?;
         if owner != Some(id) || parse_errors != 0 {
             return Err(checklist_error(
                 "cannot capture incomplete rollout or another thread's history",
             ));
         }
         Ok(items)
+    }
+
+    // Use the same exclusive lease as a native runtime, without a recorder task.
+    pub(crate) fn reserve_reconciliation_writers(
+        &self,
+        ids: impl IntoIterator<Item = ThreadId>,
+    ) -> ThreadStoreResult<Vec<codex_rollout::WriterLockGuard>> {
+        tokio::task::block_in_place(|| {
+            ids.into_iter()
+                .map(|id| self.recovery_locks.acquire(id).map_err(checklist_error))
+                .collect()
+        })
+    }
+
+    pub(crate) async fn reconciliation_history(
+        &self,
+        id: ThreadId,
+    ) -> ThreadStoreResult<(PathBuf, Vec<RolloutItem>)> {
+        let stored = self
+            .inner
+            .read_thread(ReadThreadParams {
+                thread_id: id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await?;
+        let path = stored
+            .rollout_path
+            .ok_or_else(|| checklist_error("native thread store returned no rollout path"))?;
+        let items = Self::read_recovery_rollout(id, &path).await?;
+        Ok((path, items))
+    }
+
+    pub(crate) async fn append_reconciliation(
+        &self,
+        id: ThreadId,
+        path: &Path,
+        items: Vec<RolloutItem>,
+    ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        // Keep the original bytes and ordinal offsets for native fork readers.
+        // A process can die during any stage write without tearing the live rollout.
+        let path = codex_rollout::materialize_rollout_for_reference(path)
+            .await
+            .map_err(checklist_error)?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| checklist_error("native rollout has no parent directory"))?;
+        let name = format!(".sdk-recovery-{id}");
+        let staged = tokio::task::block_in_place(|| -> ThreadStoreResult<_> {
+            match std::fs::remove_file(directory.join(&name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(checklist_error(error)),
+            }
+            let file = tempfile::Builder::new()
+                .prefix(&name)
+                .rand_bytes(0)
+                .tempfile_in(directory)
+                .map_err(checklist_error)?;
+            std::fs::copy(&path, file.path()).map_err(checklist_error)?;
+            Ok(file)
+        })?;
+        for item in items {
+            codex_rollout::append_rollout_item_to_path(staged.path(), &item)
+                .await
+                .map_err(checklist_error)?;
+        }
+        tokio::task::block_in_place(|| {
+            staged.as_file().sync_all().map_err(checklist_error)?;
+            staged.persist(&path).map_err(checklist_error)?;
+            sync_local_directory(directory)
+        })?;
+        Self::read_recovery_rollout(id, &path).await
     }
 
     pub async fn begin_rebuild(
@@ -2305,7 +2389,7 @@ impl LocalChecklistStore {
             temp.as_file().sync_all().map_err(checklist_error)?;
             temp.persist(checklist_path(&self.directory, state.thread_id))
                 .map_err(checklist_error)?;
-            sync_checklist_directory(&self.directory)
+            sync_local_directory(&self.directory)
         })
     }
 }
