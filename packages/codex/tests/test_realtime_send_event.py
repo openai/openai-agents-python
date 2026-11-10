@@ -1,16 +1,24 @@
 """Python admission doubles and provider-wire regressions through the native owner."""
 
 import asyncio
+import base64
 import json
 from collections import UserDict
 from contextlib import aclosing
+from copy import deepcopy
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeToolCall
+from agents.realtime import (
+    RealtimeAudio,
+    RealtimeConfig,
+    RealtimeDetachedFunctionCall,
+    RealtimeResponse,
+    RealtimeToolCall,
+)
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 from tests.test_realtime_provider_history import owner
@@ -413,7 +421,7 @@ async def test_raw_detached_explicit_tools_remain_application_controlled(
         "input": [],
         "output_modalities": ["text"],
         "tools": tools,
-        "tool_choice": {"type": "function", "name": "application_lookup"},
+        "tool_choice": {"type": "function", "name": "native_lookup"},
     }
     async with (
         timeout(20),
@@ -431,8 +439,12 @@ async def test_raw_detached_explicit_tools_remain_application_controlled(
         assert peer.socket is not None
         send_json = peer.socket.send_json
 
+        issued = False
+
         async def detached_calls(data: Any, *args: Any, **kwargs: Any) -> None:
-            if data.get("type") == "response.done":
+            nonlocal issued
+            if data.get("type") == "response.done" and not issued:
+                issued = True
                 response_id = data["response"]["id"]
                 calls = []
                 for index, name in enumerate(("application_lookup", "native_lookup")):
@@ -441,17 +453,17 @@ async def test_raw_detached_explicit_tools_remain_application_controlled(
                         "type": "function_call",
                         "name": name,
                         "call_id": f"detached-call-{index}",
-                        "arguments": "{}",
+                        "arguments": '{"value":"synthetic"}',
                     }
                     calls.append(item)
-                    await send_json(
-                        {
-                            "type": "response.output_item.done",
-                            "response_id": response_id,
-                            "output_index": index,
-                            "item": item,
-                        }
-                    )
+                    completed = {
+                        "type": "response.output_item.done",
+                        "response_id": response_id,
+                        "output_index": index,
+                        "item": item,
+                    }
+                    await send_json(completed)
+                    await send_json(completed)
                 data = {**data, "response": {**data["response"], "output": calls}}
             await send_json(data, *args, **kwargs)
 
@@ -465,11 +477,59 @@ async def test_raw_detached_explicit_tools_remain_application_controlled(
         )
         assert frame["response"] == response
         seen = []
+        response_id = None
         async for event in events:
             seen.append(event)
             if isinstance(event, RealtimeResponse) and event.status == "done":
+                response_id = event.response_id
                 break
         assert not any(isinstance(event, RealtimeToolCall) for event in seen)
+        assert response_id is not None
+        calls = [event for event in seen if isinstance(event, RealtimeDetachedFunctionCall)]
+        assert calls == [
+            RealtimeDetachedFunctionCall(
+                response_id,
+                "detached-item-1",
+                "detached-call-1",
+                "native_lookup",
+                '{"value":"synthetic"}',
+            )
+        ]
+        assert not any(
+            item.provider_item_id in {call.item_id for call in calls} for item in voice.history
+        )
+        assert not any(
+            item.get("id") in {call.item_id for call in calls}
+            for item in await voice.retrieve_conversation_history()
+        )
+        followup = {
+            "conversation": "none",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": "synthetic result",
+                }
+                for call in calls
+            ],
+            "output_modalities": ["text"],
+        }
+        await voice.send_event(
+            {"type": "response.create", "event_id": "detached-result", "response": followup}
+        )
+        forwarded = await peer.frame(lambda frame: frame.get("event_id") == "detached-result")
+        assert forwarded["response"] == {**followup, "tools": [], "tool_choice": "none"}
+        async for event in events:
+            assert not isinstance(event, (RealtimeDetachedFunctionCall, RealtimeToolCall))
+            if isinstance(event, RealtimeResponse) and event.status == "done":
+                break
+        assert not any(
+            item.provider_item_id in {call.item_id for call in calls} for item in voice.history
+        )
+        assert not any(
+            item.get("id") in {call.item_id for call in calls}
+            for item in await voice.retrieve_conversation_history()
+        )
     assert effects == []
     assert peer.responses.requests == []
     assert not any(
@@ -566,3 +626,420 @@ async def test_bulk_history_replays_completed_function_pair_without_native_dispa
             await asyncio.gather(updating, return_exceptions=True)
     assert effects == []
     assert peer.responses.requests == []
+
+
+async def test_raw_response_prompt_and_audio_overrides_preserve_session_defaults(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    session_prompt = {"id": "pmpt_session_default"}
+    pcm = {"type": "audio/pcm", "rate": 24000}
+    cases: list[tuple[dict[str, Any], str, int]] = [
+        (
+            {
+                "prompt": {
+                    "id": "pmpt_one_response",
+                    "version": "2",
+                    "variables": {"topic": "rainbows"},
+                },
+                "audio": {
+                    "output": {"voice": {"id": "voice_synthetic"}, "format": {"type": "audio/pcmu"}}
+                },
+            },
+            "g711_ulaw",
+            8000,
+        ),
+        (
+            {
+                "prompt": {"id": "pmpt_without_optional_fields"},
+                "audio": {"output": {"voice": "marin", "format": {"type": "audio/pcma"}}},
+            },
+            "g711_alaw",
+            8000,
+        ),
+        (
+            {"prompt": None, "audio": {"output": {"voice": "alloy", "format": pcm}}},
+            "pcm16",
+            24000,
+        ),
+        ({}, "pcm16", 24000),
+    ]
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-response-prompt-audio",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                voice="alloy",
+                settings={"output_format": "pcm16", "prompt": {"id": "pmpt_session_default"}},
+            )
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+        assert initial["session"]["prompt"] == session_prompt
+        assert initial["session"]["audio"]["output"]["format"] == pcm
+        assert initial["session"]["audio"]["output"]["voice"] == "alloy"
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def audio_before_done(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("type") == "response.done":
+                response_id = data["response"]["id"]
+                await send_json(
+                    {
+                        "type": "response.output_audio.delta",
+                        "response_id": response_id,
+                        "item_id": f"audio-{response_id}",
+                        "content_index": 0,
+                        "output_index": 0,
+                        "delta": base64.b64encode(b"\x01\x02").decode("ascii"),
+                    }
+                )
+            await send_json(data, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", audio_before_done)
+        cursor = len(peer.frames)
+        for index, (overrides, codec, rate) in enumerate(cases):
+            event = {
+                "type": "response.create",
+                "event_id": f"response-prompt-audio-{index}",
+                "response": overrides,
+            }
+            assert await voice.send_event(event) is None
+            frame = await peer.frame(
+                lambda frame, event_id=event["event_id"]: frame.get("event_id") == event_id,
+                after=cursor,
+            )
+            cursor = peer.frames.index(frame, cursor) + 1
+            expected = (
+                event if overrides else {"type": "response.create", "event_id": event["event_id"]}
+            )
+            assert frame == expected
+            audio = []
+            async for observed in events:
+                if isinstance(observed, RealtimeAudio):
+                    audio.append(observed)
+                elif isinstance(observed, RealtimeResponse) and observed.status == "done":
+                    assert len(audio) == 1
+                    assert audio[0].response_id == observed.response_id
+                    break
+            assert [(chunk.data, chunk.format, chunk.sample_rate) for chunk in audio] == [
+                (b"\x01\x02", codec, rate)
+            ]
+        assert len([frame for frame in peer.frames if frame["type"] == "session.update"]) == 1
+        assert peer.responses.requests == []
+
+
+async def test_raw_response_prompt_and_audio_validation_rejects_before_wire(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    invalid = [
+        {"prompt": []},
+        {"prompt": {"id": ""}},
+        {"prompt": {"id": "pmpt_bad_version", "version": 2}},
+        {"prompt": {"id": "pmpt_bad_variables", "variables": []}},
+        {"audio": {"output": {"voice": 42}}},
+        {"audio": {"output": {"voice": "  "}}},
+        {"audio": {"output": {"voice": {"id": ""}}}},
+        {"audio": {"output": {"format": {"type": "audio/pcm", "rate": 16000}}}},
+        {"audio": {"output": {"format": {"type": "audio/opus"}}}},
+    ]
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-invalid-response-options",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        cursor = len(peer.frames)
+        rejected_ids = set()
+        for index, response in enumerate(invalid):
+            event_id = f"invalid-prompt-audio-{index}"
+            rejected_ids.add(event_id)
+            with pytest.raises(RuntimeError):
+                await voice.send_event(
+                    {"type": "response.create", "event_id": event_id, "response": response}
+                )
+        await voice.send_event({"type": "response.create", "event_id": "valid-after-options"})
+        await peer.frame(lambda frame: frame.get("event_id") == "valid-after-options", after=cursor)
+        assert not any(frame.get("event_id") in rejected_ids for frame in peer.frames[cursor:])
+        assert not peer.disconnected.is_set()
+
+
+async def test_raw_session_tools_replace_exact_declarations_and_preserve_sparse_updates(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+
+    @function_tool
+    def lookup(key: str) -> str:
+        raise AssertionError("The fixture has not been requesting native tools")
+
+    @function_tool
+    def other() -> str:
+        raise AssertionError("The fixture has not been requesting native tools")
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-raw-session-tools",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Listen.", tools=[lookup, other], provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+        declaration = next(tool for tool in initial["session"]["tools"] if tool["name"] == "lookup")
+        assert {"lookup", "other"} <= {tool["name"] for tool in initial["session"]["tools"]}
+        cursor = len(peer.frames)
+        await voice.send_event(
+            {
+                "type": "session.update",
+                "event_id": "replace-native-tools",
+                "session": {"tools": [declaration]},
+            }
+        )
+        replaced = await peer.frame(
+            lambda frame: frame.get("event_id") == "replace-native-tools", after=cursor
+        )
+        assert replaced["session"]["tools"] == [declaration]
+        altered = deepcopy(declaration)
+        altered["parameters"] = {"type": "object", "properties": {"forged": {"type": "string"}}}
+        with pytest.raises(RuntimeError):
+            await voice.send_event(
+                {
+                    "type": "session.update",
+                    "event_id": "altered-native-tool",
+                    "session": {"tools": [altered]},
+                }
+            )
+        await voice.send_event(
+            {
+                "type": "session.update",
+                "event_id": "sparse-instructions",
+                "session": {"instructions": "Still listen."},
+            }
+        )
+        sparse = await peer.frame(
+            lambda frame: frame.get("event_id") == "sparse-instructions", after=cursor
+        )
+        assert "tools" not in sparse["session"]
+        await voice.send_event(
+            {"type": "session.update", "event_id": "clear-native-tools", "session": {"tools": []}}
+        )
+        cleared = await peer.frame(
+            lambda frame: frame.get("event_id") == "clear-native-tools", after=cursor
+        )
+        assert cleared["session"]["tools"] == []
+        assert not any(
+            frame.get("event_id") == "altered-native-tool" for frame in peer.frames[cursor:]
+        )
+        assert peer.responses.requests == []
+
+
+async def test_raw_session_caller_function_uses_public_notice_and_exact_output_ack(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents.realtime import RealtimeConversationItemObserved
+
+    peer = realtime_peer
+    declaration = {
+        "type": "function",
+        "name": "application_echo",
+        "description": "An application-owned synthetic echo.",
+        "parameters": {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    }
+    item = {
+        "id": "application-call-item",
+        "type": "function_call",
+        "status": "completed",
+        "name": "application_echo",
+        "call_id": "application-call",
+        "arguments": '{"value":"synthetic"}',
+    }
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-caller-function",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+        issued = False
+
+        async def issue_application_call(data: Any, *args: Any, **kwargs: Any) -> None:
+            nonlocal issued
+            if data.get("type") == "response.done" and not issued:
+                issued = True
+                response_id = data["response"]["id"]
+                await send_json(
+                    {
+                        "type": "response.output_item.done",
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": item,
+                    }
+                )
+                await send_json({"type": "conversation.item.done", "item": item})
+                await send_json({"type": "conversation.item.done", "item": item})
+                await send_json(
+                    {
+                        "type": "input_audio_buffer.speech_started",
+                        "audio_start_ms": 0,
+                        "item_id": "synthetic-speech",
+                    }
+                )
+                data = {**data, "response": {**data["response"], "output": [item]}}
+            await send_json(data, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", issue_application_call)
+        cursor = len(peer.frames)
+        await voice.send_event(
+            {
+                "type": "session.update",
+                "event_id": "install-application-function",
+                "session": {
+                    "tools": [declaration],
+                    "audio": {
+                        "input": {
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "interrupt_response": False,
+                            }
+                        }
+                    },
+                },
+            }
+        )
+        installed = await peer.frame(
+            lambda frame: frame.get("event_id") == "install-application-function", after=cursor
+        )
+        assert installed["session"]["tools"] == [declaration]
+        await voice.send_event(
+            {
+                "type": "response.create",
+                "response": {"tool_choice": {"type": "function", "name": "application_echo"}},
+            }
+        )
+        completed_notices = []
+        async for event in events:
+            assert not isinstance(event, RealtimeToolCall)
+            if (
+                isinstance(event, RealtimeConversationItemObserved)
+                and event.item_id == item["id"]
+                and event.status == "done"
+            ):
+                assert event.kind == "function_call"
+                assert event.call_id == item["call_id"]
+                completed_notices.append(event)
+            if isinstance(event, RealtimeResponse) and event.status == "done":
+                break
+        assert len(completed_notices) == 1
+
+        output_arrived, release_output = asyncio.Event(), asyncio.Event()
+
+        async def acknowledge_items() -> None:
+            after = cursor
+            while True:
+                request = await peer.frame(
+                    lambda frame: (
+                        frame["type"] in {"conversation.item.retrieve", "conversation.item.create"}
+                    ),
+                    after=after,
+                )
+                after = peer.frames.index(request, after) + 1
+                if request["type"] == "conversation.item.retrieve":
+                    assert request["item_id"] == item["id"]
+                    await send_json({"type": "conversation.item.retrieved", "item": item})
+                else:
+                    if request.get("event_id") == "accepted-application-output":
+                        output_arrived.set()
+                        await release_output.wait()
+                        await send_json(
+                            {
+                                "type": "conversation.item.added",
+                                "previous_item_id": None,
+                                "item": item,
+                            }
+                        )
+                    await send_json({"type": "conversation.item.created", "item": request["item"]})
+
+        acknowledgements = asyncio.create_task(acknowledge_items())
+        sending: asyncio.Task[dict[str, Any] | None] | None = None
+        try:
+            retrieved = await voice.retrieve_conversation_item(item["id"])
+            assert retrieved["name"] == "application_echo"
+            assert json.loads(retrieved["arguments"]) == {"value": "synthetic"}
+            output = {
+                "type": "function_call_output",
+                "id": "application-output-item",
+                "call_id": item["call_id"],
+                "output": '{"echo":"synthetic"}',
+            }
+            with pytest.raises(RuntimeError):
+                await voice.send_event(
+                    {
+                        "type": "conversation.item.create",
+                        "event_id": "unrelated-application-output",
+                        "item": {**output, "id": "unrelated-output-item", "call_id": "unrelated"},
+                    }
+                )
+            sending = asyncio.create_task(
+                voice.send_event(
+                    {
+                        "type": "conversation.item.create",
+                        "event_id": "accepted-application-output",
+                        "item": output,
+                    }
+                )
+            )
+            await output_arrived.wait()
+            assert not sending.done()
+            release_output.set()
+            assert await sending is None
+            with pytest.raises(RuntimeError):
+                await voice.send_event(
+                    {
+                        "type": "conversation.item.create",
+                        "event_id": "duplicate-application-output",
+                        "item": {**output, "id": "duplicate-output-item"},
+                    }
+                )
+            outputs = [
+                frame
+                for frame in peer.frames[cursor:]
+                if frame["type"] == "conversation.item.create"
+                and frame["item"]["type"] == "function_call_output"
+            ]
+            assert [frame.get("event_id") for frame in outputs] == ["accepted-application-output"]
+            assert outputs[0]["item"] == {**output, "status": "completed"}
+            assert peer.responses.requests == []
+        finally:
+            release_output.set()
+            if sending is not None:
+                await asyncio.gather(sending, return_exceptions=True)
+            acknowledgements.cancel()
+            await asyncio.gather(acknowledgements, return_exceptions=True)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,7 +13,6 @@ import pytest
 from agents import Environment
 from agents.classic.extensions.sandbox.daytona import sandbox as daytona
 from agents.sandbox import Manifest, NoopSnapshot, SandboxSession, sandbox_environment
-from tests._asyncio import original_cancellation
 from tests.test_sandbox_environment import Client, Options
 
 
@@ -39,6 +38,15 @@ def _native_client(process: SimpleNamespace, *, cleanup_s: int = 30) -> Client:
             return self.session
 
     return NativeClient([])
+
+
+async def _check_first_cancellation(operation: Awaitable[object]) -> None:
+    try:
+        await operation
+    except asyncio.CancelledError as error:
+        # Python 3.10 can drop the message when another coroutine awaits this task.
+        assert error.args == ("first cancellation",)
+        raise
 
 
 @pytest.mark.parametrize(
@@ -154,16 +162,15 @@ async def test_native_daytona_cleanup_settles_after_cancellation(
     async with sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect):
         assert client.session is not None
         close = client.session.aclose if operation == "close" else client.session.pty_terminate_all
-        task = asyncio.create_task(close())
+        task = asyncio.create_task(_check_first_cancellation(close()))
         await asyncio.wait_for(disconnect_started.wait(), timeout=5)
         task.cancel("first cancellation")
         await asyncio.sleep(0)
         task.cancel("second cancellation")
         await asyncio.sleep(0)
         release_disconnect.set()
-        with pytest.raises(asyncio.CancelledError) as cancelled:
+        with pytest.raises(asyncio.CancelledError):
             await task
-        assert original_cancellation(cancelled.value).args == ("first cancellation",)
         assert closed == list(range(entry_count))
         await client.session.pty_terminate_all()
         for handle in handles:
@@ -210,7 +217,9 @@ async def test_native_daytona_completed_pty_preserves_first_cancellation(
     async with sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect):
         assert client.session is not None
         task = asyncio.create_task(
-            client.session.pty_exec_start("true", tty=True, yield_time_s=0.001)
+            _check_first_cancellation(
+                client.session.pty_exec_start("true", tty=True, yield_time_s=0.001)
+            )
         )
         try:
             await asyncio.wait_for(kill_started.wait(), timeout=5)
@@ -220,9 +229,8 @@ async def test_native_daytona_completed_pty_preserves_first_cancellation(
             task.cancel("second cancellation")
             await asyncio.sleep(0)
             release_disconnect.set()
-            with pytest.raises(asyncio.CancelledError) as cancelled:
+            with pytest.raises(asyncio.CancelledError):
                 await task
-            assert original_cancellation(cancelled.value).args == ("first cancellation",)
             assert closed.is_set()
             handle.disconnect.assert_awaited_once()
         finally:
@@ -265,15 +273,14 @@ async def test_native_daytona_cancelled_cleanup_bounds_provider_kill(
 
     async with sandbox_environment(client, manifest=Manifest(), options=Options(), connect=connect):
         assert client.session is not None
-        task = asyncio.create_task(client.session.aclose())
+        task = asyncio.create_task(_check_first_cancellation(client.session.aclose()))
         try:
             await asyncio.wait_for(kill_started.wait(), timeout=5)
             task.cancel("first cancellation")
             done, _ = await asyncio.wait({task}, timeout=3)
             assert task in done, "provider kill exceeded the cleanup timeout"
-            with pytest.raises(asyncio.CancelledError) as cancelled:
+            with pytest.raises(asyncio.CancelledError):
                 await task
-            assert original_cancellation(cancelled.value).args == ("first cancellation",)
             handle.disconnect.assert_awaited_once()
         finally:
             release_kill.set()

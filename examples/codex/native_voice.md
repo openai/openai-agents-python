@@ -207,8 +207,8 @@ await voice.send_event(
 
 Core validates the payloads of these event types.
 
-- `session.update` accepts existing sparse session settings and waits for the provider acknowledgement. Raw tool declarations remain unsupported; use the Session's admitted tools.
-- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an explicitly empty context. Use `tool_choice` or an exact subset of the advertised function declarations in `tools` to control tools for one linked response. Detached responses default to no tools. To handle a detached function call yourself, supply its declaration in `tools`, read the call from the provider event stream, and include the result in a later detached response's `input`. Detached output stays outside the provider conversation.
+- `session.update` accepts sparse session settings and waits for the provider acknowledgement. Set `session.tools` to replace the provider tool list, send `[]` to clear it, or omit `tools` to keep it. Reuse exact advertised declarations for native functions. Hosted MCP declarations follow the existing approval flow.
+- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an explicitly empty context. Use `tool_choice` or an exact subset of the advertised function declarations in `tools` to control tools for one linked response. Detached responses default to no tools. Applications have been handling detached functions by supplying their declarations in `response.tools` and consuming `RealtimeDetachedFunctionCall` from `voice.events()`. Each event has been supplying `response_id`, `item_id`, `call_id`, `name`, and the completed JSON `arguments` string. Applications have been supplying a `function_call_output` item with the same `call_id` and their `output` string in a later detached response's `input`. Detached output has been staying outside the provider conversation.
 - `response.cancel` retires native work and local buffered output for the exact accepted response IDs. Consume `RealtimePlaybackInterrupted` and discard the indicated unplayed application audio, as with `interrupt()`.
 - `conversation.item.create` accepts supported messages and completed historical function calls and outputs. Create the historical call first, then use its `call_id` on one output. These writes wait for matching provider acknowledgements. To answer a pending hosted MCP approval, send an `mcp_approval_response` with the provider's issued `approval_request_id` and a Boolean `approve` value.
 - `conversation.item.retrieve` returns the full provider item as a dictionary. `conversation.item.delete` waits for the matching provider acknowledgement.
@@ -216,11 +216,38 @@ Core validates the payloads of these event types.
 - `input_audio_buffer.append`, `input_audio_buffer.clear`, and `input_audio_buffer.commit` use the native media queue. Audio appends use base64 data in the configured input format.
 - `output_audio_buffer.clear` applies only to provider-managed media.
 
+For a linked response using an application function declared in the raw tool list, wait for a `RealtimeConversationItemObserved` event with `kind="function_call"` and `status="done"`. Use `retrieve_conversation_item(event.item_id)` to read the function name, arguments, and `call_id`. After handling a function you own, send `conversation.item.create` with a `function_call_output` item, a fresh `id`, the same `call_id`, and the string `output`. Send `response.create` when the response's tool outputs have settled.
+
+Applications have been overriding reusable prompts for one response with `response.prompt`, using an `id`, optional `version` and `variables`, or explicit `null`. They have been choosing that response's voice and codec through `response.audio.output`.
+
+```python
+await voice.send_event(
+    {
+        "type": "response.create",
+        "response": {
+            "prompt": {
+                "id": "pmpt_example",
+                "version": "2",
+                "variables": {"topic": "rainbows"},
+            },
+            "audio": {
+                "output": {
+                    "voice": "marin",
+                    "format": {"type": "audio/pcmu"},
+                }
+            },
+        },
+    }
+)
+```
+
+Applications have also been passing a custom voice as `{"id": "voice_example"}`, or selecting `{"type": "audio/pcm", "rate": 24000}` or `{"type": "audio/pcma"}`. The SDK has been preserving each response's codec while leaving session defaults unchanged.
+
 Every event can carry an `event_id`. Sends other than item retrieval return `None`. The existing message, response, audio, and history methods remain available for their typed operations.
 
 ### Edit provider history
 
-`delete_conversation_item(provider_item_id)` deletes an eligible item from the current provider conversation. Use the provider ID from `RealtimeConversationItemObserved`, whose `status` is `"added"` or `"done"`. Canonical history IDs are separate. Native checks reject unknown or incomplete items and items still needed by unfinished work. The call completes after the matching provider acknowledgement and durable history update; `RealtimeConversationItemDeleted` reports that deletion.
+`delete_conversation_item(provider_item_id)` deletes an eligible item from the current provider conversation. Use a provider ID from `RealtimeConversationItemObserved` or one your application already knows. For an unobserved ID, the SDK retrieves the item first and requires a completed message with no active response or native work. Tool and approval items require observed native completion receipts. The call completes after the matching provider acknowledgement and durable history update. `RealtimeConversationItemDeleted` reports the provider ID.
 
 Canonical history keeps prior transcripts and appends a `provider_item_deleted` entry with its target in `provider_item_id`. Shared Session history, tool outcomes, and approval records remain intact. Deletion cannot retract output already generated or change context a response already consumed. A later voice connection can use retained Session context. This operation prunes the current provider conversation rather than erasing Session history.
 

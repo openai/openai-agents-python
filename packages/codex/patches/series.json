@@ -459,7 +459,11 @@
     {
       "path": "0174-sdk-command-environment-overrides.patch",
       "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
+      "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
     }
   ],
-  "result_tree": "94b651877aac39791e6b18abc976727fa7b426ba"
+  "result_tree": "b8c23e12b96b9965a281657cc4b05a0af5e19559"
 }

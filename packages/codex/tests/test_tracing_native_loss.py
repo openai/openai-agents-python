@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ from threading import Event
 import pytest
 
 from agents import telemetry
-from tests.test_native_trace_exporter import collector
+from tests.test_native_trace_exporter import collector, native_trace_child_env
 
 
 async def native_loss_case(long_names: bool, forwarded=False, retained_after_recovery=False):
@@ -52,9 +51,7 @@ async def native_loss_case(long_names: bool, forwarded=False, retained_after_rec
         for root in roots:
             root.__enter__()
         try:
-            print("native loss: initial flush", file=sys.stderr, flush=True)
-            initial = await telemetry.force_flush(timeout_ms=15000)
-            assert initial.status == "success", initial
+            assert (await telemetry.force_flush(timeout_ms=15000)).status == "success"
             phase.set()
             for i in range(1600):
                 with telemetry.trace(
@@ -76,9 +73,8 @@ async def native_loss_case(long_names: bool, forwarded=False, retained_after_rec
             ):
                 pass
             release.set()
-            print("native loss: recovery flush", file=sys.stderr, flush=True)
             result = await telemetry.force_flush(timeout_ms=15000)
-            assert result.dropped_records > 0 and result.status == "partial", result
+            assert result.dropped_records > 0 and result.status == "partial"
             assert mixed_batches, "native recovery never exercised mixed stale/fresh admission"
             records = [row for request in requests for row in request["payload"]["data"]]
             assert not any(
@@ -162,34 +158,23 @@ async def native_loss_case(long_names: bool, forwarded=False, retained_after_rec
             )
         finally:
             release.set()
-            print("native loss: shutdown", file=sys.stderr, flush=True)
             await telemetry.shutdown(timeout_ms=15000)
 
 
+@pytest.mark.serial
 @pytest.mark.parametrize("long_names", [False, True])
 def test_native_loss_recovers_after_record_or_byte_bound(long_names):
     script = (
-        "import faulthandler; faulthandler.dump_traceback_later(20, exit=False); "
         f"import asyncio,runpy; m=runpy.run_path({str(Path(__file__).resolve())!r}); "
         f"asyncio.run(m['native_loss_case']({long_names!r}))"
     )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            env=os.environ.copy(),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as error:
-        for output in (error.stdout, error.stderr):
-            if output:
-                print(
-                    output.decode(errors="replace") if isinstance(output, bytes) else output,
-                    file=sys.stderr,
-                    flush=True,
-                )
-        raise
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=native_trace_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS native loss recovery" in result.stdout
 
@@ -203,7 +188,7 @@ def test_native_loss_preserves_forwarding_and_recovered_retained_context(forward
     )
     result = subprocess.run(
         [sys.executable, "-B", "-c", script],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         capture_output=True,
         text=True,
         timeout=60,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -12,7 +11,12 @@ import pytest
 
 from agents import Agent, telemetry
 from agents.testing import ScriptedResponses, text
-from tests.test_native_trace_exporter import assert_sanitized_failure, collector, completed_event
+from tests.test_native_trace_exporter import (
+    assert_sanitized_failure,
+    collector,
+    completed_event,
+    native_trace_child_env,
+)
 
 
 async def test_invalid_outcome_drops_private_serializer_frames():
@@ -116,7 +120,6 @@ async def native_churn():
             "retained-root",
             options={"metadata": {"tenant": "original"}, "group_id": "original-group"},
         ):
-            print("native churn: intermediate flushes", file=sys.stderr, flush=True)
             for index in range(1100):
                 with telemetry.trace(f"completed-{index}", options={"detached": True}):
                     pass
@@ -125,7 +128,6 @@ async def native_churn():
                     assert intermediate.status == "success", intermediate
             with telemetry.span("retained-child"):
                 pass
-        print("native churn: final flush", file=sys.stderr, flush=True)
         result = await telemetry.force_flush()
         assert result.status == "success", result
         records = [row for request in requests for row in request["payload"]["data"]]
@@ -138,34 +140,23 @@ async def native_churn():
             for row in same
         )
         assert len(exporter._traces) <= 1024
-        print("native churn: shutdown", file=sys.stderr, flush=True)
         await telemetry.shutdown()
         print("PASS native active-root churn")
 
 
+@pytest.mark.serial
 def test_native_active_root_survives_completed_trace_churn():
     script = (
-        "import faulthandler; faulthandler.dump_traceback_later(20, exit=False); "
         "import runpy,asyncio; module=runpy.run_path("
         + repr(str(Path(__file__).resolve()))
         + ");asyncio.run(module['native_churn']())"
     )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            env=os.environ.copy(),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as error:
-        for output in (error.stdout, error.stderr):
-            if output:
-                print(
-                    output.decode(errors="replace") if isinstance(output, bytes) else output,
-                    file=sys.stderr,
-                    flush=True,
-                )
-        raise
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=native_trace_child_env(),
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS native active-root churn" in result.stdout
