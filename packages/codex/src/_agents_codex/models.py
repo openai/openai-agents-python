@@ -323,6 +323,9 @@ class ChatCompletionsModel:
             else:
                 options.pop("tool_choice", None)
                 options.pop("parallel_tool_calls", None)
+            choice = (options.get("extra_body") or {}).get("n")
+            if choice is not None and (type(choice) is not int or choice != 1):
+                raise ValueError("Chat adapters require exactly one choice")
             thinking = (options.get("extra_body") or {}).get("thinking")
             if thinking is not None and thinking.get("type") != "disabled":
                 raise ValueError("Chat adapters do not support configured provider thinking")
@@ -410,13 +413,27 @@ class ChatCompletionsModel:
                     "cached_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
                         "cached_tokens", 0
                     ),
+                    "cache_write_input_tokens": (raw_usage.get("prompt_tokens_details") or {}).get(
+                        "cache_write_tokens", 0
+                    ),
                     "reasoning_output_tokens": (
                         raw_usage.get("completion_tokens_details") or {}
                     ).get("reasoning_tokens", 0),
                 }
             )
             if usage is not None:
-                usage = {key: 0 if counter is None else counter for key, counter in usage.items()}
+                usage = {
+                    key: 0
+                    if counter is None
+                    and key
+                    in (
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                    )
+                    else counter
+                    for key, counter in usage.items()
+                }
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
@@ -596,7 +613,18 @@ class ResponsesModel:
                 }
             )
             if usage is not None:
-                usage = {key: 0 if counter is None else counter for key, counter in usage.items()}
+                usage = {
+                    key: 0
+                    if counter is None
+                    and key
+                    in (
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                    )
+                    else counter
+                    for key, counter in usage.items()
+                }
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
 
         finally:

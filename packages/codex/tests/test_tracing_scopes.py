@@ -3395,6 +3395,7 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
         released.set()
 
     issuer = SimpleNamespace(
+        realtime_usage=None,
         id="session",
         _active=root,
         _context=None,

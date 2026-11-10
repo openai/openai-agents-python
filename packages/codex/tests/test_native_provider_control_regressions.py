@@ -18,13 +18,26 @@ from agents import (
     ModelRequest,
     NativeError,
     NativeProvider,
+    ResponsesModel,
     function_tool,
 )
 from tests._asyncio import timeout
 
 
 @pytest.mark.parametrize("adapter", ["chat", "litellm", "anyllm"])
-@pytest.mark.parametrize("case", ["nullable_usage", "extra_body", "content_filter", "encoder"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "nullable_usage",
+        "extra_body",
+        "content_filter",
+        "encoder",
+        "cache_write",
+        "multiple_choices",
+        "single_choice",
+        "invalid_private_n",
+    ],
+)
 async def test_native_borrowed_provider_controls(adapter, case, monkeypatch):
     seen, fallback = [], []
 
@@ -52,13 +65,20 @@ async def test_native_borrowed_provider_controls(adapter, case, monkeypatch):
                 "object": "chat.completion",
                 "created": 0,
                 "model": "gpt-4.1",
-                "choices": [choice],
+                "choices": [choice, {**choice, "index": 1}]
+                if case == "multiple_choices"
+                else [choice],
                 "usage": {
                     "prompt_tokens": 3,
                     "completion_tokens": 2,
                     "total_tokens": 5,
                     "prompt_tokens_details": {
-                        "cached_tokens": None if case == "nullable_usage" else 0
+                        "cached_tokens": None if case == "nullable_usage" else 0,
+                        "cache_write_tokens": None
+                        if case == "nullable_usage"
+                        else 7
+                        if case == "cache_write"
+                        else 0,
                     },
                     "completion_tokens_details": {
                         "reasoning_tokens": None if case == "nullable_usage" else 0
@@ -106,10 +126,26 @@ async def test_native_borrowed_provider_controls(adapter, case, monkeypatch):
                             }
                         }
                         if case == "extra_body"
+                        else {"model_settings": {"extra_body": {"n": 2}}}
+                        if case == "multiple_choices"
+                        else {"model_settings": {"extra_body": {"n": 1}}}
+                        if case == "single_choice"
+                        else {"model_settings": {"extra_body": {"n": "synthetic-private-choice"}}}
+                        if case == "invalid_private_n"
                         else {}
                     ),
                 )
-                if case == "content_filter":
+                if case in ("multiple_choices", "invalid_private_n"):
+                    with pytest.raises(ValueError, match="exactly one") as caught:
+                        await agent.run("reply")
+                    if case == "invalid_private_n":
+                        trace = caught.value.__traceback__
+                        while trace:
+                            frame = trace.tb_frame
+                            if frame.f_globals.get("__name__") == "_agents_codex.models":
+                                assert "synthetic-private-choice" not in repr(frame.f_locals)
+                            trace = trace.tb_next
+                elif case == "content_filter":
                     with pytest.raises(NativeError) as caught:
                         await agent.run("reply")
                     assert caught.value.response_integrity_reason == "provider_refusal"
@@ -127,9 +163,14 @@ async def test_native_borrowed_provider_controls(adapter, case, monkeypatch):
                         trace = trace.tb_next
                     assert "synthetic-private" not in str(error)
                 else:
-                    assert (await agent.run("reply")).final_output == "42"
+                    result = await agent.run("reply")
+                    assert result.final_output == "42"
+                    if case == "cache_write":
+                        assert result.thread_usage.total_token_usage.cache_write_input_tokens == 7
         assert not fallback
-        assert len(seen) == 1
+        assert len(seen) == (0 if case in ("multiple_choices", "invalid_private_n") else 1)
+        if case == "single_choice":
+            assert seen[0]["n"] == 1
         if case == "extra_body":
             assert seen[0]["custom_native_extension"] == {"enabled": True}
             assert seen[0]["prompt_cache_key"] == ""
@@ -339,3 +380,37 @@ async def test_anyllm_generic_storage_control(store):
     assert ("store" in seen[0]) is store
     if store:
         assert seen[0]["store"] is True
+
+
+@pytest.mark.parametrize("responses", [False, True])
+async def test_mandatory_null_usage_remains_invalid(responses):
+    async def create(**options):
+        if not responses:
+            return {
+                "id": "resp_null",
+                "choices": [{"finish_reason": "stop", "message": {"content": "42"}}],
+                "usage": {"prompt_tokens": None, "completion_tokens": 1, "total_tokens": 1},
+            }
+        return {
+            "id": "resp_null",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "42"}],
+                }
+            ],
+            "usage": {"input_tokens": None, "output_tokens": 1, "total_tokens": 1},
+        }
+
+    model = (
+        ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+        if responses
+        else ChatCompletionsModel(
+            SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        )
+    )
+    async with NativeProvider(model_backend=model) as provider:
+        with pytest.raises(ValueError, match="nonnegative native token counters"):
+            await Agent(instructions="Reply.", model="gpt-4.1", provider=provider).run("reply")
