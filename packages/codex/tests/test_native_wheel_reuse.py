@@ -59,6 +59,7 @@ def hook_project(monkeypatch, tmp_path):
     (source / "py.typed").write_text("")
     (source.parents[1] / "LICENSE").write_text("Synthetic SDK license\n")
     (source.parents[1] / ".gitignore").write_text("__pycache__/\n*.py[cod]\n")
+    (source.parents[1] / "uv.lock").write_text("version = 1\n")
     native = tmp_path / "variant/packages/codex"
     (native / ".upstream").mkdir(parents=True)
     revision = hashlib.sha1(b"commit " + str(len(COMMIT)).encode() + b"\0" + COMMIT).hexdigest()
@@ -87,6 +88,8 @@ def hook_project(monkeypatch, tmp_path):
         "scripts/native_env.py",
         "scripts/native_helpers.py",
         "scripts/source_integrity.py",
+        "scripts/pgo_train.py",
+        "tests/native_fixtures.py",
     ):
         path = native / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +113,7 @@ def hook_project(monkeypatch, tmp_path):
     return hook, source
 
 
-def make_wheel(path, *, native_root, native=True, qualified=True, missing=None):
+def make_wheel(path, *, native_root, native=True, qualified=True, missing=None, native_build=None):
     from hatch_build import _native_inputs
     from source_integrity import patch_series
 
@@ -148,6 +151,7 @@ def make_wheel(path, *, native_root, native=True, qualified=True, missing=None):
                     "format": "reviewed-codex-rmcp-v4",
                     "patch_series": patch_series(native_root),
                     "native_inputs": _native_inputs(native_root),
+                    "native_build": native_build or {"profile": "release", "pgo": False},
                     "codex_commit": base64.b64encode(COMMIT).decode(),
                     "rmcp_source": rmcp_qualification(native_root),
                     "wheel_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -317,6 +321,9 @@ def test_fresh_thin_wheel_preserves_current_sdk_python_and_assets(
             output = Path(command[command.index("--out") + 1])
             wheel = output / "openai_agents-0.24.0a4-cp310-abi3-linux_x86_64.whl"
             make_wheel(wheel, native_root=Path(hook.root) / "packages/codex")
+            (output / "native-build.json").write_text(
+                json.dumps({"profile": "release" if version == "standard" else "dev", "pgo": False})
+            )
 
     monkeypatch.setattr("hatch_build.subprocess.run", run)
     verified = []
@@ -399,7 +406,9 @@ def test_wheel_budget_rejects_excess_and_cleans_staging(
     assert not staging.exists()
 
 
-@pytest.mark.parametrize("problem", ["missing", "mutated-wheel", "wrong-pin", "old-format"])
+@pytest.mark.parametrize(
+    "problem", ["missing", "mutated-wheel", "wrong-pin", "old-format", "instrumented"]
+)
 @pytest.mark.parametrize("version", ["standard", "editable"])
 def test_unqualified_wheel_is_rejected_before_staging(
     monkeypatch, hook_project, sdk_wheel, problem, version
@@ -420,6 +429,10 @@ def test_unqualified_wheel_is_rejected_before_staging(
         record = json.loads(receipt.read_text())
         record["format"] = "patched-codex"
         receipt.write_text(json.dumps(record))
+    elif problem == "instrumented":
+        record = json.loads(receipt.read_text())
+        record["native_build"]["profile"] = "instrumented"
+        receipt.write_text(json.dumps(record))
     monkeypatch.setenv("OPENAI_AGENTS_NATIVE_WHEEL", str(sdk_wheel))
     with pytest.raises(ValueError, match="matching reviewed-build receipt"):
         hook.initialize(version, {"force_include": {}})
@@ -427,11 +440,15 @@ def test_unqualified_wheel_is_rejected_before_staging(
     assert not list(source.glob("_native.*"))
 
 
-def test_repacking_rebinds_receipt_to_exact_final_wheel(monkeypatch, hook_project, sdk_wheel):
+@pytest.mark.parametrize("pgo", [False, True])
+def test_repacking_rebinds_receipt_to_exact_final_wheel(monkeypatch, hook_project, sdk_wheel, pgo):
     from hatch_build import _wheel_qualification
 
     hook, _ = hook_project
-    make_wheel(sdk_wheel, native_root=Path(hook.root) / "packages/codex")
+    build = {"profile": "release", "pgo": pgo, "maturin": "maturin 1.16.0"}
+    if pgo:
+        build["training_python_sha256"] = "a" * 64
+    make_wheel(sdk_wheel, native_root=Path(hook.root) / "packages/codex", native_build=build)
     monkeypatch.setenv("OPENAI_AGENTS_NATIVE_WHEEL", str(sdk_wheel))
     data = {"force_include": {}}
     hook.initialize("standard", data)
@@ -443,6 +460,7 @@ def test_repacking_rebinds_receipt_to_exact_final_wheel(monkeypatch, hook_projec
     record = json.loads(final.with_name(final.name + ".pristine.json").read_text())
     assert record["wheel_sha256"] == hashlib.sha256(final.read_bytes()).hexdigest()
     assert record["wheel_sha256"] != hashlib.sha256(sdk_wheel.read_bytes()).hexdigest()
+    assert record["native_build"] == build
     assert (
         _wheel_qualification(Path(hook.root) / "packages/codex", final)["format"]
         == "reviewed-codex-rmcp-v4"
@@ -552,6 +570,9 @@ def test_receipt_output_directory_must_be_absolute(monkeypatch, hook_project, sd
         "rmcp-patches/series.json",
         "scripts/source_integrity.py",
         "scripts/hatch_build.py",
+        "scripts/pgo_train.py",
+        "tests/native_fixtures.py",
+        "../../uv.lock",
         "add",
         "remove",
         "maturin",
@@ -561,6 +582,7 @@ def test_receipt_output_directory_must_be_absolute(monkeypatch, hook_project, sd
         "new-build-module",
         "hatch",
         "uv",
+        "pgo-dependencies",
     ],
 )
 def test_stale_native_inputs_reject_before_payload_staging(
@@ -580,6 +602,9 @@ def test_stale_native_inputs_reject_before_payload_staging(
         (native / "rust/new.rs").write_text("new native module")
     elif changed == "remove":
         (native / "rust/helper.rs").unlink()
+    elif changed == "pgo-dependencies":
+        path = Path(hook.root) / "pyproject.toml"
+        path.write_text(path.read_text() + '[dependency-groups]\npgo=["pytest>=99"]\n')
     elif changed in {"hatch", "uv"}:
         path = Path(hook.root) / "pyproject.toml"
         setting = (
@@ -677,10 +702,14 @@ def test_mutating_or_failed_build_cannot_mint_receipt(
         if argv[1].endswith("build.py"):
             if change_at == "failed-build":
                 raise RuntimeError("failed compiler")
+            output = Path(argv[argv.index("--out") + 1])
             make_wheel(
-                Path(argv[argv.index("--out") + 1]) / sdk_wheel.name,
+                output / sdk_wheel.name,
                 native_root=native,
                 qualified=False,
+            )
+            (output / "native-build.json").write_text(
+                json.dumps({"profile": "release", "pgo": False})
             )
             if change_at == "build":
                 (native / "rust/lib.rs").write_text("mutated during compilation")
@@ -847,6 +876,9 @@ def test_fresh_build_qualifies_verified_legacy_source_without_migration(
             compiled.append(argv)
             output = Path(argv[argv.index("--out") + 1]) / sdk_wheel.name
             make_wheel(output, native_root=native, qualified=False)
+            (output.parent / "native-build.json").write_text(
+                json.dumps({"profile": "release" if version == "standard" else "dev", "pgo": False})
+            )
             return subprocess.CompletedProcess(argv, 0)
         return real_run(argv, **kwargs)
 
