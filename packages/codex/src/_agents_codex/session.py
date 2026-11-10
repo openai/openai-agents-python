@@ -2649,6 +2649,34 @@ def _validate_storage_opening(
     return reconciliation
 
 
+def _validate_custom_storage_capabilities(
+    storage: LocalStorage | CustomStorage | None,
+    *,
+    native_agents: NativeAgents[Any] | None,
+    goals: bool,
+    programmatic_tool_calling: bool,
+    checklist: bool,
+    mcp_tools: Sequence[_MCP[Any]],
+    environment: EnvironmentSource[Any] | None,
+    available: Sequence[Tool[Any]],
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+) -> None:
+    if isinstance(storage, CustomStorage) and (
+        native_agents is not None
+        or goals
+        or programmatic_tool_calling
+        or checklist
+        or mcp_tools
+        or environment is not None
+        or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
+        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
+    ):
+        raise ValueError(
+            "CustomStorage preview does not support children, goals, checklist, "
+            "code mode, manual tools, standalone native tools or environments"
+        )
+
+
 def _capture_project_guidance(
     enabled: bool,
 ) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
@@ -2999,20 +3027,17 @@ class Session(Generic[ContextT, OutputT]):
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
-        if isinstance(storage, CustomStorage) and (
-            native_agents is not None
-            or goals
-            or programmatic_tool_calling
-            or checklist
-            or mcp_tools
-            or environment is not None
-            or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-            or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
-        ):
-            raise ValueError(
-                "CustomStorage preview does not support children, goals, checklist, "
-                "code mode, manual tools, standalone native tools or environments"
-            )
+        _validate_custom_storage_capabilities(
+            storage,
+            native_agents=native_agents,
+            goals=goals,
+            programmatic_tool_calling=programmatic_tool_calling,
+            checklist=checklist,
+            mcp_tools=mcp_tools,
+            environment=environment,
+            available=available,
+            tools=tools,
+        )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
         hosted_tools = _capture_hosted_tools(available)
