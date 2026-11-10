@@ -75,6 +75,7 @@ pub const OPERATIONS: &[&str] = &[
     "realtime_conversation_prepare_sdk",
     "realtime_conversation_config_sdk",
     "realtime_conversation_update_history_sdk",
+    "realtime_conversation_send_event_sdk",
     "realtime_conversation_retrieve_item_sdk",
     "realtime_conversation_retrieve_history_sdk",
     "realtime_conversation_activate_sdk",
@@ -1547,6 +1548,18 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .await?;
             return Ok(serde_json::to_value(result.await??)?);
         }
+        "realtime_conversation_send_event_sdk" => {
+            let p: RealtimeSdkSendEvent = decode(params)?;
+            let (reply, result) = oneshot::channel();
+            thread
+                .submit(Op::RealtimeConversationSendEventSdk {
+                    generation: p.generation,
+                    event: p.event,
+                    reply,
+                })
+                .await?;
+            return Ok(serde_json::to_value(result.await??)?);
+        }
         "realtime_conversation_update_history_sdk" => {
             let p: RealtimeSdkHistory = decode(params)?;
             let (reply, result) = oneshot::channel();
@@ -1930,6 +1943,10 @@ fn realtime_function_tools(
 params!(RealtimeSdkAudio {
     generation: String,
     frame: RealtimeAudioFrame
+});
+params!(RealtimeSdkSendEvent {
+    generation: String,
+    event: Value
 });
 params!(RealtimeSdkHistory { generation: String, items: Vec<Value> });
 params!(RealtimeSdkDeleteItem {

@@ -793,12 +793,25 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         write_policy="trusted_workspace_write",
         temp_dir=job_temp,
     )
+    # Darwin's id -F fails when getpwuid cannot resolve the real UID.
+    macos_uid_lookup = ("/usr/bin/id", "-F")
+    ssh_command = "ssh -G -T -F /dev/null credential.example.invalid"
+    if sys.platform == "darwin":
+        ssh_probe = (
+            f"ssh_config=$({ssh_command} & ssh_pid=$!; "
+            'if ! wait "$ssh_pid"; then '
+            f"uid_status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || uid_status=$?; "
+            'printf "trusted SSH pid=%s, UID lookup exit=%s\\n" "$ssh_pid" "$uid_status" >&2; '
+            "exit 1; fi); printf '%s\\n' \"$ssh_config\" | grep -q '^user '; "
+        )
+    else:
+        ssh_probe = f"{ssh_command} | grep -q '^user '; "
     command = (
         'set -eu; test "$(fixture-tool)" = "fixture tool"; '
         f'test "$HOME" = {shlex.quote(str(home))}; '
         'test "$GH_TOKEN" = synthetic-gh-token; '
         'test -z "${LD_LIBRARY_PATH+x}"; '
-        "ssh -G -T -F /dev/null credential.example.invalid | grep -q '^user '; "
+        f"{ssh_probe}"
         "printf 'protocol=https\\nhost=credential.example.invalid\\n\\n' "
         "| git credential fill | grep -qx password=synthetic-git-password; "
         'scratch=$(mktemp -d "$TMPDIR/sdk-job.XXXXXX"); printf job > "$scratch/result"; '
@@ -827,7 +840,47 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     async with timeout(40), agent.session(environment=selected) as session:
         turn = await session.submit("Create and commit the artifact.")
         assert (await turn.get_result()).final_output == "done"
-    assert "Process exited with code 0" in tool_output(responses.requests[-1], "trusted")
+    output = tool_output(responses.requests[-1], "trusted")
+    if sys.platform == "darwin" and (
+        probe := re.search(r"^trusted SSH pid=([0-9]+), UID lookup exit=[0-9]+\r?$", output, re.M)
+    ):
+        host_lookup = "unavailable"
+        try:
+            host_lookup = str(
+                subprocess.run(
+                    macos_uid_lookup,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                ).returncode
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        pid = probe[1]
+        denial = "no matching Mach lookup denial visible"
+        try:
+            log = subprocess.run(
+                [
+                    "/usr/bin/log",
+                    "show",
+                    "--last",
+                    "1m",
+                    "--predicate",
+                    f'eventMessage CONTAINS "ssh({pid}) deny(" '
+                    'AND eventMessage CONTAINS " mach-lookup "',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if match := re.search(rf"ssh\({pid}\) deny\([0-9]+\) mach-lookup [\w.-]+", log.stdout):
+                denial = match[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        pytest.fail(f"{output}\nHost UID lookup exit={host_lookup}\n{denial}")
+    assert "Process exited with code 0" in output
     advertised = json.dumps(responses.requests[0])
     assert "Fixture for selected-skill" in advertised
     assert "Fixture for hidden-skill" not in advertised

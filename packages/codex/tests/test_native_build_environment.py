@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import subprocess
 import sys
 import urllib.error
@@ -490,6 +491,13 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     monkeypatch.setattr(sys, "platform", platform)
     mode_args = ["--develop"] if develop else ["--out", str(tmp_path / "dist")]
     monkeypatch.setattr(sys, "argv", ["build.py", "--release", *mode_args])
+    monkeypatch.setattr(
+        build.subprocess,
+        "check_output",
+        lambda command, **kwargs: (
+            f"rustc 1.95.0\nhost: {host}\n" if command[0] == "rustc" else "maturin 1.16.0\n"
+        ),
+    )
     extension_builds = []
 
     def run(command, **kwargs):
@@ -516,6 +524,8 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
             for name in ("codex-sdk-runtime", "codex-code-mode-host"):
                 (destination / f"{name}{suffix}").write_text(name)
         if command[0] == "maturin":
+            if "--out" in command:
+                Path(command[command.index("--out") + 1]).mkdir(parents=True)
             licenses = tmp_path / "src/agents/licenses"
             assert {path.name: path.read_text() for path in licenses.iterdir()} == {
                 "SDK_LICENSE": "SDK license\n",
@@ -545,6 +555,11 @@ def test_helpers_and_extension_share_the_selected_target_and_crt(
     build.main()
     assert source_checks == [("codex", root), ("rmcp", root)] * 3
     assert len(extension_builds) == 1
+    if not develop:
+        provenance = json.loads((tmp_path / "dist/native-build.json").read_text())
+        assert provenance["pgo"] is False
+        assert provenance["profile"] == "release"
+        assert provenance["target"] == (configured_target or host)
     if timings:
         result = run_cli(
             [*extension_builds[0], "--help"],

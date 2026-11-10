@@ -1,7 +1,7 @@
 // Real browser + actual HTTP; keep all records and credentials synthetic.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-const browser = await chromium.launch({headless: true, args: ['--no-sandbox']});
+const browser = await chromium.launch({headless: true, chromiumSandbox: true});
 const context = await browser.newContext();
 const page = await context.newPage();
 const errors = [];

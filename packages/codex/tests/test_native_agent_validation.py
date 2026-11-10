@@ -102,3 +102,63 @@ def test_validate_reports_first_failure_before_invalid_output_schema():
         agent.validate()
     with pytest.raises((TypeError, ValueError)):
         Agent(instructions="Check output.", output_type=dict[str, int]).validate()
+
+
+@pytest.mark.parametrize("target_problem", ["name", "tools", "output"])
+def test_validate_rejects_invalid_handoff_declarations(target_problem):
+    target = Agent(
+        name=None if target_problem == "name" else "B",
+        instructions="Target.",
+        tools=[manual("exec_command")] if target_problem == "tools" else [],
+        output_type=Output if target_problem == "output" else None,
+    )
+    with pytest.raises((TypeError, ValueError)):
+        Agent(instructions="Root.", handoffs=[target]).validate()
+
+
+@pytest.mark.parametrize("target_collision", [False, True])
+def test_validate_rejects_function_handoff_name_collision(target_collision):
+    leaf = Agent(name="C", instructions="Leaf.")
+    target = Agent(
+        name="B",
+        instructions="Target.",
+        tools=[manual("transfer_to_c")] if target_collision else [],
+        handoffs=[leaf],
+    )
+    source = Agent(
+        name="A",
+        instructions="Root.",
+        handoffs=[target],
+        tools=[] if target_collision else [manual("transfer_to_b")],
+    )
+    with pytest.raises(ValueError, match="handoff name collides"):
+        source.validate()
+
+
+def test_validate_resolves_cyclic_graph_once_without_binding_context_or_resources(monkeypatch):
+    from agents import _native
+
+    resolutions = []
+
+    @function_tool
+    def contextual(context: ToolContext[str], text: str) -> str:
+        return context.context + text
+
+    def resolve_target():
+        resolutions.append("target")
+        return target
+
+    source = Agent(name="A", instructions="Root.", handoffs=[resolve_target, resolve_target])
+    target = Agent(name="B", instructions="Target.", tools=[contextual], handoffs=[source])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Graph validation bound context or acquired runtime resources.")
+
+    monkeypatch.setattr(NativeProvider, "__init__", forbidden)
+    monkeypatch.setattr(NativeProvider, "_acquire_lease", forbidden)
+    monkeypatch.setattr(_native, "_read_openai_api_key_from_env", forbidden)
+    monkeypatch.setattr(_native, "create_engine", forbidden)
+    monkeypatch.setattr(HttpMCP, "_config", forbidden)
+    monkeypatch.setattr(FunctionTool, "_capture", forbidden)
+    assert source.validate() is None
+    assert resolutions == ["target"]

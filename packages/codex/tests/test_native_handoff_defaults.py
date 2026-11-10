@@ -389,7 +389,7 @@ async def test_updated_fixed_defaults_do_not_narrow_another_profile(responses, a
     )
     expected = {("functions", "update_plan"), ("web", "run")}
     async with timeout(25), source.session() as session:
-        await session.update(tools=[])
+        await session.update(tools=[ToolRef("transfer_to_b")])
         if activation == "handoff":
             responses.respond(function_call("transfer_to_b", {}, "fixed-default-handoff"))
         else:
