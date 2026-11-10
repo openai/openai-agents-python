@@ -23,7 +23,10 @@ def recording_session() -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("host", ["github.com", "git.example.test:8443", "[::1]", "[::1]:8443"])
+@pytest.mark.parametrize(
+    "host",
+    ["github.com", "git.example.test:8443", "xn--bcher-kva.example.test", "[::1]", "[::1]:8443"],
+)
 @pytest.mark.parametrize("ref", ["release/stable", "0123456789abcdef"])
 async def test_git_host_preserves_https_authority_and_refs(host: str, ref: str) -> None:
     session = recording_session()
@@ -60,7 +63,10 @@ async def test_git_host_preserves_https_authority_and_refs(host: str, ref: str) 
         " example.test",
         "example.test\n",
         "example.test\\path",
+        "example%2etest",
         "example.test:invalid",
+        "example.test:",
+        "[::1]:",
         "[not-an-address]",
         "[::1]suffix",
     ],

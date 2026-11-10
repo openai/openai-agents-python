@@ -740,7 +740,7 @@ class LocalDir(BaseEntry):
 class GitRepo(BaseEntry):
     type: Literal["git_repo"] = "git_repo"
     is_dir: bool = True
-    host: str = "github.com"
+    host: str = "github.com"  # Unescaped host with an optional numeric port.
     repo: str  # "owner/name" (or any host-specific path)
     ref: str  # tag/branch/sha
     subpath: str | None = None
@@ -815,9 +815,13 @@ class GitRepo(BaseEntry):
 
     def _validate_host(self) -> None:
         # Validate at application time so Pydantic errors cannot retain host values.
-        valid = bool(self.host) and not any(
-            char.isspace() or ord(char) < 32 or ord(char) == 127 or char in "@/\\?#"
-            for char in self.host
+        valid = (
+            bool(self.host)
+            and not self.host.endswith(":")
+            and not any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127 or char in "%@/\\?#"
+                for char in self.host
+            )
         )
         if valid:
             try:
