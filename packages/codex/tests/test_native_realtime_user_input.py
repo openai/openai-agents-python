@@ -304,7 +304,8 @@ async def test_message_is_captured_before_waiting_for_audio_commit(realtime_peer
             )
 
 
-async def test_provider_deletion_keeps_canonical_target_audit(realtime_peer):
+@pytest.mark.parametrize("observed", [True, False], ids=["observed", "application-known"])
+async def test_provider_deletion_keeps_canonical_target_audit(realtime_peer, observed):
     from contextlib import aclosing
 
     from agents.realtime import (
@@ -335,21 +336,27 @@ async def test_provider_deletion_keeps_canonical_target_audit(realtime_peer):
     ):
         await peer.frame(lambda frame: frame["type"] == "session.update")
         assert peer.socket is not None
-        await peer.socket.send_json({"type": "conversation.item.added", "item": item})
-        await peer.socket.send_json({"type": "conversation.item.done", "item": item})
-        async for event in events:
-            if (
-                isinstance(event, RealtimeConversationItemObserved)
-                and event.item_id == provider_item_id
-                and event.status == "done"
-            ):
-                break
+        if observed:
+            await peer.socket.send_json({"type": "conversation.item.added", "item": item})
+            await peer.socket.send_json({"type": "conversation.item.done", "item": item})
+            async for event in events:
+                if (
+                    isinstance(event, RealtimeConversationItemObserved)
+                    and event.item_id == provider_item_id
+                    and event.status == "done"
+                ):
+                    break
         prior_ids = {entry.id for entry in owner.history}
         start = len(peer.frames)
-        with pytest.raises(RuntimeError):
-            await owner.delete_conversation_item("unobserved-provider-item")
         deleting = asyncio.create_task(owner.delete_conversation_item(provider_item_id))
         try:
+            if not observed:
+                lookup = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=start
+                )
+                assert lookup["item_id"] == provider_item_id
+                assert not deleting.done()
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": item})
             sent = await peer.frame(
                 lambda frame: frame["type"] == "conversation.item.delete", after=start
             )

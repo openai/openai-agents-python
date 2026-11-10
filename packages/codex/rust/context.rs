@@ -313,6 +313,9 @@ impl Change {
         let compacted = CompactedItem {
             message: summary.to_owned(),
             replacement_history: Some(replacement),
+            sdk_originals: Some(
+                codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::preserve(),
+            ),
             guardian_history,
             retained_context: self.snapshot.retained_context().cloned(),
             // Full canonical history is preserved. Native restore replays its

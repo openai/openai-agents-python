@@ -51,7 +51,8 @@ def _names(node: ast.stmt) -> set[str]:
 
 def _declaration(node: ast.stmt) -> ast.stmt | None:
     """Retain syntax that defines the API, without runtime bodies or docstrings."""
-    node = copy.deepcopy(node)
+    # The retained declaration replaces its bodies and only reads other children.
+    node = copy.copy(node)
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         node.body = [ast.Pass()]
     elif isinstance(node, ast.ClassDef):

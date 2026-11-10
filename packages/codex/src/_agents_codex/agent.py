@@ -1320,7 +1320,7 @@ class Agent(Generic[ContextT, OutputT]):
                 assert isinstance(session, Session)
                 yield session
         finally:
-            del trace_options
+            del trace_options, environment
 
     @asynccontextmanager
     async def _session_context(
@@ -1417,6 +1417,7 @@ class Agent(Generic[ContextT, OutputT]):
             trace_error = error
             raise
         finally:
+            del environment
             captured.close(trace_error)
 
     @overload

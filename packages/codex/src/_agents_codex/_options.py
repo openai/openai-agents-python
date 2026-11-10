@@ -34,6 +34,7 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
     temp_dir: str
     cwd: Required[str]
     headers: dict[str, str]
+    env_json: str
     connect_timeout: float | None
     local_mcp: bool
     network: RuntimeNetworkPolicy
