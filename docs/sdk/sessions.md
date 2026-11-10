@@ -512,6 +512,44 @@ For instruction matching and trust during restore, see [store and trust checkpoi
 
 Pass `instruction_files=[Path("method.md")]` to `agent.session()` to load trusted UTF-8 files as part of the application instructions. The SDK reads these paths on the application host. Choose them in trusted code. When restoring a portable checkpoint, supply matching instructions and file content.
 
+Matching source builds have also been supporting opt-in discovery through `discover_agents_md=True`. The [source setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) has been covering installation with the matching native extension. Discovery has been defaulting to `False`.
+
+With discovery enabled, Codex has been loading user guidance from `CODEX_HOME` on the application host, with `~/.codex` as the default. For a selected `Environment`, Codex has then been reading project guidance from the nearest Git root down to the Environment's working directory, within the executor's read policy. Without a Git root, Codex has been checking only that working directory. Without an Environment, discovery has been loading only user guidance.
+
+At each location, Codex has been checking `AGENTS.override.md` before `AGENTS.md`. More specific project files have been taking priority over broader guidance. Application instructions, including explicit `instruction_files`, have been retaining developer priority. Enabling discovery has been trusting the discovered files as instructions; application code has been choosing trusted files and parent directories. The option has been enabling instruction discovery only, without loading user configuration.
+
+For an async application using a trusted, existing workspace at `/jobs/worker/work` and a configured model provider:
+
+```python
+from pathlib import Path
+
+from agents import Agent, Environment
+
+agent = Agent(instructions="Work in the assigned workspace.")
+environment = Environment.local(
+    cwd=Path("/jobs/worker/work"),
+    tools=("exec_command",),
+)
+async with agent.session(
+    environment=environment,
+    discover_agents_md=True,
+) as session:
+    turn = await session.submit("Describe the project layout.")
+    print((await turn.get_result()).final_output)
+    state = await session.save_state()
+
+# Renewing the opt-in for this opening, including restore or storage resume.
+async with agent.session(
+    environment=environment,
+    state=state,
+    discover_agents_md=True,
+) as restored:
+    turn = await restored.submit("Continue with the same project guidance.")
+    print((await turn.get_result()).final_output)
+```
+
+Each opening has been requiring its own opt-in, including `state=` restore and `storage=`/`resume=` reopen. Omitting the option on restore has been disabling discovery for the new opening. Previously supplied instructions have still been appearing in saved conversation history. The [local execution guide](execution.md#local-execution) has been explaining workspace and sandbox prerequisites.
+
 Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settings selected for the turn's latest recorded model sampling attempt. The receipt can include:
 
 - The model, reasoning effort, Codex revision and source tree, and whether user configuration applied.
