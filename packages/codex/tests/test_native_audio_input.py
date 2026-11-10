@@ -228,7 +228,7 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
 @pytest.mark.parametrize("audio_only", [True, False])
 async def test_public_audio_history_and_restore(audio_only: bool) -> None:
     content: list[InputText | InputAudio] = [
-        {"type": "input_audio", "audio_url": "opaque:audio-source"}
+        {"type": "input_audio", "audio_url": "data:audio/wav;base64,UklGRg=="}
     ]
     if not audio_only:
         content = [
@@ -279,7 +279,7 @@ async def test_public_audio_history_and_restore(audio_only: bool) -> None:
 @pytest.mark.parametrize("audio_only", [True, False])
 async def test_initial_audio_sources_order_and_restore(audio_only: bool) -> None:
     content: list[InputText | InputAudio] = [
-        {"type": "input_audio", "audio_url": "opaque:audio-source"}
+        {"type": "input_audio", "audio_url": "data:audio/wav;base64,UklGRg=="}
     ]
     if not audio_only:
         content = [
