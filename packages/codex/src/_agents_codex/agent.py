@@ -443,7 +443,10 @@ class NativeProvider:
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
-    enabled and owns retries.
+    enabled and owns retries. On Linux, an eligible private one-shot
+    ``Agent.run()`` completion may use fresh, unpooled HTTP when this choice is
+    implicit and no routing, proxy or CA override is present. Explicit WebSocket choices and live
+    Session transport permission remain unchanged.
 
     ``request_max_retries`` controls retries of failed HTTP requests;
     ``stream_max_retries`` controls reconnections of dropped response streams.
@@ -1468,6 +1471,7 @@ class Agent(Generic[ContextT, OutputT]):
         discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
@@ -1504,6 +1508,7 @@ class Agent(Generic[ContextT, OutputT]):
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
                 _completed_input=_completed_input,
+                _private_text_run=_private_text_run,
                 **cast(
                     "_TracingOpeningOptions",
                     {"_tracing_context": captured.context} if captured.context is not None else {},
@@ -1840,6 +1845,10 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
+                if _private_text_run_eligible(
+                    self, input, context, return_state, parent_trace, trace_options
+                ):
+                    options["_private_text_run"] = True
                 if _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
@@ -2187,9 +2196,23 @@ def _completed_run_eligible(
 ) -> bool:
     """Additional one-shot ceiling; disabling it preserves atomic opening."""
     return (
+        _private_text_run_eligible(agent, input, context, return_state, parent_trace, trace_options)
+        and len(cast(str, input)) <= 16 * 1024
+    )
+
+
+def _private_text_run_eligible(
+    agent: Agent[Any, Any],
+    input: UserInput | None,
+    context: Any,
+    return_state: bool,
+    parent_trace: TraceContext | Mapping[str, str | None] | None,
+    trace_options: TraceOptions | Mapping[str, Any] | None,
+) -> bool:
+    """Private plain-text one-shot profile, independent of archive limits."""
+    return (
         type(agent) is Agent
         and type(input) is str
-        and len(input) <= 16 * 1024
         and context is None
         and not agent.programmatic_tool_calling
         and agent.transform_context is None
