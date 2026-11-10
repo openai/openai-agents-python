@@ -43,17 +43,13 @@ impl ManagedCalls {
 
     pub(crate) fn owns_output(&self, thread: ThreadId, item: &RolloutItem) -> bool {
         if let RolloutItem::ResponseItem(envelope) = item
-            && let ResponseItem::FunctionCallOutput {
-                call_id: Some(call),
-                internal_chat_message_metadata_passthrough: Some(metadata),
-                ..
-            } = &envelope.item
-            && let Some(turn) = &metadata.turn_id
+            && let Some((call, Some(turn))) =
+                crate::local_reconciliation::output_identity(&envelope.item)
         {
             return self.0.lock().expect("managed calls poisoned").contains(&(
                 thread.to_string(),
-                turn.clone(),
-                call.clone(),
+                turn.to_owned(),
+                call.to_owned(),
             ));
         }
         false
@@ -494,9 +490,15 @@ impl MemoryThreadStore {
         // must not be mistaken for completed work. This contains identities
         // only; Core remains the sole owner of actual result payloads.
         let mut unfinished = HashSet::new();
-        // The ID space is shared by function and custom calls. Remember the
+        // The ID space is shared by function, custom and computer calls. Remember the
         // kind until the matching receipt arrives; a receipt cannot settle
         // another kind of call, nor can a repeated ID inherit completion.
+        #[derive(PartialEq)]
+        enum CallKind {
+            Function,
+            Custom,
+            Computer,
+        }
         let mut calls = HashMap::new();
         for item in prefix {
             match item {
@@ -506,10 +508,15 @@ impl MemoryThreadStore {
                 }
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
-                    | ResponseItem::CustomToolCall { call_id, .. } => {
-                        let is_function = matches!(&item.item, ResponseItem::FunctionCall { .. });
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. } => {
+                        let kind = match &item.item {
+                            ResponseItem::FunctionCall { .. } => CallKind::Function,
+                            ResponseItem::CustomToolCall { .. } => CallKind::Custom,
+                            _ => CallKind::Computer,
+                        };
                         anyhow::ensure!(
-                            calls.insert(call_id.as_str(), is_function).is_none(),
+                            calls.insert(call_id.as_str(), kind).is_none(),
                             UnsupportedManualState::NativeWork
                         );
                         unfinished.insert(call_id.as_str());
@@ -519,14 +526,21 @@ impl MemoryThreadStore {
                         ..
                     } => {
                         anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&true)
+                            calls.get(call_id.as_str()) == Some(&CallKind::Function)
+                                && unfinished.remove(call_id.as_str()),
+                            UnsupportedManualState::NativeWork
+                        );
+                    }
+                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                        anyhow::ensure!(
+                            calls.get(call_id.as_str()) == Some(&CallKind::Computer)
                                 && unfinished.remove(call_id.as_str()),
                             UnsupportedManualState::NativeWork
                         );
                     }
                     ResponseItem::CustomToolCallOutput { call_id, .. } => {
                         anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&false)
+                            calls.get(call_id.as_str()) == Some(&CallKind::Custom)
                                 && unfinished.remove(call_id.as_str()),
                             UnsupportedManualState::NativeWork
                         );
@@ -537,9 +551,10 @@ impl MemoryThreadStore {
             }
         }
         anyhow::ensure!(
-            pending
-                .iter()
-                .all(|key| calls.get(key.call.as_str()) != Some(&false)),
+            pending.iter().all(|key| !matches!(
+                calls.get(key.call.as_str()),
+                Some(CallKind::Custom | CallKind::Computer)
+            )),
             UnsupportedManualState::NativeWork
         );
         if unfinished
@@ -1072,7 +1087,9 @@ impl SamplingState {
             RolloutItem::ResponseItem(envelope)
                 if matches!(
                     &envelope.item,
-                    ResponseItem::FunctionCall { .. } | ResponseItem::CustomToolCall { .. }
+                    ResponseItem::FunctionCall { .. }
+                        | ResponseItem::CustomToolCall { .. }
+                        | ResponseItem::ComputerCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
@@ -1128,7 +1145,7 @@ impl LossSuspension {
                 if let RolloutItem::ResponseItem(envelope) = item {
                     // Approval and manual keys bind functions only. A custom
                     // call sharing this ID makes cancellation attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. }
+                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. }
                         if *call_id == key.call)
                     {
                         return None;
@@ -1198,13 +1215,19 @@ impl LossSuspension {
                                     }
                                 }
                             }
-                            ResponseItem::CustomToolCall { call_id, .. } => {
+                            ResponseItem::CustomToolCall { call_id, .. }
+                            | ResponseItem::ComputerCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
                                     // A later custom call must not turn a real
                                     // function result into a cancellation receipt.
                                     preserve = false;
                                 }
+                            }
+                            ResponseItem::ComputerCallOutput { call_id, .. }
+                                if *call_id == key.call =>
+                            {
+                                preserve = false;
                             }
                             ResponseItem::FunctionCallOutput {
                                 call_id: Some(call_id),
@@ -1257,23 +1280,39 @@ fn sdk_calls_match(bound: &[ResponseItem], requested: &[ResponseItem]) -> bool {
 fn sdk_import_allowed(history: &[RolloutItem], requested: &[ResponseItem]) -> bool {
     let mut existing = HashSet::new();
     let mut unresolved = HashSet::new();
+    let mut computers = HashSet::new();
     for item in history {
         let RolloutItem::ResponseItem(envelope) = item else {
             continue;
         };
         if let Some((call_id, _)) = crate::python_tools::sdk_projection(&envelope.item) {
+            if computers.contains(call_id) {
+                return false;
+            }
             existing.insert(call_id);
             unresolved.insert(call_id);
         }
-        if let ResponseItem::FunctionCallOutput {
-            call_id: Some(call_id),
-            ..
-        } = &envelope.item
-        {
-            unresolved.remove(call_id.as_str());
+        match &envelope.item {
+            ResponseItem::ComputerCall { call_id, .. } => {
+                if !existing.insert(call_id.as_str()) {
+                    return false;
+                }
+                computers.insert(call_id.as_str());
+            }
+            ResponseItem::ComputerCallOutput { call_id, .. } => {
+                computers.remove(call_id.as_str());
+            }
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                ..
+            } => {
+                unresolved.remove(call_id.as_str());
+            }
+            _ => {}
         }
     }
-    unresolved.is_empty()
+    computers.is_empty()
+        && unresolved.is_empty()
         && requested.iter().all(|item| {
             crate::python_tools::sdk_projection(item)
                 .is_some_and(|(call_id, _)| !existing.contains(call_id))
@@ -1298,6 +1337,7 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
     }
     let mut seen = HashSet::new();
     let mut unresolved = Vec::new();
+    let mut computers = HashSet::new();
     for (index, item) in history.iter().enumerate() {
         match item {
             RolloutItem::Compacted(_)
@@ -1315,6 +1355,18 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
                     }
                     unresolved.push((index, envelope.item.clone()));
                 }
+                match &envelope.item {
+                    ResponseItem::ComputerCall { call_id, .. } => {
+                        if !seen.insert(call_id.as_str()) {
+                            return false;
+                        }
+                        computers.insert(call_id.as_str());
+                    }
+                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                        computers.remove(call_id.as_str());
+                    }
+                    _ => {}
+                }
                 if let ResponseItem::FunctionCallOutput {
                     call_id: Some(call_id),
                     ..
@@ -1331,7 +1383,8 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
     }
     // An unresolved call outside this turn still blocks an import/resume, as
     // does omitting or reordering any unresolved original sibling.
-    !requested.is_empty()
+    computers.is_empty()
+        && !requested.is_empty()
         && unresolved.iter().all(|(index, _)| *index > start)
         && sdk_calls_match(
             &unresolved
@@ -1542,6 +1595,13 @@ impl LocalChecklistStore {
             ));
         }
         let identity = (key.turn.clone(), key.call.clone());
+        if matches!(&item, ResponseItem::ComputerCallOutput { .. })
+            && (key.reply.thread != id.to_string()
+                || crate::local_reconciliation::output_identity(&item)
+                    != Some((key.call.as_str(), Some(key.turn.as_str()))))
+        {
+            return Err(checklist_error("SDK computer receipt identity mismatch"));
+        }
         if writer.early.contains(&identity) {
             return Err(checklist_error("SDK receipt was already committed"));
         }
@@ -2262,16 +2322,10 @@ impl LocalChecklistStore {
                 // synthesized cancellation claim the external effect settled.
                 let managed = self.managed_calls.owns_output(id, item);
                 if let RolloutItem::ResponseItem(envelope) = item
-                    && let ResponseItem::FunctionCallOutput {
-                        call_id: Some(call_id),
-                        name: None,
-                        namespace: None,
-                        internal_chat_message_metadata_passthrough: Some(meta),
-                        ..
-                    } = &envelope.item
-                    && let Some(turn) = &meta.turn_id
+                    && let Some((call, Some(turn))) =
+                        crate::local_reconciliation::output_identity(&envelope.item)
                 {
-                    return !writer.early.remove(&(turn.clone(), call_id.clone())) && !managed;
+                    return !writer.early.remove(&(turn.to_owned(), call.to_owned())) && !managed;
                 }
                 !managed
             });
@@ -4948,5 +5002,31 @@ mod graph_tests {
                 .unwrap(),
             vec![grandchild]
         );
+    }
+}
+
+#[cfg(test)]
+mod computer_storage_reentry_tests {
+    use super::*;
+    use serde_json::json;
+    fn row(value: serde_json::Value) -> RolloutItem {
+        RolloutItem::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            serde_json::from_value(value).unwrap(),
+        ))
+    }
+    #[test]
+    fn unknown_computer_effect_cannot_escape_through_function_only_sdk_import() {
+        let call = row(
+            json!({"type":"computer_call","call_id":"computer-1","actions":[{"type":"click","x":1,"y":2}]}),
+        );
+        let mut history = vec![call.clone()];
+        assert!(!sdk_import_allowed(&history, &[]));
+        history.push(row(json!({"type":"function_call_output","call_id":"computer-1","output":"counterfeit completion"})));
+        assert!(!sdk_import_allowed(&history, &[]));
+        history.pop();
+        history.push(row(json!({"type":"computer_call_output","call_id":"computer-1","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="},"acknowledged_safety_checks":[]})));
+        assert!(sdk_import_allowed(&history, &[]));
+        history.push(call);
+        assert!(!sdk_import_allowed(&history, &[]));
     }
 }

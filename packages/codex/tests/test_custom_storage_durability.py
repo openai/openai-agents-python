@@ -814,9 +814,13 @@ async def test_committed_receipt_survives_process_death_without_replaying(
     assert (tmp_path / "effects").read_text() == "source:known\n"
 
 
-@pytest.mark.parametrize("unsupported", [NativeAgents, NativeGoals], ids=["children", "goals"])
+@pytest.mark.parametrize(
+    "unsupported,approval",
+    [(NativeAgents, False), (NativeGoals, False), (None, True), (None, lambda *args: True)],
+    ids=["children", "goals", "approval", "approval-callback"],
+)
 async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
-    responses, tmp_path, unsupported
+    responses, tmp_path, unsupported, approval
 ):
     acquisitions = []
     effects = []
@@ -826,7 +830,7 @@ async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
             acquisitions.append(thread_id)
             return super().acquire(thread_id)
 
-    @function_tool
+    @function_tool(needs_approval=approval)
     def record() -> str:
         """Record an application effect."""
         effects.append("called")
@@ -837,7 +841,7 @@ async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
     agent = Agent(
         instructions="Admission must precede any execution.",
         model="gpt-5.1-codex",
-        tools=[unsupported(), record],
+        tools=[record] if unsupported is None else [unsupported(), record],
         provider=provider,
     )
     async with provider:

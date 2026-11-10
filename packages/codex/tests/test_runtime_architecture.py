@@ -96,6 +96,46 @@ def test_public_modules_only_forward_to_the_runtime(module: str) -> None:
     assert forwarded, path
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "canonical_storage",
+        "canonical_storage_encrypt",
+        "canonical_storage_mongodb",
+        "canonical_storage_redis",
+        "canonical_storage_sqlalchemy",
+    ],
+)
+def test_canonical_adapters_preserve_identity_after_leaf_first_import(module: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import sys
+from typing import get_type_hints
+
+importlib.import_module("_agents_codex." + sys.argv[1])
+import agents.canonical_storage as public
+import _agents_codex.canonical_storage as runtime
+
+for name in (
+    "EncryptedSessionStore", "MongoDBSessionStore", "RedisSessionStore", "SQLAlchemySessionStore"
+):
+    adapter = getattr(public, name)
+    assert adapter is getattr(runtime, name), name
+    assert adapter.__module__ == "agents.canonical_storage", name
+get_type_hints(public.EncryptedSessionStore.__init__)
+assert "agents._native" not in sys.modules
+""",
+            module,
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
 def test_runtime_dependencies_do_not_use_public_facades() -> None:
     runtime = _RUNTIME
     assert runtime.is_dir()

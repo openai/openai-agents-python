@@ -1,7 +1,7 @@
 """Deterministic canonical-frame I/O for the real native realtime owner.
 
 Recorded frames are explicit test data. Use synthetic prompts and payloads.
-Connection snapshots never retain URLs, headers, or credentials.
+Connection snapshots omit raw URLs, header values, and credentials.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ._public import preserve_module_identity as _preserve_module_identity
 from .realtime_adapter import RealtimeAdapterContext
@@ -19,6 +20,23 @@ from .realtime_adapter import RealtimeAdapterContext
 RealtimeFrame = dict[str, Any]
 RealtimeMatcher = str | RealtimeFrame | Callable[[RealtimeFrame], bool]
 RealtimeEmission = Iterable[RealtimeFrame] | Callable[[RealtimeFrame], Iterable[RealtimeFrame]]
+
+
+def _connection_endpoint(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+        if parsed.scheme not in {"http", "https", "ws", "wss"} or host is None:
+            return None
+    except ValueError:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme in {"https", "wss"} else 80
+    if port is not None and port != default_port:
+        host = f"{host}:{port}"
+    return urlunsplit((parsed.scheme, host, parsed.path or "/", "", ""))
 
 
 @dataclass(frozen=True)
@@ -32,8 +50,12 @@ class RealtimeStep:
 
 @dataclass(frozen=True)
 class RealtimeConnectCall:
+    """Credential-free observations of an effective adapter connection."""
+
     model: str | None
     headers_provided: bool
+    api_key_provided: bool = False
+    url: str | None = None
 
 
 class ScriptedRealtimeAdapter:
@@ -90,7 +112,14 @@ class ScriptedRealtimeAdapter:
     async def connect(self, context: RealtimeAdapterContext) -> ScriptedRealtimeAdapter:
         if self._calls or self._closed:
             raise RuntimeError("Scripted realtime adapter supports one connection")
-        self._calls.append(RealtimeConnectCall(context.model, bool(context.headers)))
+        self._calls.append(
+            RealtimeConnectCall(
+                context.model,
+                bool(context.headers),
+                api_key_provided=any(name.lower() == "authorization" for name in context.headers),
+                url=_connection_endpoint(context.url),
+            )
+        )
         if self._connect_error is not None:
             raise self._connect_error
         self.emit(*self._initial)

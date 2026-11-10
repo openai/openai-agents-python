@@ -1,0 +1,245 @@
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 77068bab535240e2821f0fc03c96d05857dd75a2..a8232d2a3e5b3192547bbe006ccd7c70fd0c04b0 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -283,6 +283,12 @@ impl Serialize for ResponsesApiTools {
+ /// Effective wire values. Cleared and omitted SDK settings emit no member here.
+ #[derive(Debug, Default, Serialize, Clone, PartialEq)]
+ pub struct ResponsesRequestControls {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub truncation: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub context_management: Option<Vec<serde_json::Value>>,
++    #[serde(flatten)]
++    pub extra_body: std::collections::BTreeMap<String, serde_json::Value>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub max_output_tokens: Option<u64>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 405bc81438df5a6fe208ea39fd9ee4a0305e32bd..1c010b7961f4633c82d04b0f1012027e49ee3b4f 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1189,6 +1189,13 @@ impl ModelClient {
+                 _ => {}
+             }
+         }
++        if let Some(Some(additional)) = &controls.include {
++            for field in additional {
++                if !include.contains(field) {
++                    include.push(field.clone());
++                }
++            }
++        }
+         let verbosity = if let Some(explicit) = controls.verbosity.flatten() {
+             Some(explicit)
+         } else if model_info.support_verbosity {
+@@ -1239,6 +1246,9 @@ impl ModelClient {
+                 prompt.tool_choice.to_string()
+             },
+             request_controls: codex_api::ResponsesRequestControls {
++                truncation: controls.truncation.clone().flatten(),
++                context_management: controls.context_management.clone().flatten(),
++                extra_body: controls.extra_body.clone().flatten().unwrap_or_default(),
+                 max_output_tokens: controls.max_output_tokens.flatten(),
+                 temperature: controls.temperature.flatten(),
+                 top_p: controls.top_p.flatten(),
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index d8b098a1becb3aa47a36bce9231d70b723378400..85222ee91492f6ab92f07bea774e08110e11dc30 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -27,6 +27,39 @@ pub enum PromptCacheTtl {
+ #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ #[serde(deny_unknown_fields)]
+ pub struct ModelRequestControls {
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<String>")]
++    pub truncation: Option<Option<String>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<Vec<String>>")]
++    pub include: Option<Option<Vec<String>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<Vec<serde_json::Value>>")]
++    pub context_management: Option<Option<Vec<serde_json::Value>>>,
++    #[serde(
++        default,
++        skip_serializing_if = "Option::is_none",
++        with = "serde_with::rust::double_option"
++    )]
++    #[ts(optional = nullable, type = "unknown")]
++    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>")]
++    pub extra_body: Option<Option<BTreeMap<String, serde_json::Value>>>,
++
+     #[serde(
+         default,
+         skip_serializing_if = "Option::is_none",
+@@ -120,7 +153,11 @@ pub struct ModelRequestControls {
+ 
+ impl ModelRequestControls {
+     pub fn is_empty(&self) -> bool {
+-        self.max_output_tokens.is_none()
++        self.truncation.is_none()
++            && self.include.is_none()
++            && self.context_management.is_none()
++            && self.extra_body.is_none()
++            && self.max_output_tokens.is_none()
+             && self.temperature.is_none()
+             && self.top_p.is_none()
+             && self.top_logprobs.is_none()
+@@ -134,6 +171,19 @@ impl ModelRequestControls {
+     }
+ 
+     pub fn apply_patch(&mut self, patch: &Self) {
++        if patch.truncation.is_some() {
++            self.truncation = patch.truncation.clone();
++        }
++        if patch.include.is_some() {
++            self.include = patch.include.clone();
++        }
++        if patch.context_management.is_some() {
++            self.context_management = patch.context_management.clone();
++        }
++        if patch.extra_body.is_some() {
++            self.extra_body = patch.extra_body.clone();
++        }
++
+         if patch.max_output_tokens.is_some() {
+             self.max_output_tokens = patch.max_output_tokens;
+         }
+@@ -171,6 +221,51 @@ impl ModelRequestControls {
+ 
+     /// Check wire shapes independently of uncertain model-level support.
+     pub fn validate_shape(&self) -> Result<(), String> {
++        if self
++            .truncation
++            .as_ref()
++            .and_then(Option::as_deref)
++            .is_some_and(|value| !matches!(value, "auto" | "disabled"))
++        {
++            return Err("truncation must be auto or disabled".into());
++        }
++        if let Some(Some(body)) = &self.extra_body {
++            const RESERVED: &[&str] = &[
++                "type",
++                "generate",
++                "model",
++                "stream",
++                "input",
++                "instructions",
++                "tools",
++                "tool_choice",
++                "parallel_tool_calls",
++                "reasoning",
++                "store",
++                "stream_options",
++                "include",
++                "prompt_cache_key",
++                "text",
++                "client_metadata",
++                "access_programs",
++                "previous_response_id",
++                "conversation",
++                "service_tier",
++                "max_output_tokens",
++                "temperature",
++                "top_p",
++                "top_logprobs",
++                "metadata",
++                "prompt_cache_retention",
++                "prompt_cache_options",
++                "truncation",
++                "context_management",
++            ];
++            if body.keys().any(|key| RESERVED.contains(&key.as_str())) {
++                return Err("extra_body cannot replace native request fields; use the corresponding model setting".into());
++            }
++        }
++
+         for (name, value) in [
+             ("temperature", self.temperature.flatten()),
+             ("top_p", self.top_p.flatten()),
+@@ -206,7 +301,14 @@ impl ModelRequestControls {
+ 
+     /// A known lossy formatter must reject requested wire values. A clear emits none.
+     pub fn has_wire_values(&self) -> bool {
+-        self.max_output_tokens.as_ref().is_some_and(Option::is_some)
++        self.truncation.as_ref().is_some_and(Option::is_some)
++            || self.include.as_ref().is_some_and(Option::is_some)
++            || self
++                .context_management
++                .as_ref()
++                .is_some_and(Option::is_some)
++            || self.extra_body.as_ref().is_some_and(Option::is_some)
++            || self.max_output_tokens.as_ref().is_some_and(Option::is_some)
+             || self.temperature.as_ref().is_some_and(Option::is_some)
+             || self.top_p.as_ref().is_some_and(Option::is_some)
+             || self.top_logprobs.as_ref().is_some_and(Option::is_some)
+@@ -225,3 +327,54 @@ impl ModelRequestControls {
+             || self.named_tool_choice.as_ref().is_some_and(Option::is_some)
+     }
+ }
++
++#[cfg(test)]
++mod sdk_extension_tests {
++    use super::ModelRequestControls;
++    use serde_json::json;
++
++    #[test]
++    fn extended_controls_preserve_omission_clears_and_values() {
++        let mut controls: ModelRequestControls = serde_json::from_value(json!({
++            "truncation": "auto", "include": ["message.output_text.logprobs"],
++            "context_management": [{"type": "compaction", "compact_threshold": 1024}],
++            "extra_body": {"provider_feature": {"mode": "captured"}}
++        }))
++        .unwrap();
++        controls.validate_shape().unwrap();
++        assert!(controls.has_wire_values());
++        let original = controls.clone();
++        controls.apply_patch(&ModelRequestControls::default());
++        assert_eq!(controls, original);
++        let clear: ModelRequestControls = serde_json::from_value(json!({
++            "truncation": null, "include": null, "context_management": null, "extra_body": null
++        }))
++        .unwrap();
++        controls.apply_patch(&clear);
++        assert!(!controls.has_wire_values());
++        assert!(!controls.is_empty());
++        assert_eq!(
++            serde_json::to_value(controls).unwrap(),
++            serde_json::to_value(clear).unwrap()
++        );
++    }
++
++    #[test]
++    fn body_extensions_cannot_replace_native_history_or_tools() {
++        for key in [
++            "type",
++            "generate",
++            "input",
++            "tools",
++            "instructions",
++            "model",
++            "stream",
++            "previous_response_id",
++            "include",
++        ] {
++            let controls: ModelRequestControls =
++                serde_json::from_value(json!({"extra_body": {key: "replacement"}})).unwrap();
++            assert!(controls.validate_shape().is_err(), "{key}");
++        }
++    }
++}

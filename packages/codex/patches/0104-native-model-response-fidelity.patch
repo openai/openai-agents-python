@@ -1,0 +1,203 @@
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 5188fd100baacaf82d395bec206d581bf3d8333c..ffa66c6b3b9d808bdc9bcce0d55c22b7a92739f1 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -43,6 +43,7 @@ pub use crate::common::ReasoningContext;
+ pub use crate::common::ReasoningSummaryDelivery;
+ pub use crate::common::ResponseCreateWsRequest;
+ pub use crate::common::ResponseEvent;
++pub use crate::received_response_facts::completed_model_response;
+ pub use crate::common::ResponseId;
+ pub use crate::common::ResponseStream;
+ pub use crate::common::ResponsesApiRequest;
+diff --git a/codex-rs/codex-api/src/received_response_facts.rs b/codex-rs/codex-api/src/received_response_facts.rs
+index 12dd69e8f44fd200d572169821c830f7a1cb3a79..fd57546f969cce522e8b4474b6efb8d98e0c0bd5 100644
+--- a/codex-rs/codex-api/src/received_response_facts.rs
++++ b/codex-rs/codex-api/src/received_response_facts.rs
+@@ -131,3 +131,135 @@ pub(crate) fn contains_refusal(item: &Value) -> bool {
+                 })
+             })
+ }
++/// Convert one completed application model response through the provider fact policy.
++/// Validate the complete output before admitting any tool-bearing item.
++pub fn completed_model_response(
++    response_id: String,
++    output: Vec<Value>,
++    token_usage: Option<codex_protocol::protocol::TokenUsage>,
++) -> Vec<Result<crate::ResponseEvent, crate::ApiError>> {
++    use crate::{ApiError, ResponseEvent};
++    use codex_protocol::error::ResponseIntegrityReason;
++    let mut events = vec![Ok(ResponseEvent::Created {
++        response_id: Some(response_id.clone()),
++    })];
++    for (index, item) in output.iter().enumerate() {
++        events.extend(
++            output_item_facts(item, u64::try_from(index).ok(), true)
++                .into_iter()
++                .map(|fact| Ok(ResponseEvent::ResponseFact(fact.into()))),
++        );
++    }
++    if output.iter().any(contains_refusal) {
++        events.push(Err(ApiError::ResponseIntegrity {
++            reason: ResponseIntegrityReason::ProviderRefusal,
++        }));
++        return events;
++    }
++    let items = output
++        .into_iter()
++        .map(serde_json::from_value::<codex_protocol::models::ResponseItem>)
++        .collect::<Result<Vec<_>, _>>();
++    let items = match items {
++        Ok(items) => items,
++        Err(_) => {
++            events.push(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::UndecodableOutputItem,
++            }));
++            return events;
++        }
++    };
++    events.extend(
++        items
++            .into_iter()
++            .map(|item| Ok(ResponseEvent::OutputItemDone(item))),
++    );
++    events.push(Ok(ResponseEvent::Completed {
++        response_id,
++        token_usage,
++        usage_metadata: None,
++        end_turn: None,
++    }));
++    events
++}
++
++#[cfg(test)]
++mod completed_model_response_tests {
++    use super::*;
++    use crate::{ApiError, ResponseEvent};
++    use codex_protocol::error::ResponseIntegrityReason;
++    use serde_json::json;
++    fn call() -> Value {
++        json!({"type":"function_call", "call_id":"call", "name":"echo", "arguments":"{}"})
++    }
++    fn no_items_or_terminal(events: &[Result<ResponseEvent, ApiError>]) {
++        assert!(!events.iter().any(|event| matches!(
++            event,
++            Ok(ResponseEvent::OutputItemDone(_) | ResponseEvent::Completed { .. })
++        )));
++    }
++    #[test]
++    fn later_refusal_preserves_fact_before_failure_and_admits_no_tool() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![
++                call(),
++                json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"private refusal"}]}),
++            ],
++            None,
++        );
++        assert!(matches!(
++            events.first(),
++            Some(Ok(ResponseEvent::Created { .. }))
++        ));
++        assert!(
++            events
++                .iter()
++                .any(|event| matches!(event, Ok(ResponseEvent::ResponseFact(_))))
++        );
++        assert!(matches!(
++            events.last(),
++            Some(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::ProviderRefusal
++            }))
++        ));
++        no_items_or_terminal(&events);
++    }
++    #[test]
++    fn malformed_later_item_admits_no_tool() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![call(), json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":7}]})],
++            None,
++        );
++        assert!(matches!(
++            events.last(),
++            Some(Err(ApiError::ResponseIntegrity {
++                reason: ResponseIntegrityReason::UndecodableOutputItem
++            }))
++        ));
++        no_items_or_terminal(&events);
++    }
++    #[test]
++    fn probabilities_precede_output_and_completion() {
++        let events = completed_model_response(
++            "response".into(),
++            vec![
++                json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"ok", "logprobs":[{"token":"ok", "bytes":[111,107], "logprob":-0.1, "top_logprobs":[]}]}]}),
++            ],
++            None,
++        );
++        assert!(matches!(
++            events.get(1),
++            Some(Ok(ResponseEvent::ResponseFact(_)))
++        ));
++        assert!(matches!(
++            events.get(2),
++            Some(Ok(ResponseEvent::OutputItemDone(_)))
++        ));
++        assert!(matches!(
++            events.last(),
++            Some(Ok(ResponseEvent::Completed { .. }))
++        ));
++    }
++}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index e634eb8f1ef25ee23f9799e4a0d130b679e15baf..f952c8a767e612f51185467ac7f349da7222c69b 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -149,6 +149,7 @@ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
++pub use codex_api::completed_model_response;
+ pub use model_request::ToolsOnlyCallInput;
+ pub use model_request::ToolsOnlyWorkCancellation;
+ pub use model_request::TurnSamplingStop;
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 149c53051b06144786faa1409214b3ca9596ba94..ecadfc6a72fca5e3eee62aac2bfed67fb3433ce7 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -302,7 +302,11 @@ impl ModelRequestControls {
+     /// A known lossy formatter must reject requested wire values. A clear emits none.
+     pub fn has_wire_values(&self) -> bool {
+         self.truncation.as_ref().is_some_and(Option::is_some)
+-            || self.include.as_ref().is_some_and(Option::is_some)
++            || self
++                .include
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|include| !include.is_empty())
+             || self
+                 .context_management
+                 .as_ref()
+@@ -396,3 +400,21 @@ mod sdk_extension_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod empty_include_wire_tests {
++    #[test]
++    fn explicit_empty_include_is_a_patch_without_wire_values() {
++        for include in [serde_json::json!([]), serde_json::Value::Null] {
++            let controls: super::ModelRequestControls =
++                serde_json::from_value(serde_json::json!({"include":include})).unwrap();
++            controls.validate_shape().unwrap();
++            assert!(!controls.is_empty());
++            assert!(!controls.has_wire_values());
++        }
++        let controls: super::ModelRequestControls =
++            serde_json::from_value(serde_json::json!({"include":["message.output_text.logprobs"]}))
++                .unwrap();
++        assert!(controls.has_wire_values());
++    }
++}

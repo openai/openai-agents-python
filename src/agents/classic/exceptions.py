@@ -27,6 +27,8 @@ if TYPE_CHECKING:
         ToolOutputGuardrailResult,
     )
 
+from _agents_shared.exceptions import AgentsException as AgentsException, UserError as UserError
+
 from .util._pretty_print import pretty_print_run_error_details
 
 _TOOL_LOCAL_CANCELLATION_ATTR = "_agents_tool_local_cancellation"
@@ -341,16 +343,6 @@ class RunErrorDetails:
         return pretty_print_run_error_details(self)
 
 
-class AgentsException(Exception):
-    """Base class for all exceptions in the Agents SDK."""
-
-    run_data: RunErrorDetails | None
-
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-        self.run_data = None
-
-
 class MaxTurnsExceeded(AgentsException):
     """Exception raised when the maximum number of turns is exceeded."""
 
@@ -392,16 +384,6 @@ class ModelTimeoutError(AgentsException):
     def __init__(self, timeout_seconds: float):
         self.timeout_seconds = timeout_seconds
         super().__init__(f"Model call timed out after {timeout_seconds:g} seconds.")
-
-
-class UserError(AgentsException):
-    """Exception raised when the user makes an error using the SDK."""
-
-    message: str
-
-    def __init__(self, message: str):
-        self.message = message
-        super().__init__(message)
 
 
 class MCPToolCancellationError(AgentsException):

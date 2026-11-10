@@ -163,6 +163,13 @@ class FileSearch:
     include_search_results: bool = False
     ranking_options: FileSearchRanking | None = None
     filters: FileSearchComparisonFilter | FileSearchCompoundFilter | None = None
+    provider_data: dict[str, Any] | None = None
+    """Additional provider fields; declared fields and tool identity cannot be replaced."""
+
+    def __post_init__(self) -> None:
+        value = self.max_num_results
+        if type(value) is int and value == 0:
+            object.__setattr__(self, "max_num_results", None)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -178,6 +185,10 @@ class CodeInterpreter:
     container: str | CodeInterpreterAutoContainer
     allowed_callers: Sequence[Literal["direct", "programmatic"]] | None = None
     """Caller modes the provider permits; None retains the provider default."""
+    include_outputs: bool = True
+    """Whether to request raw provider code outputs in accepted history."""
+    provider_data: dict[str, Any] | None = None
+    """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -205,6 +216,8 @@ class ImageGeneration:
     frame_count: int | None = None
     frame_duration_ms: int | None = None
     svg: ImageGenerationSvg | None = None
+    provider_data: dict[str, Any] | None = None
+    """Additional provider fields; declared fields and tool identity cannot be replaced."""
 
 
 _HOSTED_TOOLS = (FileSearch, CodeInterpreter, ImageGeneration)
@@ -222,19 +235,26 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     from dataclasses import asdict
 
     # Capture nested mutable configuration before opening can await.
-    captured = json.loads(
-        json.dumps(
-            [
-                {
-                    "type": _hosted_tool_name(tool),
-                    **{key: value for key, value in asdict(tool).items() if value is not None},
-                }
-                for tool in tools
-                if isinstance(tool, _HOSTED_TOOLS)
-            ]
+    specs: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, _HOSTED_TOOLS):
+            continue
+        fields = asdict(tool)
+        provider_data = fields.pop("provider_data")
+        if provider_data is None:
+            provider_data = {}
+        if not isinstance(provider_data, dict):
+            raise TypeError("Hosted tool provider_data must be an object")
+        if set(provider_data) & ({"type", "provider_data"} | fields.keys()):
+            raise ValueError("Hosted tool provider_data cannot replace declared fields")
+        specs.append(
+            {
+                **provider_data,
+                "type": _hosted_tool_name(tool),
+                **{key: value for key, value in fields.items() if value is not None},
+            }
         )
-    )
-    return cast(list[dict[str, Any]], captured)
+    return cast(list[dict[str, Any]], json.loads(json.dumps(specs, allow_nan=False)))
 
 
 @dataclass(frozen=True)
