@@ -130,3 +130,88 @@ async def test_native_modality_updates_restore_and_provider_isolation() -> None:
         ordinary = Agent(model="custom-model", instructions="Answer.", provider=provider)
         await ordinary.run(message)
         assert not has_audio(seen[-1])
+
+
+async def test_native_audio_and_named_selector_through_real_chat_client() -> None:
+    import json
+
+    import httpx2 as httpx
+    from openai import AsyncOpenAI
+
+    from agents import ChatCompletionsModel
+
+    seen: list[dict[str, Any]] = []
+    effects: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        message = (
+            {"role": "assistant", "content": "ok"}
+            if len(seen) > 1
+            else {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_audio_client",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat_audio",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fixture",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop" if len(seen) > 1 else "tool_calls",
+                        "message": message,
+                    }
+                ],
+            },
+        )
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("lookup")
+        return "found"
+
+    async with (
+        timeout(30),
+        httpx.AsyncClient(transport=httpx.MockTransport(handle)) as transport,
+        AsyncOpenAI(api_key="fixture", http_client=transport) as client,
+        NativeProvider(
+            base_url="https://example.invalid/v1", model_backend=ChatCompletionsModel(client)
+        ) as provider,
+    ):
+        result = await Agent(
+            model="custom-model",
+            instructions="Use lookup once.",
+            tools=[lookup],
+            provider=provider,
+            model_settings={
+                "input_modalities": ["text", "audio"],
+                "tool_choice": ToolRef("lookup"),
+            },
+        ).run(
+            {
+                "role": "user",
+                "content": [{"type": "input_audio", "audio_url": "data:audio/wav;base64,UklGRg=="}],
+            }
+        )
+    assert result.final_output == "ok"
+    assert effects == ["lookup"]
+    assert len(seen) == 2
+    assert seen[0]["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    for body in seen:
+        original = next(item for item in body["messages"] if item["role"] == "user")
+        assert original["content"] == [
+            {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
+        ]
+        assert "input_modalities" not in body
