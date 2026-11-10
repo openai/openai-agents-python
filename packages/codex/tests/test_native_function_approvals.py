@@ -828,6 +828,57 @@ async def test_approved_terminal_waits_for_pending_manual_sibling(responses, res
             assert len(responses.requests) == 1
 
 
+@pytest.mark.parametrize("restored", [False, True])
+async def test_approved_terminal_retains_completed_search_sibling(responses, restored):
+    effects = []
+
+    @function_tool(needs_approval=True, finish_turn=True)
+    def risky() -> str:
+        effects.append("effect")
+        return "terminal result"
+
+    @function_tool(defer_loading=True)
+    def spare() -> str:
+        return "unused"
+
+    responses.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "tool_search_call",
+                "call_id": "search-sibling",
+                "execution": "client",
+                "arguments": {"query": "spare", "limit": 5},
+            },
+        },
+        function_call("risky", {}, "approved-terminal"),
+    )
+    responses.respond(assistant_output("unexpected model continuation"))
+    agent = Agent(
+        instructions="Use both.",
+        tools=[risky, spare],
+        provider=provider(responses),
+        model="gpt-5.5",
+        programmatic_tool_calling=False,
+    )
+    state = None
+    async with timeout(25):
+        if restored:
+            async with agent.session() as source:
+                await source.submit("begin")
+                await next_request(source.interactions(), risky)
+                state = await source.suspend()
+        async with agent.session(state=state) as session:
+            turn = session.restored_turn if restored else await session.submit("begin")
+            approval = await next_request(session.interactions(), risky)
+            await approval.approve()
+            result = await turn.get_result()
+            assert result.final_output == "terminal result"
+            assert result.tool_call.call_id == "approved-terminal"
+            assert effects == ["effect"]
+            assert len(responses.requests) == 1
+
+
 @pytest.mark.parametrize("automatic", [False, True])
 async def test_approval_preserves_rich_callback_result(responses, automatic):
     effects = []

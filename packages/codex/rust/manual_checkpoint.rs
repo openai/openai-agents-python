@@ -114,6 +114,14 @@ impl ToolOutcomes {
                     ResponseItem::CustomToolCallOutput {
                         call_id, output, ..
                     } => (Some(call_id.as_str()), output.success),
+                    ResponseItem::ToolSearchOutput {
+                        call_id,
+                        status,
+                        execution,
+                        ..
+                    } if execution == "client" && status == "completed" => {
+                        (call_id.as_deref(), Some(true))
+                    }
                     _ => continue,
                 };
                 if let (Some(id), Some(success)) = (id, success) {
