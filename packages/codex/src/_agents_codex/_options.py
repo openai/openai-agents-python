@@ -30,6 +30,8 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
     url: str
     local: bool
     read_only: bool
+    trusted_workspace_write: bool
+    temp_dir: str
     cwd: Required[str]
     headers: dict[str, str]
     env_json: str
