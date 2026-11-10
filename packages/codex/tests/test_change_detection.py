@@ -1146,6 +1146,7 @@ def test_native_build_selection(
         "CODEX_REVISION",
         "rust/lib.rs",
         "tests/fixtures/exec_server.rs",
+        "tests/native_fixtures.py",
     ):
         path = repo / "packages/codex" / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2258,9 +2259,6 @@ def test_native_build_selection(
             "old_snapshot_after_docs",
             "snapshot_index_filtered",
             "snapshot_index_duplicate_runs",
-            "dependency_lock_changed",
-            "retired_realtime_extra",
-            "retired_realtime_extra_dependency_changed",
             "push_package_demos",
             "trusted_push_to_pr",
             "stacked_pr",
@@ -2272,7 +2270,6 @@ def test_native_build_selection(
             "branch_completed_precedence",
             "feature_push",
             "feature_push_to_pr",
-            "version_and_docs",
             "paginated",
             "push_native_config",
             "push_external_environments",

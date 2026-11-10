@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, cast
@@ -14,6 +14,7 @@ from .agent import Agent
 from .mcp import _MCP
 from .native_agents import NativeAgents
 from .schema import OutputSpec, _prepare_spec
+from .tools import ToolRef
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,11 @@ def _handoff_name(agent: Agent[Any, Any]) -> str:
     if agent.name is None or not agent.name.strip():
         raise ValueError("A handoff target must have a nonempty Agent.name")
     return re.sub(r"[^a-zA-Z0-9_-]", "_", f"transfer_to_{agent.name}").lower()[:64]
+
+
+def _check_handoff_tool_names(refs: Iterable[ToolRef], handoffs: Mapping[str, str]) -> None:
+    if any(ref.namespace is None and ref.name in handoffs for ref in refs):
+        raise ValueError("A native handoff name collides with an ordinary function tool")
 
 
 def _capture_agent_graph(
@@ -113,6 +119,9 @@ def _capture_agent_graph(
             if previous is not None and previous != target_id:
                 raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
             targets[name] = target_id
+        _check_handoff_tool_names(
+            (tool.ref for tool in declaration.tools if isinstance(tool, FunctionTool)), targets
+        )
         profiles.append(
             _AgentProfile(
                 f"agent_{indices[id(agent)]}", agent, declaration, MappingProxyType(targets)

@@ -1174,6 +1174,7 @@ impl EngineState {
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
+        let mut source_invocation_timeout = None;
         if let Ok(id) = ThreadId::from_string(id_or_path)
             && let Ok(thread) = self.manager.get_thread(id).await
         {
@@ -1201,6 +1202,7 @@ impl EngineState {
                 // the new settings record cannot revert to engine defaults.
                 // Do not copy credentials, MCP grants or the source runtime.
                 let settings = thread.thread_settings_snapshot().await;
+                source_invocation_timeout = Some(settings.invocation_timeout_ms);
                 startup.config.model = Some(settings.model.clone());
                 startup.config.model_reasoning_effort = settings.reasoning_effort.clone();
                 startup.config.model_reasoning_summary = settings.reasoning_summary;
@@ -1308,6 +1310,31 @@ impl EngineState {
             // This owned ID is imported from fork history, never the source
             // ID. The SDK can discard its temporary writer after export.
             native.checkpoint_import = Some(vec![fork_id]);
+        }
+        if let Some(invocation_timeout_ms) = source_invocation_timeout {
+            let forked = native.current()?;
+            // Core creates a fresh settings record for the fork. Apply its
+            // accepted deadline before the caller can export that record.
+            if let Err(error) = forked
+                .thread
+                .update_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+                    invocation_timeout_ms: Some(invocation_timeout_ms),
+                    ..Default::default()
+                })
+                .await
+            {
+                let error = anyhow::Error::from(error);
+                return match self
+                    .rollback_checkpoint_import(&[fork_id], Some(&forked))
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => {
+                        let message = format!("{error}; fork rollback failed: {cleanup}");
+                        Err(error.context(message))
+                    }
+                };
+            }
         }
         Ok(native)
     }
