@@ -267,7 +267,7 @@ jobs:
                       return False
               with tempfile.TemporaryDirectory(prefix='agents-native-inputs-') as directory:
                   with tempfile.TemporaryFile() as archive:
-                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'LICENSE', '.gitignore'],
+                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'uv.lock', 'LICENSE', '.gitignore'],
                                               stdout=archive)
                       if result.returncode:
                           return False
@@ -806,7 +806,7 @@ jobs:
         run: make sync
       - name: Run native SDK tests on macOS
         if: steps.changes.outputs.run == 'true'
-        timeout-minutes: 20
+        timeout-minutes: 30
         env:
           PYTEST_ADDOPTS: "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"
