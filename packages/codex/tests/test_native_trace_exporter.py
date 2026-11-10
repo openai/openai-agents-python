@@ -275,16 +275,25 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     )
     event = completed_event()
     event["attributes"]["private_fixture"] = secret
+    cancellation_message = "synthetic caller cancellation"
+
+    async def deliver():
+        try:
+            await exporter.on_trace_event(event)
+        except asyncio.CancelledError as error:
+            # Inspect the exporter's exception before asyncio forwards it to the awaiter.
+            assert error.args == (cancellation_message,)
+            assert_sanitized_failure(error, secret)
+            raise
+
     started = time.monotonic()
-    delivery = asyncio.create_task(exporter.on_trace_event(event))
+    delivery = asyncio.create_task(deliver())
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
-            delivery.cancel("synthetic caller cancellation")
-            with pytest.raises(asyncio.CancelledError) as failure:
+            delivery.cancel(cancellation_message)
+            with pytest.raises(asyncio.CancelledError):
                 await delivery
-            assert failure.value.args == ("synthetic caller cancellation",)
-            assert_sanitized_failure(failure.value, secret)
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
                 await delivery
