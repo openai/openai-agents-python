@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::{
-    Arc, RwLock, Weak,
+    Arc, OnceLock, RwLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::task::Poll;
@@ -64,6 +64,7 @@ pub struct EngineState {
     native_threads: std::sync::Mutex<Vec<Weak<std::sync::Mutex<crate::NativeThreadOwner>>>>,
     pub startup_warnings: Vec<String>,
     pub(crate) codex_account: Option<crate::auth::CodexAccount>,
+    pub(crate) plan_usage_client: OnceLock<codex_backend_client::Client>,
     extension_events: Arc<extensions::Events>,
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
@@ -604,6 +605,7 @@ impl EngineState {
             managed_thread_ids: Mutex::new(HashSet::new()),
             startup_warnings: config.startup_warnings.clone(),
             codex_account,
+            plan_usage_client: OnceLock::new(),
             extension_events,
             cloud_config,
             service_config: config,
