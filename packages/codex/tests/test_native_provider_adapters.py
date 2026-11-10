@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from agents import (
     ChatCompletionsModel,
     LitellmModel,
     ModelRequest,
+    ModelResponse,
     NativeError,
     NativeProvider,
     ResponsesModel,
@@ -195,7 +197,7 @@ async def _exercise_borrowed_provider(
             ) as provider:
                 agent = Agent(
                     model="gpt-4.1",
-                    instructions="Use double.",
+                    instructions="Use double. synthetic-private-prompt",
                     tools=[double],
                     provider=provider,
                     **(
@@ -226,11 +228,11 @@ async def _exercise_borrowed_provider(
                             match="completed response|finish_reason=length",
                         ) as caught:
                             await turn.get_result()
-                        _assert_adapter_frames_released(caught.value)
+                        _assert_adapter_frames_released(caught.value, sdk_chain=True)
                     elif outcome == "invalid_usage":
                         with pytest.raises(Exception) as caught:
                             await turn.get_result()
-                        _assert_adapter_frames_released(caught.value)
+                        _assert_adapter_frames_released(caught.value, sdk_chain=True)
                     elif outcome == "refusal":
                         with pytest.raises(NativeError) as caught:
                             await turn.get_result()
@@ -289,12 +291,15 @@ async def test_responses_reasoning_replays_through_native_tool_continuation(monk
     await _exercise_borrowed_provider("responses", "complete", monkeypatch, reasoning=True)
 
 
-def _assert_adapter_frames_released(error: BaseException) -> None:
+def _assert_adapter_frames_released(error: BaseException, *, sdk_chain: bool = False) -> None:
     frames = []
+    owner = ResponsesModel.complete.__code__.co_filename
+    owner_root = Path(owner).parent
     trace = error.__traceback__
     while trace is not None:
-        if trace.tb_frame.f_code.co_filename == ResponsesModel.complete.__code__.co_filename:
-            frames.append(trace.tb_frame.f_locals)
+        filename = trace.tb_frame.f_code.co_filename
+        if filename == owner or (sdk_chain and owner_root in Path(filename).parents):
+            frames.append((filename, trace.tb_frame.f_locals))
         trace = trace.tb_next
     assert frames
     # Application/client frames retain their own values. SDK adapter frames must
@@ -328,8 +333,30 @@ def _assert_adapter_frames_released(error: BaseException) -> None:
         "part",
         ".0",
     }
-    assert all(not payload_names.intersection(frame) for frame in frames)
-    assert all("synthetic-private-output" not in repr(frame) for frame in frames)
+    assert all(
+        not payload_names.intersection(frame) for filename, frame in frames if filename == owner
+    )
+    # SDK callback wrappers own their argument tuples, including repr-hidden requests.
+    for _, frame in frames:
+        for value in frame.values():
+            values = value if type(value) in (list, tuple) else (value,)
+            assert not any(isinstance(item, (ModelRequest, ModelResponse)) for item in values)
+
+    def payload_contains_canary(value):
+        # Inspect SDK-owned JSON copies, not borrowed exceptions/clients or Session state.
+        if type(value) is str:
+            return "synthetic-private-output" in value or "synthetic-private-prompt" in value
+        if type(value) is dict:
+            return any(
+                payload_contains_canary(k) or payload_contains_canary(v) for k, v in value.items()
+            )
+        if type(value) in (list, tuple):
+            return any(payload_contains_canary(item) for item in value)
+        return False
+
+    assert not any(
+        payload_contains_canary(value) for _, frame in frames for value in frame.values()
+    )
 
 
 @pytest.mark.parametrize("status", ["incomplete", "failed"])

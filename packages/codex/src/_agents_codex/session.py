@@ -1583,8 +1583,12 @@ async def _finish_native_home_cleanup(cleanup: Callable[[], Awaitable[None] | No
 async def _call_callback(
     callback: Callable[..., Any], admit: Callable[[], bool], /, *args: Any, **kwargs: Any
 ) -> Any:
-    with _owned_span("callback", "callback"):
-        return await _call_callback_body(callback, admit, *args, **kwargs)
+    try:
+        with _owned_span("callback", "callback"):
+            return await _call_callback_body(callback, admit, *args, **kwargs)
+    finally:
+        # Release SDK-owned callback arguments only after the admitted body exits.
+        del callback, admit, args, kwargs
 
 
 async def _call_callback_body(
@@ -1595,49 +1599,57 @@ async def _call_callback_body(
     **kwargs: Any,
 ) -> Any:
     """Run Python in its appropriate executor and retain ownership until exit."""
-    if inspect.iscoroutinefunction(callback):
-        return await callback(*args, **kwargs)
-    loop = asyncio.get_running_loop()
+    worker: asyncio.Future[Any] | None = None
+    value: Any = None
+    try:
+        if inspect.iscoroutinefunction(callback):
+            return await callback(*args, **kwargs)
+        loop = asyncio.get_running_loop()
 
-    async def admission() -> bool:
-        # The asyncio and native ownership check belongs to the application's loop.
-        return admit()
+        async def admission() -> bool:
+            # The asyncio and native ownership check belongs to the application's loop.
+            return admit()
 
-    def invoke_if_admitted() -> Any:
-        if asyncio.run_coroutine_threadsafe(admission(), loop).result():
-            return callback(*args, **kwargs)
-        return None
-
-    worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
-    cancelled = None
-    while not worker.done():
-        try:
-            # Waiting must not cancel a running worker. A cancelled shield can
-            # also log the raw callback exception before its owner sanitizes it.
-            await asyncio.wait((worker,))
-        except asyncio.CancelledError as error:
-            cancelled = cancelled or error
-    value = worker.result()
-    if cancelled is not None:
-        # A synchronous wrapper may return a coroutine. Cancellation must
-        # not start that body after the callback's authority has expired.
-        if inspect.iscoroutine(value):
-            value.close()
-        raise cancelled
-    if inspect.isawaitable(value):
-        try:
-            allowed = admit()
-        except BaseException:
-            if inspect.iscoroutine(value):
-                value.close()
-            raise
-        if not allowed:
-            # Declined work must not start the coroutine's body on the way out.
-            if inspect.iscoroutine(value):
-                value.close()
+        def invoke_if_admitted() -> Any:
+            if asyncio.run_coroutine_threadsafe(admission(), loop).result():
+                return callback(*args, **kwargs)
             return None
-        return await value
-    return value
+
+        worker = loop.run_in_executor(None, copy_context().run, invoke_if_admitted)
+        cancelled = None
+        while not worker.done():
+            try:
+                # Waiting must not cancel a running worker. A cancelled shield can
+                # also log the raw callback exception before its owner sanitizes it.
+                await asyncio.wait((worker,))
+            except asyncio.CancelledError as error:
+                cancelled = cancelled or error
+        value = worker.result()
+        if cancelled is not None:
+            # A synchronous wrapper may return a coroutine. Cancellation must
+            # not start that body after the callback's authority has expired.
+            if inspect.iscoroutine(value):
+                value.close()
+            raise cancelled
+        if inspect.isawaitable(value):
+            try:
+                allowed = admit()
+            except BaseException:
+                if inspect.iscoroutine(value):
+                    value.close()
+                raise
+            if not allowed:
+                # Declined work must not start the coroutine's body on the way out.
+                if inspect.iscoroutine(value):
+                    value.close()
+                return None
+            return await value
+        return value
+    finally:
+        # Release SDK-owned callback arguments only after the admitted body exits.
+        args = ()
+        kwargs = {}
+        del worker, value
 
 
 _PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
@@ -9665,6 +9677,8 @@ class Session(Generic[ContextT, OutputT]):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
     async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
+        request: Any = None
+        produced: Any = None
         request_id = message["request_id"]
         guard = _Invocation(self)
         token = _invocation.set(guard)
@@ -9700,14 +9714,18 @@ class Session(Generic[ContextT, OutputT]):
                     return
 
             def invoke(request: ModelRequest) -> Any:
-                value = backend.complete(request)
-                if inspect.isawaitable(value):
-                    # Keep the original coroutine visible to callback admission
-                    # so cancellation can close it before application entry.
-                    return value
-                if not isinstance(value, ModelResponse):
-                    raise TypeError("NativeModel.complete must return ModelResponse")
-                return value._capture()
+                value: Any = None
+                try:
+                    value = backend.complete(request)
+                    if inspect.isawaitable(value):
+                        # Keep the original coroutine visible to callback admission
+                        # so cancellation can close it before application entry.
+                        return value
+                    if not isinstance(value, ModelResponse):
+                        raise TypeError("NativeModel.complete must return ModelResponse")
+                    return value._capture()
+                finally:
+                    del request, value
 
             produced = await _call_callback(invoke, active, request)
             # Awaited producers settle on this loop. Capture immediately, before
@@ -9727,15 +9745,20 @@ class Session(Generic[ContextT, OutputT]):
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
         finally:
-            guard.active = False
-            _invocation.reset(token)
             try:
-                accepted = self._native._reply_model_producer(request_id, reply, error=failed)
-                if not accepted and not state.stopping and not state.failure.done():
-                    state.failure.set_result(NativeError("Prepared request expired"))
-            except RuntimeError:
-                if not state.stopping and not state.failure.done():
-                    state.failure.set_result(NativeError("Prepared request expired"))
+                guard.active = False
+                _invocation.reset(token)
+                try:
+                    accepted = self._native._reply_model_producer(request_id, reply, error=failed)
+                    if not accepted and not state.stopping and not state.failure.done():
+                        state.failure.set_result(NativeError("Prepared request expired"))
+                except RuntimeError:
+                    if not state.stopping and not state.failure.done():
+                        state.failure.set_result(NativeError("Prepared request expired"))
+            finally:
+                # Native reply admission has finished; retained failures need no payloads.
+                message = {}
+                del request, produced, reply
 
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
