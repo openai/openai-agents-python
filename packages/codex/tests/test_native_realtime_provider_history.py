@@ -84,8 +84,9 @@ async def test_native_sip_projection_matches_connection_configuration(
             model="fixture-realtime",
             voice="marin",
             instructions="Speak the synthetic forecast.",
+            output_modality="text",
             settings={
-                "turn_detection": None,
+                "turn_detection": {"type": "server_vad", "model_version": "fixture-server-vad"},
                 "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
                 "output_speed": 1.25,
                 "max_output_tokens": 256,
@@ -100,7 +101,7 @@ async def test_native_sip_projection_matches_connection_configuration(
         )
         assert peer.connections == 0
         assert peer.frames == []
-        async with session.realtime(config=config):
+        async with session.realtime(config=config) as voice:
             initial = await peer.frame(lambda frame: frame["type"] == "session.update")
             expected = {"model": "fixture-realtime", **initial["session"]}
             expected.pop("id", None)
@@ -108,15 +109,35 @@ async def test_native_sip_projection_matches_connection_configuration(
             assert "id" not in projected
             assert projected["type"] == "realtime"
             assert projected["model"] == "fixture-realtime"
+            assert projected["output_modalities"] == ["text"]
             assert "Speak the synthetic forecast." in projected["instructions"]
             assert projected["audio"]["output"]["voice"] == "marin"
             assert projected["audio"]["output"]["speed"] == 1.25
-            assert projected["audio"]["input"]["turn_detection"] is None
+            assert projected["audio"]["input"]["turn_detection"] == {
+                "type": "server_vad",
+                "model_version": "fixture-server-vad",
+            }
             assert projected["audio"]["input"]["transcription"]["language"] == "en"
             assert projected["max_output_tokens"] == 256
             tool = next(tool for tool in projected["tools"] if tool["name"] == "lookup")
             assert tool["parameters"]["properties"]["city"]["type"] == "string"
             assert "city" in tool["parameters"]["required"]
+            update_start = len(peer.frames)
+            await voice.update(
+                {
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "model_version": "fixture-semantic-vad",
+                    }
+                }
+            )
+            updated = await peer.frame(
+                lambda frame: frame["type"] == "session.update", after=update_start
+            )
+            assert updated["session"]["audio"]["input"]["turn_detection"] == {
+                "type": "semantic_vad",
+                "model_version": "fixture-semantic-vad",
+            }
 
 
 async def observe_item(

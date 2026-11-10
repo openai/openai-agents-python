@@ -1,0 +1,741 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index d9ad3ecd52c0dbc0c151de68e6e52f80b1828393..4f28047e61f789fc2c0020ff9a2d713b9cc3ce7c 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1009,6 +1009,25 @@ impl RealtimeWebsocketWriter {
+             .await
+     }
+ 
++    /// Request one response without changing the accepted session settings.
++    pub async fn send_response_create_with_options(
++        &self,
++        options: &super::settings::RealtimeResponseOptions,
++    ) -> Result<(), ApiError> {
++        if options == &super::settings::RealtimeResponseOptions::default() {
++            return self.send_response_create().await;
++        }
++        if self.event_parser != RealtimeEventParser::RealtimeV2 {
++            return Err(ApiError::InvalidRequest {
++                message: "Response options require the RealtimeV2 protocol".into(),
++            });
++        }
++        let payload = super::settings::response_create_json(options)
++            .and_then(|event| serde_json::to_string(&event))
++            .map_err(|err| ApiError::Stream(format!("failed to encode realtime request: {err}")))?;
++        self.send_payload(payload).await
++    }
++
+     /// Apply only named public V2 settings through this connection's writer.
+     pub async fn send_session_patch(
+         &self,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index b53b711c9afe961d9d2119a3fd01f0a2a5bd90db..bd626c869213a2a59a746fed4b8f7299ce94549c 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -16,6 +16,24 @@ fn put<T: Serialize>(
+     Ok(())
+ }
+ 
++pub(super) fn response_create_json(options: &RealtimeResponseOptions) -> serde_json::Result<Value> {
++    let mut response = Map::new();
++    put(&mut response, "instructions", &options.instructions)?;
++    put(
++        &mut response,
++        "max_output_tokens",
++        &options.max_output_tokens,
++    )?;
++    if let Some(modality) = &options.output_modality {
++        response.insert("output_modalities".into(), serde_json::json!([modality]));
++    }
++    let mut event = serde_json::json!({"type": "response.create"});
++    if !response.is_empty() {
++        event["response"] = Value::Object(response);
++    }
++    Ok(event)
++}
++
+ fn format_value(format: RealtimeAudioFormat) -> Value {
+     match format {
+         RealtimeAudioFormat::Pcm24k => serde_json::json!({"type": "audio/pcm", "rate": 24000}),
+@@ -251,6 +269,37 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn response_options_preserve_empty_frame_and_map_provider_fields() {
++        assert_eq!(
++            response_create_json(&RealtimeResponseOptions::default()).unwrap(),
++            json!({"type": "response.create"})
++        );
++        let options: RealtimeResponseOptions = serde_json::from_value(json!({
++            "instructions": "Say hello", "output_modality": "text", "max_output_tokens": 128
++        }))
++        .unwrap();
++        assert_eq!(
++            response_create_json(&options).unwrap(),
++            json!({
++                "type": "response.create", "response": {
++                    "instructions": "Say hello", "output_modalities": ["text"], "max_output_tokens": 128
++                }
++            })
++        );
++        assert_eq!(
++            serde_json::to_value(RealtimeResponseOptions::default()).unwrap(),
++            json!({})
++        );
++        assert!(serde_json::from_value::<RealtimeResponseOptions>(json!({"tools": []})).is_err());
++        let unlimited: RealtimeResponseOptions =
++            serde_json::from_value(json!({"max_output_tokens": "inf"})).unwrap();
++        assert_eq!(
++            response_create_json(&unlimited).unwrap(),
++            json!({"type": "response.create", "response": {"max_output_tokens": "inf"}})
++        );
++    }
++
+     #[test]
+     fn nullable_settings_preserve_missing_null_and_value() {
+         for (field, value) in [
+@@ -425,6 +474,7 @@ mod tests {
+             let update = RealtimeSessionUpdate {
+                 settings: RealtimeV2SessionSettings {
+                     turn_detection: Some(Some(RealtimeTurnDetection::ServerVad {
++                        model_version: None,
+                         threshold: Some(number),
+                         create_response: None,
+                         interrupt_response: None,
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index c25ffa8dddae5ad12ad2cadbf558c49a31414b79..08f7c4042d398742697c29c57813d293f0c997b3 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -77,6 +77,7 @@ use codex_protocol::protocol::RealtimeOutputModality;
+ use codex_protocol::protocol::RealtimeTranscriptEntry;
+ use codex_protocol::protocol::RealtimeVoice;
+ use codex_protocol::protocol::RealtimeVoicesList;
++use codex_protocol::realtime_settings::RealtimeResponseOptions;
+ use codex_utils_output_truncation::approx_bytes_for_tokens;
+ use codex_utils_string::approx_token_count;
+ use codex_utils_string::take_bytes_at_char_boundary;
+@@ -407,7 +408,7 @@ pub(crate) enum SdkRealtimeCommand {
+     Audio(RealtimeAudioFrame),
+     CommitAudio(SdkHostedMcpReply),
+     Input(ConversationInputParams),
+-    RequestResponse,
++    RequestResponse(RealtimeResponseOptions),
+     Text(ConversationTextParams),
+     #[cfg(test)]
+     Update(RealtimeSessionUpdate),
+@@ -517,7 +518,7 @@ struct RealtimeFunctionBatch {
+     handoff_pending: AtomicBool,
+     handoff_accepted: AtomicBool,
+     pending_create: AtomicBool,
+-    user_create: AtomicBool,
++    user_create: std::sync::Mutex<Option<PendingUserResponse>>,
+     automatic_retired: AtomicBool,
+     committed_target: std::sync::Mutex<Option<codex_protocol::agent_profile::AgentProfileReceipt>>,
+     update_reserved: AtomicBool,
+@@ -731,7 +732,7 @@ impl SdkRealtimeState {
+                     batch.automatic_retired.store(true, Ordering::Release);
+                     batch.pending_create.store(false, Ordering::Release);
+                     if response_id.is_none() || retire_generation {
+-                        batch.user_create.store(false, Ordering::Release);
++                        *batch.user_create.lock().unwrap() = None;
+                     }
+                 }
+                 call.cancel.cancel();
+@@ -1099,33 +1100,53 @@ struct NativeResponseRequest {
+     accepted: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
+ }
+ 
++#[derive(Debug)]
++struct PendingUserResponse {
++    order: u64,
++    options: RealtimeResponseOptions,
++}
++
+ #[derive(Default)]
+ struct RealtimeResponseCreateQueue {
+     sdk_response_id: Option<String>,
+     sdk_cancelled_response: Option<String>,
+     active_default_response: bool,
+     pending_create: bool,
+-    pending_user_create: bool,
++    pending_user_create: Option<PendingUserResponse>,
++    latest_user_create: u64,
+     pending_native_create: Option<NativeResponseRequest>,
+     pending_guardrail_response: Option<String>,
+ }
+ 
+ impl RealtimeResponseCreateQueue {
++    fn new_user_create(&mut self, options: RealtimeResponseOptions) -> PendingUserResponse {
++        self.latest_user_create += 1;
++        PendingUserResponse {
++            order: self.latest_user_create,
++            options,
++        }
++    }
++
+     async fn request_create(
+         &mut self,
+         writer: &RealtimeWebsocketWriter,
+         reason: &str,
++        explicit: Option<PendingUserResponse>,
+     ) -> anyhow::Result<()> {
+         self.pending_guardrail_response = None;
++        if explicit.is_some() {
++            self.pending_user_create = explicit;
++            self.pending_native_create = None;
++        }
+         if self.active_default_response {
+             self.pending_create = true;
+             return Ok(());
+         }
+         // This foreground request consumes the coalesced pending intent.
+         self.pending_create = false;
+-        self.pending_user_create = false;
+         self.pending_native_create = None;
+-        self.send_create_now(writer, reason).await
++        let explicit = self.pending_user_create.take();
++        self.send_create_now(writer, reason, explicit).await
+     }
+ 
+     fn mark_started(&mut self) {
+@@ -1142,9 +1163,11 @@ impl RealtimeResponseCreateQueue {
+             return Ok(());
+         }
+         self.pending_create = false;
+-        let explicit = std::mem::take(&mut self.pending_user_create);
++        let explicit = self.pending_user_create.take();
+         let native = self.pending_native_create.take();
+-        if !explicit && let Some(native) = native {
++        if explicit.is_none()
++            && let Some(native) = native
++        {
+             self.active_default_response = send_native_response_request(writer, &native).await?;
+             return Ok(());
+         }
+@@ -1154,20 +1177,30 @@ impl RealtimeResponseCreateQueue {
+                 .await?;
+             return Ok(());
+         }
+-        self.send_create_now(writer, reason).await
++        self.send_create_now(writer, reason, explicit).await
+     }
+ 
+     async fn send_create_now(
+         &mut self,
+         writer: &RealtimeWebsocketWriter,
+         reason: &str,
++        explicit: Option<PendingUserResponse>,
+     ) -> anyhow::Result<()> {
+-        if let Err(err) = writer.send_response_create().await {
++        let result = match explicit.as_ref() {
++            Some(request) => {
++                writer
++                    .send_response_create_with_options(&request.options)
++                    .await
++            }
++            None => writer.send_response_create().await,
++        };
++        if let Err(err) = result {
+             if matches!(&err, ApiError::Stream(message) if message.starts_with(REALTIME_ACTIVE_RESPONSE_ERROR_PREFIX))
+             {
+                 warn!("realtime response.create raced an active response; deferring");
+                 self.active_default_response = true;
+                 self.pending_create = true;
++                self.pending_user_create = explicit;
+                 return Ok(());
+             }
+             warn!("failed to send {reason} response.create: {err}");
+@@ -1490,7 +1523,7 @@ impl RealtimeConversationManager {
+             &command,
+             SdkRealtimeCommand::CommitAudio(_)
+                 | SdkRealtimeCommand::Input(_)
+-                | SdkRealtimeCommand::RequestResponse
++                | SdkRealtimeCommand::RequestResponse(_)
+         ) {
+             if state.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
+                 return Err(CodexErr::InvalidRequest(
+@@ -1506,6 +1539,16 @@ impl RealtimeConversationManager {
+                 })?
+                 .accepted()
+                 .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++            if let SdkRealtimeCommand::RequestResponse(options) = &command
++                && options
++                    .instructions
++                    .as_ref()
++                    .is_some_and(|value| value.len() > 1024 * 1024)
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Realtime response instructions exceed the UTF-8 byte limit".into(),
++                ));
++            }
+             if let SdkRealtimeCommand::Input(params) = &command {
+                 if params.content.is_empty()
+                     || params.content.iter().any(|item| match item {
+@@ -4747,7 +4790,7 @@ async fn handle_handoff_output(
+                     Err(err)
+                 } else {
+                     return response_create_queue
+-                        .request_create(writer, "standalone handoff")
++                        .request_create(writer, "standalone handoff", None)
+                         .await;
+                 }
+             }
+@@ -4759,7 +4802,7 @@ async fn handle_handoff_output(
+                     Err(err)
+                 } else {
+                     return response_create_queue
+-                        .request_create(writer, "standalone handoff")
++                        .request_create(writer, "standalone handoff", None)
+                         .await;
+                 }
+             }
+@@ -4800,7 +4843,7 @@ async fn handle_handoff_output(
+                     Err(err)
+                 } else {
+                     return response_create_queue
+-                        .request_create(writer, "handoff")
++                        .request_create(writer, "handoff", None)
+                         .await;
+                 }
+             }
+@@ -4828,10 +4871,10 @@ async fn request_sdk_response_create(
+     writer: &RealtimeWebsocketWriter,
+     responses: &mut RealtimeResponseCreateQueue,
+     reason: &str,
+-    origin: Option<&RealtimeFunctionBatch>,
+-    automatic: bool,
++    request: PendingUserResponse,
+ ) -> anyhow::Result<()> {
+-    if automatic && origin.is_some_and(|batch| batch.automatic_retired.load(Ordering::Acquire)) {
++    // FinishBatch can arrive after a later explicit request has been queued or sent.
++    if request.order != responses.latest_user_create {
+         return Ok(());
+     }
+     let hold = sdk
+@@ -4849,21 +4892,16 @@ async fn request_sdk_response_create(
+         })
+         .cloned();
+     if let Some(batch) = hold {
+-        if automatic {
+-            batch.pending_create.store(true, Ordering::Release);
+-        } else {
+-            batch.user_create.store(true, Ordering::Release);
++        if responses.pending_user_create.take().is_some() {
++            responses.pending_create = responses.pending_native_create.is_some()
++                || responses.pending_guardrail_response.is_some();
+         }
++        *batch.user_create.lock().unwrap() = Some(request);
+         return Ok(());
+     }
+-    if !automatic {
+-        responses.pending_native_create = None;
+-    }
+-    let result = responses.request_create(writer, reason).await;
+-    if !automatic && responses.pending_create {
+-        responses.pending_user_create = true;
+-    }
+-    result
++    responses
++        .request_create(writer, reason, Some(request))
++        .await
+ }
+ 
+ async fn send_native_response_request(
+@@ -4916,7 +4954,7 @@ async fn request_sdk_native_response(
+         return Ok(());
+     }
+     // A queued explicit request owns the coalesced response and its new input.
+-    if responses.pending_user_create {
++    if responses.pending_user_create.is_some() {
+         return Ok(());
+     }
+     let pending = writer.configuration().is_some_and(|configuration| {
+@@ -5103,15 +5141,14 @@ async fn handle_sdk_realtime_command(
+                     .handoff_accepted
+                     .store(false, Ordering::Release);
+                 let automatic = intent.batch.pending_create.swap(false, Ordering::AcqRel);
+-                let explicit = intent.batch.user_create.swap(false, Ordering::AcqRel);
+-                if explicit {
++                let explicit = intent.batch.user_create.lock().unwrap().take();
++                if let Some(options) = explicit {
+                     request_sdk_response_create(
+                         sdk,
+                         writer,
+                         responses,
+                         "SDK handoff configuration accepted",
+-                        Some(&intent.batch),
+-                        false,
++                        options,
+                     )
+                     .await?;
+                 } else if automatic {
+@@ -5141,15 +5178,14 @@ async fn handle_sdk_realtime_command(
+                 batch.handoff_pending.store(false, Ordering::Release);
+                 batch.continued.store(true, Ordering::Release);
+                 let automatic = batch.pending_create.swap(false, Ordering::AcqRel);
+-                let explicit = batch.user_create.swap(false, Ordering::AcqRel);
+-                if explicit {
++                let explicit = batch.user_create.lock().unwrap().take();
++                if let Some(options) = explicit {
+                     request_sdk_response_create(
+                         sdk,
+                         writer,
+                         responses,
+                         "SDK function batch completed",
+-                        Some(&batch),
+-                        false,
++                        options,
+                     )
+                     .await?;
+                 } else if automatic && let Some(request) = responses.pending_native_create.take() {
+@@ -5169,28 +5205,23 @@ async fn handle_sdk_realtime_command(
+         SdkRealtimeCommand::Input(params) => {
+             writer.send_user_input(params.content).await?;
+             if params.trigger_response {
+-                request_sdk_response_create(sdk, writer, responses, "SDK user input", None, false)
++                let request = responses.new_user_create(RealtimeResponseOptions::default());
++                request_sdk_response_create(sdk, writer, responses, "SDK user input", request)
+                     .await?;
+             }
+         }
+-        SdkRealtimeCommand::RequestResponse => {
+-            request_sdk_response_create(
+-                sdk,
+-                writer,
+-                responses,
+-                "SDK response request",
+-                None,
+-                false,
+-            )
+-            .await?;
++        SdkRealtimeCommand::RequestResponse(options) => {
++            let request = responses.new_user_create(options);
++            request_sdk_response_create(sdk, writer, responses, "SDK response request", request)
++                .await?;
+         }
+         SdkRealtimeCommand::Text(params) => {
+             writer
+                 .send_conversation_item_create(params.text, params.role)
+                 .await?;
+             if handoff.event_parser == RealtimeEventParser::RealtimeV2 {
+-                request_sdk_response_create(sdk, writer, responses, "SDK text", None, false)
+-                    .await?;
++                let request = responses.new_user_create(RealtimeResponseOptions::default());
++                request_sdk_response_create(sdk, writer, responses, "SDK text", request).await?;
+             }
+         }
+         SdkRealtimeCommand::Complete { handoff_id, text } => {
+@@ -5397,7 +5428,7 @@ async fn handle_sdk_realtime_command(
+             };
+             if requested.is_none() {
+                 responses.pending_create = false;
+-                responses.pending_user_create = false;
++                responses.pending_user_create = None;
+                 responses.pending_native_create = None;
+                 responses.pending_guardrail_response = None;
+             }
+@@ -5426,26 +5457,25 @@ async fn handle_sdk_realtime_command(
+             drop(calls);
+             let work = sdk.retire_tool_work(false, requested.as_deref()).await;
+             let calls = sdk.function_calls.lock().await;
+-            let release_user = requested.is_some()
+-                && calls
++            let release_user = requested.as_ref().and_then(|_| {
++                calls
+                     .values()
+                     .filter_map(|call| call.batch.as_ref())
+                     .filter(|batch| {
+                         batch.automatic_retired.load(Ordering::Acquire)
+                             && batch.committed_target.lock().unwrap().is_none()
+                     })
+-                    .fold(false, |released, batch| {
+-                        batch.user_create.swap(false, Ordering::AcqRel) || released
+-                    });
++                    .filter_map(|batch| batch.user_create.lock().unwrap().take())
++                    .max_by_key(|request| request.order)
++            });
+             drop(calls);
+-            if release_user {
++            if let Some(options) = release_user {
+                 request_sdk_response_create(
+                     sdk,
+                     writer,
+                     responses,
+                     "SDK retired handoff user input",
+-                    None,
+-                    false,
++                    options,
+                 )
+                 .await?;
+             }
+@@ -5540,13 +5570,12 @@ async fn defer_sdk_create_until_handoff(
+         })
+         .cloned();
+     if let Some(batch) = held {
+-        if responses.pending_user_create {
+-            batch.user_create.store(true, Ordering::Release);
++        if let Some(request) = responses.pending_user_create.take() {
++            *batch.user_create.lock().unwrap() = Some(request);
+         } else {
+             batch.pending_create.store(true, Ordering::Release);
+         }
+         responses.pending_create = false;
+-        responses.pending_user_create = false;
+     }
+ }
+ 
+@@ -5559,9 +5588,8 @@ async fn maybe_continue_hosted_mcp(
+     if !sdk.hosted_mcp_auto_response && !responses.pending_create {
+         return Ok(());
+     }
+-    if responses.pending_user_create {
+-        request_sdk_response_create(sdk, writer, responses, "queued user input", None, false)
+-            .await?;
++    if let Some(options) = responses.pending_user_create.take() {
++        request_sdk_response_create(sdk, writer, responses, "queued user input", options).await?;
+         return Ok(());
+     }
+     let created = if let Some(request) = &responses.pending_native_create {
+@@ -5576,7 +5604,7 @@ async fn maybe_continue_hosted_mcp(
+     if created {
+         responses.active_default_response = true;
+         responses.pending_create = false;
+-        responses.pending_user_create = false;
++        responses.pending_user_create = None;
+         responses.pending_native_create = None;
+         responses.pending_guardrail_response = None;
+     }
+@@ -5765,7 +5793,7 @@ async fn handle_realtime_server_event_with_configuration(
+             if response_create_queue.pending_guardrail_response.is_some() {
+                 response_create_queue.pending_guardrail_response = None;
+                 response_create_queue.pending_create = false;
+-                response_create_queue.pending_user_create = false;
++                response_create_queue.pending_user_create = None;
+             }
+             response_create_queue.sdk_response_id = response.response_id.clone();
+             response_create_queue.sdk_cancelled_response = None;
+@@ -5853,7 +5881,7 @@ async fn handle_realtime_server_event_with_configuration(
+                     handoff_pending: AtomicBool::new(false),
+                     handoff_accepted: AtomicBool::new(false),
+                     pending_create: AtomicBool::new(false),
+-                    user_create: AtomicBool::new(false),
++                    user_create: std::sync::Mutex::new(None),
+                     automatic_retired: AtomicBool::new(false),
+                     committed_target: std::sync::Mutex::new(None),
+                     update_reserved: AtomicBool::new(false),
+@@ -6048,7 +6076,7 @@ async fn handle_realtime_server_event_with_configuration(
+                                 return Err(err.into());
+                             }
+                             response_create_queue
+-                                .request_create(writer, "handoff steering")
++                                .request_create(writer, "handoff steering", None)
+                                 .await?;
+                         }
+                         None => {
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 89507467e35de4d37bbe6c9a7eb8d317e7e04edc..cd4d75abbec7a9f743f17b75dc51c81a82d4bc90 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -3098,7 +3098,7 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+         handoff_pending: AtomicBool::new(false),
+         handoff_accepted: AtomicBool::new(true),
+         pending_create: AtomicBool::new(true),
+-        user_create: AtomicBool::new(false),
++        user_create: std::sync::Mutex::new(None),
+         automatic_retired: AtomicBool::new(false),
+         committed_target: std::sync::Mutex::new(Some(target.clone())),
+         update_reserved: AtomicBool::new(true),
+@@ -3207,7 +3207,7 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+             wire.recv().await.unwrap()["type"],
+             "conversation.item.create"
+         );
+-        assert!(responses.pending_create && responses.pending_user_create);
++        assert!(responses.pending_create && responses.pending_user_create.is_some());
+         batch.handoff_accepted.store(true, Ordering::Release);
+         let stale = codex_api::RealtimeEvent::ResponseDone(
+             codex_protocol::protocol::RealtimeResponseDone {
+@@ -3226,8 +3226,36 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+         )
+         .await
+         .unwrap();
+-        assert!(responses.pending_create && responses.pending_user_create);
+-        assert!(!batch.user_create.load(Ordering::Acquire));
++        assert!(responses.pending_create && responses.pending_user_create.is_some());
++        assert!(batch.user_create.lock().unwrap().is_none());
++        let stale = super::PendingUserResponse {
++            order: responses.latest_user_create,
++            options: Default::default(),
++        };
++        let request = responses.new_user_create(
++            codex_protocol::realtime_settings::RealtimeResponseOptions {
++                instructions: Some("Use the newer instructions.".into()),
++                ..Default::default()
++            },
++        );
++        super::request_sdk_response_create(
++            &sdk,
++            &writer,
++            &mut responses,
++            "newer request while handoff is held",
++            request,
++        )
++        .await
++        .unwrap();
++        super::request_sdk_response_create(
++            &sdk,
++            &writer,
++            &mut responses,
++            "superseded request released by a batch",
++            stale,
++        )
++        .await
++        .unwrap();
+         control.send(SdkWireControl::Event(serde_json::json!({"type":"response.done","response":{"id":"live-response","status":"completed","output":[]}}))).unwrap();
+         let done = loop {
+             if let Some(event @ codex_api::RealtimeEvent::ResponseDone(_)) =
+@@ -3247,8 +3275,8 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+         )
+         .await
+         .unwrap();
+-        assert!(!responses.pending_create && !responses.pending_user_create);
+-        assert!(batch.user_create.load(Ordering::Acquire));
++        assert!(!responses.pending_create && responses.pending_user_create.is_none());
++        assert!(batch.user_create.lock().unwrap().is_some());
+     }
+     let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+     control
+@@ -3322,18 +3350,25 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+     if interrupt && !queued_user {
+         assert!(wire.try_recv().is_err());
+         // A new explicit request uses the accepted B configuration.
++        let request = responses.new_user_create(Default::default());
+         super::request_sdk_response_create(
+             &sdk,
+             &writer,
+             &mut responses,
+             "new explicit request",
+-            None,
+-            false,
++            request,
+         )
+         .await
+         .unwrap();
+     }
+-    assert_eq!(wire.recv().await.unwrap()["type"], "response.create");
++    let response_create = wire.recv().await.unwrap();
++    assert_eq!(response_create["type"], "response.create");
++    if queued_user {
++        assert_eq!(
++            response_create["response"]["instructions"],
++            "Use the newer instructions."
++        );
++    }
+     assert!(wire.try_recv().is_err());
+     connection.close().await.unwrap();
+     server.await.unwrap();
+@@ -4120,7 +4155,7 @@ async fn sdk_wire_pending_handoff_case(interrupt: bool, full_terminal_queue: boo
+                 batch
+                     .handoff_pending
+                     .load(std::sync::atomic::Ordering::Acquire)
+-                    && batch.user_create.load(std::sync::atomic::Ordering::Acquire)
++                    && batch.user_create.lock().unwrap().is_some()
+             })
+         }));
+         while sdk
+@@ -4553,7 +4588,7 @@ async fn sdk_scoped_batch_interrupt_joins_its_policy_while_later_batch_executes(
+             response_id: response.into(), call_ids: vec![id.into()],
+             configuration: configuration.clone(), completed: std::sync::OnceLock::new(), root_dispatch: std::sync::OnceLock::new(),
+             handoff_pending: AtomicBool::new(false), handoff_accepted: AtomicBool::new(false),
+-            pending_create: AtomicBool::new(false), user_create: AtomicBool::new(false),
++            pending_create: AtomicBool::new(false), user_create: std::sync::Mutex::new(None),
+             automatic_retired: AtomicBool::new(false), committed_target: Default::default(),
+             update_reserved: AtomicBool::new(false), continued: AtomicBool::new(false),
+         });
+@@ -4869,7 +4904,7 @@ async fn sdk_terminal_reclamation_keeps_pending_physical_preparation_and_handoff
+         handoff_pending: AtomicBool::new(true),
+         handoff_accepted: AtomicBool::new(false),
+         pending_create: AtomicBool::new(true),
+-        user_create: AtomicBool::new(false),
++        user_create: std::sync::Mutex::new(None),
+         automatic_retired: AtomicBool::new(false),
+         committed_target: std::sync::Mutex::new(None),
+         update_reserved: AtomicBool::new(false),
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index d44d8ae5cca942bc2fbb0fd7f5a4acfe4a19c5e3..0b3536d1190e40f92778addf3d22f388020f276a 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -699,12 +699,18 @@ pub(super) async fn submission_loop(
+                     );
+                     false
+                 }
+-                Op::RealtimeConversationResponseSdk { generation, reply } => {
++                Op::RealtimeConversationResponseSdk {
++                    generation,
++                    response,
++                    reply,
++                } => {
+                     let _ = reply.send(
+                         sess.conversation
+                             .sdk_enqueue(
+                                 &generation,
+-                                crate::realtime_conversation::SdkRealtimeCommand::RequestResponse,
++                                crate::realtime_conversation::SdkRealtimeCommand::RequestResponse(
++                                    response,
++                                ),
+                             )
+                             .await,
+                     );
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 540945db8c89115b4ce8d65ff2def63d05c35f9f..21eaaddb999857d486ec6edd399edd6829e57e9d 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -980,6 +980,7 @@ pub enum Op {
+     /// Request a response using the current accepted source, without adding an item.
+     RealtimeConversationResponseSdk {
+         generation: String,
++        response: crate::realtime_settings::RealtimeResponseOptions,
+         reply: oneshot::Sender<CodexResult<()>>,
+     },
+ 
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+index 22418d10e76253fae0d14dc29eb3388419fb07cf..546528348012dc947018b29a64494735399a96cb 100644
+--- a/codex-rs/protocol/src/realtime_settings.rs
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -237,6 +237,18 @@ pub struct RealtimeSessionUpdate {
+     pub settings: RealtimeV2SessionSettings,
+ }
+ 
++/// Overrides for one provider response, without changing accepted session settings.
++#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
++#[serde(default, deny_unknown_fields)]
++pub struct RealtimeResponseOptions {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub instructions: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub output_modality: Option<RealtimeOutputModality>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub max_output_tokens: Option<RealtimeMaxOutputTokens>,
++}
++
+ /// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.
+ #[derive(
+     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS,
+@@ -314,6 +326,8 @@ pub enum RealtimeImageDetail {
+ #[serde(tag = "type", rename_all = "snake_case")]
+ pub enum RealtimeTurnDetection {
+     ServerVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         create_response: Option<bool>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -328,6 +342,8 @@ pub enum RealtimeTurnDetection {
+         idle_timeout_ms: Option<u32>,
+     },
+     SemanticVad {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        model_version: Option<String>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         create_response: Option<bool>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
