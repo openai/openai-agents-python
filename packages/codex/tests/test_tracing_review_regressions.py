@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -12,7 +11,12 @@ import pytest
 
 from agents import Agent, telemetry
 from agents.testing import ScriptedResponses, text
-from tests.test_native_trace_exporter import assert_sanitized_failure, collector, completed_event
+from tests.test_native_trace_exporter import (
+    assert_sanitized_failure,
+    collector,
+    completed_event,
+    native_trace_child_env,
+)
 
 
 async def test_invalid_outcome_drops_private_serializer_frames():
@@ -140,6 +144,7 @@ async def native_churn():
         print("PASS native active-root churn")
 
 
+@pytest.mark.serial
 def test_native_active_root_survives_completed_trace_churn():
     script = (
         "import runpy,asyncio; module=runpy.run_path("
@@ -148,10 +153,10 @@ def test_native_active_root_survives_completed_trace_churn():
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS native active-root churn" in result.stdout

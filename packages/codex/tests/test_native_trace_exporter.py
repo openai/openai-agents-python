@@ -10,6 +10,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -126,12 +127,24 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         assert len(received) == 1
 
 
+def native_trace_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    test_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (test_root, env.get("PYTHONPATH"))))
+    return env
+
+
 @pytest.mark.parametrize(
     "case_name",
-    ["native_case", "native_deadline_case", "native_outcome_privacy_case", "native_batch_case"],
+    [
+        "native_case",
+        "native_deadline_case",
+        "native_outcome_privacy_case",
+        pytest.param("native_batch_case", marks=pytest.mark.serial),
+    ],
 )
 def test_real_native_capture_policy_and_openai_export(case_name):
-    env = dict(os.environ)
+    env = native_trace_child_env()
     env.pop("OPENAI_API_KEY", None)
     result = subprocess.run(
         [
@@ -538,7 +551,7 @@ async def native_batch_case():
         started = time.monotonic()
         result = await telemetry.force_flush()
         elapsed = time.monotonic() - started
-        assert result.status == "success"
+        assert result.status == "success", result
         records = [record for request in received for record in request["payload"]["data"]]
         spans = [record for record in records if record["object"] == "trace.span"]
         assert len(spans) == 21

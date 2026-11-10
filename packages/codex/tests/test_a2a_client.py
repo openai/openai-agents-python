@@ -162,7 +162,10 @@ async def test_direct_client_bounds_complete_message(tmp_path, responses, stream
                 assert len(responses.requests) == 1
 
 
-@pytest.mark.parametrize("kind", ["deadline", "idle", "stream-idle"])
+@pytest.mark.parametrize(
+    "kind",
+    [pytest.param("deadline", marks=pytest.mark.serial), "idle", "stream-idle"],
+)
 async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
     received = []
 
