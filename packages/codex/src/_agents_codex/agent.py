@@ -1535,7 +1535,7 @@ class Agent(Generic[ContextT, OutputT]):
                                 if runtime.profile.agent is not self
                                 for tool in runtime.profile.declaration.tools
                                 if isinstance(tool, FunctionTool)
-                                and tool._bind is None
+                                and (tool._bind is None or tool.needs_approval is not False)
                                 and not tool._requires_live_manual_session
                             ),
                         )

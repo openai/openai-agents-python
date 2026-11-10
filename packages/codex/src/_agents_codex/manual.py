@@ -373,7 +373,7 @@ class ApprovalRequested(ActionRequested[InputT, Any]):
         return _reply(self, decision)
 
     async def respond(self, value: Any) -> None:
-        raise TypeError("Use approve() or reject() for a managed function approval")
+        await super().respond(value)
 
     async def approve(self, *, always: bool = False) -> None:
         session = self._session()

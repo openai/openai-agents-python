@@ -6,11 +6,12 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from agents import (
     Agent,
@@ -613,3 +614,171 @@ async def test_managed_preparation_shares_function_admission_and_releases_before
             await request.approve()
         assert (await turn.get_result()).final_output == "done"
         assert sorted(effects) == [0, 1, 2]
+
+
+class MutatingApprovalInput(BaseModel):
+    value: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def increment(cls, data):
+        data["value"] += 1
+        return data
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_raw_preparation_input_survives_mutating_validators(responses, automatic):
+    originals, effects = [], []
+
+    def policy(context):
+        originals.append(context.original_arguments["payload"]["value"])
+        return not automatic
+
+    @function_tool(needs_approval=policy)
+    def risky(context: ToolContext, payload: MutatingApprovalInput) -> str:
+        originals.append(context.original_arguments["payload"]["value"])
+        effects.append(payload.value)
+        return str(payload.value)
+
+    responses.respond(function_call("risky", {"payload": {"value": 1}}, "mutating-input"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if not automatic:
+            request = await next_request(session.interactions(), risky)
+            assert request.effective_arguments.payload.value == 2
+            await request.approve()
+        assert (await turn.get_result()).final_output == "done"
+        assert effects == [2]
+        assert originals == [1, 1]
+        assert tool_output(responses.requests[1], "mutating-input") == "2"
+
+
+@pytest.mark.parametrize("delivery", ["respond", "handler"])
+@pytest.mark.parametrize("structured", [False, True])
+async def test_supported_decision_replies_reach_managed_callback_owner(
+    responses, delivery, structured
+):
+    from agents import ApprovalDecision
+
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    responses.respond(function_call("risky", {"value": "A"}, "decision-reply"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use risky.", tools=[risky], provider=provider(responses))
+    decision = ApprovalDecision(False, reason="explicit denial") if structured else True
+    async with timeout(20):
+        if delivery == "handler":
+
+            def handler(event):
+                request = risky.match(event)
+                assert isinstance(request, ApprovalRequested)
+                return request.reply(decision)
+
+            assert (await agent.run("begin", on_interaction=handler)).final_output == "done"
+        else:
+            async with agent.session() as session:
+                turn = await session.submit("begin")
+                request = await next_request(session.interactions(), risky)
+                await session.respond(request.reply(decision))
+                assert (await turn.get_result()).final_output == "done"
+    assert effects == ([] if structured else ["A"])
+
+
+async def test_destination_only_approval_exports_portable_one_shot_state(responses):
+    from agents import InteractionRequired
+
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def risky(value: str) -> str:
+        effects.append(value)
+        return value
+
+    target = Agent(name="B", instructions="Use risky.", tools=[risky])
+    agent = Agent(
+        name="A", instructions="Transfer.", handoffs=[target], provider=provider(responses)
+    )
+    responses.respond(function_call("transfer_to_b", {}, "transfer"))
+    responses.respond(function_call("risky", {"value": "A"}, "destination-approval"))
+    responses.respond(assistant_output("done"))
+    async with timeout(25):
+        with pytest.raises(InteractionRequired) as interrupted:
+            await agent.run("begin")
+        assert interrupted.value.state is not None and effects == []
+        async with agent.session(state=interrupted.value.state) as restored:
+            request = await next_request(restored.interactions(), risky)
+            await request.approve()
+            assert (await restored.restored_turn.get_result()).final_output == "done"
+        assert effects == ["A"]
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_datetime_approval_inputs_keep_parsed_callback_semantics(responses, automatic):
+    effects = []
+
+    @function_tool(needs_approval=(lambda _: False) if automatic else True)
+    def risky(when: datetime) -> str:
+        effects.append(when)
+        return when.isoformat()
+
+    raw = "2026-11-01T12:00:00+00:00"
+    responses.respond(function_call("risky", {"when": raw}, "datetime-input"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if not automatic:
+            request = await next_request(session.interactions(), risky)
+            assert request.effective_arguments.when == datetime.fromisoformat(raw)
+            await request.approve()
+        assert (await turn.get_result()).final_output == "done"
+        assert effects == [datetime.fromisoformat(raw)]
+
+
+@pytest.mark.parametrize("restored", [False, True])
+async def test_approved_terminal_function_finishes_without_another_sample(responses, restored):
+    effects = []
+
+    @function_tool(needs_approval=True, finish_turn=True)
+    def risky(value: str) -> str:
+        effects.append(value)
+        return "terminal result"
+
+    responses.respond(function_call("risky", {"value": "A"}, "terminal-approval"))
+    responses.respond(assistant_output("unexpected model continuation"))
+    agent = Agent(instructions="Use risky.", tools=[risky], provider=provider(responses))
+    async with timeout(25):
+        if restored:
+            async with agent.session() as source:
+                await source.submit("begin")
+                await next_request(source.interactions(), risky)
+                saved = await source.suspend()
+            async with agent.session(state=saved) as session:
+                request = await next_request(session.interactions(), risky)
+                await request.approve()
+                result = await session.restored_turn.get_result()
+        else:
+            async with agent.session() as session:
+                turn = await session.submit("begin")
+                request = await next_request(session.interactions(), risky)
+                await request.approve()
+                result = await turn.get_result()
+        assert result.final_output == "terminal result"
+        assert result.tool_call.call_id == "terminal-approval"
+        assert effects == ["A"]
+        assert len(responses.requests) == 1

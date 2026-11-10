@@ -5547,7 +5547,7 @@ class Session(Generic[ContextT, OutputT]):
                     _clear_current(),
                     _owned_span("manual input validation", "validation", request._tracing_context),
                 ):
-                    arguments = entry.input_adapter.validate_python(message["arguments"])
+                    arguments = entry.input_adapter.validate_python(deepcopy(message["arguments"]))
                 if not admit():
                     return
                 state.manual_inputs[request._invocation] = arguments
