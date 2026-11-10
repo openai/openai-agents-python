@@ -394,6 +394,17 @@ class RealtimeToolCall:
 
 
 @dataclass(frozen=True)
+class RealtimeDetachedFunctionCall:
+    """A completed detached function call for the application to handle."""
+
+    response_id: str
+    item_id: str
+    call_id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
 class RealtimeToolBatchError:
     """A local batch failure; accepted per-call results remain authoritative."""
 
@@ -563,6 +574,7 @@ RealtimeEvent: TypeAlias = (
     | RealtimeResponse
     | RealtimeDelegation
     | RealtimeToolCall
+    | RealtimeDetachedFunctionCall
     | RealtimeToolBatchError
     | RealtimeHistory
     | RealtimeConversationItemObserved
@@ -1011,7 +1023,9 @@ class RealtimeSession:
 
         Core validates managed controls and forwards other event types as JSON.
         Linked responses can select advertised functions for one response.
-        Detached responses can declare functions that the caller handles.
+        Detached responses can declare functions that the caller handles through
+        RealtimeDetachedFunctionCall events. Supply results in a later detached
+        response's input; detached calls do not enter conversation history.
         Item retrieval returns the provider item. Other sends return ``None``.
         Cancellation publishes the same local playback interruption as interrupt().
         Capture bounded JSON before waiting for native acceptance. Cancellation
@@ -2524,6 +2538,16 @@ class RealtimeSession:
                     asyncio.create_task, self._delegate(handoff_id, native_input, owned)
                 )
                 owned.task.add_done_callback(self._delegation_done)
+        elif name == "DetachedFunctionCall":
+            self._emit(
+                RealtimeDetachedFunctionCall(
+                    value["response_id"],
+                    value["item_id"],
+                    value["call_id"],
+                    value["name"],
+                    value["arguments"],
+                )
+            )
         elif name == "FunctionCallRequested":
             if value.get("response_id") in self._guardrail_trips:
                 return

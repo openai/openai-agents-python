@@ -279,14 +279,27 @@ class CodexLogin:
     Set ``account_id`` to require a specific ChatGPT account or workspace.
     The SDK checks the saved login when it opens a Session.
 
+    Linux trusted workspace execution requires ``credential_directory``, an
+    absolute path to an application-owned directory dedicated to credentials.
+    The selected ``codex_home/auth.json`` must resolve to ``auth.json`` in that
+    directory. Keep the directory and its ancestors in place while Sessions
+    use it. The executor cannot read that directory. Use strict execution
+    for an existing login whose auth file shares a directory with ordinary data.
+
     This experimental mode may change or be absent from the public beta or
     general availability of the Agents SDK.
     """
 
     codex_home: str | Path | None = field(default=None, repr=False)
     account_id: str | None = field(default=None, repr=False)
+    credential_directory: str | Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.credential_directory is not None and (
+            not isinstance(self.credential_directory, (str, Path))
+            or not Path(self.credential_directory).is_absolute()
+        ):
+            raise ValueError("credential_directory must be an absolute path")
         if self.codex_home is not None and (
             not isinstance(self.codex_home, (str, Path)) or not str(self.codex_home).strip()
         ):
@@ -1428,7 +1441,7 @@ class Agent(Generic[ContextT, OutputT]):
                 assert isinstance(session, Session)
                 yield session
         finally:
-            del trace_options
+            del trace_options, environment
 
     @asynccontextmanager
     async def _session_context(
@@ -1525,6 +1538,7 @@ class Agent(Generic[ContextT, OutputT]):
             trace_error = error
             raise
         finally:
+            del environment
             captured.close(trace_error)
 
     @overload

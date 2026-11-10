@@ -1,0 +1,93 @@
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+index 18d2d01..4adb13d 100644
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -563,7 +563,19 @@ fn create_filesystem_args(
+             ];
+         } else {
+             for root in readable_roots {
+-                if !root.exists() {
++                // The covering writable bind and its read-only carveout mount this
++                // path below. A bootstrap bind could depend on a temporary empty
++                // metadata target that another sandbox removes before startup.
++                let covered_protected_metadata =
++                    root.file_name().is_some_and(is_protected_metadata_name)
++                        && writable_roots.iter().any(|writable_root| {
++                            root.parent() == Some(writable_root.root.as_path())
++                                && writable_root
++                                    .read_only_subpaths
++                                    .iter()
++                                    .any(|path| path.as_path() == root)
++                        });
++                if covered_protected_metadata || !root.exists() {
+                     continue;
+                 }
+                 // Writable roots are rebound by real target below; mirror that
+@@ -1516,6 +1528,67 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use tempfile::TempDir;
+ 
++    #[test]
++    fn restricted_read_bootstrap_defers_protected_metadata_to_the_writable_bind() {
++        let workspace = TempDir::new().expect("workspace");
++        let root = workspace.path();
++        let dot_git = root.join(".git");
++        fs::create_dir(&dot_git).expect("create transient .git directory");
++        let workspace_root = AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace");
++        let mut policy = FileSystemSandboxPolicy::workspace_write(&[], true, true)
++            .materialize_project_roots_with_workspace_roots(&[workspace_root]);
++        let root_read = policy
++            .entries
++            .iter_mut()
++            .find(|entry| {
++                matches!(
++                    entry.path,
++                    FileSystemPath::Special {
++                        value: FileSystemSpecialPath::Root,
++                    }
++                )
++            })
++            .expect("workspace root read baseline");
++        root_read.path = FileSystemPath::Special {
++            value: FileSystemSpecialPath::Minimal,
++        };
++        let plan = || {
++            create_filesystem_args(&policy, root, BwrapOptions::default()).expect("filesystem args")
++        };
++        let transient = plan();
++        fs::remove_dir(&dot_git).expect("remove transient .git directory");
++        let dot_git_str = path_to_string(&dot_git);
++        let readonly_binds = |args: &BwrapArgs| {
++            args.args
++                .windows(3)
++                .enumerate()
++                .filter_map(|(index, window)| {
++                    (window == ["--ro-bind", dot_git_str.as_str(), dot_git_str.as_str()])
++                        .then_some(index)
++                })
++                .collect::<Vec<_>>()
++        };
++        assert_empty_directory_mounted_read_only(&transient.args, &dot_git);
++        assert!(readonly_binds(&transient).is_empty());
++        assert!(synthetic_mount_target_paths(&transient).contains(&dot_git));
++
++        fs::create_dir(&dot_git).expect("create real .git directory");
++        fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
++        let real = plan();
++        let root_str = path_to_string(root);
++        let writable_bind = real
++            .args
++            .windows(3)
++            .position(|window| window == ["--bind", root_str.as_str(), root_str.as_str()])
++            .expect("workspace writable bind");
++        let binds = readonly_binds(&real);
++        assert_eq!(binds.len(), 1);
++        assert!(
++            binds[0] > writable_bind,
++            "the real metadata stays read-only"
++        );
++    }
++
+     #[test]
+     fn default_unreadable_glob_scan_has_no_depth_cap() {
+         assert_eq!(BwrapOptions::default().glob_scan_max_depth, None);

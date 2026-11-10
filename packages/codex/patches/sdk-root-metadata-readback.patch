@@ -1,0 +1,204 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -26,6 +26,7 @@
+ #[derive(Default)]
+ pub(crate) struct RootDescriptor {
+     pub snapshot: OnceLock<Value>,
++    pub metadata: OnceLock<String>,
+     pub ended: AtomicBool,
+ }
+ impl std::fmt::Debug for RootDescriptor {
+@@ -281,19 +282,20 @@
+     detached: bool,
+     trace_id: Option<String>,
+     group_id: Option<String>,
+-    metadata: Option<Value>,
++    metadata: Option<Box<serde_json::value::RawValue>>,
+     disabled: Option<bool>,
+     include_sensitive_data: Option<bool>,
+     credential_ref: Option<String>,
+ }
+ #[derive(Serialize)]
+-struct Readback {
++struct Readback<'a> {
+     handle: String,
+     trace_id: String,
+     span_id: String,
+     parent_span_id: Option<String>,
+     disabled: bool,
+     include_sensitive_data: bool,
++    root_metadata: Option<&'a str>,
+ }
+ fn readback(key: &str, handle: &Handle) -> Result<String, String> {
+     let span = handle.context.span();
+@@ -306,6 +308,7 @@
+         parent_span_id: handle.parent_span_id.clone(),
+         disabled: policy.disabled,
+         include_sensitive_data: policy.include_sensitive_data,
++        root_metadata: policy.root_descriptor.metadata.get().map(String::as_str),
+     })
+     .map_err(|_| "Native tracing context could not serialize".into())
+ }
+@@ -350,10 +353,59 @@
+         _ => Ok(()),
+     }
+ }
+-fn metadata_attribute_value(value: &Value) -> Result<String, String> {
+-    let encoded = match value {
+-        Value::String(value) => value.clone(),
+-        _ => value.to_string(),
++// Validate opaque metadata with typed serde containers, without Value's private-map visitor.
++// Return canonical JSON so escaped strings keep the existing encoded-attribute byte limit.
++fn bounded_metadata_json(
++    encoded: &str,
++    depth: usize,
++) -> Result<Box<serde_json::value::RawValue>, String> {
++    if depth > 8 {
++        return Err("Tracing metadata exceeds maximum depth of 8".into());
++    }
++    let encoded = encoded.trim_start();
++    let serialized = if encoded.starts_with('"') {
++        let value: String =
++            serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
++        if value.len() > 4096 {
++            return Err("Tracing string exceeds 4096 UTF-8 bytes".into());
++        }
++        serde_json::value::to_raw_value(&value)
++    } else if encoded.starts_with('[') {
++        let values: Vec<&serde_json::value::RawValue> =
++            serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
++        if values.len() > 64 {
++            return Err("Tracing arrays may contain at most 64 entries".into());
++        }
++        let values = values
++            .iter()
++            .map(|value| bounded_metadata_json(value.get(), depth + 1))
++            .collect::<Result<Vec<_>, _>>()?;
++        serde_json::value::to_raw_value(&values)
++    } else if encoded.starts_with('{') {
++        let values: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
++            serde_json::from_str(encoded).map_err(|_| "Invalid tracing metadata")?;
++        if values.len() > 64 {
++            return Err("Tracing objects may contain at most 64 fields".into());
++        }
++        let mut bounded = std::collections::BTreeMap::new();
++        for (key, value) in values {
++            if key.len() > 256 {
++                return Err("Tracing key exceeds 256 UTF-8 bytes".into());
++            }
++            bounded.insert(key, bounded_metadata_json(value.get(), depth + 1)?);
++        }
++        serde_json::value::to_raw_value(&bounded)
++    } else {
++        return serde_json::value::RawValue::from_string(encoded.to_owned())
++            .map_err(|_| "Invalid tracing metadata".into());
++    };
++    serialized.map_err(|_| "Invalid tracing metadata".into())
++}
++fn metadata_attribute_value(value: &serde_json::value::RawValue) -> Result<String, String> {
++    let encoded = if value.get().starts_with('"') {
++        serde_json::from_str::<String>(value.get()).map_err(|_| "Invalid tracing metadata")?
++    } else {
++        value.get().to_owned()
+     };
+     if encoded.len() > 4096 {
+         return Err("Encoded tracing metadata value exceeds 4096 UTF-8 bytes".into());
+@@ -420,11 +472,21 @@
+                 .unwrap_or_default()
+         },
+     });
+-    let metadata = options.metadata.unwrap_or_else(|| json!({}));
+-    bounded_value(&metadata, 0)?;
+-    let metadata = metadata
+-        .as_object()
+-        .ok_or("Tracing metadata must be an object")?;
++    let metadata_json = options
++        .metadata
++        .as_deref()
++        .map_or("{}", serde_json::value::RawValue::get);
++    let bounded_metadata = bounded_metadata_json(metadata_json, 0)?;
++    let metadata: std::collections::BTreeMap<String, &serde_json::value::RawValue> =
++        serde_json::from_str(bounded_metadata.get())
++            .map_err(|_| "Tracing metadata must be an object")?;
++    if options.detached || inherited.is_none() {
++        // Original JSON on the existing root owner, without lossy attribute conversion.
++        let _ = policy
++            .root_descriptor
++            .metadata
++            .set(metadata_json.to_owned());
++    }
+     let mut attributes = Vec::new();
+     attributes.push(KeyValue::new("sdk.span.kind", options.kind));
+     if let Some(group) = options.group_id {
+@@ -635,15 +697,55 @@
+         assert!(bounded_value(&json!({"x":[1,2,3]}), 0).is_ok());
+     }
+     #[test]
++    fn preserves_opaque_metadata_and_existing_bounds() {
++        for marker in ["Number", "RawValue"] {
++            let encoded =
++                format!(r#"{{"nested":{{"$serde_json::private::{marker}":"ordinary text"}}}}"#);
++            assert_eq!(bounded_metadata_json(&encoded, 0).unwrap().get(), encoded);
++        }
++        let escaped = format!(r#"{{"text":"{}"}}"#, "\\u00e9".repeat(1000));
++        let canonical = bounded_metadata_json(&escaped, 0).unwrap();
++        assert_eq!(metadata_attribute_value(&canonical).unwrap().len(), 2011);
++        let string = serde_json::to_string(&"x".repeat(4096)).unwrap();
++        assert!(bounded_metadata_json(&string, 0).is_ok());
++        let string = serde_json::to_string(&"x".repeat(4097)).unwrap();
++        assert!(bounded_metadata_json(&string, 0).is_err());
++        for (count, allowed) in [(64, true), (65, false)] {
++            let array = serde_json::to_string(&vec![0; count]).unwrap();
++            assert_eq!(bounded_metadata_json(&array, 0).is_ok(), allowed);
++            let object = (0..count)
++                .map(|key| (key.to_string(), 0))
++                .collect::<std::collections::BTreeMap<_, _>>();
++            assert_eq!(
++                bounded_metadata_json(&serde_json::to_string(&object).unwrap(), 0).is_ok(),
++                allowed
++            );
++        }
++        for (length, allowed) in [(256, true), (257, false)] {
++            let object = std::collections::BTreeMap::from([("x".repeat(length), 0)]);
++            assert_eq!(
++                bounded_metadata_json(&serde_json::to_string(&object).unwrap(), 0).is_ok(),
++                allowed
++            );
++        }
++        for (depth, allowed) in [(8, true), (9, false)] {
++            let value = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
++            assert_eq!(bounded_metadata_json(&value, 0).is_ok(), allowed);
++        }
++        let large = format!(r#"{{"integer":1{}}}"#, "0".repeat(80));
++        assert_eq!(bounded_metadata_json(&large, 0).unwrap().get(), large);
++    }
++
++    #[test]
+     fn bounds_actual_metadata_attribute_encoding() {
+         assert_eq!(
+-            metadata_attribute_value(&json!("x".repeat(4096)))
++            metadata_attribute_value(&serde_json::value::to_raw_value(&json!("x".repeat(4096))).unwrap())
+                 .unwrap()
+                 .len(),
+             4096
+         );
+-        assert!(metadata_attribute_value(&json!(["x".repeat(3000), "y".repeat(3000)])).is_err());
+-        assert!(metadata_attribute_value(&json!({"key":[1,2]})).is_ok());
++        assert!(metadata_attribute_value(&serde_json::value::to_raw_value(&json!(["x".repeat(3000), "y".repeat(3000)])).unwrap()).is_err());
++        assert!(metadata_attribute_value(&serde_json::value::to_raw_value(&json!({"key":[1,2]})).unwrap()).is_ok());
+     }
+     #[test]
+     fn disabled_sampling_has_no_recording() {
+diff --git a/codex-rs/otel/Cargo.toml b/codex-rs/otel/Cargo.toml
+--- a/codex-rs/otel/Cargo.toml
++++ b/codex-rs/otel/Cargo.toml
+@@ -52,7 +52,7 @@
+ os_info = { workspace = true }
+ reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
+ serde = { workspace = true, features = ["derive"] }
+-serde_json = { workspace = true }
++serde_json = { workspace = true, features = ["raw_value"] }
+ strum_macros = { workspace = true }
+ thiserror = { workspace = true }
+ tokio = { workspace = true }

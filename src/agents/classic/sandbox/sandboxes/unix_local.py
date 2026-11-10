@@ -305,10 +305,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         _ = (only_ephemeral, session_running)
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        resolved_manifest = manifest or self.state.manifest
         validate_manifest_mount_credential_boundaries(
-            manifest or self.state.manifest,
+            resolved_manifest,
             provider_backend_id="unix_local",
         )
+        resolved_manifest._validate_git_repo_hosts()
 
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
@@ -1638,7 +1640,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
     ) -> SandboxSession:
         if not isinstance(state, UnixLocalSandboxSessionState):
             raise TypeError("UnixLocalSandboxClient.resume expects a UnixLocalSandboxSessionState")
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         _assert_unix_local_host_path_grants_unsupported(state.manifest)
         inner = UnixLocalSandboxSession.from_state(state)
         inner._host_environment_allowlist = self._host_environment_allowlist
