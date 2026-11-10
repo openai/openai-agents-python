@@ -271,6 +271,7 @@ from .usage import (
 
 if TYPE_CHECKING:
     from .realtime import RealtimeConfig, RealtimeSession
+    from .realtime_usage import RealtimeUsage
 
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
@@ -4199,6 +4200,15 @@ class Session(Generic[ContextT, OutputT]):
         """Read the saved Codex account and plan type selected at opening."""
         return self._codex_account
 
+    @property
+    def realtime_usage(self) -> RealtimeUsage | None:
+        """Detached speech usage for the current connection, separate from thread usage.
+
+        Missing usage or no current connection returns None. Each new connection
+        starts its own totals. Retain a RealtimeSession to read its totals after close.
+        """
+        return None if self._realtime is None else self._realtime.usage
+
     def realtime(self, *, config: RealtimeConfig | None = None) -> RealtimeSession:
         """Open a Realtime connection owned by this native Session.
 
@@ -5854,6 +5864,7 @@ class Session(Generic[ContextT, OutputT]):
                 MappingProxyType(deepcopy(raw_arguments)),
                 _snapshot_function_arguments(kwargs, function._ref),
                 call=request.call,
+                realtime_usage=self.realtime_usage,
             )
 
             if not admit():
@@ -11647,6 +11658,7 @@ class Session(Generic[ContextT, OutputT]):
                     MappingProxyType(deepcopy(raw_arguments)),
                     _snapshot_function_arguments(kwargs, ref),
                     trace_context=_native_trace_context(message.get("_sdk_trace")),
+                    realtime_usage=self.realtime_usage,
                     call=ToolCallInfo(
                         tool=ref,
                         session_id=self.id,
