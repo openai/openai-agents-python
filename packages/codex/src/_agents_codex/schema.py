@@ -180,7 +180,7 @@ def output_schema(output_type: Any) -> dict[str, Any] | None:
 
 
 def _prepare_output(
-    output_type: Any,
+    output_type: Any, *, wrap_scalars: bool = True
 ) -> tuple[TypeAdapter[Any], dict[str, Any], bool, TypeAdapter[Any]]:
     adapter: TypeAdapter[Any] = TypeAdapter(output_type)
     value_adapter = adapter
@@ -191,7 +191,7 @@ def _prepare_output(
             raise ValueError("output_type requires a local object schema")
         definition = schema["$defs"][reference.removeprefix("#/$defs/")]
         schema = {**definition, **schema}
-    wrapped = schema.get("type") != "object"
+    wrapped = wrap_scalars and schema.get("type") != "object"
     if wrapped:
         adapter = TypeAdapter(
             create_model(
@@ -203,6 +203,8 @@ def _prepare_output(
         schema = adapter.json_schema()
 
     def close(node: dict[str, Any]) -> None:
+        if not wrap_scalars and "$ref" in node and not node["$ref"].startswith("#/$defs/"):
+            raise ValueError("output_type requires local schema references")
         if not any(key in node for key in ("type", "$ref", "anyOf")):
             raise ValueError("output_type cannot contain unconstrained values")
         if any(key in node for key in ("oneOf", "allOf", "prefixItems", "uniqueItems")):

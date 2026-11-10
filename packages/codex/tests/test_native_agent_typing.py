@@ -4,9 +4,9 @@
 from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, RootModel
 from typing_extensions import assert_type
 
 import agents
@@ -24,6 +24,9 @@ from agents import (
     Completed,
     CompletionContext,
     ContinueTurn,
+    DecisionProvider,
+    DecisionRequest,
+    DecisionResponse,
     Environment,
     EnvironmentSource,
     ExecutorContext,
@@ -39,6 +42,7 @@ from agents import (
     NativeOutput,
     NativeProvider,
     NativeRole,
+    OpenAIDecisions,
     PromptedOutput,
     ReplaceArguments,
     ResponseIntegrityReason,
@@ -995,3 +999,115 @@ mixed_approval_children = NativeAgents(before_step=neutral_child_step, approval=
 assert_type(
     Agent(instructions="Delegate.", tools=[mixed_approval_children]), Agent[Application, str]
 )
+
+
+class ExampleDecisionProvider:
+    async def get_decision(self, request: DecisionRequest) -> DecisionResponse:
+        return DecisionResponse(value=True)
+
+
+decision_provider: DecisionProvider = ExampleDecisionProvider()
+deciding_agent = Agent(instructions="Answer.", decisions=decision_provider)
+
+
+async def typed_decision_helpers(
+    turn: Turn[str],
+    completion: CompletionContext[Application],
+    tool_context: ToolContext[Application],
+    child_step: ChildStepContext[Application],
+    builtin: OpenAIDecisions,
+) -> None:
+    assert_type(
+        await Agent(instructions="Answer").decide(
+            "Allowed?", input="Evidence", provider=decision_provider
+        ),
+        bool,
+    )
+    assert_type(
+        await Agent(instructions="Answer").decide(
+            "Select", input=[], choices=["a", "b"], provider=decision_provider
+        ),
+        str,
+    )
+    assert_type(
+        await Agent(instructions="Answer").decide(
+            "Assess", input="Evidence", output_type=Answer, provider=decision_provider
+        ),
+        Answer,
+    )
+    assert_type(
+        await Agent(instructions="Answer", decisions=builtin).decide("Allowed?", input="Evidence"),
+        bool,
+    )
+    assert_type(
+        await Agent(instructions="Answer", decisions=builtin).decide(
+            "Select", input="Evidence", choices=["a", "b"]
+        ),
+        str,
+    )
+    assert_type(await deciding_agent.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    assert_type(await turn.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    assert_type(await completion.decide("Allowed?", input=completion.text or ""), bool)
+    assert_type(await tool_context.decide("Select", input="Evidence", choices=["a", "b"]), str)
+    assert_type(await child_step.decide("Allowed?", input="Evidence"), bool)
+    async with deciding_agent.session():
+        pass
+    assert_type(await deciding_agent.run("Answer"), Completed[str])
+
+
+Probability = Annotated[float, Field(ge=0, le=1)]
+
+
+async def typed_scalar_decision_schemas(
+    agent: Agent[Application, str],
+    turn: Turn[str],
+    completion: CompletionContext[Application],
+    tool: ToolContext[Application],
+    child: ChildStepContext[Application],
+) -> None:
+    assert_type(await agent.decide("Assess", input="Evidence"), bool)
+    assert_type(await agent.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await agent.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    agent_probability: float = await agent.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(agent_probability, float)
+    assert_type(
+        await agent.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await turn.decide("Assess", input="Evidence"), bool)
+    assert_type(await turn.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await turn.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    turn_probability: float = await turn.decide("Assess", input="Evidence", output_type=Probability)
+    assert_type(turn_probability, float)
+    assert_type(
+        await turn.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await completion.decide("Assess", input="Evidence"), bool)
+    assert_type(await completion.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await completion.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    completion_probability: float = await completion.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(completion_probability, float)
+    assert_type(
+        await completion.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await tool.decide("Assess", input="Evidence"), bool)
+    assert_type(await tool.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await tool.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    tool_probability: float = await tool.decide("Assess", input="Evidence", output_type=Probability)
+    assert_type(tool_probability, float)
+    assert_type(
+        await tool.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+    assert_type(await child.decide("Assess", input="Evidence"), bool)
+    assert_type(await child.decide("Assess", input="Evidence", choices=["yes", "no"]), str)
+    assert_type(await child.decide("Assess", input="Evidence", output_type=Answer), Answer)
+    child_probability: float = await child.decide(
+        "Assess", input="Evidence", output_type=Probability
+    )
+    assert_type(child_probability, float)
+    assert_type(
+        await child.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )

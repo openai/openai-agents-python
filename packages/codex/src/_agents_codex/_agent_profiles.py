@@ -7,13 +7,13 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from ._function_tools import FunctionTool
 from .agent import Agent
 from .mcp import _MCP
 from .native_agents import NativeAgents
-from .schema import _prepare_spec
+from .schema import OutputSpec, _prepare_spec
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,8 @@ def _capture_agent_graph(
             model=source.model,
             model_settings=source.model_settings,
             provider=source.provider,
-            output_type=source.output_type,
+            decisions=source.decisions,
+            output_type=cast(OutputSpec[Any], source.output_type),
             programmatic_tool_calling=source.programmatic_tool_calling,
             transform_context=source.transform_context,
             before_compact=source.before_compact,
