@@ -410,7 +410,8 @@ async def test_completed_model_validates_whole_output_before_any_tool(later: str
 
 
 @pytest.mark.parametrize(
-    "finish_reason", ["length", "content_filter", "function_call", None, "vendor-custom"]
+    "finish_reason",
+    ["length", "content_filter", "function_call", None, "N01_SYNTHETIC_PRIVATE_FINISH_REASON"],
 )
 @pytest.mark.parametrize("refusal", [False, True])
 async def test_chat_unsuccessful_finish_has_no_tool_effect(
@@ -483,6 +484,7 @@ async def test_chat_unsuccessful_finish_has_no_tool_effect(
             with pytest.raises((ValueError, NativeError)) as caught:
                 await turn.get_result()
             assert "private-partial-answer" not in str(caught.value)
+            assert "N01_SYNTHETIC_PRIVATE_FINISH_REASON" not in str(caught.value)
             recorded = [row async for row in session.turns()][0]
             assert recorded["status"] in ("failed", "cancelled")
             if refusal:
@@ -494,7 +496,12 @@ async def test_chat_unsuccessful_finish_has_no_tool_effect(
                     for row in recorded["response_facts"]
                 )
             else:
-                assert f"finish_reason={finish_reason}" in str(caught.value)
+                reason = (
+                    finish_reason
+                    if finish_reason in ("length", "content_filter")
+                    else "unsupported"
+                )
+                assert f"finish_reason={reason}" in str(caught.value)
     assert effects == []
     assert len(requests) == 1
 
