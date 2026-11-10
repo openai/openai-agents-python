@@ -311,6 +311,19 @@ impl ThreadOptions {
                     .selection(&options.config, environment_manager, private_paths)
                     .await?;
                 env.configure_local_proxy(&mut options.config, &selection)?;
+                if self.canonical_rules && env.is_local() {
+                    if let [root] = selection.workspace_roots.as_slice() {
+                        if root != &selection.cwd {
+                            options.thread_extension_init.insert(
+                                codex_core::ProjectReadPathMapping {
+                                    environment_id: selection.environment_id.clone(),
+                                    declared_cwd: selection.cwd.clone(),
+                                    canonical_cwd: root.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
                 if strict_writes {
                     options.thread_extension_init.insert(writes);
                 }
