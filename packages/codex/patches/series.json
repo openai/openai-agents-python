@@ -479,7 +479,11 @@
     {
       "path": "sdk-local-project-read-cwd.patch",
       "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "6188f751033b221320447e63b428edbc22e8af34"
+  "result_tree": "73f46a47e15097e7bde5f393a84348937fafef0c"
 }
