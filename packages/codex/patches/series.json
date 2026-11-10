@@ -459,7 +459,11 @@
     {
       "path": "0174-sdk-command-environment-overrides.patch",
       "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-bwrap-read-only-auth-alias.patch",
+      "sha256": "4ecee9ea7a5f1f5378068e7c8a25b6c062e5be2e29349cdbbf689549c172d02d"
     }
   ],
-  "result_tree": "bc921ba2b838c6a85bba6e053835ce46b2ec507e"
+  "result_tree": "8c27c24cef6864937889eb9edba6711aba47238a"
 }

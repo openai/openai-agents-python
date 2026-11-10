@@ -26,7 +26,8 @@ use codex_exec_server::{
 };
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
-    ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
+    EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
+    WindowsSandboxLevel,
 };
 use codex_protocol::models::{PermissionProfile, PermissionProfileSnapshot};
 use codex_protocol::permissions::{
@@ -66,6 +67,7 @@ pub(crate) struct LocalStorageHome<'a> {
 pub(crate) struct LocalPrivatePaths<'a> {
     pub storage_home: Option<LocalStorageHome<'a>>,
     pub saved_login_file: Option<&'a Path>,
+    pub credential_directory: Option<&'a Path>,
 }
 
 pub async fn for_unattached_threads(
@@ -116,6 +118,9 @@ pub struct EnvironmentOptions {
     writable_roots: Option<Vec<PathUri>>,
     #[serde(default)]
     read_only: bool,
+    #[serde(default)]
+    trusted_workspace_write: bool,
+    temp_dir: Option<PathUri>,
     #[serde(default, deserialize_with = "deserialize_mounts")]
     mounts: Vec<LocalStorageMount>,
     #[serde(default)]
@@ -303,6 +308,7 @@ pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
     storage_mounts: bool,
     read_only: bool,
+    trusted_workspace_write: bool,
 }
 
 impl StrictExecutorWrites {
@@ -596,6 +602,16 @@ impl EnvironmentOptions {
     }
 
     fn check_config(&self, config: &Config) -> Result<()> {
+        if self.trusted_workspace_write {
+            ensure!(
+                self.local && !self.read_only && self.mounts.is_empty(),
+                "trusted workspace-write requires a writable local executor without storage mounts"
+            );
+        }
+        ensure!(
+            self.temp_dir.is_none() || self.trusted_workspace_write,
+            "temp_dir requires trusted workspace-write"
+        );
         if self.read_only {
             ensure!(
                 self.strict_writes(),
@@ -701,6 +717,7 @@ impl EnvironmentOptions {
                 config.codex_home.as_path(),
                 private_paths,
                 self.read_only,
+                self.trusted_workspace_write,
             )
             .await?;
             let mut policy = profile.file_system_sandbox_policy();
@@ -787,7 +804,22 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![workspace_root];
-        let mut shell_environment_policy = if self.local {
+        let mut shell_environment_policy = if self.trusted_workspace_write {
+            let mut policy = ShellEnvironmentPolicy {
+                // This environment also starts the native sandbox launcher.
+                // Keep SDK model authentication in the application process.
+                exclude: ["LD_*", "DYLD_*", "OPENAI_API_KEY", "CODEX_API_KEY"]
+                    .map(EnvironmentVariablePattern::new_case_insensitive)
+                    .to_vec(),
+                ..Default::default()
+            };
+            if let Some(temp_dir) = &self.temp_dir {
+                let path = temp_dir.to_abs_path()?;
+                let path = path.as_path().to_str().context("temp_dir must be UTF-8")?;
+                policy.r#set.insert("TMPDIR".to_owned(), path.to_owned());
+            }
+            policy
+        } else if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
                 r#set: local_shell_env(),
@@ -975,6 +1007,7 @@ async fn strict_write_profile(
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
     read_only: bool,
+    trusted_workspace_write: bool,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -988,6 +1021,7 @@ async fn strict_write_profile(
     let mut roots = Vec::with_capacity(additional.len() + 1);
     let mut writes = StrictExecutorWrites {
         read_only,
+        trusted_workspace_write,
         ..Default::default()
     };
     for root in std::iter::once(cwd).chain(additional) {
@@ -1028,7 +1062,45 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        check_local_private_write_roots(&roots, codex_home, private_paths)?;
+        let saved_login_target =
+            check_local_private_write_roots(&roots, codex_home, private_paths)?;
+        #[cfg(unix)]
+        if trusted_workspace_write
+            && let (Some(file), Some(target)) = (private_paths.saved_login_file, saved_login_target)
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let metadata = std::fs::symlink_metadata(&target)
+                .context("could not verify the trusted executor's saved Codex login file")?;
+            ensure!(
+                metadata.is_file() && metadata.nlink() == 1,
+                "trusted local executor requires a saved Codex login file without hard links"
+            );
+            if cfg!(target_os = "linux") {
+                ensure!(
+                    private_paths.credential_directory.is_some(),
+                    "trusted local execution with a saved Codex login on Linux requires \
+                     CodexLogin.credential_directory or strict write policy"
+                );
+            }
+            let denied = match private_paths.credential_directory {
+                Some(directory) => vec![directory],
+                None if file != target => vec![file, target.as_path()],
+                None => vec![file],
+            };
+            for path in denied {
+                filesystem_policy.entries.push(FileSystemSandboxEntry::new(
+                    FileSystemPath::Path {
+                        path: PathUri::from_host_native_path(path)?,
+                    },
+                    FileSystemAccessMode::Deny,
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = saved_login_target;
+    }
+    if local && !trusted_workspace_write {
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -1071,10 +1143,11 @@ fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
     let LocalPrivatePaths {
         storage_home,
         saved_login_file,
+        credential_directory,
     } = private_paths;
     let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home
@@ -1085,14 +1158,30 @@ fn check_local_private_write_roots(
         roots,
         "local executor writable roots must stay outside the native SDK runtime home",
     )?;
-    let mut protected_files = Vec::new();
-    if let Some(file) = saved_login_file {
-        let target = check_local_write_root_overlap(
-            file,
+    let saved_login_target = saved_login_file
+        .map(|file| {
+            check_local_write_root_overlap(
+                file,
+                roots,
+                "local executor writable roots must stay outside the saved Codex login",
+            )
+        })
+        .transpose()?;
+    if let Some(directory) = credential_directory {
+        let resolved = check_local_write_root_overlap(
+            directory,
             roots,
-            "local executor writable roots must stay outside the saved Codex login",
+            "local executor writable roots must stay outside the Codex credential directory",
         )?;
-        collect_existing_private_file(target, &mut protected_files)
+        let expected_file = directory.join("auth.json");
+        ensure!(
+            resolved == directory && saved_login_target.as_deref() == Some(expected_file.as_path()),
+            "The saved Codex login moved outside CodexLogin.credential_directory"
+        );
+    }
+    let mut protected_files = Vec::new();
+    if let Some(target) = &saved_login_target {
+        collect_existing_private_file(target.clone(), &mut protected_files)
             .context("could not inspect the saved Codex login file")?;
     }
     if let Some(home) = storage_home.as_deref() {
@@ -1115,7 +1204,7 @@ fn check_local_private_write_roots(
         )?,
         "local executor writable roots contain a hard link to a private native SDK file"
     );
-    Ok(())
+    Ok(saved_login_target)
 }
 
 fn check_local_helper_write_roots(
@@ -1514,6 +1603,7 @@ pub(crate) async fn replace_writable_roots(
         config.codex_home.as_path(),
         private_paths,
         current.read_only,
+        current.trusted_workspace_write,
     )
     .await?;
     ensure!(
