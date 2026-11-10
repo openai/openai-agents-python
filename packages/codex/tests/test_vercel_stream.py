@@ -913,3 +913,36 @@ async def test_final_comparison_keeps_exact_text_and_native_item_identity(
         assert {"type": "text-delta", "id": "msg_observed", "delta": shown} in frames
         assert frames[-2:] == [{"type": "error", "errorText": "resync_required"}, "[DONE]"]
         assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("output", ["Final answer", ""])
+@pytest.mark.parametrize(
+    "observed", [False, True], ids=["missing-commentary", "observed-commentary"]
+)
+async def test_completion_requires_all_canonical_commentary(responses, output, observed):
+    commentary = assistant_output("Retained commentary")
+    commentary["item"].update(id="ui_commentary", phase="commentary")
+    final = assistant_output(output)
+    final["item"].update(id="ui_final", phase="final_answer")
+    events = text_response("ui_commentary", "Retained commentary") if observed else [commentary]
+    if observed:
+        events[-1]["item"]["phase"] = "commentary"
+    if output:
+        final_events = text_response("ui_final", output)
+        final_events[-1]["item"]["phase"] = "final_answer"
+        events.extend(final_events)
+    else:
+        events.append(final)
+    responses.respond(*events)
+    async with Agent(instructions="Reply.", provider=provider(responses)).session() as session:
+        turn = await session.submit("Reply.")
+        frames = await read_body(stream_turn(turn, session=session))
+        assert (await turn.get_result()).final_output == output
+        finish = observed and bool(output)
+        assert ({"type": "finish"} in frames) is finish
+        assert frames[-2:] == (
+            [{"type": "finish"}, "[DONE]"]
+            if finish
+            else [{"type": "error", "errorText": "resync_required"}, "[DONE]"]
+        )
+        assert len(responses.requests) == 1

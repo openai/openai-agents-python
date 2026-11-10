@@ -1368,8 +1368,8 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
-        max_function_concurrency: int | None = None,
-        observation_retention: Literal["bounded", "all"] = "bounded",
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -1542,9 +1542,9 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
-            if observation_retention != "bounded":
+            if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                 options["observation_retention"] = observation_retention
-            if max_function_concurrency is not None:
+            if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
@@ -1791,8 +1791,8 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
-        max_function_concurrency: int | None = None,
-        observation_retention: Literal["bounded", "all"] = "bounded",
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1831,9 +1831,9 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
-                if observation_retention != "bounded":
+                if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                     options["observation_retention"] = observation_retention
-                if max_function_concurrency is not None:
+                if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
                     options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:
                     options["environment"] = environment
