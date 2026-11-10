@@ -65,6 +65,7 @@ def callback_session(root):
     session = object.__new__(Session)
     session._profiles = runtime
     session._closing = False
+    session._output_guardrails = ()
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)
@@ -412,7 +413,8 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
         def _check_open(self):
             return None
 
-        async def _start(self, input, output, *, budget):
+        async def _start(self, input, output, *, budget, run_usage):
+            assert run_usage is state.run_usage
             correction_inputs.append(json.loads(input[0]["text"]))
             return Attempt()
 

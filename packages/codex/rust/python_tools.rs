@@ -4242,7 +4242,7 @@ impl TurnLifecycleContributor for PythonContributor {
                         .any(|(item, _)| item.item == *input.output)
                 })
             };
-            let guard_only = receipt.is_none();
+            let guard_only = input.guard_only || receipt.is_none();
             if guard_only && !is_held() {
                 return Ok(None);
             }

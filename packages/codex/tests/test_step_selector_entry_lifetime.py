@@ -49,7 +49,10 @@ def owner(callback):
         _profiles={},
         _profile_catalogs={(None, 7): catalog},
         _catalog_bindings={(None, 7): ()},
-        _opening_agent=SimpleNamespace(tools=(), programmatic_tool_calling=False),
+        _opening_agent=SimpleNamespace(
+            tools=(), programmatic_tool_calling=False, input_guardrails=()
+        ),
+        _input_guardrails=(),
         _fail_unhandled_questions=False,
     )
     for method in (
@@ -59,6 +62,7 @@ def owner(callback):
         "_agent_for_profile",
         "_agent_for_message",
         "_bindings_for_message",
+        "_drain_terminal_observations",
     ):
         setattr(session, method, getattr(Session, method).__get__(session, Session))
     message = {

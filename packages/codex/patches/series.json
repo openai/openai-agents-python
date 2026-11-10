@@ -519,7 +519,11 @@
     {
       "path": "sdk-realtime-captured-tool-policy.patch",
       "sha256": "eb5367c48fbdde07ac26fe604d0b71c753afcd4cf0473e472dab71b2b409f480"
+    },
+    {
+      "path": "sdk-suspended-terminal-guard-only.patch",
+      "sha256": "7ab156a284a8f1bde203cd46fbe2e63f2ffc73bb78ee655278d98bd6c7dc6073"
     }
   ],
-  "result_tree": "37dc0e96defc892730f5986a10ab4ab9b58d6fad"
+  "result_tree": "efc0c07ca91fabb5aca94104f95a6ff02b8da2a7"
 }

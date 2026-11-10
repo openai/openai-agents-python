@@ -49,7 +49,11 @@ from .manual import (
     _CapturedManual as _CapturedManual,
 )
 from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
-from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents
+from .native_agents import (
+    ChildInvocation as ChildInvocation,
+    ChildStepContext as ChildStepContext,
+    NativeAgents as NativeAgents,
+)
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
 from .realtime_usage import RealtimeUsage as RealtimeUsage
@@ -66,11 +70,10 @@ from .tools import (
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
 )
+from .turn import Turn as Turn
 
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
-    from .native_agents import ChildStepContext
-    from .turn import Turn
     from .usage import TokenUsage
 
 ToolContextT = TypeVar("ToolContextT")

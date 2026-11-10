@@ -1152,20 +1152,23 @@ pub(crate) async fn continue_if_ready(
                         .find(|(call, _)| call == id)
                         .map(|(_, success)| *success)
                 })
-                .context("Held terminal reply has no captured outcome")?;
+                // Missing historical success cannot authorize terminal completion.
+                .unwrap_or(false);
             Ok((output, success))
         })
         .collect::<Result<Vec<_>>>()?;
-    let outputs = frame
+    let outputs: Vec<_> = frame
         .order
         .iter()
         .filter(|call| !held_ids.contains(*call))
         .map(|call| frame.accepted[call].clone())
         .collect();
-    thread
-        .thread
-        .inject_response_item_envelopes(outputs)
-        .await?;
+    if !outputs.is_empty() {
+        thread
+            .thread
+            .inject_response_item_envelopes(outputs)
+            .await?;
+    }
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
