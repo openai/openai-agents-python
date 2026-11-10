@@ -35,6 +35,7 @@ from _agents_shared.codex_cli.turn_options import (
     coerce_turn_options,
 )
 
+from ._compat import cancellation_requested
 from ._function_tools import ToolContext, _PythonTool, function_tool
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -277,7 +278,7 @@ def codex_tool(
 
         def check() -> None:
             task = asyncio.current_task()
-            if task is not None and task.cancelling():
+            if task is not None and cancellation_requested(task):
                 raise asyncio.CancelledError
             if captured_turn_options is not None and captured_turn_options.signal is not None:
                 if captured_turn_options.signal.is_set():
