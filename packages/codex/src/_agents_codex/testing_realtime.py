@@ -121,7 +121,7 @@ class ScriptedRealtimeAdapter:
         self._sent.append(deepcopy(actual))
         step = self._steps[self._index] if self.remaining_steps else None
         matched = step is not None and (
-            step.expect(actual)
+            step.expect(deepcopy(actual))
             if callable(step.expect)
             else actual.get("type") == step.expect
             if isinstance(step.expect, str)

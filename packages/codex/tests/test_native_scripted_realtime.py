@@ -96,3 +96,32 @@ async def test_scripted_connection_error_survives_native_cleanup():
             async with session.realtime(config=RealtimeConfig(model="fixture", adapter=adapter)):
                 raise AssertionError("Unexpected successful connection")
     assert len(adapter.connect_calls) == 1
+
+
+async def test_scripted_predicate_cannot_change_emitted_acknowledgement():
+    import json
+
+    from agents.realtime import RealtimeAdapterContext
+
+    def matches(frame):
+        frame["session"]["instructions"] = "Matcher-modified instructions"
+        return frame["type"] == "session.update"
+
+    original = {"type": "session.update", "session": {"instructions": "Original instructions"}}
+    adapter = ScriptedRealtimeAdapter(
+        [
+            RealtimeStep(
+                matches,
+                lambda frame: [{"type": "session.updated", "session": frame["session"]}],
+            )
+        ]
+    )
+    await adapter.connect(RealtimeAdapterContext("wss://synthetic.invalid", {}))
+    try:
+        await adapter.send(json.dumps(original))
+        acknowledgement = json.loads(await anext(adapter.incoming))
+        assert acknowledgement == {"type": "session.updated", "session": original["session"]}
+        assert adapter.sent_events == (original,)
+        adapter.assert_complete()
+    finally:
+        await adapter.aclose()
