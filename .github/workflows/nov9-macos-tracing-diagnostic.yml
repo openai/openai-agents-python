@@ -57,10 +57,23 @@ jobs:
           stage="$RUNNER_TEMP/nov9-macos-tracing"
           cat > "$stage/macos-tracing.patch" <<'FROZEN_PATCH'
           diff --git a/packages/codex/tests/test_native_trace_exporter.py b/packages/codex/tests/test_native_trace_exporter.py
-          index 1f2ef983a803bdbc6fc53b7ae4ff7280d131e630..a8f55c5bc829876e151e4403d8a0ebedf2232729 100644
+          index 1f2ef983a803bdbc6fc53b7ae4ff7280d131e630..e7178632ba819b502cce8aa05d619f4016418b88 100644
           --- a/packages/codex/tests/test_native_trace_exporter.py
           +++ b/packages/codex/tests/test_native_trace_exporter.py
-          @@ -330,7 +330,7 @@ async def native_deadline_case():
+          @@ -267,6 +267,12 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
+                       await writer.wait_closed()
+                       handler_done.set()
+           
+          +    if not cancelled:
+          +        with collector() as (warmup_endpoint, requests):
+          +            warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=warmup_endpoint)
+          +            await warmup.on_trace_event(completed_event())
+          +            assert len(requests) == 1
+          +
+               server = await asyncio.start_server(trickle, "127.0.0.1", 0)
+               endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+               secret = "synthetic-private-timeout-key"
+          @@ -330,7 +336,7 @@ async def native_deadline_case():
                        )
                        requests.append(json.loads(await reader.readexactly(length)))
                        writer.write(b"HTTP/1.1 200 OK\r\n")
@@ -69,7 +82,7 @@ jobs:
                            eof = asyncio.create_task(reader.read())
                            for _ in range(30):
                                done, _ = await asyncio.wait((eof,), timeout=0.02)
-          @@ -353,6 +353,10 @@ async def native_deadline_case():
+          @@ -353,6 +359,10 @@ async def native_deadline_case():
                server = await asyncio.start_server(receive, "127.0.0.1", 0)
                endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
                try:
@@ -314,7 +327,7 @@ jobs:
           if __name__ == "__main__":
               sys.exit(main())
           FROZEN_PROBE
-          printf '%s  %s\n' c798848c158f0095638de0bf962d35e73cb4530398c1af81b06c76012a631e1b "$stage/macos-tracing.patch" | shasum -a 256 -c -
+          printf '%s  %s\n' 20cae68e77a45cb0cee00d29c3a43f0813a28829bbc8b09d31e9058bd9d57803 "$stage/macos-tracing.patch" | shasum -a 256 -c -
           printf '%s  %s\n' fd3791498638774ab344a887cf2235f9afbaa5b249edef64849412259dd207f0 "$stage/trace-watchdog-probe.py" | shasum -a 256 -c -
       - name: Install stock wheel and locked tracing test dependencies
         run: |
@@ -427,8 +440,8 @@ jobs:
           run_phase before
           git apply --check "$patch"
           git apply --index "$patch"
-          test "$(git write-tree)" = 340e82da0bb24ab62ce76eb6b1f9ebd0e6363cbe
-          echo 'candidate_tree=340e82da0bb24ab62ce76eb6b1f9ebd0e6363cbe'
+          test "$(git write-tree)" = 27dc81c52b0e8ad80ce0c0126fff008fa8765d62
+          echo 'candidate_tree=27dc81c52b0e8ad80ce0c0126fff008fa8765d62'
           run_phase after
           printf 'before_pytest_exit=%s after_pytest_exit=%s before_probes_exit=%s after_probes_exit=%s\n' \
             "$(cat "$stage/before/exit")" "$(cat "$stage/after/exit")" \
