@@ -34,18 +34,39 @@ _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
-# Discover the sandbox's tools before the checkout exists. Anchor relative PATH entries
-# to the original working directory and return absolute paths, even with standalone ash.
+# Capture the sandbox's executable search path before the checkout exists. Anchor relative
+# entries to the original working directory for both tool discovery and helper lookup.
 _GIT_TOOL_CHECK = r"""command -v git >/dev/null 2>&1 || exit 1
 CDPATH=
+cd -P . || exit 0
 set -f
 IFS=:
 tool_path="${PATH-}:/usr/bin:/bin"
-for tool in env sh cp; do
+copy_path=
+for directory in $tool_path; do
+    case "$directory" in
+        /*) ;;
+        *) directory="${PWD%/}/${directory:-.}" ;;
+    esac
+    # A colon in the original working directory cannot be encoded in PATH.
+    case "$directory" in *:*) continue ;; esac
+    [ -d "$directory" ] || continue
+    copy_path="${copy_path:+$copy_path:}$directory"
+done
+# Start the clean environment with an installed system tool. The configured PATH
+# can include workspace directories populated by other manifest entries.
+env_program=
+for directory in /usr/bin /bin; do
+    if [ -f "$directory/env" ] && [ -x "$directory/env" ]; then
+        env_program="$directory/env"
+        break
+    fi
+done
+printf '%s\000' "$env_program"
+for tool in sh cp; do
     executable=
-    for directory in $tool_path; do
-        candidate=$(cd -P "${directory:-.}" 2>/dev/null && printf '%s/%s' "${PWD%/}" "$tool") ||
-            continue
+    for directory in $copy_path; do
+        candidate="${directory%/}/$tool"
         if [ -f "$candidate" ] && [ -x "$candidate" ]; then
             executable=$candidate
             break
@@ -53,7 +74,39 @@ for tool in env sh cp; do
     done
     printf '%s\000' "$executable"
 done
+printf '%s\000' "$copy_path"
 """
+
+_GIT_COPY_SOURCE_BOUNDARY = """case "$source_root" in
+    "$repo_root"|"$repo_root"/*) ;;
+    *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
+esac
+"""
+
+_GIT_COPY = (
+    """set -eu
+CDPATH=
+cd -P .
+destination=$3
+case "$destination" in
+    /*) ;;
+    *) destination="$PWD/$destination" ;;
+esac
+cd -P /tmp
+tmp_root=$PWD
+cd -P "$1"
+repo_root=$PWD
+[ "$repo_root" = "$tmp_root/${1##*/}" ] || {
+    echo 'Git checkout is outside its temporary directory' >&2
+    exit 1
+}
+cd -P "./$2"
+source_root=$PWD
+"""
+    + _GIT_COPY_SOURCE_BOUNDARY
+    + """exec "$COPY_PROGRAM" -R -P -- . "$destination/"
+"""
+)
 
 
 def _absolute_without_symlink_resolution(path: Path) -> Path:
@@ -790,9 +843,9 @@ class GitRepo(BaseEntry):
         git_src_root = self._git_src_root(tmp_dir, git_subpath)
         copy_tools = git_check.stdout.split(b"\0")
         if (
-            len(copy_tools) != 4
-            or copy_tools[3]
-            or not all(tool.startswith(b"/") for tool in copy_tools[:3])
+            len(copy_tools) != 5
+            or copy_tools[-1]
+            or not all(path.startswith(b"/") for path in copy_tools[:-1])
         ):
             raise GitCopyError(
                 src_root=git_src_root,
@@ -800,7 +853,7 @@ class GitRepo(BaseEntry):
                 stderr="Unable to locate executable env, sh, and cp tools in the sandbox",
                 context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
             )
-        env_program, shell_program, copy_program = map(os.fsdecode, copy_tools[:3])
+        env_program, shell_program, copy_program, copy_path = map(os.fsdecode, copy_tools[:-1])
         url = f"https://{self.host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
@@ -831,34 +884,11 @@ class GitRepo(BaseEntry):
             copy = await session.exec(
                 env_program,
                 "-i",
-                "PATH=/usr/bin:/bin",
+                f"PATH={copy_path}",
                 f"COPY_PROGRAM={copy_program}",
                 shell_program,
                 "-c",
-                """set -eu
-CDPATH=
-cd -P .
-destination=$3
-case "$destination" in
-    /*) ;;
-    *) destination="$PWD/$destination" ;;
-esac
-cd -P /tmp
-tmp_root=$PWD
-cd -P "$1"
-repo_root=$PWD
-[ "$repo_root" = "$tmp_root/${1##*/}" ] || {
-    echo 'Git checkout is outside its temporary directory' >&2
-    exit 1
-}
-cd -P "./$2"
-source_root=$PWD
-case "$source_root" in
-    "$repo_root"|"$repo_root"/*) ;;
-    *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
-esac
-exec "$COPY_PROGRAM" -R -P -- . "$destination/"
-""",
+                _GIT_COPY,
                 "sandbox-git-copy",
                 tmp_dir,
                 git_subpath.as_posix() if git_subpath is not None else ".",

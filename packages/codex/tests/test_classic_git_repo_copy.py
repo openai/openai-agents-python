@@ -4,6 +4,7 @@ import asyncio
 import os
 import shlex
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from typing import cast
 import pytest
 
 from agents.classic.sandbox.entries import GitRepo
+from agents.classic.sandbox.entries.artifacts import _GIT_COPY_SOURCE_BOUNDARY
 from agents.classic.sandbox.errors import GitCopyError
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.types import ExecResult
@@ -27,12 +29,15 @@ class FixtureGitSession:
         self.cwd = cwd
         self.state = SimpleNamespace(session_id=uuid.uuid4())
         self.checkout: Path | None = None
+        self.copy_launcher: str | None = None
 
     async def exec(self, *args: str, shell: bool | list[str] = True) -> ExecResult:
         if args[:2] == ("git", "clone"):
             self.checkout = Path(args[-1])
             shutil.copytree(self.fixture, self.checkout, symlinks=True)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        if args[1:2] == ("-i",):
+            self.copy_launcher = args[0]
         if shell:
             prefix = shell if isinstance(shell, list) else ["sh", "-c"]
             args = (*prefix, args[0])
@@ -64,6 +69,31 @@ def git_fixture(tmp_path: Path) -> Path:
     (nested / "selected.txt").write_text("selected fixture\n")
     (fixture / "selected-link").symlink_to("directory with spaces/nested", target_is_directory=True)
     return fixture
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_status"),
+    [
+        ("/example/checkout", 0),
+        ("/example/checkout/nested", 0),
+        ("/example/neighbor", 1),
+        ("/example/checkout-copy", 1),
+    ],
+)
+def test_git_copy_requires_a_contained_source(source: str, expected_status: int) -> None:
+    result = subprocess.run(
+        [
+            "sh",
+            "-c",
+            "repo_root=$1\nsource_root=$2\n" + _GIT_COPY_SOURCE_BOUNDARY,
+            "git-copy-boundary",
+            "/example/checkout",
+            source,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == expected_status
 
 
 @pytest.mark.parametrize("subpath", [None, ".", "directory with spaces/nested", "selected-link"])
@@ -124,15 +154,24 @@ async def test_git_repo_uses_custom_copy_with_a_clean_environment(
 ) -> None:
     system_copy = shutil.which("cp")
     assert system_copy is not None
+    system_env = shutil.which("env")
+    assert system_env is not None
     tool_bin = tmp_path / "custom tools"
     tool_bin.mkdir()
+    (tool_bin / "env").symlink_to(system_env)
     copy_marker = tmp_path / "copy marker"
+    copy_helper = tool_bin / "sdk-test-record-copy"
+    copy_helper.write_text(
+        f"#!/bin/sh\nprintf '%s' 'custom copy' > {shlex.quote(str(copy_marker))}\n",
+        encoding="utf-8",
+    )
+    copy_helper.chmod(0o755)
     custom_copy = tool_bin / "cp"
     custom_copy.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
         'test "${SDK_GIT_COPY_TEST_CONTEXT-unset}" = unset\n'
-        f"printf '%s' 'custom copy' > {shlex.quote(str(copy_marker))}\n"
+        "sdk-test-record-copy\n"
         f'exec {shlex.quote(system_copy)} "$@"\n',
         encoding="utf-8",
     )
@@ -147,6 +186,7 @@ async def test_git_repo_uses_custom_copy_with_a_clean_environment(
     assert await entry.apply(cast(BaseSandboxSession, session), destination, tmp_path) == []
     assert (destination / "root.txt").read_text() == "root fixture\n"
     assert copy_marker.read_text(encoding="utf-8") == "custom copy"
+    assert session.copy_launcher in {"/usr/bin/env", "/bin/env"}
 
 
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
