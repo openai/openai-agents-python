@@ -30,9 +30,48 @@ PYTHONPATH=. python -m examples.codex.supervised_worker publish "$job_dir/alpha"
 
 Each worker prints a JSON outcome. When a worker succeeds, its workspace contains `summary.txt` and its saved status includes an `accepted` record. The final `publish` command prints `{"status": "published"}`. Repeating publication prints `{"status": "already_published"}`.
 
-## Reconnect to a running worker
+## Reconnect to saved worker status
 
 Each process owns a separate workspace and native `LocalStorage` history. A status client can exit while the worker runs. When a new client reads status, it sees the same saved session ID and any accepted result. The application keeps its records beside the workspace, outside the roots it grants to model tools.
+
+## Supervise a live turn from another process
+
+Start the worker in a terminal or under your process manager. The worker owns the `Session`, the `LocalStorage` writer, and one submitted `Turn`. Give the worker a fresh job directory and enough time to finish the task, including time to answer questions.
+
+```sh
+job_dir="$(mktemp -d)"
+PYTHONPATH=. python -m examples.codex.supervised_worker serve "$job_dir/alpha" \
+    --turn-timeout 600 --prompt 'Ask me which color to use, then report my answer.'
+```
+
+The worker prints a JSON object with its `socket` path, session ID, and submission ID. The native turn ID becomes available when Codex starts the turn. In another terminal, set `socket` to the path the worker printed and attach to the event stream.
+
+```sh
+supervise() { PYTHONPATH=. python -m examples.codex.supervised_worker.live "$socket" "$@"; }
+supervise events
+```
+
+Copy the `turn_id` from `turn_started`. Press Ctrl+C in the supervisor terminal to detach. Reconnect with `supervise events --after "$sequence"`, using the last `sequence` you read. The SDK retains a bounded event buffer. A `gap` event means older observations have expired. A cursor beyond the latest sequence returns `invalid_request` and exits with status 1. The worker stores Session history in the job directory. If you enable `--mcp-url`, `--execution-details` includes MCP arguments and results, which can contain sensitive data.
+
+```sh
+printf '%s' 'Use the color in your final answer.' | supervise steer "$turn_id"
+supervise wait
+```
+
+`wait` returns the pending question or the settled outcome. Copy the `question_id` and `turn_id` from the question. Answer `ask_supervisor` with a JSON string. The worker denies approvals and declines MCP form and URL requests.
+
+```sh
+printf '%s' '"blue"' | supervise answer "$turn_id" "$question_id"
+supervise wait
+```
+
+`supervise cancel "$turn_id"` stops and joins the observed turn. `steer` uses `Turn.steer_exact()` and returns the native acceptance receipt. A late correction fails with `stale_turn`. A reply to a stale question fails with `expired_question`. If a supervisor disconnects before reading a steering receipt, the worker may still have applied the input. Repeating `steer` can add a second input to the same turn.
+
+The Unix socket lives in a private directory under `/tmp`. The supervisor checks the connected peer's Unix user before sending a request. Processes running under the worker's Unix account can read the output and control the turn. Use a dedicated worker account if you need to isolate it from other applications. The `serve` command gives the model the question tool and any MCP tool you configure. It opens the Session without a command executor.
+
+The turn continues when a supervisor exits. The worker keeps the socket open after the turn settles so another supervisor can read its outcome. Stop the worker with Ctrl+C in its terminal or send it SIGTERM from your process manager. Stopping the worker closes the Session and removes the socket. To recover a Session after a worker crash, an application can reopen its `LocalStorage` history and reconcile any uncertain effects.
+
+The worker requests cancellation at the turn deadline. Whether the deadline or a supervisor requests the stop, `wait` reports the settled native outcome, such as `interrupted`.
 
 ## Steer work and handle attention
 

@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import signal
 import stat
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import asdict, dataclass, field
@@ -26,6 +27,7 @@ from agents import (
     ApprovalRequest,
     Completed,
     Environment,
+    FunctionTool,
     HttpMCP,
     LocalRecoveryRequired,
     LocalStorage,
@@ -70,6 +72,18 @@ class ArtifactResult(BaseModel):
 
     artifact: Literal["summary.txt"]
     check: Literal["artifact checked"]
+
+
+class SupervisorQuestion(BaseModel):
+    question: str
+
+
+ask_supervisor = FunctionTool(
+    name="ask_supervisor",
+    description="Ask the supervisor for input when the task needs a decision.",
+    input_type=SupervisorQuestion,
+    output_type=str,
+)
 
 
 def read_record(directory: Path, name: str) -> dict[str, Any] | None:
@@ -496,7 +510,7 @@ async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, An
     worker = Worker(directory, args.pause_after_effect)
     worker.workspace.mkdir(mode=0o700, exist_ok=True)
     identity = read_record(directory, "identity")
-    if args.command in {"work", "interrupt"} and identity is not None:
+    if args.command in {"work", "interrupt", "serve"} and identity is not None:
         raise ValueError("Use a fresh worker directory for a new task.")
     if args.command in {"effect", "recover"} and identity is None:
         raise ValueError("An existing worker identity is required.")
@@ -505,9 +519,15 @@ async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, An
     notes: HttpMCP[Worker] | None = None
     if args.mcp_url is not None:
         notes = HttpMCP(name="job_notes", url=args.mcp_url, tools=["lookup"])
+    serving = args.command == "serve"
+    tools: list[Tool[Worker]] = [ask_supervisor] if serving else [brief, record_effect]
+    if notes is not None:
+        tools.append(notes)
     agent = Agent[Worker, ArtifactResult](
         model=os.environ.get("WORKER_MODEL"),
-        instructions=(
+        instructions="Ask the supervisor when you need a decision."
+        if serving
+        else (
             "Work only in the assigned workspace. Use exec_command to write summary.txt, "
             f"then run {VERIFY_COMMAND} as a separate exec_command. "
             "Report the required structured output for artifact tasks. "
@@ -515,13 +535,17 @@ async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, An
         ),
         provider=provider,
         output_type=ArtifactResult,
-        tools=[brief, record_effect] if notes is None else [brief, record_effect, notes],
+        tools=tools,
     )
-    environment: Environment[Worker] = Environment.local(
-        cwd=str(worker.workspace),
-        tools=("exec_command",),
-        writable_roots=(str(worker.workspace),),
-        capability_directories=(),
+    environment: Environment[Worker] | None = (
+        Environment.local(
+            cwd=str(worker.workspace),
+            tools=("exec_command",),
+            writable_roots=(str(worker.workspace),),
+            capability_directories=(),
+        )
+        if not serving
+        else None
     )
     stage = "startup"
     try:
@@ -571,6 +595,7 @@ async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, An
             record_once(directory, "identity", {"session_id": session.id})
             stage = "turn"
             if args.command in {"work", "interrupt"}:
+                assert environment is not None
                 return await work(
                     worker,
                     session,
@@ -580,6 +605,17 @@ async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, An
                     startup_ms,
                     interrupt=args.command == "interrupt",
                 )
+            if serving:
+                from .live import serve_turn
+
+                stop = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                loop.add_signal_handler(signal.SIGTERM, stop.set)
+                try:
+                    await serve_turn(session, args.prompt, timeout=args.turn_timeout, stop=stop)
+                finally:
+                    loop.remove_signal_handler(signal.SIGTERM)
+                return {"status": "closed", "session_id": session.id}
             prompt = (
                 "Call record_effect once to record the simulated handoff, then report its result."
                 if args.command == "effect"
@@ -636,7 +672,7 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("work", "effect", "recover", "interrupt", "status", "publish")
+        "command", choices=("work", "effect", "recover", "interrupt", "status", "publish", "serve")
     )
     parser.add_argument("directory", type=Path)
     parser.add_argument("--startup-timeout", type=float, default=60)
@@ -644,7 +680,12 @@ def main() -> None:
     parser.add_argument("--instruction-file", action="append", default=[], type=Path)
     parser.add_argument("--mcp-url", help="Trusted endpoint for the optional job_notes lookup.")
     parser.add_argument("--pause-after-effect", action="store_true")
+    parser.add_argument("--prompt", help="Initial task for the live worker.")
     args = parser.parse_args()
+    if args.command == "serve" and (args.prompt is None or not args.prompt.strip()):
+        parser.error("The live worker requires --prompt.")
+    if args.command != "serve" and args.prompt is not None:
+        parser.error("--prompt is for serve mode.")
     if not all(
         math.isfinite(value) and value > 0 for value in (args.startup_timeout, args.turn_timeout)
     ):
@@ -664,7 +705,10 @@ def main() -> None:
         created = record_once(args.directory, "published", accepted)
         status = {"status": "published" if created else "already_published"}
     else:
-        status = asyncio.run(run_worker(args))
+        try:
+            status = asyncio.run(run_worker(args))
+        except KeyboardInterrupt:
+            parser.exit(130)
     print(json.dumps(status), flush=True)
 
 
