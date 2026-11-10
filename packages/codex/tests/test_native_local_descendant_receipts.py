@@ -8,7 +8,7 @@ import os
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from aiohttp import web
@@ -38,9 +38,10 @@ DESCENDANT_MODEL = "gpt-6.1-sol"
 
 
 class LocalFamilyPeer(ChildPeer):
-    def __init__(self, depth: int) -> None:
+    def __init__(self, depth: int, *, fork_turns: Literal["none", "all"] = "none") -> None:
         super().__init__(("default",))
         self.depth = depth
+        self.fork_turns = fork_turns
         self.followup = False
         for release in self.release.values():
             release.set()
@@ -84,7 +85,7 @@ class LocalFamilyPeer(ChildPeer):
                         {
                             "task_name": name,
                             "message": "Record a memory.",
-                            "fork_turns": "all" if self.depth == 2 else "none",
+                            "fork_turns": self.fork_turns,
                         },
                         "spawn-" + name,
                     )
@@ -465,7 +466,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
     known,
     no_children,
 ):
-    peer = LocalFamilyPeer(depth)
+    peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
     app.router.add_get("/v1/responses", peer.websocket)
@@ -690,7 +691,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
 async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
     tmp_path, monkeypatch, depth, no_children
 ):
-    peer = LocalFamilyPeer(depth)
+    peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
     entered, release = asyncio.Event(), asyncio.Event()
     original_response = peer.response
 
