@@ -1,0 +1,103 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 98997cb..fc8a1b2 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -3044,12 +3044,32 @@ mod tests {
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++                usage: None,
+                 function_call_ids: Vec::new(),
+                 response_id: None
+             }))
+         );
+     }
+ 
++    #[test]
++    fn parse_realtime_v2_response_usage_preserves_zero_and_provider_details() {
++        let usage = json!({
++            "input_tokens": 0,
++            "output_tokens": 5,
++            "total_tokens": 5,
++            "input_token_details": {"audio_tokens": 0, "cached_tokens_details": {"audio_tokens": 0}},
++            "output_token_details": {"audio_tokens": 5}
++        });
++        let payload =
++            json!({"type":"response.done","response":{"id":"r","usage":usage}}).to_string();
++        let Some(RealtimeEvent::ResponseDone(done)) =
++            parse_realtime_event(&payload, RealtimeEventParser::RealtimeV2)
++        else {
++            panic!("expected response completion")
++        };
++        assert_eq!(done.usage, Some(usage));
++    }
++
+     #[test]
+     fn parse_realtime_v2_response_created_event() {
+         let payload = json!({
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+index 492ed91..3c8f05c 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+@@ -83,6 +83,11 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
+             },
+         )),
+         "response.done" => Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            usage: parsed
++                .get("response")
++                .and_then(|response| response.get("usage"))
++                .filter(|usage| usage.is_object())
++                .cloned(),
+             function_call_ids: parsed
+                 .get("response")
+                 .and_then(|response| response.get("output"))
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index d6caa4e..ee73cb6 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -2201,6 +2201,7 @@ async fn sdk_function_duplicates_never_bind_to_latest_response() {
+         }),
+         RealtimeEvent::FunctionCallRequested(request.clone()),
+         RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            usage: None,
+             response_id: Some("A".into()),
+             // The uncorrelated call is not an authoritative member of A.
+             function_call_ids: Vec::new(),
+@@ -2624,6 +2625,7 @@ async fn sdk_stale_response_terminal_does_not_release_active_response_or_create_
+     responses.pending_create = true;
+     for event in [
+         codex_api::RealtimeEvent::ResponseDone(codex_protocol::protocol::RealtimeResponseDone {
++            usage: None,
+             response_id: Some("stale".into()),
+             function_call_ids: Vec::new(),
+         }),
+@@ -2761,6 +2763,7 @@ async fn sdk_response_batch_runs_two_native_calls_under_one_source_without_model
+     })
+     .await;
+     let done = RealtimeEvent::ResponseDone(RealtimeResponseDone {
++        usage: None,
+         response_id: Some("provider-response".into()),
+         function_call_ids: ids.clone(),
+     });
+@@ -3211,6 +3214,7 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+         batch.handoff_accepted.store(true, Ordering::Release);
+         let stale = codex_api::RealtimeEvent::ResponseDone(
+             codex_protocol::protocol::RealtimeResponseDone {
++                usage: None,
+                 response_id: Some("stale-response".into()),
+                 function_call_ids: Vec::new(),
+             },
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index a11ef22..c9932cb 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -631,6 +631,9 @@ pub struct RealtimeHostedMcpCallCompleted {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeResponseDone {
++    /// Provider-reported counters. Absence is unknown, never a measured zero.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub usage: Option<Value>,
+     pub response_id: Option<String>,
+     #[serde(default)]
+     pub function_call_ids: Vec<String>,
