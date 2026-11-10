@@ -85,10 +85,17 @@ class ChatCompletionsModel:
     The client must expose ``chat.completions.create``. This adapter requests one
     complete response; it does not claim token streaming. Native function tools
     and settled assistant/tool history retain their Core execution ownership.
+    ``prompt_cache_key`` selects provider cache affinity for this adapter only;
+    ``None`` retains the native request key and existing client conversion.
     """
 
     client: Any = field(repr=False)
     model: str | None = None
+    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
+            raise TypeError("prompt_cache_key must be a string or None")
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         messages: list[dict[str, Any]] = []
@@ -206,6 +213,8 @@ class ChatCompletionsModel:
             )
             if key in request.body
         }
+        if self.prompt_cache_key is not None:
+            options["prompt_cache_key"] = self.prompt_cache_key
         if (
             request.body.keys()
             - options.keys()
@@ -259,10 +268,7 @@ class ChatCompletionsModel:
         else:
             options.pop("tool_choice", None)
             options.pop("parallel_tool_calls", None)
-        create = self.client.chat.completions.create
-        if not inspect.iscoroutinefunction(inspect.unwrap(create)):
-            raise TypeError("ChatCompletionsModel requires an asynchronous client")
-        response = await create(
+        response = await self._create(
             model=self.model or request.body["model"], messages=messages, stream=False, **options
         )
         value = response.model_dump() if hasattr(response, "model_dump") else response
@@ -317,6 +323,102 @@ class ChatCompletionsModel:
                     "cached_tokens", 0
                 ),
                 "reasoning_output_tokens": (raw_usage.get("completion_tokens_details") or {}).get(
+                    "reasoning_tokens", 0
+                ),
+            }
+        )
+        return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+
+    async def _create(self, **options: Any) -> Any:
+        create = self.client.chat.completions.create
+        if not inspect.iscoroutinefunction(inspect.unwrap(create)):
+            raise TypeError("ChatCompletionsModel requires an asynchronous client")
+        return await create(**options)
+
+
+@dataclass(frozen=True)
+class LitellmModel(ChatCompletionsModel):
+    """Borrow LiteLLM or a Router exposing asynchronous ``acompletion``.
+
+    Construct the client with its credentials, routing and transport settings.
+    Core owns tools and history; the application owns and closes the client.
+    """
+
+    async def _create(self, **options: Any) -> Any:
+        if self.prompt_cache_key is not None:
+            options["extra_body"] = {"prompt_cache_key": options.pop("prompt_cache_key")}
+        response = await self.client.acompletion(**options)
+        value = response.model_dump()
+        for choice in value["choices"]:
+            message = choice["message"]
+            refusal = (message.get("provider_specific_fields") or {}).get("refusal")
+            if message.get("refusal") is None and refusal is not None:
+                message["refusal"] = refusal
+        return value
+
+
+@dataclass(frozen=True)
+class AnyLLMModel(ChatCompletionsModel):
+    """Borrow an AnyLLM provider exposing asynchronous ``acompletion``.
+
+    Pass an application-created ``AnyLLM.create(...)`` provider. Optional provider
+    packages are not imported by the native root; credentials remain with it.
+    """
+
+    async def _create(self, **options: Any) -> Any:
+        return await self.client.acompletion(**options)
+
+
+@dataclass(frozen=True)
+class ResponsesModel:
+    """Borrow an asynchronous Responses client for the native Core model loop.
+
+    Native request fields reach ``responses.create`` without a second formatter.
+    The client remains application-owned; only complete responses are admitted.
+    ``prompt_cache_key`` overrides only this borrowed client's outgoing cache
+    affinity; ``None`` retains the native request key.
+    """
+
+    client: Any = field(repr=False)
+    model: str | None = None
+    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.prompt_cache_key is not None and not isinstance(self.prompt_cache_key, str):
+            raise TypeError("prompt_cache_key must be a string or None")
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        create = self.client.responses.create
+        if not inspect.iscoroutinefunction(inspect.unwrap(create)):
+            raise TypeError("ResponsesModel requires an asynchronous client")
+        body = dict(request.body)
+        body["model"] = self.model or body["model"]
+        if self.prompt_cache_key is not None:
+            body["prompt_cache_key"] = self.prompt_cache_key
+        body.pop("stream", None)
+        response = await create(stream=False, extra_body=body)
+        value = response.model_dump() if hasattr(response, "model_dump") else response
+        output = value.get("output") or []
+        refusal = any(
+            part.get("type") == "refusal"
+            for item in output
+            if item.get("type") == "message"
+            for part in item.get("content", [])
+        )
+        if value.get("status") != "completed" and not refusal:
+            raise ValueError("ResponsesModel requires a completed response")
+        raw_usage = value.get("usage")
+        usage = (
+            None
+            if raw_usage is None
+            else {
+                "input_tokens": raw_usage.get("input_tokens", 0),
+                "output_tokens": raw_usage.get("output_tokens", 0),
+                "total_tokens": raw_usage.get("total_tokens", 0),
+                "cached_input_tokens": (raw_usage.get("input_tokens_details") or {}).get(
+                    "cached_tokens", 0
+                ),
+                "reasoning_output_tokens": (raw_usage.get("output_tokens_details") or {}).get(
                     "reasoning_tokens", 0
                 ),
             }

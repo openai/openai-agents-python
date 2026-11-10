@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "c9fa7688b651585175b4b6bdec3ef9f722d08080",
+  "baseline_commit": "1c4c6c1b3b32a3d4ace9008722573e244fc1b0d2",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -600,14 +600,20 @@
           "@dataclass(frozen=True)\nclass ModelResponse:\n    output: list[dict[str, Any]] = field(repr=False)\n    usage: dict[str, int] | None = None\n    response_id: str = field(default_factory=lambda: 'resp_' + uuid4().hex)",
           "class NativeModel(Protocol):\n\n    def complete(self, request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]:\n        pass",
           "class ModelProvider(Protocol):\n\n    def get_model(self, model_name: str) -> NativeModel:\n        pass",
-          "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
+          "@dataclass(frozen=True)\nclass ChatCompletionsModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass",
+          "@dataclass(frozen=True)\nclass LitellmModel(ChatCompletionsModel):\n    pass",
+          "@dataclass(frozen=True)\nclass AnyLLMModel(ChatCompletionsModel):\n    pass",
+          "@dataclass(frozen=True)\nclass ResponsesModel:\n    client: Any = field(repr=False)\n    model: str | None = None\n    prompt_cache_key: str | None = field(default=None, repr=False, kw_only=True)\n\n    async def complete(self, request: ModelRequest) -> ModelResponse:\n        pass"
         ],
         "exports": {
+          "AnyLLMModel": "agents.models.AnyLLMModel",
           "ChatCompletionsModel": "agents.models.ChatCompletionsModel",
+          "LitellmModel": "agents.models.LitellmModel",
           "ModelProvider": "agents.models.ModelProvider",
           "ModelRequest": "agents.models.ModelRequest",
           "ModelResponse": "agents.models.ModelResponse",
-          "NativeModel": "agents.models.NativeModel"
+          "NativeModel": "agents.models.NativeModel",
+          "ResponsesModel": "agents.models.ResponsesModel"
         },
         "imports": [
           "from collections.abc import Awaitable",
@@ -1621,6 +1627,7 @@
       "ActionRequested": "agents.manual.ActionRequested",
       "Agent": "agents.agent.Agent",
       "Allow": "agents.native_interception.Allow",
+      "AnyLLMModel": "agents.models.AnyLLMModel",
       "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
       "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
       "ApprovalDecision": "agents.manual.ApprovalDecision",
@@ -1685,6 +1692,7 @@
       "Interaction": "agents.manual.Interaction",
       "InteractionExpiredError": "agents.session.InteractionExpiredError",
       "InteractionRequired": "agents.session.InteractionRequired",
+      "LitellmModel": "agents.models.LitellmModel",
       "LocalRecoveryRequired": "agents.recovery.LocalRecoveryRequired",
       "LocalStorage": "agents.state.LocalStorage",
       "LocalStorageMount": "agents.executor.LocalStorageMount",
@@ -1737,6 +1745,7 @@
       "RedisSessionStore": "agents.canonical_storage.RedisSessionStore",
       "ReplaceArguments": "agents.native_interception.ReplaceArguments",
       "ResponseIntegrityReason": "agents.session.ResponseIntegrityReason",
+      "ResponsesModel": "agents.models.ResponsesModel",
       "RunBudget": "agents.usage.RunBudget",
       "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
       "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
@@ -4276,6 +4285,7 @@
       "ActionRequested",
       "Agent",
       "Allow",
+      "AnyLLMModel",
       "ApiRateLimitWindow",
       "ApiRateLimits",
       "ApprovalDecision",
@@ -4340,6 +4350,7 @@
       "Interaction",
       "InteractionExpiredError",
       "InteractionRequired",
+      "LitellmModel",
       "LocalRecoveryRequired",
       "LocalStorage",
       "LocalStorageMount",
@@ -4392,6 +4403,7 @@
       "RedisSessionStore",
       "ReplaceArguments",
       "ResponseIntegrityReason",
+      "ResponsesModel",
       "RunBudget",
       "SQLAlchemySessionStore",
       "SQLiteSessionStore",
@@ -4445,7 +4457,7 @@
       "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalDecision as ApprovalDecision, ApprovalRequest as ApprovalRequest, ApprovalRequested as ApprovalRequested, ElicitationRequest as ElicitationRequest, FormRequest as FormRequest, Interaction as Interaction, UrlRequest as UrlRequest, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPBlobResourceContents as MCPBlobResourceContents, MCPCallContext as MCPCallContext, MCPGetPromptResult as MCPGetPromptResult, MCPListResourcesResult as MCPListResourcesResult, MCPListResourceTemplatesResult as MCPListResourceTemplatesResult, MCPMetadataContext as MCPMetadataContext, MCPPrompt as MCPPrompt, MCPPromptArgument as MCPPromptArgument, MCPPromptAudioContent as MCPPromptAudioContent, MCPPromptContent as MCPPromptContent, MCPPromptImageContent as MCPPromptImageContent, MCPPromptMessage as MCPPromptMessage, MCPPromptResourceContent as MCPPromptResourceContent, MCPPromptResourceLink as MCPPromptResourceLink, MCPPromptTextContent as MCPPromptTextContent, MCPReadResourceResult as MCPReadResourceResult, MCPResource as MCPResource, MCPResourceTemplate as MCPResourceTemplate, MCPResultContext as MCPResultContext, MCPTextResourceContents as MCPTextResourceContents, StdioMCP as StdioMCP",
       "from .model_context import ModelContextSnapshot as ModelContextSnapshot, ModelRequestContext as ModelRequestContext",
-      "from .models import ChatCompletionsModel as ChatCompletionsModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelResponse as ModelResponse, NativeModel as NativeModel",
+      "from .models import AnyLLMModel as AnyLLMModel, ChatCompletionsModel as ChatCompletionsModel, LitellmModel as LitellmModel, ModelProvider as ModelProvider, ModelRequest as ModelRequest, ModelResponse as ModelResponse, NativeModel as NativeModel, ResponsesModel as ResponsesModel",
       "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
       "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
