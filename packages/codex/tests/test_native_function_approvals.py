@@ -869,6 +869,20 @@ async def test_approved_terminal_retains_completed_search_sibling(responses, res
             async with agent.session() as source:
                 await source.submit("begin")
                 await next_request(source.interactions(), risky)
+                # Approval publication can precede the native search sibling's
+                # completion. Portable suspension requires its completed receipt.
+                while True:
+                    history = json.loads(await source._native.read_thread_history(None))
+                    if any(
+                        item["type"] == "response_item"
+                        and item["payload"].get("type") == "tool_search_output"
+                        and item["payload"].get("call_id") == "search-sibling"
+                        and item["payload"].get("execution") == "client"
+                        and item["payload"].get("status") == "completed"
+                        for item in history
+                    ):
+                        break
+                    await asyncio.sleep(0)
                 state = await source.suspend()
         async with agent.session(state=state) as session:
             turn = session.restored_turn if restored else await session.submit("begin")
