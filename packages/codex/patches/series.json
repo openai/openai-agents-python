@@ -415,7 +415,11 @@
     {
       "path": "sdk-realtime-provider-controls-and-tool-history.patch",
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
+    },
+    {
+      "path": "0153-sdk-saved-login-durable-refresh.patch",
+      "sha256": "b1b08f00d08eecf856f818774483486ab1e0b552a9d1615b7dd4ea124ca3add7"
     }
   ],
-  "result_tree": "4e50813c66bb4fd9cd0ef5d421d1e3f7b6a9148f"
+  "result_tree": "776635dd4b0c9def64b3f2371bcee427d2ef50d6"
 }

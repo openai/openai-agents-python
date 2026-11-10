@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import ssl
 import sys
@@ -19,6 +20,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from agents import Turn, TurnStoppedError
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output
 from tests.test_core_schema_transport import connect_proxy
@@ -216,3 +218,181 @@ async def test_sessions_share_one_refresh_of_a_copied_login_and_restart(
         assert refresh_tokens == ["synthetic-refresh-token"]
         connect_request = f"CONNECT {authority} HTTP/1.1\r\n".encode()
         assert any(request.startswith(connect_request) for request in connects)
+
+
+@pytest.mark.serial
+async def test_saved_login_survives_cancelled_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from _agents_codex import session as session_module
+
+    source = saved_login(tmp_path / "browser-host") / "auth.json"
+    home = tmp_path / "headless-host"
+    home.mkdir()
+    cache = home / "auth.json"
+    shutil.copyfile(source, cache)
+    original_bytes = source.read_bytes()
+    original = json.loads(original_bytes)
+    replacement = {"access_token": "rotated-token", "refresh_token": "rotated-refresh-token"}
+    api_key = "unused-synthetic-api-key"
+    admitted = asyncio.Event()
+    release_reply = asyncio.Event()
+    both_expired = asyncio.Event()
+    oauth_calls = replays = expired = rotated = fallback = unexpected = 0
+
+    def cache_has_rotation() -> bool:
+        try:
+            state = json.loads(cache.read_bytes())
+        except (OSError, ValueError):
+            return False
+        return (
+            isinstance(state, dict)
+            and state.get("tokens") == {**original["tokens"], **replacement}
+            and state.get("auth_mode") == original["auth_mode"]
+            and state.get("OPENAI_API_KEY") is None
+            and isinstance(state.get("last_refresh"), str)
+            and bool(state["last_refresh"])
+            and state["last_refresh"] != original["last_refresh"]
+        )
+
+    async def responses(request: web.Request) -> web.Response:
+        nonlocal expired, rotated, fallback, unexpected
+        bearer = request.headers.get("Authorization")
+        if bearer == f"Bearer {api_key}":
+            fallback += 1
+        elif request.headers.get("ChatGPT-Account-ID") == ACCOUNT:
+            if bearer == "Bearer saved-token":
+                expired += 1
+                # Each turn reloads on its first 401 and reaches refresh on its second.
+                if expired == 4:
+                    both_expired.set()
+                return web.json_response({"error": {"message": "Expired"}}, status=401)
+            if bearer == "Bearer rotated-token":
+                rotated += 1
+                events = [
+                    assistant_output("Accepted rotated login."),
+                    {"type": "response.completed", "response": {"id": "resp_rotated"}},
+                ]
+                return web.Response(
+                    text="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+                    content_type="text/event-stream",
+                )
+        unexpected += 1
+        return web.json_response({"error": {"message": "Unexpected login"}}, status=403)
+
+    async def refresh(request: web.Request) -> web.Response:
+        nonlocal oauth_calls, replays
+        oauth_calls += 1
+        grant = await request.json()
+        if (
+            grant.get("grant_type") != "refresh_token"
+            or grant.get("refresh_token") != original["tokens"]["refresh_token"]
+        ):
+            return web.json_response({"error": "invalid_grant"}, status=400)
+        if admitted.is_set():
+            replays += 1
+            return web.json_response({"error": "invalid_grant"}, status=400)
+        admitted.set()
+        await release_reply.wait()
+        return web.json_response(replacement)
+
+    async def force_cancel(turn: Turn) -> bool:
+        await turn.cancel(mode="force")
+        try:
+            await turn.get_result()
+        except TurnStoppedError:
+            return True
+        return False
+
+    model_app = web.Application(handler_args={"auto_decompress": False})
+    model_app.router.add_post("/v1/responses", responses)
+    auth_app = web.Application()
+    auth_app.router.add_post("/oauth/token", refresh)
+    ca_file, tls = refresh_server_tls(tmp_path)
+    authority = f"{AUTH_HOST}:443"
+    async with timeout(60), AsyncExitStack() as peers:
+        model = await peers.enter_async_context(TestServer(model_app))
+        auth = TestServer(auth_app, scheme="https")
+        peers.push_async_callback(auth.close)
+        await auth.start_server(ssl=tls)
+        proxy, connects = await peers.enter_async_context(
+            connect_proxy(str(auth.make_url("/")), authority=authority)
+        )
+        for variable in ("HTTPS_PROXY", "https_proxy"):
+            monkeypatch.setenv(variable, proxy)
+        for variable in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(variable, "127.0.0.1")
+        for variable in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+            monkeypatch.setenv(variable, api_key)
+        monkeypatch.setenv("CODEX_CA_CERTIFICATE", str(ca_file))
+        endpoint = str(model.make_url("/v1"))
+        monkeypatch.setenv("OPENAI_BASE_URL", endpoint)
+        monkeypatch.setattr(session_module, "_CODEX_RESPONSES_BASE_URL", endpoint)
+
+        agent = codex_agent(home)
+        provider = agent.provider
+        assert provider is not None
+        async with provider, AsyncExitStack() as sessions:
+            original_file = sessions.enter_context(cache.open("rb")) if os.name == "posix" else None
+            owner = await sessions.enter_async_context(agent.session())
+            peer = await sessions.enter_async_context(agent.session())
+            tasks: list[asyncio.Task[bool] | asyncio.Task[None]] = []
+
+            async def close_refresh_owner() -> bool:
+                await owner.aclose()
+                return cache_has_rotation()
+
+            try:
+                first = await owner.submit("Recover the saved login.")
+                async with timeout(10):
+                    await admitted.wait()
+                second = await peer.submit("Recover the same saved login.")
+                async with timeout(10):
+                    await both_expired.wait()
+                    cancelling = [
+                        asyncio.create_task(force_cancel(turn)) for turn in (first, second)
+                    ]
+                    tasks.extend(cancelling)
+                    results = await asyncio.gather(*cancelling, return_exceptions=True)
+                cancelled = sum(result is True for result in results)
+                assert cancelled == 2
+                assert expired == 4
+
+                closing_owner = asyncio.create_task(close_refresh_owner())
+                closing_peer = asyncio.create_task(peer.aclose())
+                tasks.extend((closing_owner, closing_peer))
+                # The peer can retire while the refresh owner is still waiting.
+                await closing_peer
+                assert not closing_owner.done()
+                release_reply.set()
+                cache_rotated_at_session_close = await closing_owner
+                assert cache_rotated_at_session_close
+                await provider.aclose()
+                cache_rotated_at_provider_close = cache_has_rotation()
+                assert cache_rotated_at_provider_close
+                if original_file is not None:
+                    old_record_preserved = original_file.read() == original_bytes
+                    assert old_record_preserved
+                    assert cache.stat().st_mode & 0o077 == 0
+            finally:
+                release_reply.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert rotated == 0
+        try:
+            async with timeout(15):
+                await run_after_restart(home, endpoint)
+        except AssertionError:
+            restarted = False
+        else:
+            restarted = True
+        assert restarted
+        assert expired == 4
+        assert rotated == 1
+        assert oauth_calls == 1
+        assert replays == fallback == unexpected == 0
+        source_preserved = source.read_bytes() == original_bytes
+        assert source_preserved
+        connect_request = f"CONNECT {authority} HTTP/1.1\r\n".encode()
+        connected_to_authority = any(request.startswith(connect_request) for request in connects)
+        assert connected_to_authority
