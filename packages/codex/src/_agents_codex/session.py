@@ -3138,7 +3138,6 @@ class Session(Generic[ContextT, OutputT]):
             and not instruction_files
             and agent.provider is not None
             and codex_login is None
-            and not agent.provider._websockets_enabled
             and _supports_atomic_first_turn(
                 agent,
                 output_mode=output.mode,
