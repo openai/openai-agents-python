@@ -3853,26 +3853,41 @@ impl Drop for PendingReply<'_> {
     }
 }
 
-fn provider_error_metadata(details: &codex_protocol::error::CodexErrorDetails) -> Option<Value> {
+fn provider_error_metadata(
+    details: &codex_protocol::error::CodexErrorDetails,
+    registered_plan: bool,
+) -> Option<Value> {
     use codex_protocol::error::CHATGPT_PLAN_UNSUPPORTED_CAPABILITY;
     use codex_protocol::error::CodexErrorDetails;
 
-    let (status, body, request_id) = match details {
+    let (status, body, request_id, provider_code) = match details {
         CodexErrorDetails::UnexpectedStatus(error) => (
             error.status.as_u16(),
             Some(error.body.as_str()),
             error.request_id.as_deref(),
+            None,
         ),
         // Core also constructs RetryLimit with a synthetic 500 for a transport
         // retry limit. Only this pinned HTTP 429 path retains an observed status.
         CodexErrorDetails::RetryLimit(error)
             if error.status == http::StatusCode::TOO_MANY_REQUESTS =>
         {
-            (error.status.as_u16(), None, error.request_id.as_deref())
+            (
+                error.status.as_u16(),
+                None,
+                error.request_id.as_deref(),
+                if registered_plan {
+                    error.provider_code
+                } else {
+                    None
+                },
+            )
         }
-        CodexErrorDetails::ConnectionFailed(error) => (error.source.status()?.as_u16(), None, None),
+        CodexErrorDetails::ConnectionFailed(error) => {
+            (error.source.status()?.as_u16(), None, None, None)
+        }
         CodexErrorDetails::ResponseStreamFailed(error) => {
-            (error.source.status()?.as_u16(), None, None)
+            (error.source.status()?.as_u16(), None, None, None)
         }
         _ => return None,
     };
@@ -3892,7 +3907,7 @@ fn provider_error_metadata(details: &codex_protocol::error::CodexErrorDetails) -
         });
     let mut metadata = json!({
         "status_code": status,
-        "code": code,
+        "code": code.or(provider_code),
         "request_id": request_id.filter(|id| {
             !id.is_empty() && id.len() <= 256 && id.bytes().all(|byte| byte.is_ascii_graphic())
         }),
@@ -3919,6 +3934,7 @@ pub struct PythonContributor {
     pub(crate) manager: Weak<ThreadManager>,
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
+    pub(crate) registered_plan: bool,
 }
 type AcceptedToolCalls = Arc<Mutex<HashMap<PendingKey, u64>>>;
 
@@ -4318,11 +4334,13 @@ impl TurnLifecycleContributor for PythonContributor {
                     .provider_error
                     .lock()
                     .expect("Provider error receipt poisoned") =
-                    provider_error_metadata(input.error_details).and_then(|metadata| {
-                        serde_json::to_value(input.error)
-                            .ok()
-                            .map(|category| (category, metadata))
-                    });
+                    provider_error_metadata(input.error_details, self.registered_plan).and_then(
+                        |metadata| {
+                            serde_json::to_value(input.error)
+                                .ok()
+                                .map(|category| (category, metadata))
+                        },
+                    );
             }
         })
     }
@@ -5655,8 +5673,9 @@ pub(crate) mod managed_tests {
         let synthetic = CodexErrorDetails::RetryLimit(RetryLimitReachedError {
             status: http::StatusCode::INTERNAL_SERVER_ERROR,
             request_id: None,
+            provider_code: None,
         });
-        assert!(provider_error_metadata(&synthetic).is_none());
+        assert!(provider_error_metadata(&synthetic, true).is_none());
 
         let observed = CodexErrorDetails::UnexpectedStatus(UnexpectedResponseError {
             status: http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -5669,7 +5688,7 @@ pub(crate) mod managed_tests {
             identity_error_code: None,
         });
         assert_eq!(
-            provider_error_metadata(&observed).unwrap(),
+            provider_error_metadata(&observed, false).unwrap(),
             json!({
                 "status_code": 500,
                 "code": "server_error",

@@ -491,7 +491,15 @@
     {
       "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
       "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
+    },
+    {
+      "path": "0156-sdk-commit-completed-compaction-summary.patch",
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
+    },
+    {
+      "path": "0157-sdk-registered-http-429-diagnostics.patch",
+      "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
     }
   ],
-  "result_tree": "24cff6c5ac1c76899c40e1906b39cb3d07f2c929"
+  "result_tree": "154036199220cdeec78e90df83765fbd513310dc"
 }
