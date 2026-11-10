@@ -1,6 +1,7 @@
 """Explicit SDK values use the receiver's post-filter override channel."""
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +48,9 @@ async def test_explicit_environment_values_use_post_filter_native_channel(
         "TERM": "xterm",
         "LANG": "fr_FR",
         "PATH": "/upper",
-        "Path": "/mixed",
     }
+    if sys.platform != "win32":
+        selected["Path"] = "/mixed"
     async with (
         timeout(40),
         ExecutorPeer(tmp_path / "remote", synthetic_process_output="ready\n").serve() as peer,
