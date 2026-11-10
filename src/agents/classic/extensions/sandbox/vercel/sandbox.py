@@ -1680,7 +1680,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
         if not isinstance(state, VercelSandboxSessionState):
             raise TypeError("VercelSandboxClient.resume expects a VercelSandboxSessionState")
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         if state.s3_mounts_non_resumable or _vercel_s3_mounts(state.manifest):
             raise MountConfigError(
                 message=(

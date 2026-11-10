@@ -160,7 +160,12 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
             manifest,
             provider_backend_id=self.backend_id,
         )
+        manifest._validate_git_repo_hosts()
         return manifest
+
+    def _validate_manifest_for_resume(self, state: SandboxSessionState) -> None:
+        state.assert_path_grants_rebound()
+        state.manifest._validate_git_repo_hosts()
 
     @abc.abstractmethod
     async def create(

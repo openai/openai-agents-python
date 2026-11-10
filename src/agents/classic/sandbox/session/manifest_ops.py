@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..entries import BaseEntry
+from ..errors import _redact_git_host_error_data
 from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile
 from .manifest_application import ManifestApplier
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from .base_sandbox_session import BaseSandboxSession
 
 
+@_redact_git_host_error_data
 async def apply_manifest(
     session: BaseSandboxSession,
     *,
@@ -35,6 +37,7 @@ async def provision_manifest_accounts(session: BaseSandboxSession) -> None:
     await applier.provision_accounts(session.state.manifest)
 
 
+@_redact_git_host_error_data
 async def apply_entry_batch(
     session: BaseSandboxSession,
     entries: Sequence[tuple[Path, BaseEntry]],
