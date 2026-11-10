@@ -474,8 +474,8 @@
     },
     {
       "path": "sdk-realtime-filter-forwarded-batches.patch",
-      "sha256": "bfc7c4c3a04c76696aae61abb9b446e967222e5bdad8ab17db013214043cae91"
+      "sha256": "fcc45c2e79c74aedb6c621f422b298f58a3b1c759ed691378b5f7fb893bc9838"
     }
   ],
-  "result_tree": "f22679d1e2a092b1cccb9fba2803a1ae45e8ae27"
+  "result_tree": "879d4fd6b6c965936bb63baf0fc07d9fc681ee75"
 }
