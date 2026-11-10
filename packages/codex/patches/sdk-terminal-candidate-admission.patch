@@ -307,7 +307,7 @@ index 32ae3148..29cee108 100644
 +                .await
 +            {
 +                let pending = state.lock().await;
-+                pending.pending_input.items.clone()
++                pending.pending_input.snapshot()
 +            } else {
 +                Vec::new()
 +            };
@@ -436,3 +436,17 @@ index f952c8a7..efcd7411 100644
  pub use contributors::McpServerContribution;
  pub use contributors::McpServerContributionContext;
  pub use contributors::McpServerContributor;
+diff --git a/codex-rs/core/src/session/input_queue.rs b/codex-rs/core/src/session/input_queue.rs
+--- a/codex-rs/core/src/session/input_queue.rs
++++ b/codex-rs/core/src/session/input_queue.rs
+@@ -529,6 +529,10 @@
+ 
+     pub(crate) fn is_empty(&self) -> bool {
+         self.items.is_empty()
++    }
++
++    pub(crate) fn snapshot(&self) -> Vec<TurnInput> {
++        self.items.clone()
+     }
+ 
+     fn pending_activity(&self) -> Option<InputQueueActivity> {

@@ -502,12 +502,12 @@
     },
     {
       "path": "sdk-terminal-candidate-admission.patch",
-      "sha256": "60bfed5f593bd171afa762ffc139717615b2372bc9b4652566a8a38aa5ee15c4"
+      "sha256": "d67f11ccb874275ea982708ca6c1ad246a479edda157eb19390c305670467287"
     },
     {
       "path": "sdk-realtime-captured-tool-policy.patch",
       "sha256": "eb5367c48fbdde07ac26fe604d0b71c753afcd4cf0473e472dab71b2b409f480"
     }
   ],
-  "result_tree": "64452ab4ad7e752f5e6f21e90db39afe323b59a8"
+  "result_tree": "8b17dde3824fd4156b6f89a37922de570d1ebf63"
 }
