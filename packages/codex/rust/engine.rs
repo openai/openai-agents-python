@@ -337,6 +337,9 @@ impl EngineState {
             saved_login_file: codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            credential_directory: codex_account
+                .as_ref()
+                .and_then(|account| account.credential_directory.as_deref()),
         };
         let environment_options = runtime_options.environment()?;
         if let Some(environment) = &environment_options {
@@ -511,7 +514,10 @@ impl EngineState {
                 None,
             ),
             (None, None) => {
-                crate::environment::for_unattached_threads(&config, /*sdk_local*/ false).await?
+                crate::environment::for_unattached_threads(
+                    &config, /*sdk_local*/ false, /*private_read_deny*/ None,
+                )
+                .await?
             }
         };
         let environment = Arc::new(environment);
@@ -1509,6 +1515,10 @@ impl EngineState {
                 .codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            credential_directory: self
+                .codex_account
+                .as_ref()
+                .and_then(|account| account.credential_directory.as_deref()),
         }
     }
 
