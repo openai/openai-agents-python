@@ -51,7 +51,7 @@ jobs:
           unzip -q "$stage/13762025652.zip" -d "$stage/product"
           wheel="$stage/product/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
           printf '%s  %s\n' 4b1d9a1359d9a742a5be06a5701a6031a3c237e8770699d5a5de9d1b54040252 "$wheel" | shasum -a 256 -c -
-      - name: Stage frozen patch and diagnostic probe
+      - name: Apply exact V3 and batch fixture patches
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/nov9-macos-tracing"
@@ -133,387 +133,35 @@ jobs:
                        api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
                    )
           FROZEN_PATCH
-          cat > "$stage/trace-batch-phase-probe.py" <<'BATCH_PROBE'
-          """Observe the original native batch fixture without preloading lazy transports."""
-          
-          import argparse
-          import contextvars
-          import faulthandler
-          import functools
-          import hashlib
-          import json
-          import platform
-          import subprocess
-          import sys
-          import threading
-          import time
-          from pathlib import Path
-          
-          START = time.monotonic()
-          STAGE = "startup"
-          DELIVERY = contextvars.ContextVar("probe_delivery", default=None)
-          EXPECTED_NATIVE = {
-              "Darwin": "f77e45e5770955cb4b59faaff1fb73c4b6ab4e2325af2a068b9e1f7898ac55ec",
-              "Linux": "5aae9ffff9f5d3144ad0a1dd976990331841d728f7d75ac40b7da66e1384e710",
-          }
-          
-          
-          def mark(phase, **details):
-              print(json.dumps({
-                  "elapsed_s": round(time.monotonic() - START, 6),
-                  "stage": STAGE, "delivery": DELIVERY.get(), "phase": phase, **details,
-              }, sort_keys=True), flush=True)
-          
-          
-          def child(args):
-              global STAGE
-              faulthandler.enable(all_threads=True)
-              faulthandler.dump_traceback_later(30, repeat=False)
-              mark("imports_start")
-              import asyncio
-              import inspect
-              import runpy
-              from http.server import ThreadingHTTPServer
-          
-              import _agents_codex
-              import agents
-              import agents._native
-              from agents import telemetry
-          
-              prefix = Path(sys.prefix).resolve()
-              for module in (agents, agents._native, _agents_codex, telemetry):
-                  assert Path(module.__file__).resolve().is_relative_to(prefix)
-              native_path = Path(agents._native.__file__)
-              with native_path.open("rb") as stream:
-                  digest = hashlib.file_digest(stream, "sha256").hexdigest()
-              assert digest == EXPECTED_NATIVE[platform.system()]
-              if platform.system() == "Darwin":
-                  assert platform.machine() == "arm64"
-                  assert sys.version_info[:3] == (3, 14, 10)
-              mark("product_verified", native_sha256=digest,
-                   python=platform.python_version(), system=platform.system())
-          
-              counts = {}
-          
-              def next_call(label):
-                  counts[label] = counts.get(label, 0) + 1
-                  return counts[label]
-          
-              def wrap_sync(owner, name, label):
-                  original = getattr(owner, name)
-          
-                  @functools.wraps(original)
-                  def timed(*positional, **keywords):
-                      call, started = next_call(label), time.monotonic()
-                      mark(label + "_start", call=call)
-                      try:
-                          result = original(*positional, **keywords)
-                      except BaseException as error:
-                          mark(label + "_error", call=call, error_type=type(error).__name__)
-                          raise
-                      else:
-                          return result
-                      finally:
-                          mark(label + "_end", call=call,
-                               duration_s=round(time.monotonic() - started, 6))
-          
-                  setattr(owner, name, timed)
-          
-              # Install only after the authentic exporter constructor has imported httpx2.
-              # Do not import httpcore2 backends or run a constructor to prepare the probe.
-              httpx_instrumented = False
-              injected = False
-          
-              def instrument_loaded_httpx(httpx):
-                  nonlocal httpx_instrumented
-                  if httpx_instrumented:
-                      return
-                  httpx_instrumented = True
-                  wrap_sync(httpx.AsyncClient, "__init__", "async_client_construction")
-                  # This already-loaded httpx2 entry point performs the authentic lazy
-                  # httpcore2 import and default SSL-context construction inside its call.
-                  default_transport = sys.modules.get("httpx2._transports.default")
-                  assert default_transport is not None
-                  wrap_sync(default_transport, "create_ssl_context", "create_ssl_context")
-                  original_stream = httpx.AsyncClient.stream
-          
-                  @functools.wraps(original_stream)
-                  def traced_stream(*positional, **keywords):
-                      extensions = dict(keywords.get("extensions") or {})
-                      prior_trace = extensions.get("trace")
-                      started_events = {}
-          
-                      async def trace(event, info):
-                          nonlocal injected
-                          # Trace event names come from httpcore2; never serialize info.
-                          details = {"event": event}
-                          root, _, outcome = event.rpartition(".")
-                          if outcome == "started":
-                              started_events[root] = time.monotonic()
-                          elif root in started_events:
-                              details["duration_s"] = round(
-                                  time.monotonic() - started_events.pop(root), 6
-                              )
-                          if outcome == "failed" and "exception" in info:
-                              details["error_type"] = type(info["exception"]).__name__
-                          mark("transport_trace", **details)
-                          if (STAGE == "batch" and args.first_post_delay_ms and not injected
-                                  and event == "http11.send_request_headers.started"):
-                              injected = True
-                              started = time.monotonic()
-                              completed = False
-                              mark("synthetic_first_post_delay_start",
-                                   requested_ms=args.first_post_delay_ms)
-                              try:
-                                  await asyncio.sleep(args.first_post_delay_ms / 1000)
-                                  completed = True
-                              finally:
-                                  mark("synthetic_first_post_delay_end", completed=completed,
-                                       duration_s=round(time.monotonic() - started, 6))
-                          if prior_trace is not None:
-                              result = prior_trace(event, info)
-                              if inspect.isawaitable(result):
-                                  await result
-          
-                      extensions["trace"] = trace
-                      keywords["extensions"] = extensions
-                      return original_stream(*positional, **keywords)
-          
-                  httpx.AsyncClient.stream = traced_stream
-                  mark("httpx_instrumentation_installed",
-                       anyio_backend_already_loaded="httpcore2._backends.anyio" in sys.modules)
-          
-              original_exporter_init = telemetry.OpenAITraceExporter.__init__
-          
-              @functools.wraps(original_exporter_init)
-              def exporter_init(self, *positional, **keywords):
-                  original_exporter_init(self, *positional, **keywords)
-                  assert self._timeout == 0.75
-                  assert self._max_retries == 0
-                  instrument_loaded_httpx(self._httpx)
-                  mark("exporter_constructed", timeout_ms=750, max_retries=0)
-          
-              telemetry.OpenAITraceExporter.__init__ = exporter_init
-          
-              def wrap_async(owner, name, label, *, batch=False, send=False, public=False):
-                  original = getattr(owner, name)
-          
-                  @functools.wraps(original)
-                  async def timed(*positional, **keywords):
-                      call, started = next_call(label), time.monotonic()
-                      token = DELIVERY.set(call) if send else None
-                      details = {"event_count": len(positional[1])} if batch else {}
-                      mark(label + "_start", call=call, **details)
-                      try:
-                          result = await original(*positional, **keywords)
-                      except BaseException as error:
-                          mark(label + "_error", call=call, error_type=type(error).__name__,
-                               duration_s=round(time.monotonic() - started, 6))
-                          raise
-                      else:
-                          fields = {
-                              key: getattr(result, key)
-                              for key in ("status", "dropped_records", "failed_deliveries", "barrier")
-                          } if public else {}
-                          mark(label + "_complete", call=call,
-                               duration_s=round(time.monotonic() - started, 6), **fields)
-                          return result
-                      finally:
-                          if token is not None:
-                              DELIVERY.reset(token)
-          
-                  setattr(owner, name, timed)
-          
-              wrap_async(telemetry.OpenAITraceExporter, "_send", "exporter_send", send=True)
-              wrap_async(telemetry.OpenAITraceExporter, "on_trace_events", "exporter_batch", batch=True)
-              wrap_async(telemetry, "force_flush", "force_flush", public=True)
-          
-              # Preserve the fixture's collector and handler, including its real body parser
-              # and original 500 ms sleep. Only decorate the methods created by the fixture.
-              server_local = threading.local()
-              handler_threads = set()
-              original_sleep = time.sleep
-          
-              def observed_sleep(seconds):
-                  request = getattr(server_local, "request", None)
-                  if request is None:
-                      return original_sleep(seconds)
-                  # The fixture has already parsed and appended the complete POST here.
-                  mark("server_decoded_request_complete", request=request)
-                  mark("server_original_delay_start", request=request, delay_s=seconds)
-                  started = time.monotonic()
-                  try:
-                      return original_sleep(seconds)
-                  finally:
-                      mark("server_original_delay_end", request=request,
-                           duration_s=round(time.monotonic() - started, 6))
-          
-              time.sleep = observed_sleep
-              original_server_init = ThreadingHTTPServer.__init__
-          
-              class ObservedBody:
-                  def __init__(self, stream, request):
-                      self.stream, self.request = stream, request
-          
-                  def __getattr__(self, name):
-                      return getattr(self.stream, name)
-          
-                  def read(self, *positional, **keywords):
-                      started = time.monotonic()
-                      mark("server_body_read_start", request=self.request)
-                      try:
-                          result = self.stream.read(*positional, **keywords)
-                      except BaseException as error:
-                          mark("server_body_read_error", request=self.request,
-                               error_type=type(error).__name__)
-                          raise
-                      else:
-                          mark("server_body_read_complete", request=self.request,
-                               duration_s=round(time.monotonic() - started, 6))
-                          return result
-          
-              @functools.wraps(original_server_init)
-              def server_init(self, *positional, **keywords):
-                  original_server_init(self, *positional, **keywords)
-                  handler = self.RequestHandlerClass
-                  original_post, original_headers = handler.do_POST, handler.end_headers
-          
-                  def handler_error(*unused):
-                      # The stdlib default prints request addresses and traceback source.
-                      # Preserve its return/continuation behavior with sanitized diagnostics.
-                      mark("server_handler_error", error_type=type(sys.exception()).__name__)
-          
-                  self.handle_error = handler_error
-          
-                  @functools.wraps(original_post)
-                  def post(instance):
-                      request = next_call("server_post")
-                      handler_threads.add(threading.current_thread())
-                      server_local.request = request
-                      stream = instance.rfile
-                      instance.rfile = ObservedBody(stream, request)
-                      mark("server_post_start", request=request)
-                      try:
-                          return original_post(instance)
-                      finally:
-                          instance.rfile = stream
-                          server_local.request = None
-                          mark("server_post_end", request=request)
-          
-                  @functools.wraps(original_headers)
-                  def headers(instance):
-                      request = getattr(server_local, "request", None)
-                      mark("server_response_headers_start", request=request)
-                      try:
-                          return original_headers(instance)
-                      finally:
-                          mark("server_response_headers_end", request=request)
-          
-                  handler.do_POST, handler.end_headers = post, headers
-          
-              ThreadingHTTPServer.__init__ = server_init
-          
-              sys.path.insert(0, str(args.source / "packages" / "codex"))
-              fixture_path = args.source / "packages/codex/tests/test_native_trace_exporter.py"
-              mark("fixture_import_start", fixture_sha256=hashlib.sha256(fixture_path.read_bytes()).hexdigest())
-              fixture = runpy.run_path(str(fixture_path))
-              batch_case = fixture["native_batch_case"]
-              # Leave the original function, assertions, collector, and budgets untouched.
-              # Its sole print contains only these four existing sanitized numeric/status fields.
-              def fixture_print(value, **keywords):
-                  result = json.loads(value)
-                  allowed = ("native_completed_spans", "http_requests", "flush_seconds", "flush_status")
-                  mark("fixture_result", **{key: result[key] for key in allowed})
-          
-              batch_case.__globals__["print"] = fixture_print
-              mark("fixture_import_complete")
-          
-              async def run():
-                  global STAGE
-                  if args.warmup:
-                      STAGE = "warmup"
-                      mark("warmup_start")
-                      with fixture["collector"]() as (endpoint, received):
-                          warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
-                          await warmup.on_trace_event(fixture["completed_event"]())
-                          assert len(received) == 1
-                      mark("warmup_complete")
-                  STAGE = "batch"
-                  mark("fixture_start", case="native_batch_case")
-                  await batch_case()
-                  mark("fixture_complete", case="native_batch_case")
-          
-              returncode = 0
-              try:
-                  asyncio.run(run())
-              except BaseException as error:
-                  mark("fixture_error", error_type=type(error).__name__)
-                  returncode = 1
-              finally:
-                  # Observe already-running daemon handlers after a timeout without changing
-                  # the fixture's flush deadline or its acceptance assertions.
-                  deadline = time.monotonic() + 2
-                  for worker in tuple(handler_threads):
-                      worker.join(timeout=max(0, deadline - time.monotonic()))
-                  mark("probe_summary", calls=counts, synthetic_delay_used=injected,
-                       surviving_handlers=sum(worker.is_alive() for worker in handler_threads))
-                  faulthandler.cancel_dump_traceback_later()
-              return returncode
-          
-          
-          def main():
-              parser = argparse.ArgumentParser(description=__doc__)
-              parser.add_argument("--source", type=Path, required=True)
-              parser.add_argument("--out", type=Path, required=True)
-              parser.add_argument("--first-post-delay-ms", type=int, default=0)
-              parser.add_argument("--warmup", action="store_true")
-              parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
-              args = parser.parse_args()
-              if not 0 <= args.first_post_delay_ms <= 2000:
-                  parser.error("--first-post-delay-ms must be between 0 and 2000")
-              args.source, args.out = args.source.resolve(), args.out.resolve()
-              if args.child:
-                  return child(args)
-              args.out.mkdir(parents=True, exist_ok=False)
-              (args.out / "home").mkdir()
-              environment = {
-                  "PATH": "/usr/bin:/bin", "HOME": str(args.out / "home"),
-                  "LANG": "en_US.UTF-8" if platform.system() == "Darwin" else "C.UTF-8",
-                  "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
-                  "PYTHONUNBUFFERED": "1", "RUST_MIN_STACK": "16777216",
-              }
-              command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
-                         "--child", "--source", str(args.source), "--out", str(args.out),
-                         "--first-post-delay-ms", str(args.first_post_delay_ms)]
-              if args.warmup:
-                  command.append("--warmup")
-              mark("child_start", watchdog_s=60, first_post_delay_ms=args.first_post_delay_ms,
-                   warmup=args.warmup)
-              started, timed_out = time.monotonic(), False
-              with ((args.out / "stdout.log").open("wb") as stdout,
-                    (args.out / "stderr.log").open("wb") as stderr):
-                  process = subprocess.Popen(command, cwd=args.out, env=environment,
-                                             stdout=stdout, stderr=stderr)
-                  try:
-                      returncode = process.wait(timeout=60)
-                  except subprocess.TimeoutExpired:
-                      timed_out = True
-                      process.kill()
-                      process.wait()
-                      returncode = 124
-              result = {"returncode": returncode, "child_returncode": process.returncode,
-                        "timed_out": timed_out, "duration_s": round(time.monotonic() - started, 6),
-                        "first_post_delay_ms": args.first_post_delay_ms, "warmup": args.warmup}
-              (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-              mark("child_complete", **result)
-              return returncode
-          
-          
-          if __name__ == "__main__":
-              sys.exit(main())
-          BATCH_PROBE
+          cat > "$stage/batch-warmup-v3.patch" <<'BATCH_DELTA'
+          diff --git a/packages/codex/tests/test_native_trace_exporter.py b/packages/codex/tests/test_native_trace_exporter.py
+          index 57fa828f3bc55764c32c5361e40db5915786b47b..1ea4e869cf812c725cc1f97aab279896e7d47c7e 100644
+          --- a/packages/codex/tests/test_native_trace_exporter.py
+          +++ b/packages/codex/tests/test_native_trace_exporter.py
+          @@ -541,6 +541,11 @@
+           async def native_batch_case():
+               import time
+           
+          +    with collector() as (warmup_endpoint, warmup_received):
+          +        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=warmup_endpoint)
+          +        await warmup.on_trace_event(completed_event())
+          +        assert len(warmup_received) == 1
+          +
+               with collector(delay=0.5) as (endpoint, received):
+                   exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+                   await telemetry.configure(processors=[exporter])
+          BATCH_DELTA
           printf '%s  %s\n' deaec6953404b313e5a119a6a987014173292888f9ba0594a256f4b8de5743ee "$stage/macos-tracing.patch" | shasum -a 256 -c -
-          printf '%s  %s\n' 2bf44179d7f840273ad69e9e1b97192c5e61c0138de2c5c0f0a6b13c45813e89 "$stage/trace-batch-phase-probe.py" | shasum -a 256 -c -
+          printf '%s  %s\n' abc05405c678584b58f638b21a0e82cf79524d48249e703f36b2187044df920f "$stage/batch-warmup-v3.patch" | shasum -a 256 -c -
+          git apply --check --index "$stage/macos-tracing.patch"
+          git apply --index "$stage/macos-tracing.patch"
+          test "$(git write-tree)" = 59e1567bce974e5186e9d95d26b87bfcd3c5b340
+          git apply --check --index "$stage/batch-warmup-v3.patch"
+          git apply --index "$stage/batch-warmup-v3.patch"
+          tree="$(git write-tree)"
+          printf 'candidate_tree=%s\n' "$tree"
+          test "$tree" = e4cfa9e3aac512ff9cdbd8a2960732a61dfbcfdb
+          printf '%s  %s\n' bf8a157474062a49d081365a231ffab50eb6be7a6ee81a425c3657f9ca78e58f packages/codex/tests/test_native_trace_exporter.py | shasum -a 256 -c -
       - name: Install stock wheel and locked tracing test dependencies
         run: |
           set -euo pipefail
@@ -525,57 +173,46 @@ jobs:
           uv pip install --python "$py" --require-hashes -r "$stage/requirements.txt"
           uv pip install --python "$py" --no-deps \
             "$stage/product/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
-      - name: Measure original and V3 native batching and transport warmup
-        timeout-minutes: 5
+      - name: Run exact uninstrumented native batching test
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/nov9-macos-tracing"
           py="$stage/venv/bin/python"
-          patch="$stage/macos-tracing.patch"
-          probe="$stage/trace-batch-phase-probe.py"
-          fixture="packages/codex/tests/test_native_trace_exporter.py"
-
-          run_probe() {
-            local phase="$1" expected_fixture="$2" out status=0
-            shift 2
-            out="$stage/$phase"
-            printf '%s  %s\n' "$expected_fixture" "$fixture" | shasum -a 256 -c -
-            echo "::group::$phase native batch phase receipt"
-            "$py" -I -B "$probe" --source "$GITHUB_WORKSPACE" --out "$out" "$@" || status=$?
-            cat "$out/result.json" "$out/stdout.log" "$out/stderr.log"
-            printf '%s exit=%s\n' "$phase" "$status"
-            echo '::endgroup::'
-          }
-
-          run_probe before-cold 419c14c6cb7b41b0f1b4c610f91ec5a3f713f419a91c6966a187a73ebee11d18
-          git apply --check --index "$patch"
-          git apply --index "$patch"
-          test "$(git write-tree)" = 59e1567bce974e5186e9d95d26b87bfcd3c5b340
-          run_probe v3-cold dfbcd31e759410d91c1bb7909049fb2bdaea09777280905e361c257e9d86087e
-          run_probe v3-warmup dfbcd31e759410d91c1bb7909049fb2bdaea09777280905e361c257e9d86087e --warmup
-
-          "$py" -I -B - "$stage" <<'RECEIPTS'
-          import json
-          from pathlib import Path
+          mkdir -p "$stage/exact-home"
+          clean=(env -i PATH=/usr/bin:/bin HOME="$stage/exact-home" LANG=en_US.UTF-8
+            RUST_MIN_STACK=16777216 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1
+            PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+            PYTHONPATH="$GITHUB_WORKSPACE/packages/codex")
+          "${clean[@]}" "$py" -I -B - <<'PRODUCT'
+          import hashlib
+          import pathlib
+          import platform
           import sys
+          import agents
+          import agents._native
+          import _agents_codex
 
-          root = Path(sys.argv[1])
-          for name in ("before-cold", "v3-cold", "v3-warmup"):
-              directory = root / name
-              result = json.loads((directory / "result.json").read_text())
-              assert not result["timed_out"] and result["returncode"] in (0, 1), result
-              records = [json.loads(row) for row in (directory / "stdout.log").read_text().splitlines()]
-              assert any(row["phase"] == "product_verified" for row in records), name
-              assert any(
-                  row["stage"] == "batch" and row["phase"] == "exporter_batch_start"
-                  and row["event_count"] == 42
-                  for row in records
-              ), name
-              assert any(
-                  row["stage"] == "batch" and row["phase"] == "force_flush_complete"
-                  for row in records
-              ), name
-              if name == "v3-warmup":
-                  assert any(row["phase"] == "warmup_complete" for row in records), name
-                  assert result["returncode"] == 0, result
-          RECEIPTS
+          assert platform.system() == "Darwin" and platform.machine() == "arm64"
+          assert sys.version_info[:3] == (3, 14, 10), sys.version
+          for module in (agents, agents._native, _agents_codex):
+              path = pathlib.Path(module.__file__).resolve()
+              assert path.is_relative_to(pathlib.Path(sys.prefix).resolve()), str(path)
+          with pathlib.Path(agents._native.__file__).open("rb") as stream:
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+          assert digest == "f77e45e5770955cb4b59faaff1fb73c4b6ab4e2325af2a068b9e1f7898ac55ec", digest
+          print("installed_native_sha256", digest, flush=True)
+          PRODUCT
+          "${clean[@]}" "$py" -I -B -m pytest -p pytest_asyncio.plugin -p no:cacheprovider \
+            -vv -rA --durations=0 --basetemp="$stage/pytest-exact" \
+            --junitxml="$stage/exact-results.xml" \
+            'packages/codex/tests/test_native_trace_exporter.py::test_real_native_capture_policy_and_openai_export[native_batch_case]'
+          "$py" -I -B - "$stage/exact-results.xml" <<'JUNIT'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          (node,) = ET.parse(sys.argv[1]).getroot().iter("testcase")
+          assert node.get("name") == "test_real_native_capture_policy_and_openai_export[native_batch_case]"
+          assert not any(child.tag in ("failure", "error", "skipped") for child in node)
+          print("exact_uninstrumented_node", node.get("name"), "elapsed_s", node.get("time"))
+          JUNIT
