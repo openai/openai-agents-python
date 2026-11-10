@@ -254,7 +254,7 @@
     },
     {
       "path": "0057-reuse-model-http-clients.patch",
-      "sha256": "29351a7eed6a09706141a8be50cdee0f9a5d94830eeb7011b89015d1a2c0e4e6"
+      "sha256": "62d8fdbdfabf270d62eb46320efdeaa1523dcd48908c35c0cc144700d62ef29d"
     },
     {
       "path": "0058-reuse-bundled-model-catalog.patch",
@@ -479,11 +479,7 @@
     {
       "path": "sdk-local-project-read-cwd.patch",
       "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
-    },
-    {
-      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
-      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     }
   ],
-  "result_tree": "acfdc2f12fa0196d7924005008250994bd0082e5"
+  "result_tree": "6188f751033b221320447e63b428edbc22e8af34"
 }
