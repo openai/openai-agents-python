@@ -1,0 +1,2395 @@
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index 4038108574ca434c13eb34d04e4e0c7b20412420..355d67e76802391aeeec5d4a5f33c28378cf65b4 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -70,6 +70,7 @@ pub use realtime_websocket::RealtimeConfigurationReceipt;
+ pub use realtime_websocket::RealtimeConfigurationReservation;
+ pub use realtime_websocket::RealtimeInterruptResult;
+ pub use realtime_websocket::RealtimeNativeSource;
++pub use realtime_websocket::RealtimePlaybackControl;
+ 
+ pub use realtime_websocket::RealtimeHostedMcpAllowedTools;
+ pub use realtime_websocket::RealtimeHostedMcpApproval;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index bef51d321b46feeceeae968d3603a121e0cbb96f..3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -179,6 +179,16 @@ struct WsStream {
+     adapter_cleanup: Option<RealtimeAdapterCleanup>,
+ }
+ 
++#[derive(Debug)]
++pub enum RealtimePlaybackControl {
++    Truncate {
++        item_id: String,
++        content_index: u32,
++        audio_end_ms: u32,
++    },
++    Clear,
++}
++
+ enum WsCommand {
+     HostedMcpApproval {
+         approval_id: String,
+@@ -199,12 +209,18 @@ enum WsCommand {
+     },
+     Interrupt {
+         response_id: Option<String>,
++        event_id: Option<String>,
+         playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+         feedback: Option<String>,
+         tx_result: oneshot::Sender<
+             Result<Result<super::readiness::RealtimeInterruptResult, ApiError>, WsError>,
+         >,
+     },
++    PlaybackControl {
++        control: RealtimePlaybackControl,
++        event_id: Option<String>,
++        tx_result: oneshot::Sender<Result<Result<(), ApiError>, WsError>>,
++    },
+     Configure {
+         reservation: super::readiness::RealtimeConfigurationReservation,
+         tx_result: oneshot::Sender<Result<(), WsError>>,
+@@ -334,7 +350,7 @@ impl WsStream {
+                                     Err(error) => { report_write_policy_error(&error); let _ = tx_result.send(Err(error)); break; }
+                                 }
+                             }
+-                            WsCommand::Interrupt { response_id, playback, feedback, tx_result } => {
++                            WsCommand::Interrupt { response_id, event_id, playback, feedback, tx_result } => {
+                                 let actions = readiness_observer.as_ref()
+                                     .ok_or_else(|| ApiError::InvalidRequest { message: "SDK response owner is absent".into() })
+                                     .and_then(|observer| observer.configuration().prepare_interrupt(response_id.as_deref(), playback.as_ref(), feedback.as_deref(), server_managed_audio));
+@@ -342,7 +358,12 @@ impl WsStream {
+                                     Err(error) => { let _ = tx_result.send(Ok(Err(error))); }
+                                     Ok(actions) => {
+                                         let mut result = Ok(());
+-                                        for payload in actions.payloads {
++                                        for mut payload in actions.payloads {
++                                            if let Some(event_id) = &event_id
++                                                && payload["type"] == "response.cancel"
++                                            {
++                                                payload["event_id"] = serde_json::Value::String(event_id.clone());
++                                            }
+                                             if let Err(error) = inner.send(Message::Text(payload.to_string().into())).await {
+                                                 report_write_policy_error(&error); result = Err(error); break;
+                                             }
+@@ -354,6 +375,20 @@ impl WsStream {
+                                     }
+                                 }
+                             }
++                            WsCommand::PlaybackControl { control, event_id, tx_result } => {
++                                let payload = readiness_observer.as_ref()
++                                    .ok_or_else(|| ApiError::InvalidRequest { message: "SDK playback owner is absent".into() })
++                                    .and_then(|observer| observer.configuration().prepare_playback_control(control, event_id, server_managed_audio));
++                                match payload {
++                                    Err(error) => { let _ = tx_result.send(Ok(Err(error))); }
++                                    Ok(payload) => {
++                                        match inner.send(Message::Text(payload.to_string().into())).await {
++                                            Ok(()) => { let _ = tx_result.send(Ok(Ok(()))); }
++                                            Err(error) => { report_write_policy_error(&error); let _ = tx_result.send(Err(error)); break; }
++                                        }
++                                    }
++                                }
++                            }
+                             WsCommand::Configure { reservation, tx_result } => {
+                                 // Arm inside this pump before any write/receive can
+                                 // make provider acceptance observable to another task.
+@@ -741,23 +776,33 @@ impl RealtimeWebsocketConnection {
+ }
+ 
+ impl RealtimeWebsocketWriter {
+-    pub async fn retrieve_conversation_item(&self, item_id: String) -> Result<(), ApiError> {
+-        self.send_json(&RealtimeOutboundMessage::ConversationItemRetrieve { item_id })
++    pub async fn retrieve_conversation_item(
++        &self,
++        item_id: String,
++        event_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::ConversationItemRetrieve { item_id, event_id })
+             .await
+     }
+     pub async fn create_conversation_item_raw(
+         &self,
+         item: serde_json::Value,
+         previous_item_id: Option<String>,
++        event_id: Option<String>,
+     ) -> Result<(), ApiError> {
+         self.send_json(&RealtimeOutboundMessage::ConversationItemCreateRaw {
+             item,
+             previous_item_id,
++            event_id,
+         })
+         .await
+     }
+-    pub async fn send_conversation_item_delete(&self, item_id: String) -> Result<(), ApiError> {
+-        self.send_json(&RealtimeOutboundMessage::ConversationItemDelete { item_id })
++    pub async fn send_conversation_item_delete(
++        &self,
++        item_id: String,
++        event_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::ConversationItemDelete { item_id, event_id })
+             .await
+     }
+ 
+@@ -858,12 +903,14 @@ impl RealtimeWebsocketWriter {
+     pub async fn interrupt_response(
+         &self,
+         response_id: Option<String>,
++        event_id: Option<String>,
+         playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+         feedback: Option<String>,
+     ) -> Result<super::readiness::RealtimeInterruptResult, ApiError> {
+         self.stream
+             .request(|tx_result| WsCommand::Interrupt {
+                 response_id,
++                event_id,
+                 playback,
+                 feedback,
+                 tx_result,
+@@ -877,6 +924,21 @@ impl RealtimeWebsocketWriter {
+     }
+ 
+     /// Send this connection's reserved revision through the one socket pump.
++    pub async fn send_playback_control(
++        &self,
++        control: RealtimePlaybackControl,
++        event_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.stream
++            .request(|tx_result| WsCommand::PlaybackControl {
++                control,
++                event_id,
++                tx_result,
++            })
++            .await
++            .map_err(map_realtime_websocket_connect_error)?
++    }
++
+     pub async fn send_reserved_update(
+         &self,
+         reservation: super::readiness::RealtimeConfigurationReservation,
+@@ -915,7 +977,7 @@ impl RealtimeWebsocketWriter {
+     pub async fn send_audio_frame(&self, frame: RealtimeAudioFrame) -> Result<(), ApiError> {
+         let message = match self.event_parser {
+             RealtimeEventParser::V1 | RealtimeEventParser::RealtimeV2 => {
+-                RealtimeOutboundMessage::InputAudioBufferAppend { audio: frame.data }
++                return self.send_audio_append(frame.data, None).await;
+             }
+             RealtimeEventParser::FramelessBidi => {
+                 RealtimeOutboundMessage::InputAudioAppend { audio: frame.data }
+@@ -924,13 +986,27 @@ impl RealtimeWebsocketWriter {
+         self.send_json(&message).await
+     }
+ 
+-    pub async fn send_audio_commit(&self) -> Result<(), ApiError> {
++    pub async fn send_audio_append(
++        &self,
++        audio: String,
++        event_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::InputAudioBufferAppend { audio, event_id })
++            .await
++    }
++
++    pub async fn send_audio_commit(&self, event_id: Option<String>) -> Result<(), ApiError> {
+         if self.event_parser != RealtimeEventParser::RealtimeV2 {
+             return Err(ApiError::InvalidRequest {
+                 message: "Manual audio commit requires Realtime V2".into(),
+             });
+         }
+-        self.send_json(&RealtimeOutboundMessage::InputAudioBufferCommit)
++        self.send_json(&RealtimeOutboundMessage::InputAudioBufferCommit { event_id })
++            .await
++    }
++
++    pub async fn send_audio_clear(&self, event_id: Option<String>) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::InputAudioBufferClear { event_id })
+             .await
+     }
+ 
+@@ -2314,15 +2390,18 @@ mod tests {
+         let append = serde_json::to_value(RealtimeOutboundMessage::ConversationItemCreateRaw {
+             item: item.clone(),
+             previous_item_id: None,
++            event_id: None,
+         })
+         .unwrap();
+         assert!(append.get("previous_item_id").is_none());
+         let root = serde_json::to_value(RealtimeOutboundMessage::ConversationItemCreateRaw {
+             item,
+             previous_item_id: Some("root".into()),
++            event_id: Some("client-event".into()),
+         })
+         .unwrap();
+         assert_eq!(root["previous_item_id"], "root");
++        assert_eq!(root["event_id"], "client-event");
+     }
+ 
+     #[test]
+@@ -5108,7 +5187,7 @@ mod tests {
+         ) {}
+         let effect = connection
+             .writer()
+-            .interrupt_response(None, None, None)
++            .interrupt_response(None, None, None, None)
+             .await
+             .unwrap();
+         assert_eq!(effect.cancelled_response_id.as_deref(), Some("a"));
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+index 03bcc31f42c7eb484743ee7fbfd9f82a6b558f83..ab9625ecdf69b35ea3b8bf315eab3dbe39093596 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+@@ -13,6 +13,7 @@ mod protocol_v2;
+ mod readiness;
+ mod settings;
+ 
++pub use methods::RealtimePlaybackControl;
+ pub use methods::RealtimeTranscriptState;
+ pub use methods::RealtimeWebsocketClient;
+ pub use methods::RealtimeWebsocketConnection;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+index f26fe72ba7adec5330842b9c745c0006434e09bc..05fe37f35ce68b7f21830f412411da60f782d369 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+@@ -55,9 +55,21 @@ pub struct RealtimeSessionConfig {
+ #[serde(tag = "type")]
+ pub(super) enum RealtimeOutboundMessage {
+     #[serde(rename = "input_audio_buffer.commit")]
+-    InputAudioBufferCommit,
++    InputAudioBufferCommit {
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
++    },
++    #[serde(rename = "input_audio_buffer.clear")]
++    InputAudioBufferClear {
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
++    },
+     #[serde(rename = "input_audio_buffer.append")]
+-    InputAudioBufferAppend { audio: String },
++    InputAudioBufferAppend {
++        audio: String,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
++    },
+     #[serde(rename = "conversation.handoff.append")]
+     ConversationHandoffAppend {
+         handoff_id: String,
+@@ -89,15 +101,25 @@ pub(super) enum RealtimeOutboundMessage {
+     #[serde(rename = "conversation.item.create")]
+     ConversationItemCreate { item: ConversationItemPayload },
+     #[serde(rename = "conversation.item.retrieve")]
+-    ConversationItemRetrieve { item_id: String },
++    ConversationItemRetrieve {
++        item_id: String,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
++    },
+     #[serde(rename = "conversation.item.create")]
+     ConversationItemCreateRaw {
+         item: Value,
+         #[serde(skip_serializing_if = "Option::is_none")]
+         previous_item_id: Option<String>,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
+     },
+     #[serde(rename = "conversation.item.delete")]
+-    ConversationItemDelete { item_id: String },
++    ConversationItemDelete {
++        item_id: String,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        event_id: Option<String>,
++    },
+ }
+ 
+ #[derive(Debug, Clone, Serialize)]
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+index cf974a4fb9a3bf20e494faeeff99a138491ffb1a..7ba5b2907191e116b146e1a126e46e424c7bdd53 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+@@ -1,4 +1,5 @@
+ //! Connection-owned accepted configuration and its single pending revision.
++use super::methods::RealtimePlaybackControl;
+ use crate::ApiError;
+ use codex_protocol::agent_profile::AgentProfileReceipt;
+ use codex_protocol::protocol::{RealtimeAudioFrame, RealtimeOutputGuard};
+@@ -328,7 +329,15 @@ impl RealtimeConfiguration {
+         &self,
+         update: &RealtimeSessionUpdate,
+     ) -> Result<RealtimeConfigurationReservation, ApiError> {
+-        self.reserve_revision(update, None)
++        self.reserve_revision(update, None, None)
++    }
++
++    pub fn reserve_update_with_event_id(
++        &self,
++        update: &RealtimeSessionUpdate,
++        event_id: Option<String>,
++    ) -> Result<RealtimeConfigurationReservation, ApiError> {
++        self.reserve_revision(update, None, event_id)
+     }
+ 
+     pub fn reserve_update_with_source(
+@@ -336,13 +345,14 @@ impl RealtimeConfiguration {
+         update: &RealtimeSessionUpdate,
+         source: Arc<dyn RealtimeNativeSource>,
+     ) -> Result<RealtimeConfigurationReservation, ApiError> {
+-        self.reserve_revision(update, Some(source))
++        self.reserve_revision(update, Some(source), None)
+     }
+ 
+     fn reserve_revision(
+         &self,
+         update: &RealtimeSessionUpdate,
+         source: Option<Arc<dyn RealtimeNativeSource>>,
++        event_id: Option<String>,
+     ) -> Result<RealtimeConfigurationReservation, ApiError> {
+         let mut payload = super::settings::realtime_v2_session_update_json(update)
+             .map_err(|error| invalid(&error.to_string()))?;
+@@ -365,7 +375,7 @@ impl RealtimeConfiguration {
+         apply_contract_update(&mut contract, &payload["session"]);
+         super::settings::validate_tool_choice(&contract)
+             .map_err(|error| invalid(&error.to_string()))?;
+-        let id = uuid::Uuid::now_v7().to_string();
++        let id = event_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+         payload["event_id"] = Value::String(id.clone());
+         let (completion, result) = watch::channel(ReceiptState::Pending);
+         state.pending = Some(PendingConfiguration {
+@@ -385,33 +395,34 @@ impl RealtimeConfiguration {
+         })
+     }
+ 
++    fn accepted_input_format(&self) -> Result<Option<RealtimeAudioFormat>, ApiError> {
++        let state = self.inner.state.lock().unwrap();
++        if state.failure.is_some() {
++            return Err(invalid("Realtime configuration is retired"));
++        }
++        // Pending instructions/tools cannot promote new execution authority,
++        // but they do not invalidate media already accepted by this socket.
++        if let Some(pending) = &state.pending {
++            let media_unchanged = state.accepted.as_ref().is_some_and(|accepted| {
++                ["model", "audio", "output_modalities"]
++                    .into_iter()
++                    .all(|field| accepted.contract.get(field) == pending.contract.get(field))
++            });
++            if !media_unchanged {
++                return Err(invalid("Realtime configuration acceptance is pending"));
++            }
++        }
++        state
++            .accepted
++            .as_ref()
++            .map(|accepted| accepted.input_format)
++            .ok_or_else(|| invalid("Realtime configuration has not been accepted"))
++    }
++
+     /// Validate caller media before queue admission. No codec conversion is implied.
+     pub fn validate_audio(&self, frame: &RealtimeAudioFrame) -> Result<(), ApiError> {
+-        use base64::Engine;
+-        let accepted = {
+-            let state = self.inner.state.lock().unwrap();
+-            if state.failure.is_some() {
+-                return Err(invalid("Realtime configuration is retired"));
+-            }
+-            // Pending instructions/tools cannot promote new execution authority,
+-            // but they do not invalidate media already accepted by this socket.
+-            if let Some(pending) = &state.pending {
+-                let media_unchanged = state.accepted.as_ref().is_some_and(|accepted| {
+-                    ["model", "audio", "output_modalities"]
+-                        .into_iter()
+-                        .all(|field| accepted.contract.get(field) == pending.contract.get(field))
+-                });
+-                if !media_unchanged {
+-                    return Err(invalid("Realtime configuration acceptance is pending"));
+-                }
+-            }
+-            state
+-                .accepted
+-                .clone()
+-                .ok_or_else(|| invalid("Realtime configuration has not been accepted"))?
+-        };
+         let format = frame.format.unwrap_or(RealtimeAudioFormat::Pcm24k);
+-        if accepted.input_format != Some(format)
++        if self.accepted_input_format()? != Some(format)
+             || frame.sample_rate != format.sample_rate()
+             || frame.num_channels != 1
+         {
+@@ -419,8 +430,20 @@ impl RealtimeConfiguration {
+                 "Audio frame does not match the accepted input format",
+             ));
+         }
++        Self::validate_audio_data(format, &frame.data)
++    }
++
++    pub fn validate_raw_audio(&self, audio: &str) -> Result<(), ApiError> {
++        let format = self
++            .accepted_input_format()?
++            .ok_or_else(|| invalid("Realtime input audio format is unavailable"))?;
++        Self::validate_audio_data(format, audio)
++    }
++
++    fn validate_audio_data(format: RealtimeAudioFormat, audio: &str) -> Result<(), ApiError> {
++        use base64::Engine;
+         let bytes = base64::engine::general_purpose::STANDARD
+-            .decode(&frame.data)
++            .decode(audio)
+             .map_err(|_| invalid("Audio frame must contain valid base64"))?;
+         if format == RealtimeAudioFormat::Pcm24k && bytes.len() % 2 != 0 {
+             return Err(invalid("PCM audio requires complete two-byte samples"));
+@@ -489,6 +512,63 @@ impl RealtimeConfiguration {
+         Self::validate_playback_in(&self.inner.state.lock().unwrap(), position)
+     }
+ 
++    pub(super) fn prepare_playback_control(
++        &self,
++        control: RealtimePlaybackControl,
++        event_id: Option<String>,
++        server_managed_audio: bool,
++    ) -> Result<Value, ApiError> {
++        let mut state = self.inner.state.lock().unwrap();
++        if state.failure.is_some() {
++            return Err(invalid("Realtime configuration is retired"));
++        }
++        let mut event = match control {
++            RealtimePlaybackControl::Clear if server_managed_audio => {
++                serde_json::json!({"type": "output_audio_buffer.clear"})
++            }
++            RealtimePlaybackControl::Clear => {
++                return Err(invalid(
++                    "Clearing output audio requires provider-managed playback",
++                ));
++            }
++            RealtimePlaybackControl::Truncate {
++                item_id,
++                content_index,
++                audio_end_ms,
++            } => {
++                let record = state
++                    .received_audio
++                    .iter_mut()
++                    .find(|record| {
++                        record.item_id == item_id && record.content_index == content_index
++                    })
++                    .ok_or_else(|| {
++                        invalid("Playback item is unknown or outside the retained media window")
++                    })?;
++                let rate = record
++                    .configuration
++                    .output_format
++                    .ok_or_else(|| invalid("Playback format is unknown"))?
++                    .sample_rate();
++                if u128::from(audio_end_ms) * u128::from(rate) > u128::from(record.samples) * 1000 {
++                    return Err(invalid("Played position exceeds received audio duration"));
++                }
++                record.samples = u64::from(audio_end_ms) * u64::from(rate) / 1000;
++                record.truncated = true;
++                serde_json::json!({
++                    "type": "conversation.item.truncate",
++                    "item_id": item_id,
++                    "content_index": content_index,
++                    "audio_end_ms": audio_end_ms
++                })
++            }
++        };
++        if let Some(event_id) = event_id {
++            event["event_id"] = Value::String(event_id);
++        }
++        Ok(event)
++    }
++
+     pub(super) fn response_create_for(&self, response_id: &str) -> bool {
+         let mut state = self.inner.state.lock().unwrap();
+         let request_owner = state
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index bd626c869213a2a59a746fed4b8f7299ce94549c..ca355c8b9874eb75b9e7f5a50298e2fc06230201 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -24,10 +24,20 @@ pub(super) fn response_create_json(options: &RealtimeResponseOptions) -> serde_j
+         "max_output_tokens",
+         &options.max_output_tokens,
+     )?;
++    put(&mut response, "metadata", &options.metadata)?;
++    put(
++        &mut response,
++        "parallel_tool_calls",
++        &options.parallel_tool_calls,
++    )?;
++    put(&mut response, "reasoning", &options.reasoning)?;
+     if let Some(modality) = &options.output_modality {
+         response.insert("output_modalities".into(), serde_json::json!([modality]));
+     }
+     let mut event = serde_json::json!({"type": "response.create"});
++    if let Some(event_id) = &options.event_id {
++        event["event_id"] = Value::String(event_id.clone());
++    }
+     if !response.is_empty() {
+         event["response"] = Value::Object(response);
+     }
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 814be1b3463fd797cb742b84345c038f2138a810..058c7141f7de69bbc6d81091117f50813db0f033 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -163,6 +163,7 @@ pub use crate::endpoint::RealtimeConfigurationReceipt;
+ pub use crate::endpoint::RealtimeConfigurationReservation;
+ pub use crate::endpoint::RealtimeInterruptResult;
+ pub use crate::endpoint::RealtimeNativeSource;
++pub use crate::endpoint::RealtimePlaybackControl;
+ 
+ pub use crate::endpoint::RealtimeHostedMcpAllowedTools;
+ pub use crate::endpoint::RealtimeHostedMcpApproval;
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109ca5291a84 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -1,11 +1,14 @@
+ mod item_deletion;
+ mod preparation;
+ pub(crate) mod provider_history;
++mod raw_event;
++mod raw_settings;
+ use preparation::SdkStartPreparation;
+ pub(crate) use preparation::{
+     dispatch_start_sdk, dispatch_tool_sdk, dispatch_tools_sdk, handle_activate_sdk,
+     handle_config_sdk, handle_prepare_sdk,
+ };
++pub(crate) use raw_event::handle_send_event_sdk;
+ mod tool_task;
+ use crate::client::ModelClient;
+ use crate::client::RealtimeCallLease;
+@@ -374,8 +377,7 @@ const SDK_HANDOFF_LIMIT: usize = 1024;
+ const SDK_FUNCTION_CALL_LIMIT: usize = 256;
+ const SDK_FUNCTION_CALL_MAX_BYTES: usize = 256 * 1024;
+ 
+-pub(crate) type SdkHostedMcpReply =
+-    Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CodexResult<()>>>>>;
++type SdkControlReply = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CodexResult<()>>>>>;
+ 
+ pub(crate) type SdkInterruptReply = Arc<
+     std::sync::Mutex<
+@@ -399,14 +401,29 @@ pub(crate) enum SdkRealtimeCommand {
+         approval_id: String,
+         approve: bool,
+         reason: Option<String>,
+-        reply: SdkHostedMcpReply,
++        reply: SdkControlReply,
+     },
+     DeleteItem {
+         item_id: String,
++        event_id: Option<String>,
+         reply: item_deletion::DeleteReply,
+     },
+     Audio(RealtimeAudioFrame),
+-    CommitAudio(SdkHostedMcpReply),
++    RawAudio {
++        audio: String,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
++    AudioControl {
++        control: AudioBufferControl,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
++    PlaybackControl {
++        control: codex_api::RealtimePlaybackControl,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
+     Input(ConversationInputParams),
+     RequestResponse(RealtimeResponseOptions),
+     Text(ConversationTextParams),
+@@ -414,6 +431,7 @@ pub(crate) enum SdkRealtimeCommand {
+     Update(RealtimeSessionUpdate),
+     OwnedUpdate {
+         update: RealtimeSessionUpdate,
++        event_id: Option<String>,
+         profile: Option<SdkProfileUpdate>,
+         reply: SdkUpdateReply,
+     },
+@@ -440,6 +458,7 @@ pub(crate) enum SdkRealtimeCommand {
+     },
+     Interrupt {
+         response_id: Option<String>,
++        event_id: Option<String>,
+         playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
+         feedback: Option<String>,
+         reply: Option<SdkInterruptReply>,
+@@ -1229,10 +1248,25 @@ struct RealtimeTranscriptTailFlush {
+     tx: Sender<String>,
+ }
+ 
++#[derive(Debug)]
++enum AudioBufferControl {
++    Commit,
++    Clear,
++}
++
+ #[derive(Debug)]
+ enum RealtimeAudioInput {
+     Frame(RealtimeAudioFrame),
+-    Commit(SdkHostedMcpReply),
++    RawFrame {
++        audio: String,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
++    Control {
++        control: AudioBufferControl,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
+ }
+ 
+ struct RealtimeInputChannels {
+@@ -1521,7 +1555,7 @@ impl RealtimeConversationManager {
+         }
+         if matches!(
+             &command,
+-            SdkRealtimeCommand::CommitAudio(_)
++            SdkRealtimeCommand::AudioControl { .. }
+                 | SdkRealtimeCommand::Input(_)
+                 | SdkRealtimeCommand::RequestResponse(_)
+         ) {
+@@ -1667,10 +1701,45 @@ impl RealtimeConversationManager {
+                         )
+                     });
+             }
+-            SdkRealtimeCommand::CommitAudio(reply) => {
++            SdkRealtimeCommand::RawAudio {
++                audio,
++                event_id,
++                reply,
++            } => {
++                sdk.configuration
++                    .lock()
++                    .unwrap()
++                    .as_ref()
++                    .ok_or_else(|| {
++                        CodexErr::InvalidRequest("SDK Realtime configuration is not ready".into())
++                    })?
++                    .validate_raw_audio(&audio)
++                    .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++                return state
++                    .audio_tx
++                    .try_send(RealtimeAudioInput::RawFrame {
++                        audio,
++                        event_id,
++                        reply,
++                    })
++                    .map_err(|_| {
++                        CodexErr::InvalidRequest(
++                            "SDK Realtime media queue is full or closed".into(),
++                        )
++                    });
++            }
++            SdkRealtimeCommand::AudioControl {
++                control,
++                event_id,
++                reply,
++            } => {
+                 return state
+                     .audio_tx
+-                    .try_send(RealtimeAudioInput::Commit(reply))
++                    .try_send(RealtimeAudioInput::Control {
++                        control,
++                        event_id,
++                        reply,
++                    })
+                     .map_err(|_| {
+                         CodexErr::InvalidRequest(
+                             "SDK Realtime media queue is full or closed".into(),
+@@ -1698,6 +1767,7 @@ impl RealtimeConversationManager {
+             }
+             SdkRealtimeCommand::OwnedUpdate {
+                 mut update,
++                event_id,
+                 profile,
+                 mut reply,
+             } => {
+@@ -1819,7 +1889,7 @@ impl RealtimeConversationManager {
+                                 Some(tool_task::select_accepted_tools(&accepted, tools)?);
+                         }
+                         let reservation = configuration
+-                            .reserve_update(&update)
++                            .reserve_update_with_event_id(&update, event_id)
+                             .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+                         Ok(Some((reservation, None, None)))
+                     }
+@@ -2976,19 +3046,36 @@ pub(crate) async fn dispatch_audio_commit_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+     reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
++) {
++    dispatch_sdk_control(sess, generation, reply, |reply| {
++        SdkRealtimeCommand::AudioControl {
++            control: AudioBufferControl::Commit,
++            event_id: None,
++            reply,
++        }
++    })
++    .await;
++}
++
++fn finish_sdk_control(reply: SdkControlReply, result: CodexResult<()>) {
++    if let Some(reply) = reply.lock().unwrap().take() {
++        let _ = reply.send(result);
++    }
++}
++
++async fn dispatch_sdk_control(
++    sess: &Arc<Session>,
++    generation: String,
++    reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
++    command: impl FnOnce(SdkControlReply) -> SdkRealtimeCommand,
+ ) {
+     let reply = Arc::new(std::sync::Mutex::new(Some(reply)));
+     if let Err(error) = sess
+         .conversation
+-        .sdk_enqueue(
+-            &generation,
+-            SdkRealtimeCommand::CommitAudio(Arc::clone(&reply)),
+-        )
++        .sdk_enqueue(&generation, command(Arc::clone(&reply)))
+         .await
+     {
+-        if let Some(reply) = reply.lock().unwrap().take() {
+-            let _ = reply.send(Err(error));
+-        }
++        finish_sdk_control(reply, Err(error));
+     }
+ }
+ 
+@@ -3037,12 +3124,30 @@ async fn run_history_action(
+     action: Option<provider_history::Action>,
+ ) -> anyhow::Result<()> {
+     let result = match action {
+-        Some(provider_history::Action::Retrieve(id)) => writer.retrieve_conversation_item(id).await,
+-        Some(provider_history::Action::Create { item, previous }) => {
++        Some(provider_history::Action::Retrieve { id, event_id }) => {
++            writer.retrieve_conversation_item(id, event_id).await
++        }
++        Some(provider_history::Action::Create {
++            item,
++            previous,
++            event_id,
++            recreate,
++        }) => {
+             if let Some(id) = item["id"].as_str() {
+-                sdk.item_deletion.lock().unwrap().allow_recreation(id);
++                let mut deletion = sdk.item_deletion.lock().unwrap();
++                if recreate {
++                    deletion.allow_recreation(id);
++                } else if deletion.is_deleted(id) {
++                    drop(deletion);
++                    sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
++                        "Provider message cannot reuse a deleted item ID".into(),
++                    ));
++                    return Ok(());
++                }
+             }
+-            writer.create_conversation_item_raw(item, previous).await
++            writer
++                .create_conversation_item_raw(item, previous, event_id)
++                .await
+         }
+         Some(provider_history::Action::Delete(id)) => {
+             // Validate the complete pending deletion plan before its first remote edit.
+@@ -3061,14 +3166,14 @@ async fn run_history_action(
+                 .item_deletion
+                 .lock()
+                 .unwrap()
+-                .begin_history_message(id.clone(), item_deletion::DeleteReply::new(reply))
++                .begin_history_delete(id.clone(), item_deletion::DeleteReply::new(reply))
+             {
+                 sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
+                     "Provider item cannot be edited while work is unresolved".into(),
+                 ));
+                 return Ok(());
+             }
+-            writer.send_conversation_item_delete(id).await
++            writer.send_conversation_item_delete(id, None).await
+         }
+         None => return Ok(()),
+     };
+@@ -3084,6 +3189,7 @@ pub(crate) async fn handle_delete_item_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+     item_id: String,
++    event_id: Option<String>,
+     reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
+ ) {
+     let mut owned = item_deletion::DeleteReply::new(reply);
+@@ -3093,6 +3199,7 @@ pub(crate) async fn handle_delete_item_sdk(
+             &generation,
+             SdkRealtimeCommand::DeleteItem {
+                 item_id,
++                event_id,
+                 reply: owned.clone(),
+             },
+         )
+@@ -3102,6 +3209,38 @@ pub(crate) async fn handle_delete_item_sdk(
+     }
+ }
+ 
++pub(crate) async fn dispatch_interrupt_sdk(
++    sess: &Arc<Session>,
++    generation: String,
++    response_id: Option<String>,
++    event_id: Option<String>,
++    playback: Option<codex_protocol::protocol::RealtimePlaybackPosition>,
++    feedback: Option<String>,
++    reply: tokio::sync::oneshot::Sender<
++        CodexResult<codex_protocol::protocol::RealtimeInterruptReceipt>,
++    >,
++) {
++    // The command owns completion; the dispatcher remains free to process close.
++    let completion = Arc::new(std::sync::Mutex::new(Some(reply)));
++    if let Err(error) = sess
++        .conversation
++        .sdk_enqueue(
++            &generation,
++            SdkRealtimeCommand::Interrupt {
++                response_id,
++                event_id,
++                playback,
++                feedback,
++                reply: Some(Arc::clone(&completion)),
++            },
++        )
++        .await
++        && let Some(reply) = completion.lock().unwrap().take()
++    {
++        let _ = reply.send(Err(error));
++    }
++}
++
+ pub(crate) async fn handle_update_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+@@ -3109,7 +3248,7 @@ pub(crate) async fn handle_update_sdk(
+     profile: Option<codex_protocol::realtime_settings::RealtimeToolProfileUpdate>,
+     reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
+ ) {
+-    preparation::dispatch_update_sdk(sess, generation, update, profile, reply).await;
++    preparation::dispatch_update_sdk(sess, generation, update, profile, None, reply).await;
+ }
+ 
+ pub(crate) async fn handle_tool_sdk(
+@@ -5039,7 +5178,11 @@ async fn handle_sdk_realtime_command(
+                 Err(error) => sdk.history.lock().unwrap().fail(error),
+             }
+         }
+-        SdkRealtimeCommand::DeleteItem { item_id, mut reply } => {
++        SdkRealtimeCommand::DeleteItem {
++            item_id,
++            event_id,
++            mut reply,
++        } => {
+             if sdk.history.lock().unwrap().busy() {
+                 reply.finish(Err(CodexErr::InvalidRequest(
+                     "Provider history operation is pending".into(),
+@@ -5052,7 +5195,10 @@ async fn handle_sdk_realtime_command(
+                 .unwrap()
+                 .begin(item_id.clone(), reply)
+             {
+-                if let Err(error) = writer.send_conversation_item_delete(item_id.clone()).await {
++                if let Err(error) = writer
++                    .send_conversation_item_delete(item_id.clone(), event_id)
++                    .await
++                {
+                     sdk.item_deletion
+                         .lock()
+                         .unwrap()
+@@ -5201,7 +5347,23 @@ async fn handle_sdk_realtime_command(
+                 .await
+                 .context("SDK batch status route closed")?;
+         }
+-        SdkRealtimeCommand::CommitAudio(_) => unreachable!("commit is admitted on the media FIFO"),
++        SdkRealtimeCommand::RawAudio { .. } | SdkRealtimeCommand::AudioControl { .. } => {
++            unreachable!("raw media is admitted on the media FIFO")
++        }
++        SdkRealtimeCommand::PlaybackControl {
++            control,
++            event_id,
++            reply,
++        } => match writer.send_playback_control(control, event_id).await {
++            Ok(()) => finish_sdk_control(reply, Ok(())),
++            Err(ApiError::InvalidRequest { message }) => {
++                finish_sdk_control(reply, Err(CodexErr::InvalidRequest(message)));
++            }
++            Err(error) => {
++                finish_sdk_control(reply, Err(CodexErr::InvalidRequest(error.to_string())));
++                return Err(error.into());
++            }
++        },
+         SdkRealtimeCommand::Input(params) => {
+             writer.send_user_input(params.content).await?;
+             if params.trigger_response {
+@@ -5386,6 +5548,7 @@ async fn handle_sdk_realtime_command(
+         }
+         SdkRealtimeCommand::Interrupt {
+             response_id,
++            event_id,
+             playback,
+             feedback,
+             reply,
+@@ -5395,6 +5558,7 @@ async fn handle_sdk_realtime_command(
+                 match writer
+                     .interrupt_response(
+                         response_id,
++                        event_id,
+                         playback,
+                         if responses.pending_create {
+                             None
+@@ -6147,24 +6311,46 @@ async fn handle_user_audio_input(
+ ) -> anyhow::Result<()> {
+     match input.context("user audio input channel closed")? {
+         RealtimeAudioInput::Frame(frame) => writer.send_audio_frame(frame).await?,
+-        RealtimeAudioInput::Commit(reply) => {
++        RealtimeAudioInput::RawFrame {
++            audio,
++            event_id,
++            reply,
++        } => {
++            let result = writer.send_audio_append(audio, event_id).await;
++            finish_sdk_control(
++                reply,
++                audio_write_receipt(&result, "Realtime audio append was not written"),
++            );
++            result?;
++        }
++        RealtimeAudioInput::Control {
++            control,
++            event_id,
++            reply,
++        } => {
+             // Preserve admission authority while a later update drains this FIFO.
+-            let result = writer.send_audio_commit().await;
+-            if let Some(reply) = reply.lock().unwrap().take() {
+-                let _ = reply.send(if result.is_ok() {
+-                    Ok(())
+-                } else {
+-                    Err(CodexErr::InvalidRequest(
+-                        "Realtime audio commit was not written".into(),
+-                    ))
+-                });
+-            }
++            let result = match control {
++                AudioBufferControl::Commit => writer.send_audio_commit(event_id).await,
++                AudioBufferControl::Clear => writer.send_audio_clear(event_id).await,
++            };
++            let failure = match control {
++                AudioBufferControl::Commit => "Realtime audio commit was not written",
++                AudioBufferControl::Clear => "Realtime audio clear was not written",
++            };
++            finish_sdk_control(reply, audio_write_receipt(&result, failure));
+             result?;
+         }
+     }
+     Ok(())
+ }
+ 
++fn audio_write_receipt(result: &Result<(), ApiError>, failure: &str) -> CodexResult<()> {
++    result
++        .as_ref()
++        .copied()
++        .map_err(|_| CodexErr::InvalidRequest(failure.into()))
++}
++
+ fn update_output_audio_state(
+     output_audio_state: &mut Option<OutputAudioState>,
+     frame: &RealtimeAudioFrame,
+diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+index 97cb28ea2bd3deeae323d533d9dd520df9648eb8..d8941ea55b1e89a7ca6fd350ed3dc282b868282a 100644
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -339,7 +339,7 @@ impl State {
+         });
+         true
+     }
+-    pub(super) fn begin_history_message(&mut self, id: String, reply: DeleteReply) -> bool {
++    pub(super) fn begin_history_delete(&mut self, id: String, reply: DeleteReply) -> bool {
+         let recreatable_message = self
+             .items
+             .get(&id)
+@@ -521,7 +521,7 @@ mod tests {
+         let mut state = State::default();
+         message(&mut state, "editable", "user");
+         let (reply, receiver) = reply();
+-        assert!(state.begin_history_message("editable".into(), reply));
++        assert!(state.begin_history_delete("editable".into(), reply));
+         assert!(state.pending_matches("editable"));
+         assert!(state.acknowledge("editable"));
+         assert!(state.pending_matches("editable"));
+diff --git a/codex-rs/core/src/realtime_conversation/preparation.rs b/codex-rs/core/src/realtime_conversation/preparation.rs
+index cc19e0ce9ff103b580006e45c16d3f3cd852fb6b..59760c9c964593562fc119ef42d9bc418c372a81 100644
+--- a/codex-rs/core/src/realtime_conversation/preparation.rs
++++ b/codex-rs/core/src/realtime_conversation/preparation.rs
+@@ -652,6 +652,7 @@ pub(crate) async fn dispatch_update_sdk(
+     generation: String,
+     update: RealtimeSessionUpdate,
+     profile: Option<codex_protocol::realtime_settings::RealtimeToolProfileUpdate>,
++    event_id: Option<String>,
+     reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
+ ) {
+     let mut reply = SdkUpdateReply(Some(reply));
+@@ -662,6 +663,7 @@ pub(crate) async fn dispatch_update_sdk(
+                 &generation,
+                 SdkRealtimeCommand::OwnedUpdate {
+                     update,
++                    event_id,
+                     profile: None,
+                     reply,
+                 },
+@@ -726,7 +728,7 @@ pub(crate) async fn dispatch_update_sdk(
+     let task=tokio::spawn(async move {
+         let source=tokio::select! {biased;_=stop.cancelled()=>Err(CodexErr::TurnAborted),source=tool_task::finish_realtime_native_source(&session,draft)=>source};
+         match source {
+-            Ok(source)=>{let _=session.conversation.sdk_enqueue(&generation,SdkRealtimeCommand::OwnedUpdate {update,profile:Some(SdkProfileUpdate {request,source}),reply}).await;}
++            Ok(source)=>{let _=session.conversation.sdk_enqueue(&generation,SdkRealtimeCommand::OwnedUpdate {update,event_id,profile:Some(SdkProfileUpdate {request,source}),reply}).await;}
+             Err(error)=>reply.finish(Err(error)),
+         }
+     }.instrument(tracing::Span::current()));
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+index 44998634da52145deeb6beb50ef088cbbc32530a..7fd56784c426d4bddd20d8bfda0007d55e496740 100644
+--- a/codex-rs/core/src/realtime_conversation/provider_history.rs
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -13,17 +13,37 @@ const MAX_IMAGE_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+ type Reply<T> = tokio::sync::oneshot::Sender<CodexResult<T>>;
+ #[derive(Debug)]
+ pub(crate) enum Request {
+-    Item { id: String, reply: Reply<Value> },
+-    List { reply: Reply<Vec<Value>> },
+-    Update { items: Vec<Value>, reply: Reply<()> },
++    Item {
++        id: String,
++        event_id: Option<String>,
++        reply: Reply<Value>,
++    },
++    List {
++        reply: Reply<Vec<Value>>,
++    },
++    Update {
++        items: Vec<Value>,
++        reply: Reply<()>,
++    },
++    Create {
++        item: Value,
++        previous: Option<String>,
++        event_id: Option<String>,
++        reply: Reply<()>,
++    },
+ }
+-#[derive(Debug)]
++#[derive(Debug, Clone)]
+ pub(super) enum Action {
+-    Retrieve(String),
++    Retrieve {
++        id: String,
++        event_id: Option<String>,
++    },
+     Delete(String),
+     Create {
+         item: Value,
+         previous: Option<String>,
++        event_id: Option<String>,
++        recreate: bool,
+     },
+ }
+ #[derive(Debug)]
+@@ -71,6 +91,7 @@ pub(super) fn validate_request_ids(
+ ) -> CodexResult<()> {
+     let deleted = match request {
+         Request::Item { id, .. } => !deletion.can_retrieve(id),
++        Request::Create { item, .. } => deletion.is_deleted(item_id(item)?),
+         Request::Update { items, .. } => items.iter().any(|item| {
+             item["id"].as_str().is_some_and(|id| {
+                 deletion.is_deleted(id)
+@@ -254,8 +275,8 @@ fn creation_receipt_conflicts(expected: &Value, actual: &Value) -> bool {
+         })
+ }
+ 
+-/// Preserve authoritative tool/control rows and their stable anchors. Within each
+-/// anchor segment, retain unchanged rows in relative order and edit only the other rows.
++/// Preserve surviving tool/control rows as anchors. Omitted rows are deletion
++/// candidates and must pass the native deletion checks before any edits are sent.
+ fn edits(
+     current: &[Value],
+     desired: &[Value],
+@@ -270,7 +291,9 @@ fn edits(
+     }
+     let old_anchors: Vec<_> = current
+         .iter()
+-        .filter(|item| !mutable_message(item))
++        .filter(|item| {
++            !mutable_message(item) && item["id"].as_str().is_some_and(|id| ids.contains(id))
++        })
+         .collect();
+     let new_anchors: Vec<_> = desired
+         .iter()
+@@ -278,29 +301,9 @@ fn edits(
+         .collect();
+     if old_anchors != new_anchors {
+         return Err(invalid(
+-            "Provider tool and control items must retain their exact IDs, contents, and order",
++            "Surviving provider tool and control items must retain their exact IDs, contents, and order",
+         ));
+     }
+-    let segments = |items: &[Value]| -> CodexResult<HashMap<String, usize>> {
+-        let mut segment = 0;
+-        let mut result = HashMap::new();
+-        for item in items {
+-            if mutable_message(item) {
+-                result.insert(item_id(item)?.to_owned(), segment);
+-            } else {
+-                segment += 1;
+-            }
+-        }
+-        Ok(result)
+-    };
+-    let old_segments = segments(current)?;
+-    for (id, segment) in segments(desired)? {
+-        if old_segments.get(&id).is_some_and(|old| *old != segment) {
+-            return Err(invalid(
+-                "Messages cannot move across authoritative tool or control anchors",
+-            ));
+-        }
+-    }
+     let mut deletes = VecDeque::new();
+     let mut creates = VecDeque::new();
+     let mut old_start = 0;
+@@ -392,6 +395,8 @@ fn edits(
+                 creates.push_back(Action::Create {
+                     item: creation_item(item, &mut remaining_image_work)?,
+                     previous: previous.clone(),
++                    event_id: None,
++                    recreate: true,
+                 });
+             }
+             previous = Some(id);
+@@ -428,7 +433,8 @@ impl State {
+     }
+     pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
+         self.pending.as_ref().and_then(|pending| {
+-            if pending.request.is_none() && matches!(pending.waiting, Some(Action::Retrieve(_))) {
++            if pending.request.is_none() && matches!(pending.waiting, Some(Action::Retrieve { .. }))
++            {
+                 None
+             } else {
+                 Some(pending.deadline)
+@@ -438,7 +444,7 @@ impl State {
+     pub(super) fn expire_read(&mut self) -> bool {
+         if self.pending.as_ref().is_some_and(|pending| {
+             pending.deadline <= tokio::time::Instant::now()
+-                && matches!(pending.waiting, Some(Action::Retrieve(_)))
++                && matches!(pending.waiting, Some(Action::Retrieve { .. }))
+         }) {
+             self.interrupt(invalid("Provider history retrieval timed out"));
+             true
+@@ -455,6 +461,11 @@ impl State {
+         let previous = previous.map(|previous| previous.filter(|id| *id != "root"));
+         if previous.flatten() == Some(id.as_str()) {
+             self.mark_order_unknown();
++            if self.expected_create(&id) {
++                self.interrupt(invalid(
++                    "Provider create receipt has a contradictory predecessor",
++                ));
++            }
+             self.record_id(&id, false)?;
+             return Ok(());
+         }
+@@ -464,7 +475,12 @@ impl State {
+                 previous.is_some_and(|actual| actual.unwrap_or("root") != expected)
+             })
+         });
+-        if (previous.is_none() && !expected_create) || contradictory {
++        if contradictory {
++            self.incomplete = true;
++            self.interrupt(invalid(
++                "Provider create receipt has a contradictory predecessor",
++            ));
++        } else if previous.is_none() && !expected_create {
+             self.mark_order_unknown();
+         }
+         if self.order.is_empty() {
+@@ -512,7 +528,7 @@ impl State {
+         self.pending
+             .as_ref()
+             .and_then(|pending| match &pending.waiting {
+-                Some(Action::Create { item, previous }) if item["id"].as_str() == Some(id) => {
++                Some(Action::Create { item, previous, .. }) if item["id"].as_str() == Some(id) => {
+                     Some(previous)
+                 }
+                 _ => None,
+@@ -554,6 +570,36 @@ impl State {
+         }
+         Ok(())
+     }
++    fn insert_message(
++        &self,
++        item: &Value,
++        previous: &Option<String>,
++        event_id: &Option<String>,
++    ) -> CodexResult<Action> {
++        let id = item_id(item)?;
++        if self.order.len() == LIMIT
++            || self.boundary.as_deref() == Some(id)
++            || self.order.iter().any(|known| known == id)
++        {
++            return Err(invalid(
++                "Provider message ID is already in use or history is full",
++            ));
++        }
++        if previous
++            .as_ref()
++            .is_some_and(|id| self.boundary.as_ref() != Some(id) && !self.order.contains(id))
++        {
++            return Err(invalid("Unknown provider message predecessor"));
++        }
++        let mut remaining_image_work = MAX_IMAGE_DECODE_BYTES;
++        let item = creation_item(item, &mut remaining_image_work)?;
++        Ok(Action::Create {
++            item,
++            previous: previous.clone(),
++            event_id: event_id.clone(),
++            recreate: false,
++        })
++    }
+     pub(super) fn start(&mut self, request: Request) -> CodexResult<Option<Action>> {
+         if self.busy() {
+             finish_request(
+@@ -562,7 +608,7 @@ impl State {
+             );
+             return Ok(None);
+         }
+-        if self.incomplete && !matches!(request, Request::Item { .. }) {
++        if self.incomplete && matches!(request, Request::List { .. } | Request::Update { .. }) {
+             finish_request(
+                 request,
+                 Err(invalid(
+@@ -571,6 +617,7 @@ impl State {
+             );
+             return Ok(None);
+         }
++        let mut actions = VecDeque::new();
+         let ids = match &request {
+             Request::Item { id, .. } => {
+                 if !valid_id(id) {
+@@ -580,6 +627,21 @@ impl State {
+                 VecDeque::from([id.clone()])
+             }
+             Request::List { .. } | Request::Update { .. } => self.order.iter().cloned().collect(),
++            Request::Create {
++                item,
++                previous,
++                event_id,
++                ..
++            } => {
++                match self.insert_message(item, previous, event_id) {
++                    Ok(action) => actions.push_back(action),
++                    Err(error) => {
++                        finish_request(request, Err(error));
++                        return Ok(None);
++                    }
++                }
++                VecDeque::new()
++            }
+         };
+         if let Request::Update { items, .. } = &request {
+             if items.len() > LIMIT {
+@@ -609,7 +671,7 @@ impl State {
+             retained_bytes,
+             ids,
+             snapshot: vec![],
+-            actions: VecDeque::new(),
++            actions,
+             waiting: None,
+             deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+         });
+@@ -619,7 +681,7 @@ impl State {
+         if !self
+             .pending
+             .as_ref()
+-            .is_some_and(|pending| matches!(pending.waiting, Some(Action::Retrieve(_))))
++            .is_some_and(|pending| matches!(pending.waiting, Some(Action::Retrieve { .. })))
+         {
+             return Ok(None);
+         }
+@@ -633,7 +695,8 @@ impl State {
+         let Some(pending) = self.pending.as_mut() else {
+             return Ok(None);
+         };
+-        if !matches!(&pending.waiting, Some(Action::Retrieve(expected)) if expected == id) {
++        if !matches!(&pending.waiting, Some(Action::Retrieve { id: expected, .. }) if expected == id)
++        {
+             return Ok(None);
+         }
+         // This matching receipt is consumed even if retaining its body exceeds the budget.
+@@ -671,6 +734,7 @@ impl State {
+         let Some(Action::Create {
+             item: expected,
+             previous,
++            ..
+         }) = &pending.waiting
+         else {
+             return Ok(None);
+@@ -715,6 +779,9 @@ impl State {
+             .as_ref()
+             .is_some_and(|pending| match &pending.request {
+                 Some(Request::Item { id: requested, .. }) => requested == id,
++                Some(Request::Create { item, previous, .. }) => {
++                    item["id"].as_str() == Some(id) || previous.as_deref() == Some(id)
++                }
+                 Some(Request::List { .. } | Request::Update { .. }) => true,
+                 None => false,
+             });
+@@ -747,9 +814,14 @@ impl State {
+             return Ok(None);
+         }
+         if let Some(id) = pending.ids.pop_front() {
+-            pending.waiting = Some(Action::Retrieve(id.clone()));
++            let event_id = match &pending.request {
++                Some(Request::Item { event_id, .. }) => event_id.clone(),
++                _ => None,
++            };
++            let action = Action::Retrieve { id, event_id };
++            pending.waiting = Some(action.clone());
+             pending.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+-            return Ok(Some(Action::Retrieve(id)));
++            return Ok(Some(action));
+         }
+         if let Some(Request::Update { items, .. }) = &pending.request {
+             if pending.actions.is_empty() && !pending.snapshot.is_empty() {
+@@ -760,14 +832,7 @@ impl State {
+             }
+         }
+         if let Some(action) = pending.actions.pop_front() {
+-            pending.waiting = Some(match &action {
+-                Action::Retrieve(id) => Action::Retrieve(id.clone()),
+-                Action::Delete(id) => Action::Delete(id.clone()),
+-                Action::Create { item, previous } => Action::Create {
+-                    item: item.clone(),
+-                    previous: previous.clone(),
+-                },
+-            });
++            pending.waiting = Some(action.clone());
+             pending.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+             return Ok(Some(action));
+         }
+@@ -785,7 +850,7 @@ impl State {
+             Request::List { reply } => {
+                 let _ = reply.send(Ok(pending.snapshot));
+             }
+-            Request::Update { reply, .. } => {
++            Request::Update { reply, .. } | Request::Create { reply, .. } => {
+                 let _ = reply.send(Ok(()));
+             }
+         }
+@@ -826,7 +891,7 @@ fn finish_request(request: Request, result: CodexResult<()>) {
+         Request::List { reply } => {
+             let _ = reply.send(Err(error));
+         }
+-        Request::Update { reply, .. } => {
++        Request::Update { reply, .. } | Request::Create { reply, .. } => {
+             let _ = reply.send(Err(error));
+         }
+     }
+@@ -864,11 +929,32 @@ mod tests {
+         json!({"id":id,"type":"message","role":"user","content":[{"type":"input_text","text":text}]})
+     }
+     #[tokio::test]
++    async fn raw_create_rejects_its_own_id_as_the_receipt_predecessor() {
++        let mut state = super::State::default();
++        let item = message("inserted", "Text");
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        let action = state
++            .start(Request::Create {
++                item: item.clone(),
++                previous: None,
++                event_id: Some("client-event".into()),
++                reply,
++            })
++            .unwrap();
++        assert!(
++            matches!(action, Some(Action::Create { event_id: Some(id), .. }) if id == "client-event")
++        );
++        state.observe_added(&item, Some(Some("inserted"))).unwrap();
++        state.created(&item, true).unwrap();
++        assert!(receipt.await.unwrap().is_err());
++        assert!(!state.busy());
++    }
++    #[tokio::test]
+     async fn explicit_retrieval_returns_full_media_and_retirement_releases_waiter() {
+         let mut state = State::default();
+         let (reply, receipt) = tokio::sync::oneshot::channel();
+         assert!(
+-            matches!(state.start(Request::Item{id:"audio".into(),reply}).unwrap(),Some(Action::Retrieve(id)) if id=="audio")
++            matches!(state.start(Request::Item{id:"audio".into(),event_id:None,reply}).unwrap(),Some(Action::Retrieve { id, .. }) if id=="audio")
+         );
+         assert!(
+             state
+@@ -886,6 +972,7 @@ mod tests {
+         state
+             .start(Request::Item {
+                 id: "audio".into(),
++                event_id: None,
+                 reply,
+             })
+             .unwrap();
+@@ -902,17 +989,17 @@ mod tests {
+         state.observe_added(&old, Some(Some("first"))).unwrap();
+         let (reply, mut receipt) = tokio::sync::oneshot::channel();
+         assert!(
+-            matches!(state.start(Request::Update{items:vec![first.clone(),new.clone()],reply}).unwrap(),Some(Action::Retrieve(id)) if id=="first")
++            matches!(state.start(Request::Update{items:vec![first.clone(),new.clone()],reply}).unwrap(),Some(Action::Retrieve { id, .. }) if id=="first")
+         );
+         assert!(
+-            matches!(state.retrieved(first.clone()).unwrap(),Some(Action::Retrieve(id)) if id=="old")
++            matches!(state.retrieved(first.clone()).unwrap(),Some(Action::Retrieve { id, .. }) if id=="old")
+         );
+         assert!(matches!(state.retrieved(old).unwrap(),Some(Action::Delete(id)) if id=="old"));
+         assert!(receipt.try_recv().is_err());
+         assert!(!state.deleted("unrelated").unwrap());
+         assert!(state.deleted("old").unwrap());
+         assert!(
+-            matches!(state.advance().unwrap(),Some(Action::Create {item,previous}) if item==new && previous.as_deref()==Some("first"))
++            matches!(state.advance().unwrap(),Some(Action::Create { item, previous, .. }) if item==new && previous.as_deref()==Some("first"))
+         );
+         assert!(receipt.try_recv().is_err());
+         state.observe_added(&new, Some(Some("first"))).unwrap();
+@@ -934,17 +1021,20 @@ mod tests {
+         .unwrap();
+         assert!(matches!(plan.pop_front(),Some(Action::Delete(id)) if id=="a"));
+         assert!(
+-            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==a && previous.as_deref()==Some("b"))
++            matches!(plan.pop_front(),Some(Action::Create { item, previous, .. }) if item==a && previous.as_deref()==Some("b"))
+         );
+         assert!(plan.is_empty());
++        let moved = edits(
++            &current,
++            &[b.clone(), tool.clone(), a.clone()],
++            Some("root"),
++        )
++        .unwrap();
++        assert!(matches!(moved[0], Action::Delete(ref id) if id == "a"));
+         assert!(
+-            edits(
+-                &current,
+-                &[tool.clone(), a.clone(), b.clone()],
+-                Some("root")
+-            )
+-            .is_err()
++            matches!(&moved[1], Action::Create { item, previous, .. } if item == &a && previous.as_deref() == Some("tool"))
+         );
++        assert_eq!(moved.len(), 2);
+         let mut manufactured = tool.clone();
+         manufactured["arguments"] = json!("changed");
+         assert!(
+@@ -955,7 +1045,9 @@ mod tests {
+             )
+             .is_err()
+         );
+-        assert!(edits(&current, &[a, b], Some("root")).is_err());
++        let removed = edits(&current, &[a, b], Some("root")).unwrap();
++        assert!(matches!(removed[0], Action::Delete(ref id) if id == "tool"));
++        assert_eq!(removed.len(), 1);
+     }
+     #[test]
+     fn correcting_or_inserting_before_unchanged_assistant_audio_preserves_its_item() {
+@@ -971,13 +1063,13 @@ mod tests {
+         .unwrap();
+         assert!(matches!(plan.pop_front(),Some(Action::Delete(id)) if id=="user"));
+         assert!(
+-            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==corrected && previous.as_deref()==Some("root"))
++            matches!(plan.pop_front(),Some(Action::Create { item, previous, .. }) if item==corrected && previous.as_deref()==Some("root"))
+         );
+         assert!(plan.is_empty());
+         let inserted = message("inserted", "before audio");
+         let mut plan = edits(&[audio.clone()], &[inserted.clone(), audio], Some("root")).unwrap();
+         assert!(
+-            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==inserted && previous.as_deref()==Some("root"))
++            matches!(plan.pop_front(),Some(Action::Create { item, previous, .. }) if item==inserted && previous.as_deref()==Some("root"))
+         );
+         assert!(plan.is_empty());
+     }
+@@ -1049,6 +1141,7 @@ mod tests {
+             let (reply, _) = tokio::sync::oneshot::channel();
+             let item = Request::Item {
+                 id: id.into(),
++                event_id: None,
+                 reply,
+             };
+             assert_eq!(
+@@ -1065,6 +1158,7 @@ mod tests {
+         state
+             .start(Request::Item {
+                 id: "same".into(),
++                event_id: None,
+                 reply,
+             })
+             .unwrap();
+@@ -1074,6 +1168,7 @@ mod tests {
+         state
+             .start(Request::Item {
+                 id: "same".into(),
++                event_id: None,
+                 reply,
+             })
+             .unwrap();
+@@ -1113,7 +1208,7 @@ mod tests {
+         .unwrap();
+         assert!(matches!(actions.pop_front(),Some(Action::Delete(id)) if id=="b"));
+         assert!(
+-            matches!(actions.pop_front(),Some(Action::Create{item,previous}) if item==b && previous.as_deref()==Some("root"))
++            matches!(actions.pop_front(),Some(Action::Create { item, previous, .. }) if item==b && previous.as_deref()==Some("root"))
+         );
+         assert!(actions.is_empty());
+     }
+@@ -1158,7 +1253,7 @@ mod tests {
+         state.start(Request::List { reply }).unwrap();
+         let media = |id| json!({"id":id,"type":"message","role":"user","content":[{"type":"input_audio","audio":"A".repeat(1_100_000)}]});
+         assert!(
+-            matches!(state.retrieved(media("one")).unwrap(),Some(Action::Retrieve(id)) if id=="two")
++            matches!(state.retrieved(media("one")).unwrap(),Some(Action::Retrieve { id, .. }) if id=="two")
+         );
+         let error = state.retrieved(media("two")).unwrap_err();
+         state.fail(error);
+@@ -1203,7 +1298,7 @@ mod tests {
+             assert!(matches!(
+                 state.start(Request::Update {
+                     items: vec![message("old", "corrected")], reply,
+-                }).unwrap(), Some(Action::Retrieve(id)) if id == "old"
++                }).unwrap(), Some(Action::Retrieve { id, .. }) if id == "old"
+             ));
+             let arrived = message("arrived", "new speech");
+             if added_event {
+@@ -1243,7 +1338,7 @@ mod tests {
+                 assert!(list_receipt.await.unwrap().is_err());
+                 task
+             };
+-            assert!(matches!(task, Some(Action::Retrieve(id)) if id == "old"));
++            assert!(matches!(task, Some(Action::Retrieve { id, .. }) if id == "old"));
+             if update {
+                 state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
+                 assert!(state.expire_read());
+diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8daded69cb9aafb87b6083f567c26755d5425944
+--- /dev/null
++++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
+@@ -0,0 +1,348 @@
++use std::collections::BTreeMap;
++use std::sync::Arc;
++use std::sync::atomic::Ordering;
++
++use codex_api::RealtimePlaybackControl;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::protocol::RealtimeInterruptReceipt;
++use codex_protocol::protocol::RealtimeOutputModality;
++use codex_protocol::realtime_settings::RealtimeMaxOutputTokens;
++use codex_protocol::realtime_settings::RealtimeReasoning;
++use codex_protocol::realtime_settings::RealtimeResponseOptions;
++use serde::Deserialize;
++use serde_json::Value;
++use tokio::sync::oneshot;
++
++use super::AudioBufferControl;
++use super::RealtimeEventParser;
++use super::SdkRealtimeCommand;
++use super::dispatch_interrupt_sdk;
++use super::dispatch_sdk_control;
++use super::handle_delete_item_sdk;
++use super::handle_history_sdk;
++use super::preparation::dispatch_update_sdk;
++use super::provider_history::Request;
++use super::raw_settings::session_update;
++use crate::session::session::Session;
++
++type Reply<T> = oneshot::Sender<CodexResult<T>>;
++
++#[derive(Deserialize)]
++#[serde(tag = "type", deny_unknown_fields)]
++enum ClientEvent {
++    #[serde(rename = "response.create")]
++    ResponseCreate { response: Option<Value> },
++    #[serde(rename = "response.cancel")]
++    ResponseCancel { response_id: Option<String> },
++    #[serde(rename = "conversation.item.create")]
++    ItemCreate {
++        item: Value,
++        previous_item_id: Option<String>,
++    },
++    #[serde(rename = "conversation.item.retrieve")]
++    ItemRetrieve { item_id: String },
++    #[serde(rename = "conversation.item.delete")]
++    ItemDelete { item_id: String },
++    #[serde(rename = "conversation.item.truncate")]
++    ItemTruncate {
++        item_id: String,
++        content_index: u32,
++        audio_end_ms: u32,
++    },
++    #[serde(rename = "input_audio_buffer.append")]
++    AudioAppend { audio: String },
++    #[serde(rename = "input_audio_buffer.clear")]
++    AudioClear {},
++    #[serde(rename = "input_audio_buffer.commit")]
++    AudioCommit {},
++    #[serde(rename = "output_audio_buffer.clear")]
++    OutputClear {},
++    #[serde(rename = "session.update")]
++    SessionUpdate { session: Value },
++}
++
++#[derive(Default, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Response {
++    instructions: Option<String>,
++    output_modalities: Option<[RealtimeOutputModality; 1]>,
++    max_output_tokens: Option<RealtimeMaxOutputTokens>,
++    metadata: Option<BTreeMap<String, String>>,
++    parallel_tool_calls: Option<bool>,
++    reasoning: Option<RealtimeReasoning>,
++}
++
++fn invalid(message: &str) -> CodexErr {
++    CodexErr::InvalidRequest(message.into())
++}
++
++fn response_options(
++    response: Option<Value>,
++    event_id: Option<String>,
++) -> CodexResult<RealtimeResponseOptions> {
++    let response: Response = match response {
++        Some(value @ Value::Object(_)) => serde_json::from_value(value)
++            .map_err(|_| invalid("Unsupported or invalid raw Realtime response options"))?,
++        Some(_) => return Err(invalid("Raw Realtime response options must be an object")),
++        None => Response::default(),
++    };
++    if response.metadata.as_ref().is_some_and(|metadata| {
++        metadata.len() > 16
++            || metadata
++                .iter()
++                .any(|(key, value)| key.chars().count() > 64 || value.chars().count() > 512)
++    }) {
++        return Err(invalid(
++            "Raw Realtime response metadata exceeds provider limits",
++        ));
++    }
++    Ok(RealtimeResponseOptions {
++        instructions: response.instructions,
++        output_modality: response.output_modalities.map(|[modality]| modality),
++        max_output_tokens: response.max_output_tokens,
++        metadata: response.metadata,
++        parallel_tool_calls: response.parallel_tool_calls,
++        reasoning: response.reasoning,
++        event_id,
++    })
++}
++
++fn completion<T: Send + 'static>(
++    mut reply: Reply<Option<Value>>,
++    convert: fn(T) -> Option<Value>,
++) -> Reply<T> {
++    let (tx, rx) = oneshot::channel();
++    // The session dispatcher must remain free to process close while a
++    // generation-owned command waits for its provider receipt.
++    tokio::spawn(async move {
++        tokio::select! {
++            result = rx => {
++                let _ = reply.send(result.unwrap_or(Err(CodexErr::TurnAborted)).map(convert));
++            }
++            () = reply.closed() => {}
++        }
++    });
++    tx
++}
++
++async fn validate_connection(
++    sess: &Arc<Session>,
++    generation: &str,
++    event: &ClientEvent,
++) -> CodexResult<()> {
++    let state = sess.conversation.state.lock().await;
++    let conversation = state
++        .conversation
++        .as_ref()
++        .filter(|conversation| {
++            conversation.handoff.sdk.as_ref().is_some_and(|sdk| {
++                sdk.generation == generation && sdk.active.load(Ordering::Acquire)
++            })
++        })
++        .ok_or_else(|| invalid("SDK Realtime generation is stale"))?;
++    if conversation.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
++        return Err(invalid("Raw client events require RealtimeV2"));
++    }
++    if matches!(
++        event,
++        ClientEvent::AudioAppend { .. } | ClientEvent::AudioClear {} | ClientEvent::AudioCommit {}
++    ) && !conversation.accepts_audio
++    {
++        return Err(invalid("Existing calls receive media from their provider"));
++    }
++    Ok(())
++}
++
++pub(crate) async fn handle_send_event_sdk(
++    sess: &Arc<Session>,
++    generation: String,
++    value: Value,
++    reply: Reply<Option<Value>>,
++) {
++    let (event, event_id) = match parse_event(value) {
++        Ok(event) => event,
++        Err(error) => {
++            let _ = reply.send(Err(error));
++            return;
++        }
++    };
++    if let Err(error) = validate_connection(sess, &generation, &event).await {
++        let _ = reply.send(Err(error));
++        return;
++    }
++    match event {
++        ClientEvent::ResponseCreate { response } => {
++            let result = match response_options(response, event_id) {
++                Ok(options) => {
++                    sess.conversation
++                        .sdk_enqueue(&generation, SdkRealtimeCommand::RequestResponse(options))
++                        .await
++                }
++                Err(error) => Err(error),
++            };
++            let _ = reply.send(result.map(|()| None));
++        }
++        ClientEvent::ResponseCancel { response_id } => {
++            if response_id
++                .as_ref()
++                .is_some_and(|id| id.is_empty() || id.len() > 512)
++            {
++                let _ = reply.send(Err(invalid("Raw Realtime response ID is invalid")));
++                return;
++            }
++            dispatch_interrupt_sdk(
++                sess,
++                generation,
++                response_id,
++                event_id,
++                None,
++                None,
++                completion(reply, |receipt: RealtimeInterruptReceipt| {
++                    Some(serde_json::json!(receipt))
++                }),
++            )
++            .await;
++        }
++        ClientEvent::ItemCreate {
++            item,
++            previous_item_id,
++        } => {
++            let mut item = match item {
++                Value::Object(item)
++                    if item.get("type").and_then(Value::as_str) == Some("message") =>
++                {
++                    item
++                }
++                _ => {
++                    let _ = reply.send(Err(invalid(
++                        "Raw Realtime item creation requires a supported message",
++                    )));
++                    return;
++                }
++            };
++            item.entry("id").or_insert_with(|| {
++                Value::String(format!("item_{}", uuid::Uuid::new_v4().simple()))
++            });
++            handle_history_sdk(
++                sess,
++                generation,
++                Request::Create {
++                    item: Value::Object(item),
++                    previous: previous_item_id,
++                    event_id,
++                    reply: completion(reply, |_| None),
++                },
++            )
++            .await;
++        }
++        ClientEvent::ItemRetrieve { item_id } => {
++            handle_history_sdk(
++                sess,
++                generation,
++                Request::Item {
++                    id: item_id,
++                    event_id,
++                    reply: completion(reply, Some),
++                },
++            )
++            .await;
++        }
++        ClientEvent::ItemDelete { item_id } => {
++            handle_delete_item_sdk(
++                sess,
++                generation,
++                item_id,
++                event_id,
++                completion(reply, |_| None),
++            )
++            .await;
++        }
++        ClientEvent::AudioAppend { audio } => {
++            dispatch_sdk_control(sess, generation, completion(reply, |_| None), |reply| {
++                SdkRealtimeCommand::RawAudio {
++                    audio,
++                    event_id,
++                    reply,
++                }
++            })
++            .await;
++        }
++        ClientEvent::AudioClear {} | ClientEvent::AudioCommit {} => {
++            let control = if matches!(event, ClientEvent::AudioClear {}) {
++                AudioBufferControl::Clear
++            } else {
++                AudioBufferControl::Commit
++            };
++            dispatch_sdk_control(sess, generation, completion(reply, |_| None), |reply| {
++                SdkRealtimeCommand::AudioControl {
++                    control,
++                    event_id,
++                    reply,
++                }
++            })
++            .await;
++        }
++        ClientEvent::ItemTruncate {
++            item_id,
++            content_index,
++            audio_end_ms,
++        } => {
++            dispatch_sdk_control(sess, generation, completion(reply, |_| None), |reply| {
++                SdkRealtimeCommand::PlaybackControl {
++                    control: RealtimePlaybackControl::Truncate {
++                        item_id,
++                        content_index,
++                        audio_end_ms,
++                    },
++                    event_id,
++                    reply,
++                }
++            })
++            .await;
++        }
++        ClientEvent::OutputClear {} => {
++            dispatch_sdk_control(sess, generation, completion(reply, |_| None), |reply| {
++                SdkRealtimeCommand::PlaybackControl {
++                    control: RealtimePlaybackControl::Clear,
++                    event_id,
++                    reply,
++                }
++            })
++            .await;
++        }
++        ClientEvent::SessionUpdate { session } => match session_update(session) {
++            Ok(update) => {
++                dispatch_update_sdk(
++                    sess,
++                    generation,
++                    update,
++                    None,
++                    event_id,
++                    completion(reply, |_| None),
++                )
++                .await
++            }
++            Err(error) => {
++                let _ = reply.send(Err(error));
++            }
++        },
++    }
++}
++
++fn parse_event(mut value: Value) -> CodexResult<(ClientEvent, Option<String>)> {
++    let mut retained_bytes = 0;
++    codex_api::charge_realtime_json_storage(&value, &mut retained_bytes)
++        .map_err(|_| invalid("Raw Realtime event exceeds its 8 MiB estimated storage limit"))?;
++    let fields = value
++        .as_object_mut()
++        .ok_or_else(|| invalid("Raw Realtime event must be an object"))?;
++    let event_id = match fields.remove("event_id") {
++        Some(Value::String(id)) if !id.is_empty() && id.len() <= 512 => Some(id),
++        None | Some(Value::Null) => None,
++        Some(_) => return Err(invalid("Raw Realtime event ID is invalid")),
++    };
++    let event: ClientEvent = serde_json::from_value(value)
++        .map_err(|_| invalid("Unsupported or invalid raw Realtime client event"))?;
++    Ok((event, event_id))
++}
+diff --git a/codex-rs/core/src/realtime_conversation/raw_settings.rs b/codex-rs/core/src/realtime_conversation/raw_settings.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..01a85ce0ff36fd8dd23672ed4e48cf67a2845172
+--- /dev/null
++++ b/codex-rs/core/src/realtime_conversation/raw_settings.rs
+@@ -0,0 +1,255 @@
++//! Translate provider session patches into the existing native settings path.
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++use codex_protocol::realtime_settings::RealtimeSessionUpdate;
++use serde_json::Map;
++use serde_json::Value;
++
++fn invalid() -> CodexErr {
++    CodexErr::InvalidRequest("Unsupported or invalid raw Realtime session settings".into())
++}
++
++fn object<'a>(value: &'a Value, keys: &[&str]) -> CodexResult<&'a Map<String, Value>> {
++    let fields = value.as_object().ok_or_else(invalid)?;
++    if fields.keys().any(|key| !keys.contains(&key.as_str())) {
++        return Err(invalid());
++    }
++    Ok(fields)
++}
++
++fn format(value: &Value) -> CodexResult<Value> {
++    let fields = object(value, &["type", "rate"])?;
++    let name = match fields.get("type").and_then(Value::as_str) {
++        Some("audio/pcm") if fields.get("rate").and_then(Value::as_u64) == Some(24000) => "pcm16",
++        Some("audio/pcmu") if !fields.contains_key("rate") => "g711_ulaw",
++        Some("audio/pcma") if !fields.contains_key("rate") => "g711_alaw",
++        _ => return Err(invalid()),
++    };
++    Ok(Value::String(name.into()))
++}
++
++// Protocol DTOs intentionally tolerate extra fields on several settings. Raw
++// provider input must name only supported leaves before those DTOs decode it.
++fn nested(name: &str, value: &Value) -> CodexResult<()> {
++    if value.is_null() {
++        return if matches!(
++            name,
++            "noise_reduction" | "transcription" | "turn_detection" | "prompt" | "tracing"
++        ) {
++            Ok(())
++        } else {
++            Err(invalid())
++        };
++    }
++    match name {
++        "noise_reduction" => {
++            object(value, &["type"])?;
++        }
++        "transcription" => {
++            object(
++                value,
++                &[
++                    "model",
++                    "language",
++                    "prompt",
++                    "keywords",
++                    "languages",
++                    "delay",
++                ],
++            )?;
++        }
++        "turn_detection" => {
++            let keys: &[&str] = match value.get("type").and_then(Value::as_str) {
++                Some("server_vad") => &[
++                    "type",
++                    "model_version",
++                    "create_response",
++                    "interrupt_response",
++                    "threshold",
++                    "prefix_padding_ms",
++                    "silence_duration_ms",
++                    "idle_timeout_ms",
++                ],
++                Some("semantic_vad") => &[
++                    "type",
++                    "model_version",
++                    "create_response",
++                    "interrupt_response",
++                    "eagerness",
++                ],
++                _ => return Err(invalid()),
++            };
++            object(value, keys)?;
++        }
++        "voice" if value.is_object() => {
++            object(value, &["id"])?;
++        }
++        "tool_choice" if value.is_object() => {
++            object(value, &["type", "name"])?;
++        }
++        "reasoning" => {
++            object(value, &["effort"])?;
++        }
++        "tracing" if value.is_object() => {
++            object(value, &["workflow_name", "group_id", "metadata"])?;
++        }
++        "prompt" => {
++            let fields = object(value, &["id", "version", "variables"])?;
++            if let Some(variables) = fields.get("variables").filter(|value| !value.is_null()) {
++                for value in variables.as_object().ok_or_else(invalid)?.values() {
++                    if value.is_string() {
++                        continue;
++                    }
++                    let keys: &[&str] = match value.get("type").and_then(Value::as_str) {
++                        Some("input_text") => &["type", "text"],
++                        Some("input_image") => &["type", "image_url", "file_id", "detail"],
++                        Some("input_file") => {
++                            &["type", "file_url", "file_id", "file_data", "filename"]
++                        }
++                        _ => return Err(invalid()),
++                    };
++                    object(value, keys)?;
++                }
++            }
++        }
++        _ => {}
++    }
++    Ok(())
++}
++
++/// Decode the `session` object, never an entire client event. Tool declarations
++/// cannot enter through this path; native typed update admission retains policy.
++pub(super) fn session_update(value: Value) -> CodexResult<RealtimeSessionUpdate> {
++    let fields = object(
++        &value,
++        &[
++            "type",
++            "model",
++            "instructions",
++            "output_modalities",
++            "audio",
++            "tool_choice",
++            "prompt",
++            "tracing",
++            "max_output_tokens",
++            "parallel_tool_calls",
++            "reasoning",
++        ],
++    )?;
++    if fields
++        .get("type")
++        .is_some_and(|value| value.as_str() != Some("realtime"))
++    {
++        return Err(invalid());
++    }
++    let mut update = Map::new();
++    for name in [
++        "model",
++        "instructions",
++        "tool_choice",
++        "prompt",
++        "tracing",
++        "max_output_tokens",
++        "parallel_tool_calls",
++        "reasoning",
++    ] {
++        if let Some(value) = fields.get(name) {
++            nested(name, value)?;
++            update.insert(name.into(), value.clone());
++        }
++    }
++    if let Some(value) = fields.get("output_modalities") {
++        let modalities = value
++            .as_array()
++            .filter(|values| values.len() == 1)
++            .ok_or_else(invalid)?;
++        if !matches!(modalities[0].as_str(), Some("text" | "audio")) {
++            return Err(invalid());
++        }
++        update.insert("output_modality".into(), modalities[0].clone());
++    }
++    if let Some(audio) = fields.get("audio") {
++        for (direction, section) in object(audio, &["input", "output"])? {
++            let names: &[&str] = if direction == "input" {
++                &[
++                    "format",
++                    "noise_reduction",
++                    "transcription",
++                    "turn_detection",
++                ]
++            } else {
++                &["format", "voice", "speed"]
++            };
++            for (name, value) in object(section, names)? {
++                let (key, translated) = if name == "format" {
++                    (
++                        if direction == "input" {
++                            "input_format"
++                        } else {
++                            "output_format"
++                        },
++                        format(value)?,
++                    )
++                } else {
++                    nested(name, value)?;
++                    (
++                        match name.as_str() {
++                            "voice" => "output_voice",
++                            "speed" => "output_speed",
++                            name => name,
++                        },
++                        value.clone(),
++                    )
++                };
++                update.insert(key.into(), translated);
++            }
++        }
++    }
++    serde_json::from_value(Value::Object(update)).map_err(|_| invalid())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn maps_wire_audio_and_preserves_sparse_nulls() {
++        let update = session_update(json!({"type":"realtime", "output_modalities":["text"],
++            "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},
++                "noise_reduction":null,"transcription":null,"turn_detection":null},
++                "output":{"format":{"type":"audio/pcmu"},"voice":"marin","speed":1.2}},
++            "prompt":null,"tracing":null}))
++        .unwrap();
++        assert_eq!(
++            serde_json::to_value(update).unwrap(),
++            json!({"output_modality":"text",
++            "input_format":"pcm16","output_format":"g711_ulaw","output_voice":"marin",
++            "output_speed":1.2,"noise_reduction":null,"transcription":null,
++            "turn_detection":null,"prompt":null,"tracing":null})
++        );
++        assert_eq!(
++            session_update(json!({})).unwrap(),
++            RealtimeSessionUpdate::default()
++        );
++    }
++
++    #[test]
++    fn rejects_unknown_nested_fields_and_authority_changes() {
++        for value in [
++            json!([]),
++            json!({"tools":[]}),
++            json!({"function_tools":[]}),
++            json!({"hosted_mcp_tools":[]}),
++            json!({"type":"transcription"}),
++            json!({"output_modalities":["text","audio"]}),
++            json!({"model":null}),
++            json!({"audio":{"output":{"voice":{"id":"custom","extra":true}}}}),
++            json!({"audio":{"input":{"format":{"type":"audio/pcm","rate":16000}}}}),
++            json!({"audio":{"input":{"turn_detection":{"type":"semantic_vad","threshold":0.5}}}}),
++            json!({"reasoning":{"effort":"low","unknown":true}}),
++        ] {
++            assert!(session_update(value).is_err());
++        }
++    }
++}
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index e11bea84e83d434c5b3086360fab7ff078c9fd22..7947d71ea8e862b95f714831464dd7a51148f6da 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -472,6 +472,7 @@ async fn sdk_full_command_queue_does_not_consume_a_handoff() {
+             .sdk_enqueue(
+                 "voice-1",
+                 SdkRealtimeCommand::Interrupt {
++                    event_id: None,
+                     reply: None,
+                     playback: None,
+                     feedback: None,
+@@ -522,6 +523,7 @@ async fn sdk_close_is_idempotent_and_stale_close_cannot_stop_current_owner() {
+             .sdk_enqueue(
+                 "voice-2",
+                 super::SdkRealtimeCommand::Interrupt {
++                    event_id: None,
+                     reply: None,
+                     playback: None,
+                     feedback: None,
+@@ -813,6 +815,7 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     sdk.register("pending-after-done").await.unwrap();
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            event_id: None,
+             reply: None,
+             playback: None,
+             feedback: None,
+@@ -828,6 +831,7 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     assert!(sdk.pending.lock().await.contains_key("pending-after-done"));
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            event_id: None,
+             reply: None,
+             playback: None,
+             feedback: None,
+@@ -844,6 +848,7 @@ async fn sdk_v2_writes_only_exact_accepted_result_and_deduplicates_cancel_case()
+     for response in ["old-response", "new-response", "new-response"] {
+         super::handle_sdk_realtime_command(
+             Ok(SdkRealtimeCommand::Interrupt {
++                event_id: None,
+                 reply: None,
+                 playback: None,
+                 feedback: None,
+@@ -2677,6 +2682,7 @@ async fn sdk_scoped_interrupt_preserves_b_and_uncorrelated_native_work() {
+         .clone();
+     super::handle_sdk_realtime_command(
+         Ok(SdkRealtimeCommand::Interrupt {
++            event_id: None,
+             reply: None,
+             response_id: Some("a".into()),
+             playback: None,
+@@ -2926,6 +2932,7 @@ async fn sdk_interrupt_completion_reports_actual_source_after_execution() {
+         .sdk_enqueue(
+             "receipt-1",
+             SdkRealtimeCommand::Interrupt {
++                event_id: None,
+                 response_id: None,
+                 playback: None,
+                 feedback: None,
+@@ -3236,12 +3243,11 @@ async fn sdk_handoff_ack_race(interrupt: bool, queued_user: bool) {
+             order: responses.latest_user_create,
+             options: Default::default(),
+         };
+-        let request = responses.new_user_create(
+-            codex_protocol::realtime_settings::RealtimeResponseOptions {
++        let request =
++            responses.new_user_create(codex_protocol::realtime_settings::RealtimeResponseOptions {
+                 instructions: Some("Use the newer instructions.".into()),
+                 ..Default::default()
+-            },
+-        );
++            });
+         super::request_sdk_response_create(
+             &sdk,
+             &writer,
+@@ -4220,6 +4226,7 @@ async fn sdk_wire_pending_handoff_case(interrupt: bool, full_terminal_queue: boo
+     if interrupt {
+         super::handle_sdk_realtime_command(
+             Ok(super::SdkRealtimeCommand::Interrupt {
++                event_id: None,
+                 response_id: Some("handoff-source".into()),
+                 playback: None,
+                 feedback: None,
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 0b3536d1190e40f92778addf3d22f388020f276a..27434420d45f0275d30f27b8ea0ba7a29a238eb1 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -716,6 +716,17 @@ pub(super) async fn submission_loop(
+                     );
+                     false
+                 }
++                Op::RealtimeConversationSendEventSdk {
++                    generation,
++                    event,
++                    reply,
++                } => {
++                    crate::realtime_conversation::handle_send_event_sdk(
++                        &sess, generation, event, reply,
++                    )
++                    .await;
++                    false
++                }
+                 Op::RealtimeConversationAudioCommitSdk { generation, reply } => {
+                     crate::realtime_conversation::dispatch_audio_commit_sdk(
+                         &sess, generation, reply,
+@@ -733,6 +744,7 @@ pub(super) async fn submission_loop(
+                         generation,
+                         crate::realtime_conversation::provider_history::Request::Item {
+                             id: item_id,
++                            event_id: None,
+                             reply,
+                         },
+                     )
+@@ -770,7 +782,7 @@ pub(super) async fn submission_loop(
+                     reply,
+                 } => {
+                     crate::realtime_conversation::handle_delete_item_sdk(
+-                        &sess, generation, item_id, reply,
++                        &sess, generation, item_id, None, reply,
+                     )
+                     .await;
+                     false
+@@ -833,25 +845,16 @@ pub(super) async fn submission_loop(
+                     feedback,
+                     reply,
+                 } => {
+-                    // The command owns completion; the dispatcher remains free to process close.
+-                    let completion = Arc::new(std::sync::Mutex::new(Some(reply)));
+-                    if let Err(error) = sess
+-                        .conversation
+-                        .sdk_enqueue(
+-                            &generation,
+-                            crate::realtime_conversation::SdkRealtimeCommand::Interrupt {
+-                                response_id,
+-                                playback,
+-                                feedback,
+-                                reply: Some(Arc::clone(&completion)),
+-                            },
+-                        )
+-                        .await
+-                    {
+-                        if let Some(reply) = completion.lock().unwrap().take() {
+-                            let _ = reply.send(Err(error));
+-                        }
+-                    }
++                    crate::realtime_conversation::dispatch_interrupt_sdk(
++                        &sess,
++                        generation,
++                        response_id,
++                        None,
++                        playback,
++                        feedback,
++                        reply,
++                    )
++                    .await;
+                     false
+                 }
+ 
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 8355a8c61fb16633218ef31f8bed4eca9e56274c..d9563eddf39729d2e5ce9c341b9793f56954b4e6 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -987,6 +987,13 @@ pub enum Op {
+         reply: oneshot::Sender<CodexResult<()>>,
+     },
+ 
++    /// Admit a provider-shaped client event through the native Realtime owner.
++    RealtimeConversationSendEventSdk {
++        generation: String,
++        event: Value,
++        reply: oneshot::Sender<CodexResult<Option<Value>>>,
++    },
++
+     /// Commit preceding admitted audio; completes after the commit is written.
+     RealtimeConversationAudioCommitSdk {
+         generation: String,
+@@ -1398,6 +1405,7 @@ impl Op {
+             Self::RealtimeConversationAudioSdk { .. } => "realtime_conversation_audio_sdk",
+             Self::RealtimeConversationInputSdk { .. } => "realtime_conversation_input_sdk",
+             Self::RealtimeConversationResponseSdk { .. } => "realtime_conversation_response_sdk",
++            Self::RealtimeConversationSendEventSdk { .. } => "realtime_conversation_send_event_sdk",
+             Self::RealtimeConversationAudioCommitSdk { .. } => {
+                 "realtime_conversation_audio_commit_sdk"
+             }
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+index 546528348012dc947018b29a64494735399a96cb..6966215d9cdd8f3b392002c0fe42eb59673e0ce6 100644
+--- a/codex-rs/protocol/src/realtime_settings.rs
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -247,6 +247,15 @@ pub struct RealtimeResponseOptions {
+     pub output_modality: Option<RealtimeOutputModality>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub max_output_tokens: Option<RealtimeMaxOutputTokens>,
++    /// Provider client-event correlation and per-response overrides from raw sends.
++    #[serde(skip)]
++    pub event_id: Option<String>,
++    #[serde(skip)]
++    pub metadata: Option<BTreeMap<String, String>>,
++    #[serde(skip)]
++    pub parallel_tool_calls: Option<bool>,
++    #[serde(skip)]
++    pub reasoning: Option<RealtimeReasoning>,
+ }
+ 
+ /// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.

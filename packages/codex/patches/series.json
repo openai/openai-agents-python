@@ -359,7 +359,11 @@
     {
       "path": "0068-decisions.patch",
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
+    },
+    {
+      "path": "sdk-realtime-raw-events-and-history.patch",
+      "sha256": "98af42b99ec923bf501866782ef1c91a9a74e7dd5c5529e3834adb2126619e45"
     }
   ],
-  "result_tree": "054297b00a11edfe3e731caaffc36e1c768fee70"
+  "result_tree": "db1e12ea032b390bd3d598d0319191abc627e616"
 }
