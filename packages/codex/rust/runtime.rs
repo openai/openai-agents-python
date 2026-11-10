@@ -1,4 +1,4 @@
-//! Companion executable for Codex's unmodified sandbox and execution helper modes.
+//! Companion executable for the SDK's native sandbox and execution helpers.
 
 #[cfg(target_os = "linux")]
 mod linux_supervisor;
@@ -14,6 +14,11 @@ fn main() -> anyhow::Result<()> {
         let executable = args.next().expect("the runtime has argv[0]");
         let name = Path::new(&executable).file_name();
         if name == Some("codex-linux-sandbox".as_ref()) {
+            if args.next().as_deref() == Some(local_sandbox::APPARMOR_USERNS_PROBE_ARG.as_ref())
+                && args.next().is_none()
+            {
+                std::process::exit(i32::from(!apparmor_restricts_userns()));
+            }
             // The process and filesystem sandboxes use this alias to find
             // bubblewrap. Do not search host or workspace PATH entries.
             // SAFETY: this entry point runs before any helper thread starts.
@@ -34,4 +39,19 @@ fn main() -> anyhow::Result<()> {
     codex_arg0::arg0_dispatch_or_else(|_| async {
         anyhow::bail!("this executable is an internal Codex execution helper")
     })
+}
+
+#[cfg(target_os = "linux")]
+fn apparmor_restricts_userns() -> bool {
+    // SAFETY: This one-shot helper is single-threaded and exits after the probe.
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+        return false;
+    }
+    // Ubuntu's stock policy allows creation but confines the new namespace.
+    let restricted = std::fs::read_to_string("/proc/self/attr/apparmor/current")
+        .is_ok_and(|label| label.trim_end() == "unprivileged_userns (enforce)");
+    // SAFETY: If allowed, this creates a private network namespace for this helper alone.
+    restricted
+        && unsafe { libc::unshare(libc::CLONE_NEWNET) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

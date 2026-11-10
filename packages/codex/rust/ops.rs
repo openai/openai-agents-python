@@ -1567,6 +1567,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .submit(Op::RealtimeConversationUpdateHistorySdk {
                     generation: p.generation,
                     items: p.items,
+                    expected_items: None,
                     reply,
                 })
                 .await?;
