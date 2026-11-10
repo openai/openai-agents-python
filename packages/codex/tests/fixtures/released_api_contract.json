@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "b7db03a23c898f5a35666f81244966eabea7380c",
+  "baseline_commit": "39c4b25e8eaf9842508f4744ebada0f1fdb20ae7",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1142,7 +1142,7 @@
           "FeatureName: TypeAlias = Literal['native_output', 'prompted_output', 'manual_suspend', 'native_output_manual_restore', 'tool_selection', 'function_policy', 'mcp_before_policy', 'mcp_result_policy', 'environment_before_policy', 'environment_code_result_policy', 'native_agents', 'remote_skills', 'checklist']",
           "class Capabilities:\n\n    def __init__(self, session: Session[Any, Any]) -> None:\n        pass\n\n    @property\n    def websockets_allowed(self) -> bool:\n        pass\n\n    def get(self, feature: FeatureName) -> FeatureSupport:\n        pass\n\n    def require(self, feature: FeatureName, *, allow_limited: bool=False) -> None:\n        pass",
           "ResponseIntegrityReason: TypeAlias = Literal['undecodable_output_item', 'provider_owned_tool_receipt', 'unfinished_assistant_item', 'missing_supported_terminal_output', 'provider_refusal', 'malformed_probability_facts']",
-          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
+          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None, param: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",

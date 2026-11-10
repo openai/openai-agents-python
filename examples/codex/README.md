@@ -70,6 +70,8 @@ reports auth or plan usage failures without switching to API-key billing.
 Pause plan-backed requests when `NativeError.category` is `usage_limit_exceeded`.
 For an HTTP plan limit, the SDK also exposes the service code
 `subscription_sharing_usage_limit_exceeded` and the request ID when supplied.
+For `subscription_sharing_unsupported_capability`, use `NativeError.param`
+when available to locate and remove the unsupported request field.
 Your application decides whether to retry a temporary service error.
 [Error recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery)
 

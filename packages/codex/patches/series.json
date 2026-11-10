@@ -418,8 +418,8 @@
     },
     {
       "path": "0152-siwc-http-errors.patch",
-      "sha256": "218d0a4e56d530c8d21d30510803f0ebc9b9cc2a753e0f35c4e4f4bd7fb3ed9a"
+      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
     }
   ],
-  "result_tree": "76c041410b1f7ee353d0079eb481d004c45a0a6f"
+  "result_tree": "ea3b7cec2f075b25842513f89c7b1a11b0479bf8"
 }

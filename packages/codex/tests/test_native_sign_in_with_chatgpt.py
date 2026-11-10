@@ -625,6 +625,48 @@ async def test_http_failure_retains_provider_diagnostics(
     assert requests == [("/responses", f"Bearer {token}")]
 
 
+@pytest.mark.parametrize("case", ["admission", "capability", "discarded_parameter"])
+async def test_direct_http_failure_preserves_recovery_fields(monkeypatch, case):
+    token = access_token()
+    requests = []
+    code = "subscription_sharing_unsupported_capability"
+    request_id = "synthetic-plan-recovery"
+    diagnostic = "Synthetic request includes an unsupported capability."
+    param = "tools[0].type"
+    status = 400
+    body: dict[str, object] = {"error": {"code": code, "message": diagnostic, "param": param}}
+    if case == "admission":
+        status = 403
+        diagnostic = "Synthetic admission denied for the serving region."
+        body = {"detail": diagnostic}
+    elif case == "discarded_parameter":
+        body = {"error": {"code": code, "param": token}}
+        diagnostic = "Unsupported ChatGPT plan capability."
+
+    async def reject(request):
+        requests.append((request.method, request.path))
+        assert request.headers.get("Authorization") == f"Bearer {token}"
+        return web.json_response(body, status=status, headers={"x-request-id": request_id})
+
+    peer = web.Application()
+    peer.router.add_post("/v1/responses", reject)
+    async with TestServer(peer) as server:
+        set_endpoint(monkeypatch, str(server.make_url("/v1")))
+        with pytest.raises(NativeError) as caught:
+            async with timeout(30):
+                await plan_agent(token).run("Synthetic recovery check.")
+
+    error = caught.value
+    assert error.status_code == status
+    assert error.request_id == request_id
+    assert error.code == (None if case == "admission" else code)
+    assert error.category == ("authentication_error" if case == "admission" else "invalid_request")
+    assert error.param == (param if case == "capability" else None)
+    assert diagnostic in str(error)
+    assert token not in repr((error, vars(error), error.__cause__, error.__context__))
+    assert requests == [("POST", "/v1/responses")]
+
+
 async def test_redirect_does_not_forward_or_retry_bearer(monkeypatch):
     requests = []
 

@@ -685,8 +685,10 @@ class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
     ``status_code``, ``code`` and ``request_id`` contain available provider
-    metadata. Budget failures use an SDK-defined ``code``. ``category`` is the normalized
-    native failure category. Missing or discarded values remain ``None``.
+    metadata. For an unsupported ChatGPT plan capability, ``param`` contains
+    the provider's field path when available. Budget failures use an SDK-defined
+    ``code``. ``category`` is the normalized native failure category. Missing
+    or discarded values remain ``None``.
     Messages and metadata may contain provider-supplied information.
     effects describes only the failed operation, never earlier actions.
     unknown forbids assuming replay is safe.
@@ -702,12 +704,14 @@ class NativeError(RuntimeError):
         code: str | None = None,
         request_id: str | None = None,
         category: str | None = None,
+        param: str | None = None,
     ) -> None:
         super().__init__(*args)
         self.status_code = status_code
         self.code = code
         self.request_id = request_id
         self.category = category
+        self.param = param
         self._response_integrity_reason: ResponseIntegrityReason | None = None
 
     @property
@@ -831,6 +835,7 @@ def _native_error(error: dict[str, Any], message: str | None = None) -> NativeEr
         ),
         request_id=metadata.get("request_id"),
         category=_error_code(error),
+        param=metadata.get("param"),
     )
     reason = error.get("_sdk_response_integrity_reason")
     if isinstance(reason, str) and reason in get_args(ResponseIntegrityReason):

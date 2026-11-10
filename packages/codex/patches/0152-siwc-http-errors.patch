@@ -1,16 +1,28 @@
 diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
-index f3b9b05f8187f77c6592e1b52601b74a8e99702b..5b84ca2f105ebd9ee1ffa5ce1ca8dbd8869a62e3 100644
+index 0f4eaaa379f53b4ad377dd270fd4698fe5682e1b..2433d32217255f40a71b5407dbe9d0b6aab401f4 100644
 --- a/codex-rs/codex-api/src/api_bridge.rs
 +++ b/codex-rs/codex-api/src/api_bridge.rs
-@@ -15,6 +15,7 @@ use codex_protocol::error::ConnectionFailedError;
+@@ -15,6 +15,8 @@ use codex_protocol::error::ConnectionFailedError;
  use codex_protocol::error::RetryLimitReachedError;
  use codex_protocol::error::UnexpectedResponseError;
  use codex_protocol::error::UsageLimitReachedError;
++use codex_protocol::error::is_chatgpt_plan_unsupported_capability;
 +use codex_protocol::error::is_chatgpt_plan_usage_limit;
  use codex_protocol::protocol::MisalignmentErrorDetails;
  use http::HeaderMap;
  use serde::Deserialize;
-@@ -193,7 +194,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+@@ -171,7 +173,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                     });
+                 }
+ 
+-                if status == http::StatusCode::BAD_REQUEST {
++                if status == http::StatusCode::BAD_REQUEST
++                    && !is_chatgpt_plan_unsupported_capability(status, &body_text)
++                {
+                     if let Ok(parsed) = serde_json::from_str::<Value>(&body_text)
+                         && let Some(error) = parsed.get("error")
+                         && let Some(
+@@ -209,7 +213,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                      }
                  } else if status == http::StatusCode::INTERNAL_SERVER_ERROR {
                      CodexErr::InternalServerError
@@ -21,8 +33,23 @@ index f3b9b05f8187f77c6592e1b52601b74a8e99702b..5b84ca2f105ebd9ee1ffa5ce1ca8dbd8
                      if let Ok(body) = serde_json::from_str::<Value>(&body_text)
                          && let Some(error) = body.get("error").and_then(parse_flex_unavailable)
                      {
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 5c5b3e2c4bf8ef0141e2fad382abdc5c218d9e21..fa8b9fc37260ab45b76e14552683653d3354ba12 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -97,7 +97,9 @@ impl SessionTask for CompactTask {
+                 return Err(err);
+             }
+             let error = err.to_codex_protocol_error();
+-            if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
++            if matches!(error, CodexErrorInfo::UsageLimitExceeded)
++                || matches!(err.details(), CodexErrorDetails::UnexpectedStatus(_))
++            {
+                 // Compaction already emitted the error; notify extensions without emitting it twice.
+                 session
+                     .emit_turn_error_lifecycle(ctx.as_ref(), error, err.details())
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index 918a3b04023d5fa172d2c8952e6707c14e251964..1604e53e690db861a4fd4ec87a19f64d8e14ca64 100644
+index 156c5d454e339e971ca88490426660f89733eef3..2fe3af57fb85ae3aa20c683b5ca50b74ddbd4b06 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -276,6 +276,11 @@ pub trait ExternalAuth: Send + Sync {
@@ -48,19 +75,31 @@ index 918a3b04023d5fa172d2c8952e6707c14e251964..1604e53e690db861a4fd4ec87a19f64d
                  .auth_cached()
                  .as_ref()
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index 3080fcafdaacd73be74dd678923448960cf8651e..24d83307858265ca9a45894dafd6812e94a95112 100644
+index 3080fcafdaacd73be74dd678923448960cf8651e..35ea0a41fa8184981352d642c24c67fb1217d0d2 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
-@@ -457,7 +457,7 @@ impl CodexErr {
+@@ -457,7 +457,8 @@ impl CodexErr {
                  if matches!(
                      error.status,
                      http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
 -                ) =>
-+                ) || is_chatgpt_plan_usage_limit(error.status, &error.body) =>
++                ) || is_chatgpt_plan_usage_limit(error.status, &error.body)
++                    || is_chatgpt_plan_unsupported_capability(error.status, &error.body) =>
              {
                  None
              }
-@@ -537,6 +537,11 @@ impl CodexErr {
+@@ -519,7 +520,9 @@ impl CodexErr {
+     /// Translate core error to client-facing protocol error.
+     pub fn to_codex_protocol_error(&self) -> CodexErrorInfo {
+         match &self.details {
+-            CodexErrorDetails::ModelInvocationDeadlineExceeded(_) => CodexErrorInfo::ModelInvocationDeadlineExceeded,
++            CodexErrorDetails::ModelInvocationDeadlineExceeded(_) => {
++                CodexErrorInfo::ModelInvocationDeadlineExceeded
++            }
+             CodexErrorDetails::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
+             CodexErrorDetails::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+             CodexErrorDetails::RateLimitExceeded(_) => CodexErrorInfo::RateLimitExceeded,
+@@ -537,6 +540,16 @@ impl CodexErr {
              CodexErrorDetails::RetryLimit(_) => CodexErrorInfo::ResponseTooManyFailedAttempts {
                  http_status_code: self.http_status_code_value(),
              },
@@ -69,10 +108,15 @@ index 3080fcafdaacd73be74dd678923448960cf8651e..24d83307858265ca9a45894dafd6812e
 +            {
 +                CodexErrorInfo::UsageLimitExceeded
 +            }
++            CodexErrorDetails::UnexpectedStatus(error)
++                if is_chatgpt_plan_unsupported_capability(error.status, &error.body) =>
++            {
++                CodexErrorInfo::BadRequest
++            }
              CodexErrorDetails::ConnectionFailed(_) | CodexErrorDetails::UnexpectedStatus(_) => {
                  CodexErrorInfo::HttpConnectionFailed {
                      http_status_code: self.http_status_code_value(),
-@@ -636,6 +641,13 @@ pub struct UnexpectedResponseError {
+@@ -636,12 +649,32 @@ pub struct UnexpectedResponseError {
  
  const UNEXPECTED_RESPONSE_BODY_MAX_BYTES: usize = 1000;
  
@@ -83,21 +127,25 @@ index 3080fcafdaacd73be74dd678923448960cf8651e..24d83307858265ca9a45894dafd6812e
 +        })
 +}
 +
++pub const CHATGPT_PLAN_UNSUPPORTED_CAPABILITY: &str = "subscription_sharing_unsupported_capability";
++
++pub fn is_chatgpt_plan_unsupported_capability(status: StatusCode, body: &str) -> bool {
++    status == StatusCode::BAD_REQUEST
++        && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|body| {
++            body["error"]["code"].as_str() == Some(CHATGPT_PLAN_UNSUPPORTED_CAPABILITY)
++        })
++}
++
  impl UnexpectedResponseError {
      fn display_body(&self) -> String {
          if let Some(message) = self.extract_error_message() {
-diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
-index 5c5b3e2c4bf8ef0141e2fad382abdc5c218d9e21..fa8b9fc37260ab45b76e14552683653d3354ba12 100644
---- a/codex-rs/core/src/tasks/compact.rs
-+++ b/codex-rs/core/src/tasks/compact.rs
-@@ -97,7 +97,9 @@ impl SessionTask for CompactTask {
-                 return Err(err);
-             }
-             let error = err.to_codex_protocol_error();
--            if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
-+            if matches!(error, CodexErrorInfo::UsageLimitExceeded)
-+                || matches!(err.details(), CodexErrorDetails::UnexpectedStatus(_))
-+            {
-                 // Compaction already emitted the error; notify extensions without emitting it twice.
-                 session
-                     .emit_turn_error_lifecycle(ctx.as_ref(), error, err.details())
+             return message;
+         }
+ 
++        if is_chatgpt_plan_unsupported_capability(self.status, &self.body) {
++            return "Unsupported ChatGPT plan capability.".to_string();
++        }
++
+         let trimmed_body = self.body.trim();
+         if trimmed_body.is_empty() {
+             return "Unknown error".to_string();
