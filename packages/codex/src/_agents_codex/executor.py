@@ -293,7 +293,7 @@ class Environment(Generic[ContextT_contra]):
     sequence keeps only that directory writable. Strict write enforcement is the
     default and requires a Linux or macOS executor. To retain remote approval
     behavior, explicitly select ``write_policy="legacy"`` without writable roots.
-    Local executors support only ``write_policy="strict"``.
+    Linux local executors also support ``write_policy="trusted_workspace_write"``.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -372,10 +372,11 @@ class Environment(Generic[ContextT_contra]):
     network: NetworkPolicy | RuntimeNetworkPolicy | None = None
     writable_roots: Sequence[str | PathLike[str]] | None = None
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
-    write_policy: Literal["strict", "legacy"] = "strict"
+    write_policy: Literal["strict", "legacy", "trusted_workspace_write"] = "strict"
     read_only: bool = False
     # Captured command overrides; current declarations only, excluded from saved state.
     env: Mapping[str, str] | None = field(default=None, repr=False)
+    temp_dir: str | PathLike[str] | None = None
 
     @classmethod
     def local(
@@ -401,22 +402,39 @@ class Environment(Generic[ContextT_contra]):
         ) = None,
         policy_timeout: float = 30,
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
-        write_policy: Literal["strict"] = "strict",
+        write_policy: Literal["strict", "trusted_workspace_write"] = "strict",
         read_only: bool = False,
         env: Mapping[str, str] | None = None,
+        temp_dir: str | PathLike[str] | None = None,
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
         Use an existing absolute working directory on Linux or macOS.
         Additional roots must be existing directories on this executor.
         The URL identifies the working directory as a file URI.
-        Model commands start with a system executable search path and receive
+        By default, model commands start with a system executable search path and receive
         no ambient environment variables. They can read the working directory,
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
+
+        Set ``write_policy="trusted_workspace_write"`` for trusted local Linux jobs.
+        Commands can read files accessible to the application user and inherit
+        the application process environment, including ambient credentials,
+        subject to native sandbox and network rules. Both inherited values and
+        explicit ``env`` overrides exclude
+        ``OPENAI_API_KEY``, ``CODEX_API_KEY``, and ``LD_*`` and ``DYLD_*`` overrides.
+        Commands can write to the
+        workspace and explicit writable roots, subject to native metadata
+        protections. Set ``temp_dir`` to an absolute path to override ``TMPDIR`` for
+        commands. For a writable job temp directory, place it in the workspace
+        or include it in the writable roots for each turn.
+        Selected capability directories can contain directory symlinks to
+        readable skill directories. Use this mode only when you trust the
+        prompts and tools with the application's files and credentials.
+
         On Linux, ``mounts`` adds read-only access to canonical same-path
         directories. Supply each source; destination and ``local_bind`` strategy
-        default to the supported same-path bind.
+        default to the supported same-path bind. Mounts require strict mode.
         ``read_only=True`` caps the workspace at read access without expanding
         its readable paths or network policy. It excludes additional writable
         roots, native apply_patch and NativeAgents. Empty root replacement stays read-only.
@@ -440,6 +458,7 @@ class Environment(Generic[ContextT_contra]):
             mounts=mounts,
             write_policy=write_policy,
             read_only=read_only,
+            temp_dir=temp_dir,
         )
 
     def __post_init__(self) -> None:
@@ -449,8 +468,19 @@ class Environment(Generic[ContextT_contra]):
             raise ValueError("Read-only execution requires strict write policy")
         if self.read_only and self._is_local and sys.platform not in ("linux", "darwin"):
             raise ValueError("Read-only local execution requires Linux or macOS")
-        if self.write_policy not in ("strict", "legacy"):
+        if self.write_policy not in ("strict", "legacy", "trusted_workspace_write"):
+            if self._is_local:
+                raise ValueError("write_policy must be strict or trusted_workspace_write")
             raise ValueError("write_policy must be strict or legacy")
+        if self.write_policy == "trusted_workspace_write":
+            if not self._is_local:
+                raise ValueError("Trusted workspace-write requires Environment.local")
+            if sys.platform != "linux":
+                raise ValueError("Trusted workspace-write requires Environment.local on Linux")
+        if self.temp_dir is not None:
+            if self.write_policy != "trusted_workspace_write":
+                raise ValueError("temp_dir requires trusted workspace-write")
+            _path_uri(fspath(self.temp_dir))
         if self.write_policy == "legacy":
             if self._is_local:
                 raise ValueError("Legacy write policy requires a remote Environment")
@@ -479,6 +509,8 @@ class Environment(Generic[ContextT_contra]):
             mounts.append(mount)
         if mounts and (not self._is_local or sys.platform != "linux"):
             raise ValueError("Storage mounts require Environment.local on Linux")
+        if mounts and self.write_policy == "trusted_workspace_write":
+            raise ValueError("Storage mounts require strict write policy")
         object.__setattr__(self, "mounts", tuple(mounts))
         self._validate_settings()
         if self._is_local:
@@ -674,6 +706,10 @@ class Environment(Generic[ContextT_contra]):
             result["local"] = True
         else:
             result["url"] = self.url
+        if self.write_policy == "trusted_workspace_write":
+            result["trusted_workspace_write"] = True
+        if self.temp_dir is not None:
+            result["temp_dir"] = _path_uri(fspath(self.temp_dir))
         if self.writable_roots is not None:
             result["writable_roots"] = [fspath(root) for root in self.writable_roots]
         if self.mounts:
