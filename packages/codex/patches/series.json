@@ -479,7 +479,11 @@
     {
       "path": "sdk-local-project-read-cwd.patch",
       "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
+    },
+    {
+      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     }
   ],
-  "result_tree": "6188f751033b221320447e63b428edbc22e8af34"
+  "result_tree": "19e117ad4714734704495dfb24919ff42ffece0f"
 }
