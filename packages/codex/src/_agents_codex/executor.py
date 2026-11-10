@@ -55,6 +55,12 @@ ExecutorToolName = Literal[
 
 
 def _domain_pattern(value: str) -> str:
+    if value == "*":
+        raise ValueError(
+            "Bare '*' is invalid in network domain rules. "
+            "Use an exact host or a scoped wildcard such as '*.example.org'. "
+            "Use NetworkPolicy.allow_all() to allow public hosts through the proxy."
+        )
     # The proxy matches hosts across all ports. Reject inputs that imply a narrower grant.
     if not value.isascii() or not value.isprintable() or re.search(r"[\s/@#\\]", value):
         raise ValueError("Network domain rules require an ASCII host or host pattern")
