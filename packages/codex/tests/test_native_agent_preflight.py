@@ -53,7 +53,7 @@ async def test_run_restores_target_default_selection_with_current_bindings(respo
                     None,
                     state=pending.value.state,
                     on_interaction=lambda request: request.reply(
-                        "allow_once" if kind == "managed" else "current reply"
+                        True if kind == "managed" else "current reply"
                     ),
                 )
             else:
