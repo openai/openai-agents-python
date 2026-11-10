@@ -107,6 +107,9 @@ class ModelSettings(TypedDict, total=False, closed=True):
 
     ``service_tier=None`` clears the override. These settings select model
     behavior; they do not grant tools, filesystem access, or network access.
+    ``input_modalities`` replaces the selected model's declared input capabilities.
+    Omission preserves the current selection; ``None`` restores catalogue metadata.
+    This declaration never becomes a provider request field or grants file access.
     ``tool_choice`` controls whether the model may call tools in the request.
     Use ``"auto"`` to let the model decide, ``"none"`` to disable tool calls,
     or ``"required"`` to require a call to an offered tool. The default is
@@ -130,6 +133,7 @@ class ModelSettings(TypedDict, total=False, closed=True):
     reasoning_summary: str
     service_tier: str | None
     tool_choice: Literal["auto", "none", "required"] | ToolRef | None
+    input_modalities: Sequence[Literal["text", "image", "audio"]] | None
     max_output_tokens: int | None
     temperature: float | None
     top_p: float | None
@@ -168,7 +172,20 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     for key, value in captured.items():
         if value is None:
             continue
-        if key == "max_output_tokens":
+        if key == "input_modalities":
+            if (
+                not isinstance(value, Sequence)
+                or isinstance(value, (str, bytes))
+                or not value
+                or any(item not in ("text", "image", "audio") for item in value)
+                or len(set(value)) != len(value)
+            ):
+                raise ValueError(
+                    "input_modalities requires a nonempty sequence "
+                    "of distinct text/image/audio values"
+                )
+            captured[key] = list(value)
+        elif key == "max_output_tokens":
             if type(value) is not int or not 0 <= value <= 18_446_744_073_709_551_615:
                 raise ValueError("max_output_tokens must be an unsigned 64-bit integer")
         elif key == "top_logprobs":
@@ -198,6 +215,7 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
             elif not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
                 raise TypeError("extra_body must be a JSON object")
             if key == "extra_body" and set(value) & {
+                "input_modalities",
                 "tool_choice",
                 "client_metadata",
                 "service_tier",

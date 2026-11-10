@@ -90,7 +90,9 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
     if kind == "message" and raw.get("role") in {"user", "assistant"}:
         role = raw["role"]
         accepted = (
-            {"output_text"} if role == "assistant" else {"input_text", "input_image", "input_file"}
+            {"output_text"}
+            if role == "assistant"
+            else {"input_text", "input_image", "input_file", "input_audio"}
         )
         content = [part for part in raw["content"] if part["type"] in accepted]
         return {

@@ -23,6 +23,13 @@ def _source(value: object, *, file: bool = False) -> str:
     return value
 
 
+def _capture_audio(value: object) -> dict[str, Any]:
+    data = _record(value)
+    if set(data) != {"audio_url"}:
+        raise ValueError("Audio requires exactly one audio_url")
+    return {"audio_url": _source(data["audio_url"])}
+
+
 def _capture_image(value: object) -> dict[str, Any]:
     data = _record(value)
     if set(data) - {"image_url", "file_id", "detail"}:
