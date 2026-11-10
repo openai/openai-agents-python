@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import socket
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import FrozenInstanceError, replace
 from functools import partial
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 import pytest
@@ -1138,6 +1140,76 @@ if not allow_all:
             errno.EPERM, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH
         ), error
 """
+
+
+_LINUX_UNIX_SOCKET_PROBE = """\
+import errno
+import socket
+import sys
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.settimeout(3)
+    try:
+        connection.connect(sys.argv[1])
+    except OSError as error:
+        assert error.errno == errno.EPERM, error
+        print("unix-canary: denied")
+    else:
+        connection.sendall(b"synthetic-unix-canary")
+        print("unix-canary: connected")
+"""
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_linux_trusted_workspace_unix_socket_requires_explicit_consent(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # Keep the pathname below sockaddr_un's limit and outside the writable workspace.
+    with (
+        TemporaryDirectory(prefix="sdk-uds-", dir="/tmp") as directory,
+        socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
+    ):
+        pathname = str(Path(directory) / "s")
+        listener.bind(pathname)
+        listener.listen(1)
+        listener.setblocking(False)
+
+        command = shlex.join([sys.executable, "-I", "-c", _LINUX_UNIX_SOCKET_PROBE, pathname])
+        for consent in (False, True):
+            selected = Environment.local(
+                cwd=workspace,
+                tools=["exec_command"],
+                write_policy="trusted_workspace_write",
+                network=NetworkPolicy(allow_all_unix_sockets=True) if consent else None,
+            )
+            responses.respond(
+                function_call(
+                    "exec_command",
+                    {"cmd": command, "login": False, "yield_time_ms": 20_000},
+                    "probe",
+                )
+            )
+            responses.respond(assistant_output("done"))
+            agent = Agent(instructions="Run the canary.", provider=provider(responses))
+            async with timeout(40):
+                result = await agent.run("Run the canary.", environment=selected)
+            assert result.final_output == "done"
+            output = tool_output(responses.requests[-1], "probe")
+            assert "Process exited with code 0" in output, output
+            if consent:
+                assert "unix-canary: connected" in output
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(1)
+                    with connection.makefile("rb") as stream:
+                        assert stream.read() == b"synthetic-unix-canary"
+            else:
+                assert "unix-canary: denied" in output
+                with pytest.raises(BlockingIOError):
+                    connection, _ = listener.accept()
+                    connection.close()
 
 
 @pytest.mark.requires_native_linux_sandbox

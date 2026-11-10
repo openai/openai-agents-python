@@ -2800,6 +2800,10 @@ def _configure_native_agents(
         )
 
 
+def _optional_path_string(value: str | Path | None) -> str | None:
+    return None if value is None else str(value)
+
+
 def _configure_storage_runtime(
     runtime: dict[str, Any],
     storage: LocalStorage | CustomStorage | None,
@@ -3256,7 +3260,9 @@ class Session(Generic[ContextT, OutputT]):
                     saved.executor_policy_digest is not None
                     and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
                 )
-                if recorded_strict != (executor is not None and executor.write_policy == "strict"):
+                if recorded_strict != (
+                    executor is not None and executor.writable_roots is not None
+                ):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )
@@ -3337,10 +3343,9 @@ class Session(Generic[ContextT, OutputT]):
 
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {
-                    "codex_home": (
-                        None if codex_login.codex_home is None else str(codex_login.codex_home)
-                    ),
+                    "codex_home": _optional_path_string(codex_login.codex_home),
                     "account_id": codex_login.account_id,
+                    "credential_directory": _optional_path_string(codex_login.credential_directory),
                     "expected_binding": (
                         saved.codex_login_binding
                         if state is not None
