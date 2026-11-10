@@ -802,28 +802,30 @@ class NativeProvider:
                         else:
                             await release()
 
-                async def close_with_openings() -> None:
+                async def close_with_openings() -> bool:
                     try:
-                        await native_closing
+                        rotation_save_failed = await native_closing
                     except BaseException as error:
                         # A home removal error alone must not strand a manager.
                         # fail_environment separately proves its resource join.
                         await _close_after_error(error, release_openings)
                         raise
                     await release_openings()
+                    return bool(rotation_save_failed)
 
                 operation = close_with_openings()
             else:
                 operation = native_closing
 
-        pending = asyncio.ensure_future(operation)
-        try:
-            await _join(pending)
-        finally:
-            if pending.done() and not pending.cancelled() and pending.exception() is None:
-                with _PROVIDER_LOCK:
-                    object.__setattr__(self, "_closed", True)
-                    object.__setattr__(self, "_transport", None)
+        async def retire() -> None:
+            rotation_save_failed = await operation
+            with _PROVIDER_LOCK:
+                object.__setattr__(self, "_closed", True)
+                object.__setattr__(self, "_transport", None)
+            if rotation_save_failed:
+                raise RuntimeError("Could not save the refreshed Codex login")
+
+        await _join(asyncio.create_task(retire()))
 
     async def __aenter__(self) -> NativeProvider:
         with _PROVIDER_LOCK:

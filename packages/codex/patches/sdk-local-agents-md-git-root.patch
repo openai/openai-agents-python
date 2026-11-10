@@ -1,0 +1,167 @@
+diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
+index 4228374b3cd89b9203b656bba8d5e70c69982980..a5d05a31252ab745356bc18ffc87aa7cb80e4e85 100644
+--- a/codex-rs/core/src/agents_md.rs
++++ b/codex-rs/core/src/agents_md.rs
+@@ -53,6 +53,11 @@ const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+ // transport when independent startup discovery runs concurrently.
+ const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
+ 
++struct AgentsMdSandbox {
++    context: FileSystemSandboxContext,
++    check_git_head: bool,
++}
++
+ /// Loads project AGENTS.md content and combines it with host-provided user
+ /// instructions.
+ pub(crate) async fn load_project_instructions(
+@@ -76,7 +81,11 @@ pub(crate) async fn load_project_instructions(
+             .permission_profile()
+             .file_system_sandbox_policy()
+             .has_full_disk_read_access())
+-        .then(|| turn_environment.sandbox_context(/*additional_permissions*/ None));
++        .then(|| AgentsMdSandbox {
++            context: turn_environment.sandbox_context(/*additional_permissions*/ None),
++            // The Linux local sandbox can expose an empty protected .git directory at the cwd.
++            check_git_head: cfg!(target_os = "linux") && !turn_environment.environment.is_remote(),
++        });
+         match read_agents_md(
+             config,
+             filesystem.as_ref(),
+@@ -128,7 +137,7 @@ async fn read_agents_md(
+     environment_id: &str,
+     cwd: &PathUri,
+     max_total: usize,
+-    sandbox: Option<&FileSystemSandboxContext>,
++    sandbox: Option<&AgentsMdSandbox>,
+ ) -> io::Result<Option<LoadedAgentsMd>> {
+     if max_total == 0 {
+         return Ok(None);
+@@ -139,6 +148,7 @@ async fn read_agents_md(
+         return Ok(None);
+     }
+ 
++    let sandbox = sandbox.map(|sandbox| &sandbox.context);
+     let mut remaining: u64 = max_total as u64;
+     let mut loaded = LoadedAgentsMd::default();
+ 
+@@ -193,9 +203,11 @@ async fn agents_md_paths(
+     config: &Config,
+     cwd: &PathUri,
+     fs: &dyn ExecutorFileSystem,
+-    sandbox: Option<&FileSystemSandboxContext>,
++    sandbox: Option<&AgentsMdSandbox>,
+ ) -> io::Result<Vec<PathUri>> {
+     let dir = cwd.clone();
++    let check_git_head = sandbox.is_some_and(|sandbox| sandbox.check_git_head);
++    let sandbox = sandbox.map(|sandbox| &sandbox.context);
+ 
+     let mut merged = TomlValue::Table(toml::map::Map::new());
+     for layer in config.config_layer_stack.layers_low_to_high() {
+@@ -217,6 +229,7 @@ async fn agents_md_paths(
+         &dir,
+         project_root_markers,
+         FindUpErrorPolicy::Ignore,
++        check_git_head,
+         sandbox,
+     )
+     .await?;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 8a19bfbb697f609784bd09e079f759ee13aba7a4..1ec1cf24ec8c3f266e84655093a913c315b93866 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1011,6 +1011,7 @@ async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, Pat
+             cwd,
+             vec![".git".to_string()],
+             FindUpErrorPolicy::Ignore,
++            /*check_git_head*/ false,
+             /*sandbox*/ None,
+         )
+         .await
+diff --git a/codex-rs/file-system/src/find_up.rs b/codex-rs/file-system/src/find_up.rs
+index a5a071d2843ccd19f11a73aed3af54e676b9e876..9d370124607a220a53acd00eec26710dd6a0846d 100644
+--- a/codex-rs/file-system/src/find_up.rs
++++ b/codex-rs/file-system/src/find_up.rs
+@@ -24,11 +24,14 @@ pub enum FindUpErrorPolicy {
+ /// Marker paths are probed in lexical order from `start` toward the filesystem root. A bounded
+ /// number of ordinary metadata calls are kept in flight so remote filesystems can pipeline them
+ /// without requiring a batch protocol operation.
++///
++/// When `check_git_head` is set, a `.git` directory with no `HEAD` is skipped.
+ pub async fn find_nearest_ancestor_with_markers(
+     file_system: &dyn ExecutorFileSystem,
+     start: &PathUri,
+     markers: Vec<String>,
+     error_policy: FindUpErrorPolicy,
++    check_git_head: bool,
+     sandbox: Option<&FileSystemSandboxContext>,
+ ) -> FileSystemResult<Option<PathUri>> {
+     find_nearest_ancestor(
+@@ -37,9 +40,10 @@ pub async fn find_nearest_ancestor_with_markers(
+         markers,
+         PathUri::parent,
+         |ancestor, marker| {
+-            ancestor
++            let path = ancestor
+                 .join(marker)
+-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
++                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
++            Ok((path, check_git_head && marker == ".git"))
+         },
+         error_policy,
+         sandbox,
+@@ -63,7 +67,7 @@ pub async fn find_nearest_native_ancestor_with_markers(
+         start.clone(),
+         markers,
+         AbsolutePathBuf::parent,
+-        |ancestor, marker| Ok(PathUri::from_abs_path(&ancestor.join(marker))),
++        |ancestor, marker| Ok((PathUri::from_abs_path(&ancestor.join(marker)), false)),
+         error_policy,
+         sandbox,
+     )
+@@ -82,7 +86,7 @@ async fn find_nearest_ancestor<P, Parent, MarkerPath>(
+ where
+     P: Clone + Send,
+     Parent: FnMut(&P) -> Option<P> + Send,
+-    MarkerPath: FnMut(&P, &str) -> FileSystemResult<PathUri> + Send,
++    MarkerPath: FnMut(&P, &str) -> FileSystemResult<(PathUri, bool)> + Send,
+ {
+     let mut ancestors = std::iter::successors(Some(start), parent);
+     let mut ancestor = ancestors.next();
+@@ -102,11 +106,24 @@ where
+     });
+     let mut results = futures::stream::iter(probes)
+         .map(|(ancestor, marker_path)| async move {
+-            let marker_path = marker_path?;
++            let (marker_path, check_git_head) = marker_path?;
+             match file_system
+                 .get_metadata(&marker_path, crate::GetMetadataOptions::default(), sandbox)
+                 .await
+             {
++                Ok(metadata) if check_git_head && metadata.is_directory => {
++                    let head = marker_path
++                        .join("HEAD")
++                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
++                    match file_system
++                        .get_metadata(&head, Default::default(), sandbox)
++                        .await
++                    {
++                        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
++                        // Keep the existing root boundary when the HEAD probe is inconclusive.
++                        _ => Ok(Some(ancestor)),
++                    }
++                }
+                 Ok(_) => Ok(Some(ancestor)),
+                 Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                 Err(err) => match error_policy {
+diff --git a/codex-rs/git-utils/src/trust.rs b/codex-rs/git-utils/src/trust.rs
+index c9cd4a4565402b6d4b6866d0af550fdc07c9d9f6..bc8fbfcc5c1d4045473e28313eb59989c89de2f3 100644
+--- a/codex-rs/git-utils/src/trust.rs
++++ b/codex-rs/git-utils/src/trust.rs
+@@ -96,6 +96,7 @@ async fn resolve_root(fs: &dyn ExecutorFileSystem, cwd: TrustPath) -> Option<Tru
+                     path,
+                     vec![".git".to_string()],
+                     FindUpErrorPolicy::Ignore,
++                    /*check_git_head*/ false,
+                     /*sandbox*/ None,
+                 )
+                 .await
