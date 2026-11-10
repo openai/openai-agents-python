@@ -82,6 +82,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
+| `await session.history_snapshot(*, limit=None)` | Matching source builds have been returning `CanonicalHistorySnapshot(revision, total, items)` for original JSON records while idle. `limit=0` has been returning only revision and count. See [original history](state.md#read-and-edit-original-history). |
+| `await session.transact_history(*, expected_revision, keep, items=())` | Matching source builds have been retaining `keep` original records and replacing the suffix atomically, returning the accepted revision. Stale revisions have been failing before commit. See [transaction limits](state.md#read-and-edit-original-history). |
 | `await session.model_context()` | Capture detached current model input while idle. Use the issued `ModelContextSnapshot` to [retain selected originals during compaction](state.md#retain-selected-context-items). |
 | `await session.compact(*, summary=None, snapshot=None, retain=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](state.md#compact-conversation-context). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
@@ -438,7 +440,26 @@ NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=No
 await provider.aclose() -> None
 ```
 
-Use the [provider configuration guide](configuration.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. Custom endpoints require Responses support. Close every Session using the provider before calling `aclose()`.
+Use the [provider configuration guide](configuration.md#provider-connection) for connection defaults, WebSocket selection and provider lifetime. The default transport has been requiring Responses support from custom endpoints. Matching source builds have also been accepting `model_backend` with [application models](#application-models). Close every Session using the provider before calling `aclose()`.
+
+### Application models
+
+These APIs have been requiring a [matching source build](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source); the alpha.7 wheel has not been including them. The [application-client guide](configuration.md#use-an-application-owned-model-client) has been providing a complete example and lifecycle limits.
+
+```text
+NativeProvider(..., model_backend: NativeModel | ModelProvider | None = None)
+ModelRequest(body: dict[str, Any], context: Any, session_id: str, turn_id: str)
+ModelResponse(output: list[dict[str, Any]], usage: dict[str, int] | None = None,
+              response_id: str = <generated>)
+NativeModel.complete(request: ModelRequest) -> ModelResponse | Awaitable[ModelResponse]
+ModelProvider.get_model(model_name: str) -> NativeModel
+ChatCompletionsModel(client, model=None, *, prompt_cache_key=None)
+ResponsesModel(client, model=None, *, prompt_cache_key=None)
+LitellmModel(client, model=None, *, prompt_cache_key=None)
+AnyLLMModel(client, model=None, *, prompt_cache_key=None)
+```
+
+The runtime has been accepting synchronous or asynchronous `complete()` methods. The packaged client adapters have been requiring asynchronous clients and complete responses. `ModelResponse.output` has been using Responses item JSON. `usage` has been accepting nonnegative native token counters: `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, and `total_tokens`. Omitted usage has been representing unknown counts.
 
 ### CodexLogin
 
