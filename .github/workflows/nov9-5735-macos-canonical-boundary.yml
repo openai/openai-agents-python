@@ -1,0 +1,256 @@
+name: macOS canonical path boundary for 5735
+
+on:
+  push:
+    branches: [codex/nov9-5735-macos-canonical-boundary]
+    paths: [.github/workflows/nov9-5735-macos-canonical-boundary.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  canonical-boundary:
+    if: github.repository == 'openai/openai-agents-python' && github.ref == 'refs/heads/codex/nov9-5735-macos-canonical-boundary'
+    runs-on: macos-15
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: bash
+    env:
+      DRAFT_SOURCE: 99e5713b98b8923347a6272fe2a3fc5778bcb01b
+      WHEEL: openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl
+    steps:
+      - name: Check out the draft source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.DRAFT_SOURCE }}
+          path: draft
+          persist-credentials: false
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.11.14"
+          python-version: "3.14.10"
+          enable-cache: false
+      - name: Verify the retained qualified wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)/$(uname -m)" = Darwin/arm64
+          test "$(id -u)" != 0
+          test -x /usr/bin/sandbox-exec
+          test "$(git -C draft rev-parse HEAD)" = "$DRAFT_SOURCE"
+          # Package job 129947799235 qualified preview 727e14f0, with this same tree.
+          test "$(git -C draft rev-parse 'HEAD^{tree}')" = f79ab30ce5d23411463ff42d275d9c1640b93fb0
+          stage=$(mktemp -d "$RUNNER_TEMP/canonical-boundary.XXXXXXXX")
+          printf 'ALIAS_STAGE=%s\n' "$stage" >> "$GITHUB_ENV"
+          mkdir "$stage/draft"
+          archive="$stage/draft/artifact.zip"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/13779663586/zip" > "$archive"
+          printf '%s  %s\n' 269a12515925d24d4bdbc70528cf14f3802b04d554ef702a3492098c793879e4 "$archive" | shasum -a 256 -c -
+          unzip -q "$archive" "$WHEEL" "$WHEEL.pristine.json" exec-server-fixture -d "$stage/draft"
+          export ALIAS_STAGE="$stage"
+          cat > "$stage/identity.json" <<'IDENTITY'
+          {
+            "draft": {
+              "bundle_sha256": "8047d2a20c64fbd82b7cc3a9a3bf731f3fb4f8122f2cb39721ec09f224b4d96c",
+              "core_tree": "48fe00004f533ba5d27aa87469e239d1122107dc",
+              "fixture_sha256": "70c6c954a084e1a2924ba178510ce0f7d33c44215ce27508633314b4fb6aac49",
+              "input_count": 201,
+              "inputs_sha256": "9ed1b363f90ec0546ca95da3c205efbd7fb7f79ebf7d3c52066d2a2590ed0a50",
+              "native_products": {
+                "agents/_native.abi3.so": "55e4be85a2131c5b74bd0eae31b0ba027364955a4abebc3071dd726928975aed",
+                "agents/bin/codex-code-mode-host": "598322479ffd5f38d5bb25d5b92695a387ce7dd85503480d770195a16ccedfab",
+                "agents/bin/codex-execve-wrapper": "0604019fce98bc228a8e1998cb85fc63d5f48ad2e002028221f36cff8457a61f",
+                "agents/bin/codex-sdk-runtime": "0604019fce98bc228a8e1998cb85fc63d5f48ad2e002028221f36cff8457a61f"
+              },
+              "pristine_sha256": "9edde629632c1203973d45b89d1fe01ba63de3941a4bc772a81e89e9ec3ee7fd",
+              "wheel_sha256": "2803752584452fb3ad87ac71c3a72fa0d825a8eeef86b0343110d0df73b801da"
+            }
+          }
+          IDENTITY
+          "$(uv python find 3.14.10)" -I -B - <<'VERIFY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import runpy
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          def digest(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          stage = Path(os.environ["ALIAS_STAGE"])
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          identities = json.loads((stage / "identity.json").read_text())
+          roots = {"agents": "src", "_agents_shared": "src", "_agents_codex": "packages/codex/src"}
+          for lane, expected in identities.items():
+              project = workspace / lane
+              native = project / "packages/codex"
+              integrity = runpy.run_path(str(native / "scripts/source_integrity.py"))
+              wheel = stage / lane / os.environ["WHEEL"]
+              receipt_path = wheel.with_name(wheel.name + ".pristine.json")
+              assert digest(wheel) == expected["wheel_sha256"], lane
+              assert digest(receipt_path) == expected["pristine_sha256"], lane
+              assert digest(wheel.parent / "exec-server-fixture") == expected["fixture_sha256"], lane
+              receipt = json.loads(receipt_path.read_text())
+              inputs = integrity["native_inputs"](native)
+              assert receipt["format"] == "reviewed-codex-rmcp-v4"
+              assert receipt["native_build"]["target"] == "aarch64-apple-darwin"
+              assert receipt["wheel_sha256"] == expected["wheel_sha256"]
+              assert len(inputs) == expected["input_count"] and inputs == receipt["native_inputs"]
+              assert hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest() == expected["inputs_sha256"]
+              assert integrity["native_bundle_identity"](project) == expected["bundle_sha256"]
+              assert integrity["patch_series"](native) == receipt["patch_series"]
+              assert receipt["patch_series"]["result_tree"] == expected["core_tree"]
+              pin = integrity["object_id"]("commit", base64.b64decode(receipt["codex_commit"], validate=True))
+              assert pin == (native / "CODEX_REVISION").read_text().strip()
+              rmcp = receipt["rmcp_source"]
+              assert rmcp["identity"] == integrity["rmcp_source_identity"](native)
+              assert rmcp["patch_series"] == integrity["rmcp_patch_series"](native)
+              assert rmcp["identity"]["rev"] == integrity["object_id"](
+                  "commit", base64.b64decode(rmcp["commit"], validate=True)
+              )
+              python_files = 0
+              with ZipFile(wheel) as package:
+                  for name in package.namelist():
+                      root = roots.get(name.split("/", 1)[0])
+                      if root is not None and name.endswith(".py"):
+                          assert package.read(name) == (project / root / name).read_bytes(), name
+                          python_files += 1
+                  assert python_files == 475 and "_agents_codex/session.py" in package.namelist()
+                  for name, expected_sha in expected["native_products"].items():
+                      with package.open(name) as stream:
+                          header = stream.read(8)
+                          assert header == bytes.fromhex("cffaedfe0c000001"), name
+                          stream.seek(0)
+                          assert hashlib.file_digest(stream, "sha256").hexdigest() == expected_sha, name
+              print(f"{lane}: {python_files} wheel Python files match source; {json.dumps(expected, sort_keys=True)}")
+          VERIFY
+      - name: Apply the reviewed test-only change
+        run: |
+          set -euo pipefail
+          base64 -D > "$ALIAS_STAGE/stable.patch" <<'STABLE_PATCH'
+          LS0tIGEvcGFja2FnZXMvY29kZXgvdGVzdHMvdGVzdF9uYXRpdmVfcHJvamVjdF9ndWlkYW5jZS5w
+          eQorKysgYi9wYWNrYWdlcy9jb2RleC90ZXN0cy90ZXN0X25hdGl2ZV9wcm9qZWN0X2d1aWRhbmNl
+          LnB5CkBAIC0yMDMsNyArMjAzLDE4IEBACiAgICAgKCJsYXlvdXQiLCAidHJ1c3QiLCAiYWJzb2x1
+          dGUiLCAicmVhZGFibGUiLCAiZ3VpZGFuY2UiKSwKICAgICBbCiAgICAgICAgICgic2libGluZyIs
+          IE5vbmUsIEZhbHNlLCBUcnVlLCBUcnVlKSwKLSAgICAgICAgKCJzaWJsaW5nIiwgTm9uZSwgVHJ1
+          ZSwgRmFsc2UsIEZhbHNlKSwKKyAgICAgICAgcHl0ZXN0LnBhcmFtKAorICAgICAgICAgICAgInNp
+          YmxpbmciLAorICAgICAgICAgICAgTm9uZSwKKyAgICAgICAgICAgIFRydWUsCisgICAgICAgICAg
+          ICBGYWxzZSwKKyAgICAgICAgICAgIEZhbHNlLAorICAgICAgICAgICAgbWFya3M9cHl0ZXN0Lm1h
+          cmsuc2tpcGlmKAorICAgICAgICAgICAgICAgIHN5cy5wbGF0Zm9ybSAhPSAibGludXgiLCByZWFz
+          b249ImNoZWNrcyBMaW51eCBtb3VudCBuYW1lc3BhY2UgdmlzaWJpbGl0eSIKKyAgICAgICAgICAg
+          ICksCisgICAgICAgICksCisgICAgICAgICgiY2Fub25pY2FsIiwgTm9uZSwgVHJ1ZSwgVHJ1ZSwg
+          VHJ1ZSksCisgICAgICAgICgib3V0c2lkZSIsIE5vbmUsIEZhbHNlLCBGYWxzZSwgRmFsc2UpLAog
+          ICAgICAgICAoImluc2lkZSIsICJ0cnVzdGVkIiwgRmFsc2UsIFRydWUsIFRydWUpLAogICAgICAg
+          ICAoImluc2lkZSIsICJ1bnRydXN0ZWQiLCBGYWxzZSwgVHJ1ZSwgRmFsc2UpLAogICAgICAgICAo
+          Imluc2lkZSIsICJjb25mbGljdGluZyIsIEZhbHNlLCBUcnVlLCBGYWxzZSksCkBAIC0yNDAsMTUg
+          KzI1MSwyNiBAQAogICAgICAgICAgICAgY29uZmlnICs9IGYiW3Byb2plY3RzLntqc29uLmR1bXBz
+          KHN0cihwYXRoKSl9XVxudHJ1c3RfbGV2ZWwgPSB7anNvbi5kdW1wcyhsZXZlbCl9XG4iCiAgICAg
+          KGhvbWUgLyAiY29uZmlnLnRvbWwiKS53cml0ZV90ZXh0KGNvbmZpZykKICAgICAod29ya3NwYWNl
+          IC8gIi5wcm9qZWN0LXJvb3QiKS53cml0ZV90ZXh0KCIiKQotICAgICh3b3Jrc3BhY2UgLyAicmVj
+          b3JkLnR4dCIpLndyaXRlX3RleHQoIlNZTlRIRVRJQ19BTElBU19URVhUIikKLSAgICAod29ya3Nw
+          YWNlIC8gInBpeGVsLnBuZyIpLndyaXRlX2J5dGVzKF9QSVhFTF9QTkcpCisgICAgdGFyZ2V0ID0g
+          d29ya3NwYWNlCisgICAgcHJlZml4ID0gIiIKKyAgICBpZiBsYXlvdXQgPT0gIm91dHNpZGUiOgor
+          ICAgICAgICB0YXJnZXQgPSB0bXBfcGF0aCAvICJ1bmdyYW50ZWQiCisgICAgICAgIHRhcmdldC5t
+          a2RpcigpCisgICAgICAgICh3b3Jrc3BhY2UgLyAib3V0c2lkZS1saW5rIikuc3ltbGlua190byh0
+          YXJnZXQsIHRhcmdldF9pc19kaXJlY3Rvcnk9VHJ1ZSkKKyAgICAgICAgcHJlZml4ID0gIm91dHNp
+          ZGUtbGluay8iCisgICAgKHRhcmdldCAvICJyZWNvcmQudHh0Iikud3JpdGVfdGV4dCgiU1lOVEhF
+          VElDX0FMSUFTX1RFWFQiKQorICAgICh0YXJnZXQgLyAicGl4ZWwucG5nIikud3JpdGVfYnl0ZXMo
+          X1BJWEVMX1BORykKICAgICBydWxlcyA9IHdvcmtzcGFjZSAvICIuYWdlbnRzIiAvICJydWxlcyIK
+          ICAgICBydWxlcy5ta2RpcihwYXJlbnRzPVRydWUpCi0gICAgKHJ1bGVzIC8gInRleHQubWQiKS53
+          cml0ZV90ZXh0KCItLS1cbnBhdGhzOlxuICAtIHJlY29yZC50eHRcbi0tLVxuU1lOVEhFVElDX1RF
+          WFRfR1VJREFOQ0UiKQotICAgIChydWxlcyAvICJpbWFnZS5tZCIpLndyaXRlX3RleHQoIi0tLVxu
+          cGF0aHM6XG4gIC0gcGl4ZWwucG5nXG4tLS1cblNZTlRIRVRJQ19JTUFHRV9HVUlEQU5DRSIpCisg
+          ICAgKHJ1bGVzIC8gInRleHQubWQiKS53cml0ZV90ZXh0KAorICAgICAgICBmIi0tLVxucGF0aHM6
+          XG4gIC0ge3ByZWZpeH1yZWNvcmQudHh0XG4tLS1cblNZTlRIRVRJQ19URVhUX0dVSURBTkNFIgor
+          ICAgICkKKyAgICAocnVsZXMgLyAiaW1hZ2UubWQiKS53cml0ZV90ZXh0KAorICAgICAgICBmIi0t
+          LVxucGF0aHM6XG4gIC0ge3ByZWZpeH1waXhlbC5wbmdcbi0tLVxuU1lOVEhFVElDX0lNQUdFX0dV
+          SURBTkNFIgorICAgICkKICAgICAocnVsZXMgLyAib3RoZXIubWQiKS53cml0ZV90ZXh0KCItLS1c
+          bnBhdGhzOlxuICAtIG90aGVyLnR4dFxuLS0tXG5TWU5USEVUSUNfT1RIRVJfUlVMRSIpCi0gICAg
+          dGV4dF9wYXRoID0gc3RyKGN3ZCAvICJyZWNvcmQudHh0IikgaWYgYWJzb2x1dGUgZWxzZSAicmVj
+          b3JkLnR4dCIKLSAgICBpbWFnZV9wYXRoID0gc3RyKGN3ZCAvICJwaXhlbC5wbmciKSBpZiBhYnNv
+          bHV0ZSBlbHNlICJwaXhlbC5wbmciCisgICAgdGV4dF9wYXRoID0gc3RyKGN3ZCAvIGYie3ByZWZp
+          eH1yZWNvcmQudHh0IikgaWYgYWJzb2x1dGUgZWxzZSBmIntwcmVmaXh9cmVjb3JkLnR4dCIKKyAg
+          ICBpbWFnZV9wYXRoID0gc3RyKGN3ZCAvIGYie3ByZWZpeH1waXhlbC5wbmciKSBpZiBhYnNvbHV0
+          ZSBlbHNlIGYie3ByZWZpeH1waXhlbC5wbmciCiAgICAgcmVzcG9uc2VzLnJlcGxpZXMuZXh0ZW5k
+          KAogICAgICAgICBbCiAgICAgICAgICAgICBbZnVuY3Rpb25fY2FsbCgicmVhZF90ZXh0X2ZpbGUi
+          LCB7InBhdGgiOiB0ZXh0X3BhdGh9LCAidGV4dC0xIildLAo=
+          STABLE_PATCH
+          printf '%s  %s\n' 39b596118725f27beb47347b8e4d5049bd687ebd263c0787b39309e38fd29842 "$ALIAS_STAGE/stable.patch" | shasum -a 256 -c -
+          git -C draft apply --check "$ALIAS_STAGE/stable.patch"
+          git -C draft apply "$ALIAS_STAGE/stable.patch"
+          fixture=packages/codex/tests/test_native_project_guidance.py
+          test "$(git -C draft diff --name-only)" = "$fixture"
+          printf '%s  %s\n' 6ee2664a32de71e19013ad5fa30669240b03d00c7589dc8f216c81bb56f31198 "draft/$fixture" | shasum -a 256 -c -
+      - name: Install the wheel with frozen test dependencies
+        run: |
+          set -euo pipefail
+          work="$ALIAS_STAGE/draft"
+          uv export --directory draft --frozen --no-default-groups --group pgo \
+            --no-emit-project --format requirements-txt --output-file "$work/requirements.txt" --quiet
+          uv venv --python 3.14.10 "$work/venv"
+          uv pip install --python "$work/venv/bin/python" --require-hashes --only-binary :all: -r "$work/requirements.txt"
+          uv pip install --python "$work/venv/bin/python" --no-deps --only-binary :all: "$work/$WHEEL"
+      - name: Verify in-grant absolute and physical outside reads
+        run: |
+          set -euo pipefail
+          work="$ALIAS_STAGE/draft"
+          mkdir -m 700 -p "$work/home/codex" "$work/tmp"
+          cat > "$ALIAS_STAGE/check.py" <<'CHECK'
+          import hashlib
+          import json
+          import runpy
+          import sys
+          import sysconfig
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          import pytest
+          from _agents_codex import session
+          from agents import _native
+
+          lane, stage_arg = sys.argv[1:]
+          stage = Path(stage_arg)
+          verifier = runpy.run_path("packages/codex/scripts/verify_installed.py")
+          installed = verifier["installed_distribution"]()
+          assert _native.CODEX_REVISION == verifier["EXPECTED_PIN"]
+          platlib = Path(sysconfig.get_path("platlib")).resolve()
+          assert Path(session.__file__).resolve().is_relative_to(platlib)
+          expected = json.loads((stage / "identity.json").read_text())[lane]
+          for name, digest in expected["native_products"].items():
+              with (platlib / name).open("rb") as stream:
+                  assert hashlib.file_digest(stream, "sha256").hexdigest() == digest, name
+          print(f"{lane}: installed {json.dumps(installed, sort_keys=True)}", flush=True)
+
+          cases = [
+              "test_local_project_guidance_alias_read_boundary[canonical-None-True-True-True]",
+              "test_local_project_guidance_alias_read_boundary[outside-None-False-False-False]",
+          ]
+          work = stage / lane
+          report = work / "junit.xml"
+          fixture = "packages/codex/tests/test_native_project_guidance.py"
+          result = pytest.main([
+              "-q", "-rA", "-p", "pytest_asyncio.plugin", "-p", "no:cacheprovider",
+              "-o", "pythonpath=packages/codex", "--basetemp", str(work / "pytest"),
+              "--junitxml", str(report), *(f"{fixture}::{case}" for case in cases),
+          ])
+          rows = ET.parse(report).findall(".//testcase")
+          assert sorted(row.get("name") for row in rows) == sorted(cases)
+          statuses = {}
+          for row in rows:
+              status = next((tag for tag in ("error", "failure", "skipped") if row.find(tag) is not None), "passed")
+              statuses[row.attrib["name"]] = status
+          print(f"{lane}: {json.dumps(statuses, sort_keys=True)}", flush=True)
+          sys.exit(1 if result or any(status != "passed" for status in statuses.values()) else 0)
+          CHECK
+          cd draft
+          env -i PATH="$work/venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            HOME="$work/home" CODEX_HOME="$work/home/codex" TMPDIR="$work/tmp" \
+            LC_ALL=C OPENAI_AGENTS_DISABLE_TRACING=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            "$work/venv/bin/python" -I -B "$ALIAS_STAGE/check.py" draft "$ALIAS_STAGE"
