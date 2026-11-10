@@ -1,6 +1,6 @@
 # Managed function approvals
 
-Use this example with the matching native SDK preview source and wheel. From the repository root, run `uv run python examples/codex/managed_approvals/main.py`. It uses synthetic data and a loopback Responses fixture, so it needs no provider credentials. Keep loopback traffic off your proxy. The expected output is `Approved callback ran once.`
+Use this example with the matching native SDK preview source and wheel. With that SDK environment active, run `python examples/codex/managed_approvals/main.py` from the repository root. It uses synthetic data and a loopback Responses fixture, so it needs no provider credentials. Keep loopback traffic off your proxy. The expected output is `Approved callback ran once.`
 
 Set `@function_tool(needs_approval=True)` to pause before a Python function runs. Read `ApprovalRequested` from `session.interactions()`, inspect `arguments` and `effective_arguments`, then await `approve()` or `reject(reason)`. Approval runs the registered callback. Rejection returns a failed tool result without calling it. The request belongs to its original Session, Turn, and call; a second decision or an expired request fails.
 
