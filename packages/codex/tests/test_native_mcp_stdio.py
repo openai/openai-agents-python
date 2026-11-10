@@ -314,7 +314,8 @@ async def test_native_stdio_reconnect_does_not_replay_uncertain_call(
             assert (await turn.get_result()).final_output == "done"
             assert len(responses.requests) == 3
             error = tool_output(responses.requests[1], uncertain)
-            assert "Transport closed" in error, error
+            assert error.endswith("MCP tool invocation failed"), error
+            assert "Transport closed" not in error
             output = tool_output(responses.requests[2], later)
 
             peer_records = records(log)

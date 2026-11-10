@@ -52,7 +52,10 @@ async def test_live_mcp_selection_can_be_cleared_and_restored(
             )
             name = declaration["name"]
             await voice.function(name, {"key": "before"}, "mcp-before")
-            await voice.frame(lambda frame: frame.get("item", {}).get("call_id") == "mcp-before")
+            first_result = await voice.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "mcp-before"
+            )
+            assert accepted, (first_result, mcp.calls)
             assert isinstance(accepted[-1].submission, Turn)
             await accepted[-1].submission.get_result()
 
