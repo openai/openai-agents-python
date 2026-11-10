@@ -9,11 +9,14 @@ from pathlib import Path
 
 import pytest
 
-import _agents_codex.session as native_session
 from agents import Agent, Environment
 from agents.observation import TurnStarted
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import function_declarations, provider
+
+_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 async def test_project_guidance_requires_an_executor(responses) -> None:
@@ -32,23 +35,10 @@ async def test_project_guidance_requires_an_executor(responses) -> None:
     else pytest.mark.requires_native_macos_sandbox
 )
 async def test_project_guidance_reads_workspace_image_without_command_grants(
-    tmp_path: Path, responses, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, responses
 ) -> None:
-    capture_project_guidance = native_session._capture_project_guidance
-
-    def capture_trusted_guidance(enabled: bool):
-        config, options, tools = capture_project_guidance(enabled)
-        projects = {str(tmp_path.resolve()): {"trust_level": "trusted"}}
-        return {**config, "projects": projects}, options, tools
-
-    monkeypatch.setattr(native_session, "_capture_project_guidance", capture_trusted_guidance)
-
     image = tmp_path / "pixel.png"
-    image.write_bytes(
-        base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
-        )
-    )
+    image.write_bytes(_PIXEL_PNG)
     rules = tmp_path / ".agents" / "rules"
     rules.mkdir(parents=True)
     (rules / "general.md").write_text("SYNTHETIC_WORKSPACE_GUIDANCE")
@@ -69,6 +59,54 @@ async def test_project_guidance_reads_workspace_image_without_command_grants(
     assert "SYNTHETIC_WORKSPACE_GUIDANCE" in request
     assert not any(
         tool.get("name") == "exec_command" for tool in responses.requests[0].get("tools", [])
+    )
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+async def test_project_guidance_matches_scoped_rule_with_aliased_cwd(
+    tmp_path: Path, responses, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.native_executor_fixtures import ExecutorPeer
+
+    async with ExecutorPeer(tmp_path / "workspace").serve() as peer:
+        alias = tmp_path / "alias"
+        alias.symlink_to(peer.root, target_is_directory=True)
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-certificates"))
+        (peer.root / "pixel.png").write_bytes(_PIXEL_PNG)
+        rules = peer.root / ".agents" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "pixel.md").write_text("---\npaths:\n  - pixel.png\n---\nSYNTHETIC_IMAGE_GUIDANCE")
+        (rules / "other.md").write_text("---\npaths:\n  - other.png\n---\nSYNTHETIC_OTHER_GUIDANCE")
+        responses.replies.extend(
+            [
+                [function_call("view_image", {"path": str(alias / "pixel.png")}, "image-1")],
+                [assistant_output("image read")],
+            ]
+        )
+        async with Agent(instructions="Answer.", provider=provider(responses)).session(
+            environment=Environment(
+                url=peer.url,
+                cwd=str(alias),
+                headers={"Authorization": "Bearer " + peer.token},
+                writable_roots=(),
+            ),
+            project_guidance=True,
+        ) as session:
+            assert (await (await session.submit("Read the image.")).get_result()).final_output == (
+                "image read"
+            )
+
+    first, second = responses.requests
+    assert "SYNTHETIC_IMAGE_GUIDANCE" not in json.dumps(first)
+    request = json.dumps(second)
+    assert "data:image/png;base64," in request
+    assert "SYNTHETIC_IMAGE_GUIDANCE" in request
+    assert "SYNTHETIC_OTHER_GUIDANCE" not in request
+    assert all(
+        tool.get("name") != "exec_command"
+        for request in responses.requests
+        for tool in function_declarations(request)
     )
 
 

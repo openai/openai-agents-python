@@ -735,7 +735,11 @@ class _NativeInterception:
                 assert approval is not None
                 assert call.call_id is not None
                 collab_context = ToolContext(
-                    session._context, state.handle, call.call_id, call=info
+                    session._context,
+                    state.handle,
+                    call.call_id,
+                    call=info,
+                    realtime_usage=session.realtime_usage,
                 )
                 value = await session._call_decision_callback(
                     state,
