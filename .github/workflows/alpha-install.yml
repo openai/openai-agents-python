@@ -28,10 +28,17 @@ jobs:
         platform:
           - runner: ubuntu-24.04
             wheel: manylinux_2_39_x86_64
+          - runner: ubuntu-24.04-arm
+            wheel: manylinux_2_39_aarch64
           - runner: windows-latest
             wheel: win_amd64
           - runner: macos-latest
             wheel: macosx_11_0_arm64
+        # These published releases predate the Linux ARM64 wheel.
+        exclude: >-
+          ${{ contains(fromJSON('["v0.24.0-alpha.6","v0.24.0a6","v0.24.0-alpha.7","v0.24.0a7"]'), inputs.tag)
+              && fromJSON('[{"platform":{"runner":"ubuntu-24.04-arm","wheel":"manylinux_2_39_aarch64"}}]')
+              || fromJSON('[]') }}
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 15
     env:
