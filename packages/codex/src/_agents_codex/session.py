@@ -2656,6 +2656,49 @@ def _configure_project_search(
         runtime["_sdk_project_search"] = {"root": cwd, "tools": search_tools}
 
 
+def _configure_native_agents(
+    runtime: dict[str, Any],
+    config: dict[str, Any],
+    native_agents: NativeAgents | None,
+    instructions: str,
+    *,
+    project_guidance: bool,
+) -> None:
+    if native_agents is not None:
+        runtime["_native_agents"] = True
+        # Core enables the owned route only for non-root child creation.
+        runtime["approval_policy"] = "never"
+        config.update(
+            {
+                "agents.enabled": True,
+                "features.multi_agent_v2": {
+                    "subagent_developer_instructions": instructions,
+                    "enabled": True,
+                    "tool_namespace": "collaboration",
+                    "expose_spawn_agent_model_overrides": False,
+                    **(
+                        {"max_concurrent_threads_per_session": (native_agents.max_children + 1)}
+                        if native_agents.max_children is not None
+                        else {}
+                    ),
+                },
+                "features.view_image": project_guidance,
+                "features.image_generation": False,
+                "features.current_time_reminder": False,
+                "features.sleep_tool": False,
+                "features.request_permissions_tool": False,
+                "features.token_budget": False,
+                "features.deferred_executor": False,
+                "features.apps": False,
+                "features.plugins": False,
+                "features.memory_tool": False,
+                "features.tool_suggest": False,
+                "features.send_message_to_user_async": False,
+                "tools.experimental_request_user_input.enabled": False,
+            }
+        )
+
+
 def _configure_storage_runtime(
     runtime: dict[str, Any],
     storage: LocalStorage | CustomStorage | None,
@@ -3320,43 +3363,13 @@ class Session(Generic[ContextT, OutputT]):
                     }
                 if model is not None:
                     config["model"] = model
-                if native_agents is not None:
-                    runtime["_native_agents"] = True
-                    # Core enables the owned route only for non-root child creation.
-                    runtime["approval_policy"] = "never"
-                    config.update(
-                        {
-                            "agents.enabled": True,
-                            "features.multi_agent_v2": {
-                                "subagent_developer_instructions": instructions,
-                                "enabled": True,
-                                "tool_namespace": "collaboration",
-                                "expose_spawn_agent_model_overrides": False,
-                                **(
-                                    {
-                                        "max_concurrent_threads_per_session": (
-                                            native_agents.max_children + 1
-                                        )
-                                    }
-                                    if native_agents.max_children is not None
-                                    else {}
-                                ),
-                            },
-                            "features.view_image": project_guidance,
-                            "features.image_generation": False,
-                            "features.current_time_reminder": False,
-                            "features.sleep_tool": False,
-                            "features.request_permissions_tool": False,
-                            "features.token_budget": False,
-                            "features.deferred_executor": False,
-                            "features.apps": False,
-                            "features.plugins": False,
-                            "features.memory_tool": False,
-                            "features.tool_suggest": False,
-                            "features.send_message_to_user_async": False,
-                            "tools.experimental_request_user_input.enabled": False,
-                        }
-                    )
+                _configure_native_agents(
+                    runtime,
+                    config,
+                    native_agents,
+                    instructions,
+                    project_guidance=project_guidance,
+                )
                 if provider.model_backend is not None:
                     opening.api_key = "native-model-producer"
                 elif codex_login is not None:
