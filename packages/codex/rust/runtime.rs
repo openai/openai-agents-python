@@ -23,7 +23,10 @@ fn main() -> anyhow::Result<()> {
             // bubblewrap. Do not search host or workspace PATH entries.
             // SAFETY: this entry point runs before any helper thread starts.
             unsafe {
-                std::env::set_var("PATH", local_sandbox::SYSTEM_EXECUTABLE_PATH);
+                std::env::set_var(
+                    "CODEX_SDK_BWRAP_SEARCH_PATH",
+                    local_sandbox::SYSTEM_EXECUTABLE_PATH,
+                );
                 std::env::remove_var("CARGO_BIN_EXE_bwrap");
             }
         }

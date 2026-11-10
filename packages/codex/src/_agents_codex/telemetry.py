@@ -386,6 +386,22 @@ class SpanContext:
     include_sensitive_data: bool
     _handle: str = field(repr=False, compare=False)
 
+    @property
+    def trace_metadata(self) -> Mapping[str, Any] | None:
+        """Detached snapshot of this native root's original metadata."""
+        data = json.loads(_native_tracing().trace_span_context(self._handle))
+        if "root_metadata" not in data:
+            raise RuntimeError("Native trace metadata unavailable")
+        encoded = data["root_metadata"]
+        if encoded is None:
+            return None
+        if not isinstance(encoded, str):
+            raise RuntimeError("Invalid native trace metadata")
+        metadata = json.loads(encoded)
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Invalid native trace metadata")
+        return metadata
+
     def __post_init__(self) -> None:
         from weakref import finalize
 
@@ -471,6 +487,7 @@ def _retain_context(context: str) -> SpanContext:
     try:
         data = json.loads(native.trace_span_context(retained))
         data.pop("handle", None)
+        data.pop("root_metadata", None)
         return SpanContext(_handle=retained, **data)
     finally:
         native.release_trace_context(retained)
@@ -538,6 +555,11 @@ class TraceScope:
             raise RuntimeError("Enter the trace scope before reading its context")
         return self._context
 
+    @property
+    def trace_metadata(self) -> Mapping[str, Any] | None:
+        """Inherited root metadata, without mutation of the native owner."""
+        return self.context.trace_metadata
+
     def start(self) -> TraceScope:
         """Start and activate this span in the current task.
 
@@ -588,6 +610,7 @@ class TraceScope:
                 wire["credential_ref"] = credential
             data = json.loads(native.start_trace_span(json.dumps(wire, allow_nan=False)))
             handle = data.pop("handle")
+            data.pop("root_metadata", None)
             self._context = SpanContext(_handle=handle, **data)
             self._span_handle = handle
             admitted = True
@@ -774,6 +797,7 @@ def _capture(
                 native = _native_tracing()
                 data = json.loads(native.trace_span_context(fallback))
                 data.pop("handle", None)
+                data.pop("root_metadata", None)
                 token = _current.set(SpanContext(_handle=fallback, **data))
                 try:
                     scope.__enter__()
@@ -1367,6 +1391,7 @@ def _activate(context: str | None) -> Iterator[None]:
         return
     data = json.loads(_native_tracing().trace_span_context(context))
     data.pop("handle", None)
+    data.pop("root_metadata", None)
     token = _current.set(SpanContext(_handle=context, **data))
     try:
         yield

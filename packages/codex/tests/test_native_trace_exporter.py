@@ -10,6 +10,8 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from socketserver import TCPServer
 from threading import Thread
 from typing import Any
 
@@ -17,6 +19,7 @@ import pytest
 
 from agents import Agent, telemetry
 from agents.testing import ScriptedResponses, text
+from tests._asyncio import capture_cancellation
 
 
 @contextmanager
@@ -25,6 +28,11 @@ def collector(
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
+
+    class LoopbackHTTPServer(ThreadingHTTPServer):
+        def server_bind(self):
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -45,7 +53,7 @@ def collector(
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
     try:
@@ -56,10 +64,10 @@ def collector(
         worker.join()
 
 
-def assert_sanitized_failure(error, secret):
+def assert_sanitized_failure(error, secret, *, expected_context=None):
     """Inspect exception objects and library frames, including suppressed context."""
     assert error.__cause__ is None
-    assert error.__context__ is None
+    assert error.__context__ is expected_context
     pending = [error]
     seen = set()
     while pending:
@@ -126,12 +134,24 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         assert len(received) == 1
 
 
+def native_trace_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    test_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (test_root, env.get("PYTHONPATH"))))
+    return env
+
+
 @pytest.mark.parametrize(
     "case_name",
-    ["native_case", "native_deadline_case", "native_outcome_privacy_case", "native_batch_case"],
+    [
+        "native_case",
+        "native_deadline_case",
+        "native_outcome_privacy_case",
+        pytest.param("native_batch_case", marks=pytest.mark.serial),
+    ],
 )
 def test_real_native_capture_policy_and_openai_export(case_name):
-    env = dict(os.environ)
+    env = native_trace_child_env()
     env.pop("OPENAI_API_KEY", None)
     result = subprocess.run(
         [
@@ -259,13 +279,30 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             else:
                 writer.write(b"Content-Length: 0\r\n\r\n")
                 await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            if not request_started.is_set():
+                raise
+            peer_closed.set()
         finally:
-            if eof is not None and not eof.done():
-                eof.cancel()
+            if eof is not None:
+                if not eof.done():
+                    eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                if not peer_closed.is_set():
+                    raise
             handler_done.set()
+
+    if not cancelled:
+        with collector() as (warmup_endpoint, requests):
+            warmup = telemetry.OpenAITraceExporter(
+                api_key="synthetic-key", endpoint=warmup_endpoint
+            )
+            await warmup.on_trace_event(completed_event())
+            assert len(requests) == 1
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
@@ -276,15 +313,25 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     event = completed_event()
     event["attributes"]["private_fixture"] = secret
     started = time.monotonic()
-    delivery = asyncio.create_task(exporter.on_trace_event(event))
+    cancellations = []
+    delivery = asyncio.create_task(
+        capture_cancellation(exporter.on_trace_event(event), cancellations)
+    )
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
-            assert failure.value.args == ("synthetic caller cancellation",)
-            assert_sanitized_failure(failure.value, secret)
+            assert delivery.cancelled()
+            assert [error.args for error in cancellations] == [("synthetic caller cancellation",)]
+            assert_sanitized_failure(cancellations[0], secret)
+            # Python 3.10 wraps the original cancellation when the Task finishes.
+            assert_sanitized_failure(
+                failure.value,
+                secret,
+                expected_context=None if failure.value is cancellations[0] else cancellations[0],
+            )
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
                 await delivery
@@ -330,7 +377,7 @@ async def native_deadline_case():
             )
             requests.append(json.loads(await reader.readexactly(length)))
             writer.write(b"HTTP/1.1 200 OK\r\n")
-            if len(requests) == 1:
+            if len(requests) == 2:
                 eof = asyncio.create_task(reader.read())
                 for _ in range(30):
                     done, _ = await asyncio.wait((eof,), timeout=0.02)
@@ -353,6 +400,10 @@ async def native_deadline_case():
     server = await asyncio.start_server(receive, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
     try:
+        # Warm the lazy HTTP transport before the bounded native request.
+        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        await warmup.on_trace_event(completed_event())
+        assert len(requests) == 1
         exporter = telemetry.OpenAITraceExporter(
             api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
@@ -519,6 +570,11 @@ async def native_outcome_privacy_case():
 async def native_batch_case():
     import time
 
+    with collector() as (warmup_endpoint, warmup_received):
+        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=warmup_endpoint)
+        await warmup.on_trace_event(completed_event())
+        assert len(warmup_received) == 1
+
     with collector(delay=0.5) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
         await telemetry.configure(processors=[exporter])
@@ -529,7 +585,7 @@ async def native_batch_case():
         started = time.monotonic()
         result = await telemetry.force_flush()
         elapsed = time.monotonic() - started
-        assert result.status == "success"
+        assert result.status == "success", result
         records = [record for request in received for record in request["payload"]["data"]]
         spans = [record for record in records if record["object"] == "trace.span"]
         assert len(spans) == 21

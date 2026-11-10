@@ -1,0 +1,421 @@
+diff --git a/codex-rs/exec-server-protocol/src/rpc.rs b/codex-rs/exec-server-protocol/src/rpc.rs
+index 1d79b2b..d1229fe 100644
+--- a/codex-rs/exec-server-protocol/src/rpc.rs
++++ b/codex-rs/exec-server-protocol/src/rpc.rs
+@@ -15,8 +15,8 @@ use serde::de::MapAccess;
+ use serde::de::SeqAccess;
+ use serde::de::Visitor;
+ use serde_json::Map;
+-use serde_json::Number;
+ use serde_json::Value;
++use serde_json::value::RawValue;
+ 
+ pub const JSONRPC_VERSION: &str = "2.0";
+ 
+@@ -25,11 +25,6 @@ pub const JSONRPC_VERSION: &str = "2.0";
+ // while preventing compact arrays from expanding into millions of heap values.
+ const MAX_JSONRPC_VALUE_NODES: usize = 256 * 1024;
+ 
+-// With `arbitrary_precision` enabled, serde_json presents decimal, exponent,
+-// and out-of-range integer values to visitors as a synthetic one-entry map.
+-const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
+-const SERDE_JSON_RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+-
+ #[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Deserialize, Serialize, Hash, Eq)]
+ #[serde(untagged)]
+ pub enum RequestId {
+@@ -63,39 +58,93 @@ impl<'de> Deserialize<'de> for JSONRPCMessage {
+     where
+         D: Deserializer<'de>,
+     {
++        let raw = Box::<RawValue>::deserialize(deserializer)?;
+         let mut remaining = MAX_JSONRPC_VALUE_NODES;
+-        let value = BoundedValueSeed {
+-            remaining: &mut remaining,
+-        }
+-        .deserialize(deserializer)?;
+-        let object = value
+-            .as_object()
+-            .ok_or_else(|| de::Error::custom("expected a JSON-RPC object"))?;
+-
++        let value = bounded_raw_value(&raw, &mut remaining, 0).map_err(de::Error::custom)?;
++        let Value::Object(mut object) = value else {
++            return Err(de::Error::custom("expected a JSON-RPC object"));
++        };
++        // Move arbitrary payloads directly: deserializing Value into Value again
++        // would reinterpret literal serde_json private marker keys.
+         if object.contains_key("method") {
++            let method = required_field::<_, D::Error>(&mut object, "method")?;
++            let params = object.remove("params").filter(|value| !value.is_null());
+             if object.contains_key("id") {
+-                JSONRPCRequest::deserialize(value)
+-                    .map(Self::Request)
+-                    .map_err(de::Error::custom)
++                let trace = object
++                    .remove("trace")
++                    .map(serde_json::from_value::<Option<W3cTraceContext>>)
++                    .transpose()
++                    .map_err(de::Error::custom)?
++                    .flatten();
++                Ok(Self::Request(JSONRPCRequest {
++                    id: required_field::<_, D::Error>(&mut object, "id")?,
++                    method,
++                    params,
++                    trace,
++                }))
+             } else {
+-                JSONRPCNotification::deserialize(value)
+-                    .map(Self::Notification)
+-                    .map_err(de::Error::custom)
++                Ok(Self::Notification(JSONRPCNotification { method, params }))
+             }
+-        } else if object.contains_key("result") {
+-            JSONRPCResponse::deserialize(value)
+-                .map(Self::Response)
+-                .map_err(de::Error::custom)
++        } else if let Some(result) = object.remove("result") {
++            Ok(Self::Response(JSONRPCResponse {
++                id: required_field::<_, D::Error>(&mut object, "id")?,
++                result,
++            }))
+         } else {
+-            JSONRPCError::deserialize(value)
+-                .map(Self::Error)
+-                .map_err(de::Error::custom)
++            let error = object
++                .remove("error")
++                .ok_or_else(|| <D::Error as de::Error>::missing_field("error"))?;
++            let Value::Object(mut error) = error else {
++                return Err(de::Error::custom("expected a JSON-RPC error object"));
++            };
++            Ok(Self::Error(JSONRPCError {
++                id: required_field::<_, D::Error>(&mut object, "id")?,
++                error: JSONRPCErrorError {
++                    code: required_field::<_, D::Error>(&mut error, "code")?,
++                    data: error.remove("data").filter(|value| !value.is_null()),
++                    message: required_field::<_, D::Error>(&mut error, "message")?,
++                },
++            }))
+         }
+     }
+ }
+ 
++fn required_field<T: serde::de::DeserializeOwned, E: de::Error>(
++    object: &mut Map<String, Value>,
++    name: &'static str,
++) -> std::result::Result<T, E> {
++    let value = object.remove(name).ok_or_else(|| E::missing_field(name))?;
++    serde_json::from_value(value).map_err(E::custom)
++}
++
++// Inspect syntax before generic Value decoding so literal maps stay distinct
++// from serde_json's synthetic arbitrary-precision number representation.
++fn bounded_raw_value(
++    raw: &RawValue,
++    remaining: &mut usize,
++    depth: usize,
++) -> serde_json::Result<Value> {
++    let Some(next) = remaining.checked_sub(1) else {
++        return Err(de::Error::custom(format!(
++            "JSON-RPC message exceeds the limit of {MAX_JSONRPC_VALUE_NODES} JSON values"
++        )));
++    };
++    *remaining = next;
++    let kind = raw.get().trim_start().as_bytes().first();
++    if matches!(kind, Some(b'{' | b'[')) && depth >= 127 {
++        return Err(de::Error::custom("recursion limit exceeded"));
++    }
++    let visitor = BoundedValueVisitor { remaining, depth };
++    match kind {
++        Some(b'{') => serde_json::Deserializer::from_str(raw.get()).deserialize_map(visitor),
++        Some(b'[') => serde_json::Deserializer::from_str(raw.get()).deserialize_seq(visitor),
++        _ => serde_json::from_str(raw.get()),
++    }
++}
++
+ struct BoundedValueSeed<'a> {
+     remaining: &'a mut usize,
++    depth: usize,
+ }
+ 
+ impl<'de> DeserializeSeed<'de> for BoundedValueSeed<'_> {
+@@ -105,20 +154,14 @@ impl<'de> DeserializeSeed<'de> for BoundedValueSeed<'_> {
+     where
+         D: Deserializer<'de>,
+     {
+-        let Some(remaining) = self.remaining.checked_sub(1) else {
+-            return Err(de::Error::custom(format!(
+-                "JSON-RPC message exceeds the limit of {MAX_JSONRPC_VALUE_NODES} JSON values"
+-            )));
+-        };
+-        *self.remaining = remaining;
+-        deserializer.deserialize_any(BoundedValueVisitor {
+-            remaining: self.remaining,
+-        })
++        let raw = <&RawValue>::deserialize(deserializer)?;
++        bounded_raw_value(raw, self.remaining, self.depth).map_err(de::Error::custom)
+     }
+ }
+ 
+ struct BoundedValueVisitor<'a> {
+     remaining: &'a mut usize,
++    depth: usize,
+ }
+ 
+ impl<'de> Visitor<'de> for BoundedValueVisitor<'_> {
+@@ -128,48 +171,6 @@ impl<'de> Visitor<'de> for BoundedValueVisitor<'_> {
+         formatter.write_str("a JSON value within the exec-server complexity limit")
+     }
+ 
+-    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::Bool(value))
+-    }
+-
+-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::Number(value.into()))
+-    }
+-
+-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::Number(value.into()))
+-    }
+-
+-    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E> {
+-        Ok(Number::from_f64(value).map_or(Value::Null, Value::Number))
+-    }
+-
+-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::String(value.to_string()))
+-    }
+-
+-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::String(value))
+-    }
+-
+-    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::Null)
+-    }
+-
+-    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+-    where
+-        D: Deserializer<'de>,
+-    {
+-        BoundedValueSeed {
+-            remaining: self.remaining,
+-        }
+-        .deserialize(deserializer)
+-    }
+-
+-    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+-        Ok(Value::Null)
+-    }
+-
+     fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+     where
+         A: SeqAccess<'de>,
+@@ -177,6 +178,7 @@ impl<'de> Visitor<'de> for BoundedValueVisitor<'_> {
+         let mut values = Vec::new();
+         while let Some(value) = sequence.next_element_seed(BoundedValueSeed {
+             remaining: &mut *self.remaining,
++            depth: self.depth + 1,
+         })? {
+             values.push(value);
+         }
+@@ -191,29 +193,10 @@ impl<'de> Visitor<'de> for BoundedValueVisitor<'_> {
+             return Ok(Value::Object(Map::new()));
+         };
+ 
+-        if first_key == SERDE_JSON_NUMBER_TOKEN {
+-            let encoded = object.next_value::<String>()?;
+-            let number = encoded.parse::<Number>().map_err(de::Error::custom)?;
+-            return Ok(Value::Number(number));
+-        }
+-
+-        if first_key == SERDE_JSON_RAW_VALUE_TOKEN {
+-            let encoded = object.next_value::<String>()?;
+-            let mut deserializer = serde_json::Deserializer::from_str(&encoded);
+-            // The raw wrapper already consumed one value from the budget. Reuse
+-            // that slot for the decoded root while charging all of its children.
+-            let value = (&mut deserializer)
+-                .deserialize_any(BoundedValueVisitor {
+-                    remaining: &mut *self.remaining,
+-                })
+-                .map_err(de::Error::custom)?;
+-            deserializer.end().map_err(de::Error::custom)?;
+-            return Ok(value);
+-        }
+-
+         let mut values = Map::new();
+         let first_value = object.next_value_seed(BoundedValueSeed {
+             remaining: &mut *self.remaining,
++            depth: self.depth + 1,
+         })?;
+         values.insert(first_key, first_value);
+ 
+@@ -225,6 +208,7 @@ impl<'de> Visitor<'de> for BoundedValueVisitor<'_> {
+             }
+             let value = object.next_value_seed(BoundedValueSeed {
+                 remaining: &mut *self.remaining,
++                depth: self.depth + 1,
+             })?;
+             values.insert(key, value);
+         }
+diff --git a/codex-rs/exec-server-protocol/src/rpc_tests.rs b/codex-rs/exec-server-protocol/src/rpc_tests.rs
+index 4ace85b..a6290c4 100644
+--- a/codex-rs/exec-server-protocol/src/rpc_tests.rs
++++ b/codex-rs/exec-server-protocol/src/rpc_tests.rs
+@@ -10,7 +10,6 @@ use super::JSONRPCRequest;
+ use super::JSONRPCResponse;
+ use super::MAX_JSONRPC_VALUE_NODES;
+ use super::RequestId;
+-use super::SERDE_JSON_RAW_VALUE_TOKEN;
+ 
+ #[test]
+ fn round_trips_every_jsonrpc_message_variant() -> serde_json::Result<()> {
+@@ -61,36 +60,124 @@ fn round_trips_arbitrary_precision_numbers() -> serde_json::Result<()> {
+ }
+ 
+ #[test]
+-fn applies_value_limit_to_raw_value_wrapper() -> serde_json::Result<()> {
+-    let encoded =
+-        format!(r#"{{"method":"raw","params":{{"{SERDE_JSON_RAW_VALUE_TOKEN}":"[0,1]"}}}}"#);
++fn raw_value_serialization_obeys_the_value_limit() -> serde_json::Result<()> {
++    #[derive(serde::Serialize)]
++    struct RawNotification<'a> {
++        method: &'a str,
++        params: &'a serde_json::value::RawValue,
++    }
++    let raw = serde_json::value::RawValue::from_string("[0,1]".into())?;
++    let encoded = serde_json::to_string(&RawNotification {
++        method: "raw",
++        params: &raw,
++    })?;
+     let actual = serde_json::from_str::<JSONRPCMessage>(&encoded)?;
+-    let expected = JSONRPCMessage::Notification(JSONRPCNotification {
+-        method: "raw".to_string(),
+-        params: Some(json!([0, 1])),
+-    });
+-    assert_eq!(actual, expected);
++    assert_eq!(
++        actual,
++        JSONRPCMessage::Notification(JSONRPCNotification {
++            method: "raw".into(),
++            params: Some(json!([0, 1])),
++        })
++    );
++    let raw = serde_json::value::RawValue::from_string(format!(
++        "[{}]",
++        vec!["0"; MAX_JSONRPC_VALUE_NODES].join(",")
++    ))?;
++    let encoded = serde_json::to_string(&RawNotification {
++        method: "raw",
++        params: &raw,
++    })?;
++    assert!(
++        serde_json::from_str::<JSONRPCMessage>(&encoded)
++            .unwrap_err()
++            .to_string()
++            .contains("exceeds the limit")
++    );
++    Ok(())
++}
+ 
+-    let mut wrapped = String::with_capacity(2 * MAX_JSONRPC_VALUE_NODES + 1);
+-    wrapped.push('[');
+-    for index in 0..MAX_JSONRPC_VALUE_NODES {
+-        if index != 0 {
+-            wrapped.push(',');
++#[test]
++fn literal_marker_environment_names_survive_real_process_request_decode() -> serde_json::Result<()>
++{
++    for (key, value) in [
++        ("$serde_json::private::Number", "7"),
++        (
++            "$serde_json::private::RawValue",
++            "{\"APP_MODE\":\"injected\"}",
++        ),
++    ] {
++        let mut env = std::collections::HashMap::new();
++        env.insert(key.to_string(), value.to_string());
++        let encoded = serde_json::to_string(
++            &json!({"id":1,"method":"process/start","params":{"processId":"literal-map","argv":["/bin/true"],"cwd":"file:///tmp","env":{},"tty":false,"envPolicy":{"inherit":"none","ignoreDefaultExcludes":true,"exclude":[],"set":env,"includeOnly":[]}}}),
++        )?;
++        let JSONRPCMessage::Request(request) = serde_json::from_str(&encoded)? else {
++            panic!("expected request")
++        };
++        let wire: crate::WireExecParams = serde_json::from_value(request.params.unwrap())?;
++        let params: crate::ExecParams = wire.into();
++        assert_eq!(params.env_policy.unwrap().r#set, env);
++    }
++    Ok(())
++}
++
++#[test]
++fn literal_marker_payloads_survive_every_envelope() -> serde_json::Result<()> {
++    for payload in [
++        json!({"$serde_json::private::Number":"7"}),
++        json!({"$serde_json::private::RawValue":"{\"a\":1}"}),
++    ] {
++        let envelopes = [
++            JSONRPCMessage::Request(JSONRPCRequest {
++                id: RequestId::Integer(1),
++                method: "literal".into(),
++                params: Some(payload.clone()),
++                trace: None,
++            }),
++            JSONRPCMessage::Notification(JSONRPCNotification {
++                method: "literal".into(),
++                params: Some(payload.clone()),
++            }),
++            JSONRPCMessage::Response(JSONRPCResponse {
++                id: RequestId::Integer(1),
++                result: payload.clone(),
++            }),
++            JSONRPCMessage::Error(JSONRPCError {
++                id: RequestId::Integer(1),
++                error: JSONRPCErrorError {
++                    code: -1,
++                    message: "literal".into(),
++                    data: Some(payload),
++                },
++            }),
++        ];
++        for expected in envelopes {
++            let encoded = serde_json::to_string(&expected)?;
++            assert_eq!(serde_json::from_str::<JSONRPCMessage>(&encoded)?, expected);
+         }
+-        wrapped.push('0');
+     }
+-    wrapped.push(']');
+-    let encoded =
+-        format!(r#"{{"method":"raw","params":{{"{SERDE_JSON_RAW_VALUE_TOKEN}":"{wrapped}"}}}}"#);
++    Ok(())
++}
+ 
+-    let error = serde_json::from_str::<JSONRPCMessage>(&encoded)
+-        .expect_err("raw value wrapper should not bypass the JSON value limit");
+-    let expected_error = format!("exceeds the limit of {MAX_JSONRPC_VALUE_NODES} JSON values");
++#[test]
++fn rejects_nested_recursion_even_with_reparsed_fragments() {
++    let encoded = format!(
++        "{{\"method\":\"deep\",\"params\":{}0{}}}",
++        "[".repeat(127),
++        "]".repeat(127)
++    );
+     assert!(
+-        error.to_string().contains(&expected_error),
+-        "unexpected error: {error}"
++        serde_json::from_str::<JSONRPCMessage>(&encoded)
++            .unwrap_err()
++            .to_string()
++            .contains("recursion limit")
+     );
+-    Ok(())
++    let valid = format!(
++        "{{\"method\":\"deep\",\"params\":{}0{}}}",
++        "[".repeat(126),
++        "]".repeat(126)
++    );
++    assert!(serde_json::from_str::<JSONRPCMessage>(&valid).is_ok());
+ }
+ 
+ #[test]
