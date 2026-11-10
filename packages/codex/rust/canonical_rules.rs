@@ -404,10 +404,15 @@ impl CanonicalRules {
         };
         let lookup =
             ProjectTrustLookup::from_paths(convention, trust_path(&fs, &selection.cwd).await, repo);
-        if !native_config
-            .get_active_project_for_lookup(&lookup)
-            .is_some_and(|project| project.is_trusted())
-        {
+        let project = native_config.get_active_project_for_lookup(&lookup);
+        // Rules represents the explicit SDK opt-in. With no matching Core
+        // trust entry, discover rules at the selected workspace root using
+        // the executor's existing read authority.
+        let workspace_root = match selection.workspace_roots.as_slice() {
+            [root] if project.is_none() => Some(root),
+            _ => None,
+        };
+        if workspace_root.is_none() && !project.is_some_and(|project| project.is_trusted()) {
             let mut scope = rules.0.lock().expect("canonical rules scope poisoned");
             if scope.turn == input.turn_id {
                 // Do not revive paths observed under revoked trust on a later reload.
@@ -444,7 +449,10 @@ impl CanonicalRules {
         // loading here so error invalidation cannot erase this step's proof.
         let body = async {
             let paths = paths?;
-            let root = project_root(&fs, &selection.cwd, &markers).await?;
+            let root = match workspace_root {
+                Some(root) => root.clone(),
+                None => project_root(&fs, &selection.cwd, &markers).await?,
+            };
             load_rules(&fs, &root, &paths).await
         }
         .await;

@@ -39,7 +39,7 @@ async def test_project_guidance_reads_workspace_image_without_command_grants(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
         )
     )
-    rules = tmp_path / ".claude" / "rules"
+    rules = tmp_path / ".agents" / "rules"
     rules.mkdir(parents=True)
     (rules / "general.md").write_text("SYNTHETIC_WORKSPACE_GUIDANCE")
     responses.replies.extend(
