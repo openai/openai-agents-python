@@ -1680,9 +1680,10 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                     }
                 }
                 "realtime_conversation_response_sdk" => {
-                    let p: RealtimeSdkGeneration = decode(params)?;
+                    let p: RealtimeSdkResponse = decode(params)?;
                     Op::RealtimeConversationResponseSdk {
                         generation: p.generation,
+                        response: p.response,
                         reply,
                     }
                 }
@@ -1809,6 +1810,11 @@ params!(RealtimeAudio {
     frame: RealtimeAudioFrame
 });
 params!(RealtimeSdkGeneration { generation: String });
+params!(RealtimeSdkResponse {
+    generation: String,
+    #[serde(default)]
+    response: codex_protocol::realtime_settings::RealtimeResponseOptions,
+});
 fn realtime_auto_response_default() -> bool {
     true
 }
