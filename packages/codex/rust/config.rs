@@ -45,6 +45,8 @@ pub(crate) struct RuntimeOptions {
     // The facade owns this signal on its live runtime; checkpoint runtime is ignored.
     #[serde(rename = "_sdk_native_config")]
     sdk_native_config: bool,
+    #[serde(rename = "_sdk_discover_agents_md")]
+    pub(crate) sdk_discover_agents_md: bool,
     #[serde(rename = "_sdk_codex_login")]
     sdk_codex_login: Option<crate::auth::SavedCodexLogin>,
     #[serde(rename = "_sdk_project_search")]
@@ -321,7 +323,6 @@ pub async fn load(
             "openai_base_url".to_owned(),
             toml::Value::String("https://api.openai.com/v1".into()),
         ),
-        ("project_doc_max_bytes".to_owned(), toml::Value::Integer(0)),
         (
             "features.skip_host_skill_discovery".to_owned(),
             toml::Value::Boolean(true),
@@ -341,6 +342,9 @@ pub async fn load(
         ("analytics.enabled".to_owned(), toml::Value::Boolean(false)),
     ];
     let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
+    if !options.sdk_discover_agents_md {
+        overrides.push(("project_doc_max_bytes".to_owned(), toml::Value::Integer(0)));
+    }
     anyhow::ensure!(
         options.linux_sandbox_pid_namespace.is_none()
             && options.proxy_private_ips_via_upstream.is_none(),

@@ -197,7 +197,7 @@ class Turn(Generic[OutputT]):
                 _strip_mcp_frames(error)
             return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
         except NativeError as error:
-            if error.code == "run_budget_exceeded":
+            if error.code in {"run_budget_exceeded", "run_budget_usage_unavailable"}:
                 reason = "budget_exceeded"
             elif error._interrupted:
                 reason = "interrupted"

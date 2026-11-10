@@ -442,15 +442,21 @@ def test_native_macos_rejects_deferred_executable_symbols(
 
 @pytest.mark.parametrize("donor", ["", "123"])
 @pytest.mark.parametrize("event", ["push", "pull_request"])
-def test_native_reuse_never_forces_cache_warming(donor: str, event: str) -> None:
-    values = {"inputs.native_source_run": donor, "github.event_name": event}
+@pytest.mark.parametrize("runner", ["ubuntu-24.04", "ubuntu-24.04-arm"])
+def test_native_reuse_never_forces_cache_warming(donor: str, event: str, runner: str) -> None:
+    values = {
+        "inputs.native_source_run": donor,
+        "github.event_name": event,
+        "inputs.runner": runner,
+    }
+    publish_dependencies = not donor and event == "push" and runner == "ubuntu-24.04"
     expected = {
         "Install native build tools": not donor,
         "Download the qualified native build": bool(donor),
         "Build the SDK and native runtime together": not donor,
         "Build the shared test executor": not donor,
-        "Prepare Rust dependency cache": not donor and event == "push",
-        "Publish Rust dependencies": not donor and event == "push",
+        "Prepare Rust dependency cache": publish_dependencies,
+        "Publish Rust dependencies": publish_dependencies,
     }
     for step in _steps():
         if step.get("name") in expected:
@@ -469,7 +475,7 @@ def test_native_publication_is_a_global_barrier() -> None:
         return set(needs).union(*(ancestors(parent) for parent in needs))
 
     for name in jobs:
-        if name != "changes" and name not in producers:
+        if name not in {"changes", "produce-linux-arm64", "native-linux-arm64-pr"} | producers:
             assert producers <= ancestors(name), name
     for name in producers:
         assert jobs[name]["needs"] == "changes"
@@ -495,6 +501,61 @@ def test_native_publication_is_a_global_barrier() -> None:
     assert names[-1] == "Share the package and test executor"
     uv = next(step for step in steps if "setup-uv@" in step.get("uses", ""))
     assert uv["with"]["enable-cache"] == "false"
+
+
+@pytest.mark.parametrize(
+    ("event", "branch", "code", "pr", "push"),
+    [
+        ("pull_request", "feat/codex-harness", "true", True, False),
+        ("merge_group", "feat/codex-harness", "true", True, False),
+        ("push", "feat/codex-harness", "true", False, True),
+        ("push", "feat/codex-harness", "false", False, False),
+        ("pull_request", "feat/codex-harness", "false", False, False),
+        ("pull_request", "main", "true", False, False),
+        ("merge_group", "main", "true", False, False),
+        ("push", "main", "true", False, False),
+        ("workflow_dispatch", "feat/codex-harness", "true", False, False),
+    ],
+)
+def test_linux_arm64_routes_to_one_producer_and_the_matching_qualifier(
+    event: str, branch: str, code: str, pr: bool, push: bool
+) -> None:
+    jobs = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]
+    values = {
+        "inputs.native_only": False,
+        "needs.changes.outputs.code": code,
+        "github.event_name": event,
+        "github.ref": f"refs/heads/{branch}",
+        "github.base_ref": branch,
+        "github.event.merge_group.base_ref": f"refs/heads/{branch}",
+    }
+    producer = jobs["produce-linux-arm64"]
+    assert producer["needs"] == "changes"
+    assert producer["with"] == {
+        "runner": "ubuntu-24.04-arm",
+        "native_provenance": "${{ needs.changes.outputs.native_provenance }}",
+    }
+    produced = _condition(producer["if"], values)
+    assert produced is (pr or push)
+    for name, runs in (("native-linux-arm64-pr", pr), ("native-linux-arm64", push)):
+        job = jobs[name]
+        assert (produced and _condition(job["if"], values)) is runs
+        assert job["uses"] == "./.github/workflows/codex-python-qualify.yml"
+        assert job["with"] == {
+            **producer["with"],
+            "artifact_id": "${{ needs.produce-linux-arm64.outputs.artifact_id }}",
+            "artifact_digest": "${{ needs.produce-linux-arm64.outputs.artifact_digest }}",
+        }
+    assert set(jobs["native-linux-arm64-pr"]["needs"]) == {"changes", "produce-linux-arm64"}
+    assert set(jobs["native-linux-arm64"]["needs"]) == {
+        "changes",
+        "produce-linux-arm64",
+        "produce-linux",
+        "produce-macos",
+        "produce-windows",
+    }
 
 
 @pytest.mark.parametrize(
@@ -817,6 +878,8 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
             "native-linux",
             "native-windows",
             "native-macos",
+            "native-linux-arm64",
+            "native-linux-arm64-pr",
         }:
             assert "!inputs.native_only" in job["if"], name
     changes = suite["jobs"]["changes"]

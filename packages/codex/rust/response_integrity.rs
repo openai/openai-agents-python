@@ -1,29 +1,36 @@
 //! Reject unsupported or incomplete output from a model generation stream.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use codex_extension_api::{
-    ModelRequestContributor, ModelRequestInput, ModelRequestKind, ModelResponseError,
-    ModelResponseInterceptor, ModelResponseStream, ResponseEvent,
+    ModelInvocationDeadlineState, ModelRequestContributor, ModelRequestInput, ModelRequestKind,
+    ModelResponseError, ModelResponseInterceptor, ModelResponseStream, ModelToolAdmission,
+    ResponseEvent, TurnSamplingStop,
 };
 use codex_protocol::error::ResponseIntegrityReason;
 use codex_protocol::models::{ContentItem, ResponseItem};
-use futures_util::Stream;
+use codex_protocol::protocol::ResponseObservationStatus;
+use futures_util::{Stream, StreamExt, stream};
 
 pub(crate) const UNSUPPORTED_OUTPUT: &str =
     "Native model response ended without complete supported output";
 
 #[derive(Debug)]
-pub(crate) struct Contributor(pub Arc<crate::native_interception::Boundary>);
+pub(crate) struct Contributor {
+    pub(crate) boundary: Arc<crate::native_interception::Boundary>,
+    pub(crate) registered_plan: bool,
+}
 
 impl ModelRequestContributor for Contributor {
     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
         (input.kind == ModelRequestKind::Generation).then(|| {
             Box::new(Interceptor {
                 thread: input.thread_id.to_owned(),
-                admission: self.0.response_admission(input.thread_id),
+                admission: self.boundary.response_admission(input.thread_id),
+                registered_plan: self.registered_plan,
             }) as Box<dyn ModelResponseInterceptor>
         })
     }
@@ -32,9 +39,32 @@ impl ModelRequestContributor for Contributor {
 struct Interceptor {
     thread: String,
     admission: Option<Arc<crate::python_tools::TurnAdmission>>,
+    registered_plan: bool,
 }
 
 impl ModelResponseInterceptor for Interceptor {
+    fn intercept_with_tool_admission(
+        self: Box<Self>,
+        stream: ModelResponseStream,
+        admission: Option<Arc<dyn ModelToolAdmission>>,
+    ) -> ModelResponseStream {
+        if !self.registered_plan {
+            return self.intercept(stream);
+        }
+        let stop = admission.and_then(|admission| admission.turn_store().get::<TurnSamplingStop>());
+        let deadline = stop.as_ref().and_then(|stop| stop.capture_model_deadline());
+        let gate = PlanStream {
+            upstream: Some(self.intercept(stream)),
+            pending: VecDeque::new(),
+            completed_response: None,
+            stop,
+            deadline,
+        };
+        Box::pin(stream::unfold(gate, |mut gate| async move {
+            gate.next().await.map(|event| (event, gate))
+        }))
+    }
+
     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
         Box::pin(Generation {
             stream,
@@ -45,6 +75,104 @@ impl ModelResponseInterceptor for Interceptor {
             rejected: false,
         })
     }
+}
+
+const MAX_PENDING_PLAN_EVENTS: usize = 65_536;
+
+struct PlanStream {
+    upstream: Option<ModelResponseStream>,
+    pending: VecDeque<Result<ResponseEvent, ModelResponseError>>,
+    completed_response: Option<String>,
+    stop: Option<Arc<TurnSamplingStop>>,
+    deadline: Option<Arc<ModelInvocationDeadlineState>>,
+}
+
+impl PlanStream {
+    async fn next(&mut self) -> Option<Result<ResponseEvent, ModelResponseError>> {
+        let Some(upstream) = &mut self.upstream else {
+            return self.pending.pop_front();
+        };
+        // Hold the suffix in its original order. In particular, a retained
+        // successful observation must follow its calls for manual recovery.
+        let terminal = loop {
+            match upstream.next().await {
+                Some(Ok(event)) => {
+                    match &event {
+                        ResponseEvent::ResponseObserved(observation) => {
+                            self.completed_response =
+                                if observation.status == ResponseObservationStatus::Completed {
+                                    observation.response_id.clone()
+                                } else {
+                                    None
+                                };
+                        }
+                        ResponseEvent::Completed { response_id, .. } => {
+                            // The SSE parser also emits Completed for interrupted
+                            // responses. Only a matching successful observation
+                            // authorizes release. Use Core's captured clock before
+                            // admitting callbacks that precede Core's terminal event.
+                            let accepted = self.completed_response.as_ref() == Some(response_id)
+                                && (self.pending.is_empty()
+                                    || (!self.stop.as_ref().is_some_and(|stop| stop.requested())
+                                        && self
+                                            .deadline
+                                            .as_ref()
+                                            .is_none_or(|deadline| deadline.accept_outcome())));
+                            break Some(if accepted {
+                                Ok(event)
+                            } else {
+                                Err(ModelResponseError::Stream(
+                                    "Sign in with ChatGPT response did not complete successfully"
+                                        .into(),
+                                ))
+                            });
+                        }
+                        _ => {}
+                    }
+                    if self.pending.is_empty() && !starts_tool_call(&event) {
+                        return Some(Ok(event));
+                    }
+                    if self.pending.len() == MAX_PENDING_PLAN_EVENTS {
+                        break Some(Err(ModelResponseError::Stream(
+                            "Sign in with ChatGPT response exceeded its pending tool event limit"
+                                .into(),
+                        )));
+                    }
+                    self.pending.push_back(Ok(event));
+                }
+                terminal => break terminal,
+            }
+        };
+        self.upstream = None;
+        if !matches!(&terminal, Some(Ok(ResponseEvent::Completed { .. }))) {
+            // Received facts describe what the provider reported, even when
+            // no provisional output is safe to retain or execute.
+            self.pending.retain(|event| {
+                matches!(
+                    event,
+                    Ok(ResponseEvent::ResponseObserved(_) | ResponseEvent::ResponseFact(_))
+                )
+            });
+        }
+        self.pending.extend(terminal);
+        self.pending.pop_front()
+    }
+}
+
+fn starts_tool_call(event: &ResponseEvent) -> bool {
+    let item = match event {
+        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => item,
+        _ => return false,
+    };
+    matches!(
+        item,
+        ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::ComputerCall { .. }
+    ) || matches!(
+        item,
+        ResponseItem::ToolSearchCall { call_id: Some(_), execution, .. } if execution == "client"
+    )
 }
 
 struct Generation {
@@ -74,6 +202,7 @@ impl Stream for Generation {
                             call_id: Some(_),
                             ..
                         } | ResponseItem::CustomToolCallOutput { .. }
+                            | ResponseItem::ComputerCallOutput { .. }
                     ) || matches!(
                         item,
                         ResponseItem::ToolSearchOutput {
@@ -121,6 +250,7 @@ impl Stream for Generation {
                         // WebSearch turn item. A later empty placeholder must
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
+                        | ResponseItem::ComputerCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::WebSearchCall { .. }
                         | ResponseItem::FileSearchCall { .. }
@@ -171,5 +301,63 @@ impl Stream for Generation {
             }
         }
         next
+    }
+}
+
+#[cfg(test)]
+mod computer_guard_tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn computer_progress_completes_but_provider_computer_receipts_never_grant_authority() {
+        for receipt in [false, true] {
+            let value = if receipt {
+                json!({"type":"computer_call_output","call_id":"computer-only","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,private-image"},"acknowledged_safety_checks":[]})
+            } else {
+                json!({"type":"computer_call","call_id":"computer-only","actions":[{"type":"wait"}]})
+            };
+            for added in [false, true] {
+                let item = serde_json::from_value(value.clone()).unwrap();
+                let mut generation = Generation {
+                    stream: Box::pin(futures_util::stream::iter(vec![
+                        Ok(if added {
+                            ResponseEvent::OutputItemAdded(item)
+                        } else {
+                            ResponseEvent::OutputItemDone(item)
+                        }),
+                        Ok(ResponseEvent::Completed {
+                            response_id: "computer".into(),
+                            token_usage: None,
+                            usage_metadata: None,
+                            end_turn: None,
+                        }),
+                    ])),
+                    owner: Interceptor {
+                        thread: "computer-guard".into(),
+                        admission: None,
+                        registered_plan: false,
+                    },
+                    pending_assistant: false,
+                    last_assistant_has_text: false,
+                    completed_native_item: false,
+                    rejected: false,
+                };
+                let first = generation.next().await.unwrap();
+                if receipt {
+                    assert!(matches!(
+                        first,
+                        Err(ModelResponseError::ResponseIntegrity {
+                            reason: ResponseIntegrityReason::ProviderOwnedToolReceipt
+                        })
+                    ));
+                    assert!(generation.next().await.is_none());
+                } else if !added {
+                    assert!(first.is_ok());
+                    assert!(generation.next().await.unwrap().is_ok());
+                }
+            }
+        }
     }
 }

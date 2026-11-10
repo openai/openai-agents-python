@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::{
-    Arc, RwLock, Weak,
+    Arc, OnceLock, RwLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::task::Poll;
@@ -64,18 +64,20 @@ pub struct EngineState {
     native_threads: std::sync::Mutex<Vec<Weak<std::sync::Mutex<crate::NativeThreadOwner>>>>,
     pub startup_warnings: Vec<String>,
     pub(crate) codex_account: Option<crate::auth::CodexAccount>,
+    pub(crate) plan_usage_client: OnceLock<codex_backend_client::Client>,
     extension_events: Arc<extensions::Events>,
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
+    pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
 }
 
 const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
 const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
-const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+pub(crate) const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
 
 impl EngineState {
     pub(crate) fn owns_runtime_services(&self) -> bool {
@@ -278,6 +280,14 @@ impl EngineState {
         };
         // Capture one typed runtime at the original first accessor decode point.
         let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
+        let user_instructions: Arc<dyn codex_extension_api::UserInstructionsProvider> =
+            if runtime_options.sdk_discover_agents_md {
+                let home =
+                    find_codex_home().context("Unable to locate Codex home for AGENTS.md")?;
+                Arc::new(CodexHomeUserInstructionsProvider::new(home))
+            } else {
+                Arc::new(options::EmptyUserInstructions)
+            };
         let native_turn_control = runtime_options.native_turn_control();
         let sdk_user_input_enabled = runtime_options
             .sdk_native_config()
@@ -533,7 +543,6 @@ impl EngineState {
         };
         let environment = Arc::new(environment);
         let installation_id = ThreadId::new().to_string();
-        let user_instructions = Arc::new(options::EmptyUserInstructions);
         let extension_events = Arc::new(extensions::Events::new());
         let code_mode = runtime_options.code_mode_provider(&config).or_else(|| {
             // Mirror ThreadManager's pinned default if no package helper was
@@ -557,6 +566,7 @@ impl EngineState {
         } else {
             None
         };
+        let recovery = Arc::new(crate::recovery_guard::RecoveryContributor::default());
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
@@ -569,6 +579,7 @@ impl EngineState {
                 environment.clone(),
                 extension_events.clone(),
                 interception.clone(),
+                recovery.clone(),
                 local_checklist_store
                     .as_ref()
                     .map(|store| store.managed_calls.clone())
@@ -631,7 +642,9 @@ impl EngineState {
             managed_thread_ids: Mutex::new(HashSet::new()),
             startup_warnings: config.startup_warnings.clone(),
             codex_account,
+            plan_usage_client: OnceLock::new(),
             extension_events,
+            recovery,
             cloud_config,
             service_config: config,
             // The isolated HTTP pool enables Core's redirect rejection when
@@ -1215,6 +1228,7 @@ impl EngineState {
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
+        let mut source_invocation_timeout = None;
         if let Ok(id) = ThreadId::from_string(id_or_path)
             && let Ok(thread) = self.manager.get_thread(id).await
         {
@@ -1242,6 +1256,7 @@ impl EngineState {
                 // the new settings record cannot revert to engine defaults.
                 // Do not copy credentials, MCP grants or the source runtime.
                 let settings = thread.thread_settings_snapshot().await;
+                source_invocation_timeout = Some(settings.invocation_timeout_ms);
                 startup.config.model = Some(settings.model.clone());
                 startup.config.model_reasoning_effort = settings.reasoning_effort.clone();
                 startup.config.model_reasoning_summary = settings.reasoning_summary;
@@ -1349,6 +1364,31 @@ impl EngineState {
             // This owned ID is imported from fork history, never the source
             // ID. The SDK can discard its temporary writer after export.
             native.checkpoint_import = Some(vec![fork_id]);
+        }
+        if let Some(invocation_timeout_ms) = source_invocation_timeout {
+            let forked = native.current()?;
+            // Core creates a fresh settings record for the fork. Apply its
+            // accepted deadline before the caller can export that record.
+            if let Err(error) = forked
+                .thread
+                .update_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+                    invocation_timeout_ms: Some(invocation_timeout_ms),
+                    ..Default::default()
+                })
+                .await
+            {
+                let error = anyhow::Error::from(error);
+                return match self
+                    .rollback_checkpoint_import(&[fork_id], Some(&forked))
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => {
+                        let message = format!("{error}; fork rollback failed: {cleanup}");
+                        Err(error.context(message))
+                    }
+                };
+            }
         }
         Ok(native)
     }

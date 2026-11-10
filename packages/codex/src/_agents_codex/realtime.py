@@ -1005,11 +1005,12 @@ class RealtimeSession:
                     await self._call("response", response=captured)
 
     async def send_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Send a supported provider-wire event through the native session owner.
+        """Send a provider-wire event through the native session owner.
 
-        Core accepts guarded session, response, item, and audio-buffer controls;
-        raw tool declarations and fabricated authority rows remain unsupported.
-        Item retrieval returns the provider item; other sends return ``None``.
+        Core validates managed controls and forwards other event types as JSON.
+        Linked responses can select advertised functions for one response.
+        Detached responses can declare functions that the caller handles.
+        Item retrieval returns the provider item. Other sends return ``None``.
         Cancellation publishes the same local playback interruption as interrupt().
         Capture bounded JSON before waiting for native acceptance. Cancellation
         joins acceptance, and queued events share the Realtime input budget.
@@ -1082,9 +1083,10 @@ class RealtimeSession:
     async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:
         """Edit provider history observed during this connection, in the supplied order.
 
-        Supply unique item IDs. Only supported message rows are editable. Retain
-        surviving tool, MCP, and approval rows byte-for-byte and in relative order;
-        remove them only after native work has settled. Supported messages may move
+        Supply unique item IDs. Edit supported message rows and import completed
+        historical function call and output pairs as context. Retain surviving
+        tool, MCP, and approval rows byte-for-byte and in relative order. Remove
+        them only after native work has settled. Supported messages may move
         across retained rows. Native validation owns item eligibility.
         Items predating attachment that this connection has not observed remain
         untouched. The canonical ``history`` audit and Session context remain intact.

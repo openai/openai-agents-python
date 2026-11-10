@@ -190,11 +190,35 @@ where
     F: Future<Output = PyResult<T>> + Send + 'static,
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
+    eager_future_into_py(py, fut, false)
+}
+
+// A passive request should not send work when cancellation is already ready.
+pub(crate) fn cancel_first_future_into_py<'py, F, T>(
+    py: Python<'py>,
+    fut: F,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    F: Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
+    eager_future_into_py(py, fut, true)
+}
+
+fn eager_future_into_py<'py, F, T>(
+    py: Python<'py>,
+    fut: F,
+    cancel_first: bool,
+) -> PyResult<Bound<'py, PyAny>>
+where
+    F: Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
     // Eager callers already own F. Box it before capturing it in the starter,
     // so neither Make nor the spawned wrappers retain F-sized inline storage.
     let locals = py_tokio::get_current_locals(py)?;
     let fut = Box::pin(fut);
-    let call = new_call_made(py, locals, move || fut)?;
+    let call = new_call_made(py, locals, cancel_first, move || fut)?;
     await_call(py, call)
 }
 
@@ -229,7 +253,7 @@ where
     let locals = py_tokio::get_current_locals(py)?;
     // Invoke and box the factory only inside the existing spawned
     // CURRENT/TaskLocals/panic scopes, at the original make() point.
-    new_call_made(py, locals, move || Box::pin(make()))
+    new_call_made(py, locals, false, move || Box::pin(make()))
 }
 
 // All callers supply one pinned allocation already, including managed reads.
@@ -237,6 +261,7 @@ where
 fn new_call_made<Make, F, T>(
     py: Python<'_>,
     locals: TaskLocals,
+    cancel_first: bool,
     make: Make,
 ) -> PyResult<Py<NativeCall>>
 where
@@ -264,8 +289,9 @@ where
                     let outcome = AssertUnwindSafe(py_tokio::scope(locals, async move {
                         tokio::select! {
                             biased;
+                            _ = task_cancelled.cancelled(), if cancel_first => None,
                             value = make() => Some(value),
-                            _ = task_cancelled.cancelled() => None,
+                            _ = task_cancelled.cancelled(), if !cancel_first => None,
                         }
                     }))
                     .catch_unwind()
@@ -360,7 +386,7 @@ impl ReadyRead {
             EventPoll::Ready(value) => value?.into_py_any(py),
             EventPoll::Pending(future) => {
                 let locals = py_tokio::get_current_locals(py)?;
-                Ok(new_call_made(py, locals, move || future)?.into_any())
+                Ok(new_call_made(py, locals, false, move || future)?.into_any())
             }
         }
     }
@@ -666,6 +692,10 @@ def check(make, expected):
                 };
                 if mode == 1 {
                     future_factory_into_py(args.py(), factory).map(Bound::unbind)
+                } else if mode == 4 {
+                    let locals = py_tokio::get_current_locals(args.py())?;
+                    new_call_made(args.py(), locals, true, move || Box::pin(factory()))
+                        .map(|call| call.into_any())
                 } else {
                     new_call(args.py(), factory).map(|call| call.into_any())
                 }
@@ -735,6 +765,17 @@ def check(make, observe):
         else:
             raise AssertionError('pending future ignored cancellation')
         assert observe() == (3, 2, 5, True)
+
+        call = make(4)
+        call.cancel()
+        try:
+            await asyncio.wait_for(_await_native_completion(call), 5)
+        except RuntimeError as caught:
+            assert str(caught) == 'native completion has no result'
+        else:
+            raise AssertionError('cancellation-first call published a result')
+        # The joined future dropped without being polled.
+        assert observe() == (4, 2, 6, True)
     asyncio.run(main())
 "#,
             )

@@ -7,7 +7,6 @@ import base64
 import importlib
 import json
 import os
-import socket
 from pathlib import Path
 
 import pytest
@@ -17,14 +16,19 @@ from aiohttp.test_utils import TestServer
 from agents import (
     Agent,
     CapabilityError,
+    ComputerProvider,
     CustomStorage,
     LocalRecoveryRequired,
     LocalStorage,
+    ModelRequest,
+    ModelResponse,
     NativeError,
     NativeProvider,
     SessionState,
     SignInWithChatGPT,
     SQLiteSessionStore,
+    TurnStoppedError,
+    computer_tool,
     function_tool,
 )
 from agents.agent import SignInWithChatGPT as AgentSignInWithChatGPT
@@ -104,6 +108,26 @@ def test_public_auth_and_conflicting_provider_options():
     assert NativeProvider(auth=auth, request_max_retries=0, stream_max_retries=0).auth is auth
 
 
+async def test_sign_in_with_chatgpt_skips_saved_login_plan_usage(monkeypatch):
+    requests = []
+
+    async def record_request(request):
+        requests.append(request.path)
+        return web.Response(status=500)
+
+    peer = web.Application()
+    peer.router.add_route("*", "/{path:.*}", record_request)
+    session_module = importlib.import_module("_agents_codex.session")
+    async with TestServer(peer) as server:
+        set_endpoint(monkeypatch, str(server.make_url("/v1")))
+        monkeypatch.setattr(
+            session_module, "_CODEX_ACCOUNT_BASE_URL", str(server.make_url("/backend-api"))
+        )
+        async with timeout(30), plan_agent(access_token()).session() as session:
+            assert await session.plan_usage() is None
+    assert requests == []
+
+
 async def test_explicit_plan_auth_runs_streaming_tool_turn(plan_endpoint: ResponsesFixture):
     @function_tool
     def read_source() -> str:
@@ -134,6 +158,141 @@ async def test_explicit_plan_auth_runs_streaming_tool_turn(plan_endpoint: Respon
         assert body["store"] is False
         assert body["stream"] is True
         assert "previous_response_id" not in body
+
+
+@pytest.mark.parametrize(
+    "terminal", ["completed", "eof", "interrupted", "cancel", "deadline", "api-key"]
+)
+async def test_tool_calls_require_successful_registered_response(terminal, monkeypatch, tmp_path):
+    call_id = "registered-tool-call"
+    requests = []
+    effects = []
+    terminal_sent = False
+    tool_started = asyncio.Event()
+    call_sent = asyncio.Event()
+    release_peer = asyncio.Event()
+    completes = terminal in ("completed", "api-key")
+
+    @function_tool
+    async def record_effect() -> str:
+        """Record one synthetic application effect."""
+        effects.append(terminal_sent)
+        tool_started.set()
+        return "recorded"
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal terminal_sent
+        requests.append(await request.json())
+        first = len(requests) == 1
+        response_id = f"response-{len(requests)}"
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+
+        async def write(event):
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+
+        await write({"type": "response.created", "response": {"id": response_id}})
+        if first:
+            await write(function_call("record_effect", {}, call_id))
+            call_sent.set()
+            if terminal in ("cancel", "deadline"):
+                await release_peer.wait()
+                return response
+            if terminal == "eof":
+                await response.write_eof()
+                return response
+            if terminal == "interrupted":
+                await write(
+                    {
+                        "type": "response.incomplete",
+                        "response": {
+                            "id": response_id,
+                            "incomplete_details": {"reason": "interrupted"},
+                        },
+                    }
+                )
+                await response.write_eof()
+                return response
+            if terminal == "api-key":
+                # The ordinary peer cannot complete until the eager call starts.
+                await tool_started.wait()
+            terminal_sent = True
+        else:
+            await write(assistant_output("Continued."))
+        await write(
+            {
+                "type": "response.completed",
+                "response": {"id": response_id, "end_turn": not first},
+            }
+        )
+        await response.write_eof()
+        return response
+
+    peer = web.Application()
+    peer.router.add_post("/v1/responses", handle)
+    storage = (
+        CustomStorage(SQLiteSessionStore(tmp_path / "registered-tool.sqlite"))
+        if not completes and os.name == "posix"
+        else None
+    )
+    async with timeout(30), TestServer(peer) as server:
+        base_url = str(server.make_url("/v1"))
+        if terminal == "api-key":
+            agent = Agent(
+                instructions="Follow the request.",
+                model=MODEL,
+                tools=[record_effect],
+                provider=NativeProvider(
+                    api_key="synthetic-key", base_url=base_url, supports_websockets=False
+                ),
+            )
+        else:
+            set_endpoint(monkeypatch, base_url)
+            agent = plan_agent(
+                access_token(),
+                tools=[record_effect],
+                model_settings={
+                    "invocation_timeout_ms": 2_000 if terminal == "deadline" else 60_000
+                },
+            )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            turn = await session.submit("Record an effect.")
+            try:
+                if completes:
+                    assert (await turn.get_result()).final_output == "Continued."
+                elif terminal == "cancel":
+                    await call_sent.wait()
+                    await turn.cancel()
+                    with pytest.raises((TurnStoppedError, asyncio.CancelledError)):
+                        await turn.get_result()
+                else:
+                    with pytest.raises(NativeError) as caught:
+                        await turn.get_result()
+                    category = (
+                        "model_invocation_deadline_exceeded"
+                        if terminal == "deadline"
+                        else "internal_error"
+                    )
+                    assert caught.value.category == category
+            finally:
+                release_peer.set()
+        if completes:
+            assert effects == [terminal == "completed"]
+            assert len(requests) == 2
+            assert tool_output(requests[1], call_id) == "recorded"
+        else:
+            assert effects == []
+            assert len(requests) == 1
+            if storage is not None:
+                async with agent.session(storage=storage, resume=identity) as session:
+                    result = await (
+                        await session.submit("Continue without a tool call.")
+                    ).get_result()
+                    assert result.final_output == "Continued."
+                assert len(requests) == 2
+                assert all(item.get("call_id") != call_id for item in requests[1]["input"])
+                assert effects == []
 
 
 @pytest.mark.parametrize(
@@ -337,15 +496,53 @@ async def test_redirect_does_not_forward_or_retry_bearer(monkeypatch):
     assert requests == [("/responses", f"Bearer {token}")]
 
 
-async def test_unsupported_store_control_rejects_open_and_preserves_live_session(plan_endpoint):
+def test_model_backend_cannot_replace_plan_authentication():
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            pytest.fail("The model callback must not replace plan authentication")
+
+    async def get_access_token() -> str:
+        pytest.fail("Conflicting providers must be rejected before obtaining a token")
+
+    with pytest.raises(ValueError, match="without plan authentication"):
+        NativeProvider(
+            auth=SignInWithChatGPT(get_access_token=get_access_token), model_backend=Model()
+        )
+
+
+async def test_plan_auth_rejects_computer_tools_before_resolving_credentials():
+    async def get_access_token() -> str:
+        pytest.fail("Computer tools must be rejected before obtaining a token")
+
+    def create_computer(_):
+        pytest.fail("Plan auth must not acquire a computer driver")
+
+    agent = Agent(
+        instructions="Use the computer.",
+        provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=get_access_token)),
+        tools=[computer_tool(ComputerProvider(create_computer))],
+    )
+    with pytest.raises(ValueError, match="computer tools"):
+        async with timeout(30), agent.session():
+            pytest.fail("Opened a plan-backed Session with a computer tool")
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [{"store": True}, {"extra_body": {"synthetic_feature": True}}],
+    ids=["store", "extra-body"],
+)
+async def test_unsupported_request_controls_reject_open_and_preserve_live_session(
+    plan_endpoint, settings
+):
     token = access_token()
     async with timeout(30):
         with pytest.raises((ValueError, RuntimeError), match="Responses Lite"):
-            async with plan_agent(token, model_settings={"store": True}).session():
+            async with plan_agent(token, model_settings=settings).session():
                 pytest.fail("Unsupported request controls opened a Session")
     async with timeout(30), plan_agent(token).session() as session:
         with pytest.raises(ValueError, match="Responses Lite"):
-            await session.update(model_settings={"store": True})
+            await session.update(model_settings=settings)
         plan_endpoint.respond(assistant_output("Still streaming."))
         assert (
             await (await session.submit("Hello.")).get_result()
@@ -367,15 +564,22 @@ async def test_direct_realtime_start_rejects_plan_auth_before_resolving_credenti
     assert plan_endpoint.requests == []
 
 
-async def test_refused_connection_leaves_retry_timing_to_the_application(monkeypatch):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        set_endpoint(monkeypatch, f"http://127.0.0.1:{port}/v1")
-        async with timeout(30), plan_agent(access_token()).session() as session, timeout(4):
+async def test_closed_connection_leaves_retry_timing_to_the_application(monkeypatch):
+    connections = 0
+
+    def close_connection(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal connections
+        connections += 1
+        writer.close()
+
+    async with await asyncio.start_server(close_connection, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        set_endpoint(monkeypatch, f"https://127.0.0.1:{port}/v1")
+        async with timeout(30), plan_agent(access_token()).session() as session:
             with pytest.raises(NativeError) as caught:
                 await (await session.submit("Hello.")).get_result()
     assert caught.value.category == "connection_failed"
+    assert connections == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX file locking")

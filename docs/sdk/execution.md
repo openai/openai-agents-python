@@ -43,6 +43,43 @@ The example asks the model to list files in that workspace. The final answer des
 
 Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
 
+### Allow the Linux sandbox helper to use user namespaces on Ubuntu 24.04
+
+Ubuntu 24.04 uses AppArmor to restrict unprivileged user namespaces. The local executor needs these namespaces to start its sandbox. If a local Session fails to start, ask an administrator to check the kernel log. [Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)
+
+```sh
+sudo journalctl -k -b --grep='apparmor="DENIED"'
+```
+
+Find the capability denial for the failed bubblewrap invocation (`comm="bwrap"` and `operation="capable"`). For a loopback setup failure, look for `capname="net_admin"`. If several Sessions start at the same time, retry one Session to identify its audit record. Ubuntu's default policy can deny capabilities after bubblewrap creates a user namespace. The audit record identifies that policy as `profile="unprivileged_userns"`. If the record names a different profile, ask the administrator who manages that profile to investigate.
+
+For a denial from `unprivileged_userns`, an administrator can grant `userns` to the SDK's installed `codex-linux-sandbox` helper. AppArmor applies the grant when an account executes that helper, including outside a Session. Child processes can inherit the profile. Use a trusted SDK installation in an administrator-controlled directory outside the job workspace and writable roots. Limit access to the helper to trusted application accounts.
+
+Find the helper's exact path using the application's Python interpreter.
+
+```sh
+python -c 'from pathlib import Path; import agents; print((Path(agents.__file__).parent / "bin" / "codex-linux-sandbox").resolve(strict=True))'
+```
+
+Create `/etc/apparmor.d/agents-sdk-linux-sandbox-worker` as an administrator. Replace the example attachment path with the resolved helper path. Avoid AppArmor pattern characters such as `*`, `?`, `[` and `{` in the installation path. Give each helper path its own profile name and file.
+
+```text
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agents-sdk-linux-sandbox-worker "/opt/agents-sdk/venv/lib/python3.12/site-packages/agents/bin/codex-linux-sandbox" flags=(unconfined) {
+  userns,
+}
+```
+
+Load the profile, then retry the same local Session as the application user.
+
+```sh
+sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-linux-sandbox-worker
+```
+
+Keep the system-wide AppArmor user namespace restriction enabled. The SDK still requires its native sandbox before it runs local commands. If the SDK installation path changes, update the profile attachment and reload the profile before retrying.
+
 ### Add read-only directories on Linux
 
 SDK version `0.24.0-alpha.7` or later supports `Environment.local(mounts=[...])` on Linux. Import `LocalStorageMount` from `agents` and declare each directory as `LocalStorageMount(source=path)`. Destination defaults to source, strategy defaults to `"local_bind"`, and `read_only` defaults to `True`; writable mounts are unsupported. Source and destination must name the same existing canonical absolute directory without symlink components. The caller owns the directory and its contents; the mount grants native commands read-only access without changing the host directory's permissions.

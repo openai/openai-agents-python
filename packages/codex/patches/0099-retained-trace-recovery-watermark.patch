@@ -1,0 +1,37 @@
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -174,13 +174,14 @@
+     span: &SpanData,
+     lifecycle: &str,
+     policy: Option<&crate::sdk_trace::ScopePolicy>,
++    start_sequence: u64,
+ ) -> Option<Value> {
+     let owner = &policy?.root_descriptor;
+     if span.parent_span_id == opentelemetry::trace::SpanId::INVALID {
+         owner.snapshot.get_or_init(|| {
+             let mut attrs = attributes(span);
+             attrs.retain(|key, _| key.starts_with("sdk.metadata.") || key == "sdk.group_id");
+-            json!({"name":truncate(&span.name,4096),"attributes":attrs})
++            json!({"name":truncate(&span.name,4096),"attributes":attrs,"start_sequence":start_sequence})
+         });
+         if lifecycle == "end" {
+             owner
+@@ -855,7 +856,8 @@
+         self.inner.on_start(span, cx);
+         let mut s = lock();
+         if let Some(data) = span.exported_data() {
+-            let descriptor = retained_root_descriptor(&data, "start", policy.as_deref());
++            let descriptor =
++                retained_root_descriptor(&data, "start", policy.as_deref(), s.sequence + 1);
+             if !s.processors.is_empty() {
+                 event(&mut s, &data, "start", descriptor);
+             }
+@@ -867,7 +869,7 @@
+             return;
+         }
+         let mut s = lock();
+-        let descriptor = retained_root_descriptor(&span, "end", policy.as_deref());
++        let descriptor = retained_root_descriptor(&span, "end", policy.as_deref(), s.sequence + 1);
+         event(&mut s, &span, "end", descriptor);
+         if s.replaced || !self.default_enabled {
+             return;

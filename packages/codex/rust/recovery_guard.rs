@@ -81,6 +81,16 @@ impl Guard {
 #[derive(Debug, Default)]
 pub struct RecoveryContributor {
     threads: Mutex<HashMap<String, Weak<Guard>>>,
+    reconciled_descendants: Mutex<HashMap<String, HashSet<String>>>,
+}
+
+impl RecoveryContributor {
+    pub(crate) fn set_reconciled_descendants(&self, ids: HashMap<String, HashSet<String>>) {
+        *self
+            .reconciled_descendants
+            .lock()
+            .expect("recovery index poisoned") = ids;
+    }
 }
 
 impl ThreadLifecycleContributor<Config> for RecoveryContributor {
@@ -90,13 +100,19 @@ impl ThreadLifecycleContributor<Config> for RecoveryContributor {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let guard = input.thread_store.get_or_init(Guard::default);
+            let id = input.thread_store.level_id();
+            if let Some(ids) = self
+                .reconciled_descendants
+                .lock()
+                .expect("recovery index poisoned")
+                .get(id)
+            {
+                guard.set_reconciled(ids.clone());
+            }
             self.threads
                 .lock()
                 .expect("recovery index poisoned")
-                .insert(
-                    input.thread_store.level_id().to_owned(),
-                    Arc::downgrade(&guard),
-                );
+                .insert(id.to_owned(), Arc::downgrade(&guard));
         })
     }
 
@@ -214,7 +230,9 @@ impl Stream for GuardedStream {
             let id = match item {
                 ResponseItem::FunctionCall { call_id, .. }
                 | ResponseItem::CustomToolCall { call_id, .. }
-                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+                | ResponseItem::CustomToolCallOutput { call_id, .. }
+                | ResponseItem::ComputerCall { call_id, .. }
+                | ResponseItem::ComputerCallOutput { call_id, .. } => Some(call_id.as_str()),
                 ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_deref(),
                 _ => None,
             };
@@ -324,5 +342,40 @@ mod tests {
                 if response_id == "provider-response"
         ));
         assert!(guarded.next().await.is_none());
+    }
+    #[tokio::test]
+    async fn recovery_fences_original_computer_calls_and_outputs_before_forwarding() {
+        let computer: ResponseItem = serde_json::from_value(json!({
+            "type":"computer_call", "call_id":"original", "actions":[{"type":"click","x":1,"y":2}]
+        }))
+        .unwrap();
+        let output: ResponseItem = serde_json::from_value(json!({
+            "type":"computer_call_output", "call_id":"original",
+            "output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="},
+            "acknowledged_safety_checks":[]
+        }))
+        .unwrap();
+        for item in [computer, output] {
+            for added in [true, false] {
+                let event = if added {
+                    ResponseEvent::OutputItemAdded(item.clone())
+                } else {
+                    ResponseEvent::OutputItemDone(item.clone())
+                };
+                let upstream = stream::iter(vec![
+                    Ok(event),
+                    Ok(ResponseEvent::OutputItemDone(call("fresh"))),
+                    Ok(completed()),
+                ]);
+                let mut guarded = Box::new(Request(Arc::new(HashSet::from(["original".into()]))))
+                    .intercept(Box::pin(upstream));
+                assert!(matches!(
+                    guarded.next().await,
+                    Some(Err(ModelResponseError::InvalidRequest { .. }))
+                ));
+                assert!(guarded.next().await.is_none());
+                assert!(guarded.next().await.is_none());
+            }
+        }
     }
 }

@@ -185,9 +185,9 @@ asyncio.run(main(sys.argv[1]))
 
 ### Send provider-wire events
 
-Inside an open voice context, `await voice.send_event(event)` sends a supported provider-wire event through the native owner. Core validates the event and preserves native tool and approval authority. This method accepts a JSON-compatible mapping, captures it before waiting, and shares the connection's 128-operation/8 MiB input budget. It rejects calls from the same owner's adapter callbacks. Cancellation waits for native acceptance to settle.
+Inside an open voice context, `await voice.send_event(event)` sends a provider-wire event through the native owner. Core validates the managed controls below and forwards other event types as JSON, including their event IDs. This method accepts a JSON-compatible mapping, captures it before waiting, and shares the connection's 128-operation/8 MiB input budget. It rejects calls from the same owner's adapter callbacks. Cancellation waits for native acceptance to settle.
 
-For example, use an open `voice` owner to request a response with provider metadata and an event ID:
+For a detached text response, set `conversation` to `"none"` and supply its input in the request.
 
 ```python
 await voice.send_event(
@@ -195,20 +195,22 @@ await voice.send_event(
         "type": "response.create",
         "event_id": "application-response-1",
         "response": {
+            "conversation": "none",
+            "input": [{"type": "item_reference", "id": provider_item_id}],
             "output_modalities": ["text"],
-            "instructions": "Reply briefly.",
+            "instructions": "Classify the referenced message.",
             "metadata": {"request": "application-request-1"},
         },
     }
 )
 ```
 
-Core accepts these event names with guarded payloads:
+Core validates the payloads of these event types.
 
 - `session.update` accepts existing sparse session settings and waits for the provider acknowledgement. Raw tool declarations remain unsupported; use the Session's admitted tools.
-- `response.create` accepts instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Alternate input and out-of-band responses remain unsupported. Admission and coalescing match `request_response()`.
+- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an explicitly empty context. Use `tool_choice` or an exact subset of the advertised function declarations in `tools` to control tools for one linked response. Detached responses default to no tools. To handle a detached function call yourself, supply its declaration in `tools`, read the call from the provider event stream, and include the result in a later detached response's `input`. Detached output stays outside the provider conversation.
 - `response.cancel` retires native work and local buffered output for the exact accepted response IDs. Consume `RealtimePlaybackInterrupted` and discard the indicated unplayed application audio, as with `interrupt()`.
-- `conversation.item.create` accepts supported message rows, an optional item ID, and a known `previous_item_id`. Native validation rejects fabricated function, MCP, and approval rows. Creation waits for the matching provider acknowledgement.
+- `conversation.item.create` accepts supported messages and completed historical function calls and outputs. Create the historical call first, then use its `call_id` on one output. These writes wait for matching provider acknowledgements. To answer a pending hosted MCP approval, send an `mcp_approval_response` with the provider's issued `approval_request_id` and a Boolean `approve` value.
 - `conversation.item.retrieve` returns the full provider item as a dictionary. `conversation.item.delete` waits for the matching provider acknowledgement.
 - `conversation.item.truncate` requires known received assistant audio and a valid playback offset.
 - `input_audio_buffer.append`, `input_audio_buffer.clear`, and `input_audio_buffer.commit` use the native media queue. Audio appends use base64 data in the configured input format.
@@ -225,6 +227,8 @@ Canonical history keeps prior transcripts and appends a `provider_item_deleted` 
 Use `await voice.retrieve_conversation_item(provider_item_id)` to retrieve a known provider item with its available media, including an item from before SIP attachment. Retrieval rejects IDs still recorded as deleted. Retrieving an ID absent from the observed history does not add it to that history's order. `await voice.retrieve_conversation_history()` retrieves full items for IDs observed during this connection, in observed order. The result can include audio and image data and can be large. It cannot discover items from before SIP attachment. These requests are separate from the synchronous `voice.history` audit view.
 
 Pass an edited list of those provider items to `await voice.update_history(items)` to update the observed portion of the provider conversation. The method supports adding, correcting, removing, and reordering supported system, user, and assistant messages. Keep surviving tool, MCP, and approval items byte-for-byte unchanged and in their relative order. You can remove them only after their native work has settled. Supported messages can move across retained items. Removing a settled item prunes provider context; it does not retract execution or approval authority. Native validation checks the replacement before sending changes and waits for provider acknowledgements. It cannot erase unobserved items or rewrite the Session's audit, background work, or retained context. An interrupted edit or a provider failure after some acknowledgements can leave partial edits. If the connection remains active, retrieve the observed history before retrying.
+
+To import a completed historical function pair, place a new `function_call` before its matching `function_call_output`. Give both items unique provider IDs and share one fresh `call_id` between them. Each imported call requires exactly one output. Imported items supply context only.
 
 The connection retains 128 recent deletion receipts. Within this window, you can restore a message removed by an interrupted `update_history()` under its original ID. Supply a supported message after refreshing the observed history. IDs deleted directly with `delete_conversation_item()` or by another controller, and tool or control identities, remain protected while their receipts are retained. Recovery preserves the canonical deletion audit. Deletions observed from another controller also remove items from observed provider history. They do not cancel or approve pending native work.
 

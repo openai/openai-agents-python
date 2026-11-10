@@ -655,7 +655,9 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     assert build < verify < upload
     assert "if" not in steps[build] and "if" not in steps[upload]
     assert steps[verify]["if"] == "runner.os == 'Linux'"
-    assert "for version in 3.10 3.11 3.12; do" in steps[verify]["run"]
+    assert "versions=(3.10 3.11 3.12)" in steps[verify]["run"]
+    assert "versions+=(3.14)" in steps[verify]["run"]
+    assert 'for version in "${versions[@]}"; do' in steps[verify]["run"]
     assert 'cd "$RUNNER_TEMP"' in steps[verify]["run"]
     assert "env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX" in steps[verify]["run"]
     assert "-I verify_installed.py" in steps[verify]["run"]

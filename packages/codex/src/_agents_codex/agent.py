@@ -64,6 +64,7 @@ from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
+from .models import ModelProvider, NativeModel
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -143,6 +144,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
     invocation_timeout_ms: int | None
+    truncation: Literal["auto", "disabled"] | None
+    include: list[str] | None
+    context_management: list[dict[str, Any]] | None
+    extra_body: Mapping[str, Any] | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
@@ -182,6 +187,57 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
+        elif key == "truncation":
+            if value not in ("auto", "disabled"):
+                raise ValueError("truncation must be auto or disabled")
+        elif key == "include":
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise TypeError("include must be a list of strings")
+            captured[key] = list(value)
+        elif key in ("context_management", "extra_body"):
+            if key == "context_management":
+                if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                    raise TypeError("context_management must be a list of JSON objects")
+            elif not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+                raise TypeError("extra_body must be a JSON object")
+            if key == "extra_body" and set(value) & {
+                "tool_choice",
+                "client_metadata",
+                "service_tier",
+                "tools",
+                "access_programs",
+                "metadata",
+                "previous_response_id",
+                "stream",
+                "parallel_tool_calls",
+                "prompt_cache_retention",
+                "model",
+                "prompt_cache_key",
+                "stream_options",
+                "conversation",
+                "temperature",
+                "prompt_cache_options",
+                "truncation",
+                "top_p",
+                "generate",
+                "store",
+                "context_management",
+                "instructions",
+                "type",
+                "reasoning",
+                "include",
+                "input",
+                "top_logprobs",
+                "text",
+                "max_output_tokens",
+            }:
+                raise ValueError(
+                    "extra_body cannot replace native request fields; "
+                    "use the corresponding model setting"
+                )
+            captured[key] = json.loads(
+                json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
+            )
         elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
             allowed = {
                 "verbosity": ("low", "medium", "high"),
@@ -373,6 +429,11 @@ class NativeProvider:
     unset or set them to zero so the application owns retry timing. The SDK
     reports credential and entitlement failures without switching billing modes.
 
+    Retry budgets and phase timeouts are native provider settings. Omission keeps
+    Core defaults. Zero disables retries or sets an immediate phase deadline.
+    Core caps request and stream retry budgets at 100 and retains retry safety,
+    cancellation, and replay ownership. Timeouts use integer milliseconds.
+
     Routing maps are captured at construction. ``env_headers`` resolves values
     once; missing/empty values stay omitted. Query pairs use URL encoding.
     Supplied routing options reject same-origin and cross-origin redirects.
@@ -407,11 +468,19 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    model_backend: NativeModel | ModelProvider | None = field(default=None, repr=False, hash=False)
     request_max_retries: int | None = None
     stream_max_retries: int | None = None
+    stream_idle_timeout_ms: int | None = field(default=None, repr=False)
+    websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        for name in ("request_max_retries", "stream_max_retries"):
+        for name in (
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+            "websocket_connect_timeout_ms",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
@@ -441,6 +510,16 @@ class NativeProvider:
                 raise ValueError(
                     f"{type(self.auth).__name__} requires HTTP and its own endpoint and credentials"
                 )
+        if self.model_backend is not None:
+            if not any(
+                callable(getattr(self.model_backend, name, None))
+                for name in ("complete", "get_model")
+            ):
+                raise TypeError(
+                    "model_backend must implement complete(request) or get_model(model_name)"
+                )
+            if self.supports_websockets is True or self.auth is not None:
+                raise ValueError("model_backend requires HTTP mode without plan authentication")
         self._capture_routing()
 
     def _capture_routing(self) -> None:
@@ -570,6 +649,8 @@ class NativeProvider:
 
     @property
     def _websockets_enabled(self) -> bool:
+        if self.model_backend is not None:
+            return False
         return (
             self.auth is None
             and self.response_mode == "streaming"
@@ -1006,7 +1087,7 @@ class Agent(Generic[ContextT, OutputT]):
         )
 
     def validate(self) -> None:
-        """Check the declaration without opening a Session.
+        """Check the default declaration and captured handoff graph without opening a Session.
 
         Return None on success, or raise the first TypeError or ValueError.
         Uses the opening checks for tool admission, MCP names and output schema.
@@ -1018,20 +1099,31 @@ class Agent(Generic[ContextT, OutputT]):
         from .schema import _prepare_spec
         from .session import _check_namespaced_tool_collisions, _split_tools
 
-        python_tools, mcp_tools, native_agents = _split_tools(
-            self.tools, self.programmatic_tool_calling
-        )
-        _check_namespaced_tool_collisions(
-            python_tools,
-            _tool_names(mcp_tools),
-            self.tools,
-            native_agents=native_agents,
-        )
         native = importlib.import_module("agents._native")
-        native._validate_python_tool_declarations(
-            json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
-        )
-        _prepare_spec(self.output_type)
+
+        def check(declaration: Agent[Any, Any]) -> None:
+            python_tools, mcp_tools, native_agents = _split_tools(
+                declaration.tools, declaration.programmatic_tool_calling
+            )
+            _check_namespaced_tool_collisions(
+                python_tools,
+                _tool_names(mcp_tools),
+                declaration.tools,
+                native_agents=native_agents,
+            )
+            native._validate_python_tool_declarations(
+                json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
+            )
+            _prepare_spec(declaration.output_type)
+
+        if self.handoffs:
+            from ._agent_profiles import _capture_agent_graph
+
+            declarations = tuple(profile.declaration for profile in _capture_agent_graph(self))
+        else:
+            declarations = (self,)
+        for declaration in declarations:
+            check(declaration)
 
     def with_output_type(self, output_type: OutputSpec[NewOutputT]) -> Agent[ContextT, NewOutputT]:
         """Return a declaration variant with the same settings and a new output.
@@ -1071,6 +1163,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -1095,6 +1189,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -1119,6 +1215,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -1143,6 +1241,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        project_guidance: bool = False,
+        discover_agents_md: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -1203,6 +1303,10 @@ class Agent(Generic[ContextT, OutputT]):
         another ambient scope or explicit parent changes the trace linkage.
         Tracing context and export credentials never enter SessionState.
 
+        project_guidance loads native workspace instructions and enables native
+        workspace image viewing. It requires an Environment and uses only that
+        executor's granted paths. It does not grant command or write access.
+
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
         borrowed. A standard async context manager yielding an Environment
@@ -1234,17 +1338,30 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. An unknown root tool outcome raises LocalRecoveryRequired.
+        provider. An unknown root or descendant tool outcome raises LocalRecoveryRequired.
         Check the effect using application records and pass reconciled_calls
-        on reopen. The SDK records those outcomes without running those
-        calls. An unknown descendant tool outcome raises RuntimeError because
-        descendant calls cannot be reconciled. Local storage and portable
+        with the original root Session ID. The SDK records each result in the
+        owning thread without restarting the interrupted work. Read descendant
+        results with ``session.items(subagent_id=call.thread_id)``. Local storage and portable
         ``state`` cannot be combined. Local storage rejects code mode because
         individual nested tool identities lack durable intent and result receipts.
 
         Pass instruction_files to load trusted UTF-8 files as application
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
+
+        Set discover_agents_md=True to trust Codex instruction files on the
+        application host and in the selected Environment. Core loads user
+        guidance from CODEX_HOME (default ~/.codex), followed by project
+        guidance from the nearest Git root through the Environment's working
+        directory, within the executor's read policy. Without a Git root,
+        Core checks only the working directory. Without an Environment,
+        Core loads only user guidance. Core checks AGENTS.override.md before
+        AGENTS.md at each location. More specific files take precedence over
+        broader guidance. Application instructions, including instruction_files,
+        have developer priority. This option loads instruction files only.
+        Pass it again to discover files when restoring or resuming. Previously
+        supplied instructions can still appear in the conversation history.
         """
         try:
             initial_messages = _capture_initial_messages(
@@ -1263,12 +1380,14 @@ class Agent(Generic[ContextT, OutputT]):
                 environment=environment,
                 tools=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                discover_agents_md=discover_agents_md,
             ) as session:
                 from .session import Session
 
@@ -1299,8 +1418,10 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
@@ -1328,9 +1449,11 @@ class Agent(Generic[ContextT, OutputT]):
                 model_settings=model_settings,
                 tool_selection=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                discover_agents_md=discover_agents_md,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
                 _completed_input=_completed_input,
@@ -1520,9 +1643,16 @@ class Agent(Generic[ContextT, OutputT]):
         options: dict[str, Any] = {}
         try:
             from ._function_tools import FunctionTool
+            from .manual import _CapturedApproval
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
-            from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
+            from .session import (
+                CapabilityError,
+                InteractionRequired,
+                NativeError,
+                _handoff_default_names,
+                _split_tools,
+            )
             from .state import SessionState
             from .tools import _HOSTED_TOOLS, WebSearch, _CapturedFunction
 
@@ -1583,21 +1713,18 @@ class Agent(Generic[ContextT, OutputT]):
                 if on_interaction is None
                 and before_step is None
                 and prepare_request is None
-                and tool._bind is None
+                and (tool._bind is None or tool.needs_approval is not False)
                 and (tools is None or tool in tools or tool.ref in tools)
             )
-            budget_capture_error = None
-            if budget is not None and pause_manual:
-                budget_capture_error = CapabilityError(
+            if state is None and budget is not None and pause_manual:
+                raise CapabilityError(
                     "An active run with a budget cannot be captured for manual replies. "
                     "Pass on_interaction or use Agent.session() for live replies."
                 )
-                if state is None or tools is not None:
-                    raise budget_capture_error
-            # Restore persisted defaults before judging an omitted selection.
+            # A restored operation selects tools from the captured active profile.
             if (
-                pause_manual
-                and (state is None or tools is not None)
+                state is None
+                and pause_manual
                 and (
                     self.programmatic_tool_calling
                     or isinstance(self.output_type, PromptedOutput)
@@ -1607,10 +1734,7 @@ class Agent(Generic[ContextT, OutputT]):
                     or any(tool._requires_live_manual_session for tool in declared)
                     or (
                         mcp_tools
-                        and (
-                            (tools is None and state is None)
-                            or (tools is not None and _split_tools(tools, available=self.tools)[1])
-                        )
+                        and (tools is None or _split_tools(tools, available=self.tools)[1])
                     )
                 )
             ):
@@ -1693,8 +1817,8 @@ class Agent(Generic[ContextT, OutputT]):
                     # A delegating factory may change the opening roster or its
                     # default operation. Check the same effective selection that
                     # submit will capture, before it admits work or starts MCP.
-                    opening = session._opening_agent
-                    assert opening is not None
+                    opening = session._effective_agent()
+                    handoffs = session._effective_handoffs()
                     effective = session._default_tools if tools is None else tools
                     selected, selected_mcp, _ = _split_tools(
                         opening.tools if effective is None else effective,
@@ -1703,30 +1827,72 @@ class Agent(Generic[ContextT, OutputT]):
                         ceiling=opening.tools,
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
+                        handoffs=handoffs,
                     )
-                    # Handoff targets keep their own captured declarations. Their
-                    # bare manual requests can pause the same root Session.
                     if on_interaction is None and before_step is None and prepare_request is None:
-                        pause_manual = (
-                            *pause_manual,
-                            *(
-                                tool
-                                for runtime in session._profiles.values()
-                                if runtime.profile.agent is not self
-                                for tool in runtime.profile.declaration.tools
-                                if isinstance(tool, FunctionTool)
-                                and tool._bind is None
-                                and not tool._requires_live_manual_session
-                            ),
+                        selected_manual = tuple(
+                            tool
+                            for tool in selected
+                            if tool._bind is None or tool.needs_approval is not False
                         )
-                    if budget_capture_error is not None:
-                        if any(tool._bind is None for tool in selected):
-                            raise budget_capture_error
-                        pause_manual = ()
+                        if state is not None:
+                            active_profile = session._profile_current
+                            pause_declarations: Sequence[Tool[Any]] = declared
+                            if (
+                                active_profile is not None
+                                and session._profiles[active_profile[0]].profile.agent is not self
+                            ):
+                                pause_declarations = opening.tools
+                            pause_manual = tuple(
+                                tool
+                                for tool in selected_manual
+                                if any(tool is grant for grant in pause_declarations)
+                            )
+                        # Selection can include a replacement from a delegating factory.
+                        # Budget preflight sees that tool without granting checkpoint authority.
+                        has_reachable_manual = bool(selected_manual)
+                        # An explicit operation keeps its original declaration
+                        # ceiling. Omitted tools follow captured destination defaults.
+                        names = _handoff_default_names(effective, handoffs)
+                        pending = [
+                            target
+                            for name, target in (handoffs or {}).items()
+                            if tools is None and (names is None or name in names)
+                        ]
+                        visited: set[str] = set()
+                        for target in pending:
+                            if target in visited:
+                                continue
+                            visited.add(target)
+                            profile = session._profiles[target].profile
+                            target_manual = tuple(
+                                tool
+                                for tool in profile.declaration.tools
+                                if isinstance(tool, FunctionTool)
+                                and (tool._bind is None or tool.needs_approval is not False)
+                                and not tool._requires_live_manual_session
+                            )
+                            has_reachable_manual |= bool(target_manual)
+                            pause_manual += tuple(
+                                tool
+                                for tool in target_manual
+                                if profile.agent is not self
+                                or any(tool is grant for grant in declared)
+                            )
+                            pending.extend(profile.handoffs.values())
+                        if budget is not None and has_reachable_manual:
+                            raise CapabilityError(
+                                "An active run with a budget cannot be captured "
+                                "for manual replies. Pass on_interaction or use "
+                                "Agent.session() for live replies."
+                            )
                     if (
                         prepare_request is not None
                         and before_step is None
-                        and any(tool._bind is None for tool in selected)
+                        and any(
+                            tool._bind is None or tool.needs_approval is not False
+                            for tool in selected
+                        )
                     ):
                         raise InteractionRequired(
                             "Running manual tools with prepare_request requires on_interaction. "
@@ -1741,7 +1907,7 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._storage is not None
                         or selected_mcp
                         or any(
-                            isinstance(tool, _CapturedFunction)
+                            isinstance(tool, (_CapturedFunction, _CapturedApproval))
                             and tool._requires_live_manual_session
                             for tool in session._bound_tools
                         )

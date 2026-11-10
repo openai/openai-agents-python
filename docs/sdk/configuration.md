@@ -55,6 +55,14 @@ An invocation deadline raises `NativeError` with `code="model_invocation_deadlin
 
 Development builds also accept a `ToolRef` for `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
 
+## Make typed decisions
+
+Matching development builds have been supporting `Agent.decide()` for booleans, choices and structured values. The `0.24.0-alpha.7` preview has not been including this API. The [typed decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been providing matching-source setup, complete examples and supported output types.
+
+Applications have been selecting a decision provider through `Agent(decisions=provider)`, separately from the generative `model` and `provider`. Each `await agent.decide(question, input=...)` call has been requiring explicit input and returning a boolean by default. Calls with `choices=[...]` have been returning one of those values; calls with `output_type=...` have been returning a validated value of that type. The SDK has been rejecting calls that combine `choices` and `output_type`.
+
+Decision calls have been using only their explicit input, without starting an Agent run or adding conversation history. A per-call `provider=` has been overriding the Agent's `decisions` default. Calls without either provider have been raising `ValueError`. Applications have been owning decision-provider cleanup; Agent and Session have been borrowing that provider. The [provider guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#replace-the-provider) has been describing `DecisionProvider` and the optional `OpenAIDecisions` adapter.
+
 ## Choose tools and workspace access
 
 Declare tools on the Agent or when opening the Session. The Session records Python and manual tool names, together with each MCP server name and raw tool name. Those names limit later updates and turn selections. [Idle updates](tools.md#replace-tools-between-turns) can replace the registered callbacks or MCP connections, including endpoints and credentials. Temporary selections use the accepted bindings and cannot redefine them. The fixed Apps registration from `HostedVerificationMCP` or `ChatGPTAppsMCP` requires a new Session for replacement; see [service-specific integrations](mcp.md#service-specific-integrations).
@@ -102,6 +110,16 @@ Pass `NativeProvider(auth=CodexLogin())` to reuse an existing Codex-managed Chat
 Complete `codex login` separately before opening an SDK Session. This mode reads the ChatGPT login saved in `auth.json`. If Codex uses the operating system credential store, configure file storage and sign in again. See [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage) to configure file storage. Protect the login file and keep its tokens out of logs and source control.
 
 `CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
+
+#### Set up a login on a headless host
+
+1. Ask your ChatGPT workspace admin to enable device-code sign-in in the workspace permissions. For a personal account, enable it in your ChatGPT security settings.
+2. On the headless host, run `codex login --device-auth`. Open the displayed link in a browser on another device and enter the one-time code. Use the ChatGPT account and workspace you want the SDK to use.
+3. Make sure the CLI saved `auth.json` in the directory that `CodexLogin` will read. If your setup uses a credential store, see the [file storage settings](https://learn.chatgpt.com/docs/auth#credential-storage).
+
+If device-code sign-in is unavailable, use a copied login if your workspace permits file storage. Sign in with `codex login` on a machine with a browser and file storage enabled. Then [copy `auth.json` over a secure connection](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache) to the Codex directory on the headless host. Use the default directory or set `CodexLogin(codex_home=...)` to the destination directory. Give the user running the SDK write access to that directory and restrict access to the cache file to that user. Treat the file like a password and keep it out of source control, logs, and shared artifacts.
+
+Sessions in one SDK process can share the same saved login. The SDK coordinates token refresh in that process and writes renewed credentials back to the file. Keep the updated file so the next process can use it after a restart. Use a single process at a time to refresh a saved login, even if copies of the file exist on other hosts.
 
 #### Run a coding turn without an API key
 
@@ -271,6 +289,8 @@ for repair in result.repair_attempts:
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
+Corrections have been retaining the accepted model, reasoning effort, reasoning summary and service tier. Matching development builds have also been applying the accepted `invocation_timeout_ms` afresh to each correction. The alpha.7 preview has not been including this timeout setting. Corrections have not been inheriting the other [development model controls](#additional-controls-in-development-builds), including output caps, sampling controls, metadata, provider storage and prompt-cache settings.
+
 Live manual replies and idle restore support structured output. An explicit Session can suspend a settled manual turn with `NativeOutput`, a bare structured output type, or `PromptedOutput`. Restore must match the saved output mode and schema, including the retry setting for prompted output.
 
 Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
@@ -324,6 +344,8 @@ These hooks have separate owners. A context projection does not change admitted 
 Return `None` to accept, `ContinueTurn("specific feedback")` to continue the same turn, or `StopTurn(...)` to stop it. Continuation feedback becomes model-visible conversation data and saved history. Bound root continuations with [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage). Root budgets exclude children, so use `continuation_count` and `StopTurn` to bound child continuations.
 
 The callback sees proposed text before output-type validation. Rejected text may already have streamed and remains in history. The callback does not run for provider failures, cancellation, compaction, or separate prompted-output repairs. A raised exception fails the turn. Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks. A callback must not mutate its own Session.
+
+Matching development builds have also been supplying `CompletionContext.decide()` for checks with the captured [decision provider](#make-typed-decisions). The [completion-check example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#bind-a-provider-to-an-agent) has been combining a typed decision with a bounded continuation.
 
 ## Edit the next sampling request
 

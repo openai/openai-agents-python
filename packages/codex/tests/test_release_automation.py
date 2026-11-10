@@ -740,6 +740,7 @@ def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "tests (3.14)",
             "tests-windows (3.10)",
             "tests-windows (3.14)",
+            "native-linux-arm64 / Native package (ubuntu-24.04-arm)",
         ]
     ]
     for identifier, job in enumerate(jobs, 1):
@@ -750,6 +751,7 @@ def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             ("native-Linux-X64", "manylinux_2_39_x86_64"),
             ("native-Windows-X64", "win_amd64"),
             ("native-macOS-ARM64", "macosx_11_0_arm64"),
+            ("native-Linux-ARM64", "manylinux_2_39_aarch64"),
         ],
         1,
     ):
@@ -838,10 +840,49 @@ def test_preview_distribution_requires_explicit_source_branch(publication: dict[
         automation.qualified_distributions("b" * 40)
     qualified = automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
     assert qualified["run"]["head_branch"] == "feat/codex-harness"
+    assert {item["name"] for item in qualified["artifacts"]} == {
+        "native-Linux-X64",
+        "native-Windows-X64",
+        "native-macOS-ARM64",
+        "native-Linux-ARM64",
+    }
     assert any("branch=feat%2Fcodex-harness" in path for path in publication["reads"])
     windows = next(job for job in publication["jobs"] if job["name"] == "tests-windows (3.14)")
     windows["conclusion"] = "failure"
     with pytest.raises(ValueError, match="test gates"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        ("pr_job", "Release test gates did not pass"),
+        ("skipped_job", "Release test gates did not pass"),
+        ("missing_artifact", "Missing, expired or ambiguous release artifact"),
+        ("missing_digest", "Unbound release artifact"),
+    ],
+)
+def test_preview_requires_exact_arm64_qualification(
+    publication: dict[str, Any], defect: str, message: str
+) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    job = next(
+        job
+        for job in publication["jobs"]
+        if job["name"] == "native-linux-arm64 / Native package (ubuntu-24.04-arm)"
+    )
+    artifact = next(
+        item for item in publication["artifacts"] if item["name"] == "native-Linux-ARM64"
+    )
+    if defect == "pr_job":
+        job["name"] = "native-linux-arm64-pr / Native package (ubuntu-24.04-arm)"
+    elif defect == "skipped_job":
+        job["conclusion"] = "skipped"
+    elif defect == "missing_artifact":
+        publication["artifacts"].remove(artifact)
+    else:
+        del artifact["digest"]
+    with pytest.raises(ValueError, match=f"{message}: (?i:native-linux-arm64)"):
         automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
 
 
@@ -943,7 +984,7 @@ def test_release_distribution_rejects_incomplete_artifacts(
 ) -> None:
     artifacts = publication["artifacts"]
     if defect == "missing":
-        artifacts.pop()
+        artifacts.remove(next(item for item in artifacts if item["name"] == "native-macOS-ARM64"))
     elif defect == "expired":
         artifacts[1]["expired"] = True
     elif defect == "duplicate":
@@ -1117,27 +1158,43 @@ def test_release_record_pagination_reads_all_pages(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize(
-    "defect",
-    [None, "digest", "rerun", "wheel_version", "metadata_version", "platform_tag", "missing_sdist"],
+    ("branch", "defect"),
+    [
+        ("main", None),
+        ("main", "digest"),
+        ("main", "rerun"),
+        ("main", "wheel_version"),
+        ("main", "metadata_version"),
+        ("main", "platform_tag"),
+        ("main", "missing_sdist"),
+        ("feat/codex-harness", None),
+        ("feat/codex-harness", "digest"),
+        ("feat/codex-harness", "platform_tag"),
+    ],
 )
 def test_release_collection_keeps_only_exact_distributions(
     publication: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    branch: str,
     defect: str | None,
 ) -> None:
     import hashlib
     import io
     import zipfile
 
-    qualified = automation.qualified_distributions("b" * 40)
+    publication["run"]["head_branch"] = branch
+    qualified = automation.qualified_distributions("b" * 40, source_branch=branch)
+    platform = "manylinux_2_39_x86_64" if branch == "main" else "manylinux_2_39_aarch64"
+    artifact = qualified["artifacts"][0 if branch == "main" else -1]
+    identifier = artifact["id"]
     if defect == "digest":
-        publication["payloads"][1] += b"changed"
+        publication["payloads"][identifier] += b"changed"
     elif defect == "rerun":
         publication["after_run"] = {**publication["run"], "run_attempt": 2}
     elif defect in {"wheel_version", "metadata_version", "platform_tag", "missing_sdist"}:
         output = io.BytesIO()
-        with zipfile.ZipFile(io.BytesIO(publication["payloads"][1])) as original:
+        with zipfile.ZipFile(io.BytesIO(publication["payloads"][identifier])) as original:
             with zipfile.ZipFile(output, "w") as changed:
                 for name in original.namelist():
                     if defect == "missing_sdist" and name.endswith(".tar.gz"):
@@ -1157,16 +1214,12 @@ def test_release_collection_keeps_only_exact_distributions(
                                     if member.endswith("METADATA") and defect == "metadata_version":
                                         content = content.replace(b"alpha.3", b"alpha.4")
                                     if member.endswith("WHEEL") and defect == "platform_tag":
-                                        content = content.replace(
-                                            b"manylinux_2_39_x86_64", b"win_amd64"
-                                        )
+                                        content = content.replace(platform.encode(), b"win_amd64")
                                     replacement.writestr(member, content)
                         data = wheel_bytes.getvalue()
                     changed.writestr(target, data)
-        publication["payloads"][1] = output.getvalue()
-        qualified["artifacts"][0]["digest"] = (
-            "sha256:" + hashlib.sha256(output.getvalue()).hexdigest()
-        )
+        publication["payloads"][identifier] = output.getvalue()
+        artifact["digest"] = "sha256:" + hashlib.sha256(output.getvalue()).hexdigest()
 
     def download(command: list[str], **kwargs: Any) -> None:
         assert command[:2] == ["gh", "api"]
@@ -1190,9 +1243,12 @@ def test_release_collection_keeps_only_exact_distributions(
         assert list(destination.iterdir()) == []
     else:
         automation.collect_distributions(qualified, destination)
-        assert {path.name for path in destination.iterdir()} == {
+        expected = {
             "openai_agents-0.24.0a3-cp310-abi3-manylinux_2_39_x86_64.whl",
             "openai_agents-0.24.0a3-cp310-abi3-win_amd64.whl",
             "openai_agents-0.24.0a3-cp310-abi3-macosx_11_0_arm64.whl",
             "openai_agents-0.24.0a3.tar.gz",
         }
+        if branch == "feat/codex-harness":
+            expected.add("openai_agents-0.24.0a3-cp310-abi3-manylinux_2_39_aarch64.whl")
+        assert {path.name for path in destination.iterdir()} == expected

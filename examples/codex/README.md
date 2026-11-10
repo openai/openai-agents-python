@@ -63,9 +63,12 @@ Your application decides whether to retry a temporary service error.
 [Error recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery)
 
 The route uses HTTP streaming with a Responses Lite model. You can use
-direct Python function tools with one Agent. The SDK excludes handoffs,
-NativeAgents, deferred tool loading, code mode, hosted tools, web search,
-and Realtime on this route.
+direct Python function tools with one Agent. A function call becomes eligible
+to run after the response completes successfully. If the stream ends first,
+the SDK drops the pending call before it can run or enter conversation history.
+The SDK excludes handoffs,
+NativeAgents, deferred tool loading, code mode, hosted tools, computer tools,
+web search, and Realtime on this route.
 
 ## Migrate a v0 workflow
 
@@ -80,6 +83,7 @@ These programs use the current SDK and model credentials:
 | Task | Example | What to inspect |
 | --- | --- | --- |
 | Call a Python function | [basic.py](basic.py) | One answer through `Agent` and `function_tool`. |
+| Approve a managed callback | [Managed function approvals](managed_approvals/README.md) | Synthetic native approval, callback execution, and portable pending state. |
 | Search the web | [hosted_web_search.py](hosted_web_search.py) | Domain filters, approximate location, and source URLs on a compatible Responses model. |
 | Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
 | Make typed decisions (source preview) | [Decisions guide](decisions-guide.md) | Replaceable providers, typed output, and decisions bound to Agent callbacks; requires a build with Decisions support. |
@@ -120,5 +124,24 @@ These programs use the current SDK and model credentials:
 | Search project paths and text | [project_search.py](project_search.py) | Current SDK, a Linux or macOS project directory, and model credentials. Uses structured glob and grep tools. |
 | Use Unix sockets inside an offline job | [offline_unix_sockets.py](offline_unix_sockets.py) | Current SDK, an isolated Linux or macOS executor, gateway credentials, and a local synthetic Responses peer. |
 | Provision an offline Docker job | [offline_docker.py](offline_docker.py) | Docker and a prepared image. This standard-library helper expects the application to supply the gateway and executor configuration. |
+
+### Allow public hosts with exceptions
+
+Use a preview wheel that includes `NetworkPolicy.allow_all()` with this example.
+Pass the policy as `network` when creating an `Environment`. The managed proxy
+allows native commands to reach public hosts and blocks any host that matches
+`denied_domains`.
+
+```python
+from agents import NetworkPolicy
+
+network = NetworkPolicy.allow_all(
+    denied_domains=("uploads.example.org", "**.private.example.org"),
+)
+```
+
+`**.private.example.org` covers the domain itself and its subdomains.
+On Linux, also pass `allow_all_unix_sockets=True` and use an executor private to
+the job. This grants access to every Unix socket the executor can reach.
 
 Use the [SDK guide](../../docs/sdk/index.md) for API behavior and the [tool guide](../../docs/sdk/tools.md) for Python functions and native MCP tools.

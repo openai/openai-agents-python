@@ -26,6 +26,7 @@ from agents import (
     CustomStorage,
     NativeError,
     NativeProvider,
+    PromptedOutput,
     SQLiteSessionStore,
     TurnStoppedError,
     function_tool,
@@ -247,6 +248,86 @@ async def test_deadline_setting_capture_roundtrip_and_clear(deadline_peer, value
                 latest_settings(await restored.save_state()).get("invocation_timeout_ms") == value
             )
     assert deadline_peer.requests == []
+
+
+async def test_fork_keeps_current_deadline_after_update_and_portable_reopen(deadline_peer):
+    async with timeout(30), provider_for(deadline_peer) as provider:
+        agent = Agent(
+            model="gpt-5.1-codex",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"invocation_timeout_ms": 60_000},
+        )
+        async with agent.session() as session:
+            opening_fork = await session.fork()
+            assert latest_settings(opening_fork)["invocation_timeout_ms"] == 60_000
+            await session.update(model_settings={"invocation_timeout_ms": MODEL_MS})
+            updated_fork = await session.fork()
+            assert latest_settings(updated_fork)["invocation_timeout_ms"] == MODEL_MS
+            saved = await session.save_state()
+        async with agent.session(state=saved) as restored:
+            reopened_fork = await restored.fork()
+            assert reopened_fork.source_session_id != saved.source_session_id
+            assert latest_settings(reopened_fork)["invocation_timeout_ms"] == MODEL_MS
+            await restored.update(model_settings={"invocation_timeout_ms": None})
+            cleared_fork = await restored.fork()
+            assert latest_settings(cleared_fork).get("invocation_timeout_ms") is None
+        async with agent.session(state=reopened_fork) as destination:
+            assert (
+                latest_settings(await destination.save_state())["invocation_timeout_ms"] == MODEL_MS
+            )
+        async with agent.session(state=cleared_fork) as destination:
+            assert (
+                latest_settings(await destination.save_state()).get("invocation_timeout_ms") is None
+            )
+    assert deadline_peer.requests == []
+
+
+@pytest.mark.parametrize("profile_completion", [False, True])
+async def test_prompted_correction_keeps_the_accepted_updated_deadline(
+    deadline_peer, profile_completion
+):
+    gate = Gate()
+    deadline_peer.allow_disconnect = True
+    deadline_peer.respond(assistant_output("invalid JSON"))
+    deadline_peer.respond(assistant_output("7"))
+
+    async def gate_correction(event):
+        if event["type"] == "response.completed":
+            deadline_peer.header_gate = gate
+
+    deadline_peer.before_event = gate_correction
+    async with timeout(30), provider_for(deadline_peer) as provider:
+        target = Agent(
+            name="Target",
+            model="gpt-5.1-codex",
+            instructions="Answer.",
+            output_type=PromptedOutput(int, max_retries=1),
+            before_complete=lambda context: None,
+            model_settings={"invocation_timeout_ms": 60_000},
+        )
+        agent = Agent(
+            model="gpt-5.1-codex",
+            instructions="Answer.",
+            provider=provider,
+            output_type=PromptedOutput(int, max_retries=1),
+            model_settings={"invocation_timeout_ms": 60_000},
+            handoffs=[target] if profile_completion else [],
+        )
+        async with agent.session() as session:
+            if profile_completion:
+                await session.update(agent=target)
+            await session.update(model_settings={"invocation_timeout_ms": MODEL_MS})
+            result = asyncio.create_task((await session.submit("one")).get_result())
+            try:
+                await wait_for_phase(gate.entered, result)
+                await asyncio.sleep(MODEL_MS / 1000 + 0.3)
+                assert result.done(), "Correction lost the accepted invocation deadline"
+                await deadline_error(result)
+                assert len(deadline_peer.requests) == 2
+            finally:
+                gate.release.set()
+                await asyncio.gather(result, return_exceptions=True)
 
 
 @pytest.mark.parametrize(
@@ -689,28 +770,18 @@ async def test_entered_reply_writer_settles_after_expiry_without_replay(
         )
 
 
-async def test_separate_output_repair_does_not_inherit_the_main_invocation_clock(
-    deadline_peer,
-):
-    # EXCLUDED: exact public prompted repair contract, not a generic mocked call.
+async def test_separate_output_repair_starts_a_fresh_invocation_clock(deadline_peer):
     from pydantic import BaseModel
-
-    from agents import PromptedOutput
 
     class Report(BaseModel):
         value: int
 
-    held = Gate()
-    count = 0
+    async def delay_each_invocation(event):
+        if event["type"] == "response.output_item.done":
+            # Together the calls exceed one allowance, but each owns its clock.
+            await asyncio.sleep(MODEL_MS / 1500)
 
-    async def hold_repair(event):
-        nonlocal count
-        if event["type"] == "response.created":
-            count += 1
-        if count == 2 and event["type"] == "response.output_item.done":
-            await held.hold()
-
-    deadline_peer.before_event = hold_repair
+    deadline_peer.before_event = delay_each_invocation
     deadline_peer.respond(assistant_output("not-json"))
     deadline_peer.respond(assistant_output('{"value":7}'))
     async with (
@@ -724,14 +795,8 @@ async def test_separate_output_repair_does_not_inherit_the_main_invocation_clock
             model_settings={"invocation_timeout_ms": MODEL_MS},
         ).session() as session,
     ):
-        result = asyncio.create_task((await session.submit("one")).get_result())
-        try:
-            await held.entered.wait()
-            done, _ = await asyncio.wait({result}, timeout=MODEL_MS / 500)
-            assert not done
-        finally:
-            held.release.set()
-        assert (await result).final_output.value == 7
+        result = await (await session.submit("one")).get_result()
+        assert result.final_output.value == 7
     assert len(deadline_peer.requests) == 2
     assert deadline_peer.requests[1].get("tools", []) == []
 

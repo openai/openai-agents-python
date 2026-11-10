@@ -165,6 +165,8 @@ class _PendingManual(BaseModel):
     call_id: str
     tool: str
     arguments: str
+    approval_required: bool = False
+    effective_arguments: str | None = None
 
 
 class _ToolOutcomes(BaseModel):

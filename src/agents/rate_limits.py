@@ -1,4 +1,4 @@
-"""Rate limits reported by the API-key model provider."""
+"""API-key rate limits and Codex plan usage."""
 
 from __future__ import annotations
 
@@ -9,6 +9,11 @@ from _agents_codex.rate_limits import (
     Any as Any,
     ApiRateLimits as ApiRateLimits,
     ApiRateLimitWindow as ApiRateLimitWindow,
+    CodexPlanCredits as CodexPlanCredits,
+    CodexPlanLimit as CodexPlanLimit,
+    CodexPlanSpendLimit as CodexPlanSpendLimit,
+    CodexPlanUsage as CodexPlanUsage,
+    CodexPlanWindow as CodexPlanWindow,
     Context as Context,
     Decimal as Decimal,
     _api_rate_limits as _api_rate_limits,
@@ -24,4 +29,12 @@ from _agents_codex.rate_limits import (
     timezone as timezone,
 )
 
-__all__ = ["ApiRateLimitWindow", "ApiRateLimits"]
+__all__ = [
+    "ApiRateLimitWindow",
+    "ApiRateLimits",
+    "CodexPlanCredits",
+    "CodexPlanLimit",
+    "CodexPlanSpendLimit",
+    "CodexPlanUsage",
+    "CodexPlanWindow",
+]
