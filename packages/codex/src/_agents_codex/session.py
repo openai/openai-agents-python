@@ -116,7 +116,7 @@ from .executor import (
     _path_uri as _path_uri,
     _writable_roots as _writable_roots,
 )
-from .history import RecordedTurn as RecordedTurn
+from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
     _FORM_MODES as _FORM_MODES,
@@ -2840,12 +2840,12 @@ class Session(Generic[ContextT, OutputT]):
             or checklist
             or mcp_tools
             or environment is not None
-            or any(isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in available)
+            or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
             or any(tool._bind is None for tool in tools)
         ):
             raise ValueError(
                 "CustomStorage preview does not support children, goals, checklist, "
-                "code mode, manual tools, native tools or environments"
+                "code mode, manual tools, standalone native tools or environments"
             )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
@@ -3945,6 +3945,7 @@ class Session(Generic[ContextT, OutputT]):
         self._resources_retired = False
         self._native_scope_failure: BaseException | None = None
         self._broken = False
+        self._history_context_retired = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
@@ -5832,6 +5833,70 @@ class Session(Generic[ContextT, OutputT]):
             return json.loads(result)
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
+
+    async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
+        """Read effective canonical response items from an idle Session.
+
+        ``limit`` returns the latest items; zero returns only revision and count.
+        The revision identifies the entire canonical input, including an omitted
+        prefix. This is distinct from projected ``items()`` and raw audit records.
+        """
+        self._check_callback_operation("read canonical history from its own Session")
+        self._check_idle_update()
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a nonnegative integer or None")
+
+        async def capture() -> CanonicalHistorySnapshot:
+            value = json.loads(await self._native._canonical_history(limit))
+            return CanonicalHistorySnapshot(
+                value["revision"], value["total"], tuple(value["items"])
+            )
+
+        return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def transact_history(
+        self,
+        *,
+        expected_revision: str,
+        keep: int,
+        items: Sequence[Mapping[str, Any]] = (),
+    ) -> str:
+        """Atomically retain a prefix and replace its suffix with native items.
+
+        Use a current ``history_snapshot().revision``. Core rejects a conflict,
+        invalid item batch or non-idle owner before committing. ``keep=0`` replaces
+        the effective conversation; append with ``keep=snapshot.total``. The
+        acknowledged replacement survives restore through canonical storage.
+        An uncertain persistence outcome retires this Session; close it and
+        restore from storage before continuing. Raw rollout audit records remain.
+        Child graphs, goals and pending work
+        must settle or use their dedicated APIs before editing history.
+        """
+        self._check_callback_operation("edit canonical history from its own Session")
+        self._check_idle_update()
+        if not isinstance(expected_revision, str) or not expected_revision:
+            raise ValueError("expected_revision must be nonempty text")
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
+            raise ValueError("keep must be a nonnegative integer")
+        captured = json.dumps(list(items))
+
+        async def replace() -> str:
+            value = json.loads(
+                await self._native._transact_history(expected_revision, keep, captured)
+            )
+            if value.get("outcome") == "uncertain":
+                self._history_context_retired = True
+                self._broken = True
+                self._model_context_snapshots.clear()
+                raise NativeError(
+                    "Canonical history commit outcome is uncertain; close and restore the Session"
+                )
+            self._model_context_snapshots.clear()
+            return str(value["revision"])
+
+        return await self._join_mutation(asyncio.create_task(replace()))
 
     async def model_context(self) -> ModelContextSnapshot:
         """Read the current native model context of an idle Session.
@@ -11845,7 +11910,12 @@ class Session(Generic[ContextT, OutputT]):
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:
                     await asyncio.gather(self._checkpoint_task, return_exceptions=True)
-                if state is None or not state.restored_pending:
+                # History retirement holds the exclusive native context fence
+                # after idle admission without children/background execution.
+                # Its native owner still needs close, but cannot accept stop work.
+                if not self._history_context_retired and (
+                    state is None or not state.restored_pending
+                ):
                     try:
                         # Reserve the graph fence synchronously, before closing
                         # interception releases any native result to Core.
@@ -11931,7 +12001,11 @@ class Session(Generic[ContextT, OutputT]):
                     if graph_stopped and (state is None or state.deferred_close is None):
                         await asyncio.gather(*interrupts, return_exceptions=True)
                     try:
-                        if self._executor is not None and not self._executor_termination_attempted:
+                        if (
+                            self._executor is not None
+                            and not self._executor_termination_attempted
+                            and not self._history_context_retired
+                        ):
                             self._executor_termination_attempted = True
                             await self._native._terminate_executor_processes()
                     except BaseException as error:

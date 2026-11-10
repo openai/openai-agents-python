@@ -15,6 +15,7 @@ preview before retention. A call interrupted before Core records a completion
 may have no item.
 """
 
+from dataclasses import dataclass as dataclass
 from typing import Any as Any, Literal as Literal
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
@@ -35,6 +36,20 @@ from .response_facts import (
     TextProbabilitiesFact as TextProbabilitiesFact,
 )
 from .turn_receipt import TurnReceipt as TurnReceipt
+
+
+@dataclass(frozen=True)
+class CanonicalHistorySnapshot:
+    """Detached effective canonical response items and their content revision.
+
+    ``total`` counts the full canonical input, even for a bounded tail read.
+    Canonical edits preserve raw rollout audit records; they do not erase bytes
+    from storage. Tool output already truncated by Core cannot be recovered.
+    """
+
+    revision: str
+    total: int
+    items: tuple[dict[str, Any], ...]
 
 
 class ReceivedInputTokensDetails(TypedDict, total=False):

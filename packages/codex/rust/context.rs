@@ -418,7 +418,7 @@ fn original_envelopes(
         .collect()
 }
 
-fn check_pairs(
+pub(crate) fn check_pairs(
     items: &[codex_protocol::models::ResponseItem],
     indices: &[usize],
 ) -> anyhow::Result<()> {

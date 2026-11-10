@@ -367,7 +367,11 @@
     {
       "path": "0211-native-computer-guardian.patch",
       "sha256": "70a07e4e7e46d5e0ae324fd80d53da0b18a9e944287a7cb59f8bd5e2e05a3887"
+    },
+    {
+      "path": "0170-canonical-history-transactions.patch",
+      "sha256": "e88a2db32ae35587399c2eeae49284f96ef83383399b26f60961f9748d74e779"
     }
   ],
-  "result_tree": "eaad32e5c242894023714aa8358863e01442c82f"
+  "result_tree": "636c3698d8a9d25684981e8bbccfee448c25c935"
 }

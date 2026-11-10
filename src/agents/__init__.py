@@ -22,8 +22,12 @@ if TYPE_CHECKING:
     )
     from .canonical_storage import (
         CustomStorage as CustomStorage,
+        EncryptedSessionStore as EncryptedSessionStore,
+        MongoDBSessionStore as MongoDBSessionStore,
+        RedisSessionStore as RedisSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
+        SQLAlchemySessionStore as SQLAlchemySessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
@@ -236,9 +240,13 @@ _MODULES = {
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
+    "EncryptedSessionStore": ".canonical_storage",
+    "MongoDBSessionStore": ".canonical_storage",
+    "RedisSessionStore": ".canonical_storage",
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",
+    "SQLAlchemySessionStore": ".canonical_storage",
     "LocalRecoveryRequired": ".recovery",
     "ReconciledCall": ".recovery",
     "UncertainCall": ".recovery",

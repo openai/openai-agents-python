@@ -1,0 +1,140 @@
+"""Authenticated encryption for canonical SessionStore snapshots."""
+
+from __future__ import annotations
+
+import base64
+import json
+from typing import TYPE_CHECKING, Any
+
+from ._public import preserve_module_identity as _preserve_module_identity
+
+if TYPE_CHECKING:
+    from cryptography.fernet import Fernet
+
+
+class EncryptedSessionStore:
+    """Encrypt opaque native snapshots while preserving backend ownership.
+
+    The backend retains its existing durability and fencing guarantees. Revision
+    and write identifiers remain visible; snapshot contents use authenticated
+    per-session Fernet encryption. Supply a high-entropy master key, not a
+    password: HKDF does not harden passwords. Keep the key outside the backend.
+
+    Expiration is deliberately unsupported: expiring a canonical snapshot would
+    discard the conversation rather than filter individual history items. This
+    wrapper does not migrate Classic encrypted item stores or rotate keys.
+    """
+
+    def __init__(self, backend: SessionStore, *, encryption_key: str) -> None:
+        if not isinstance(backend, SessionStore):
+            raise TypeError("backend must implement SessionStore")
+        if not isinstance(encryption_key, str) or not encryption_key:
+            raise ValueError("encryption_key must be nonempty text")
+        # Import the optional encryption dependency only when selecting this adapter.
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        self.backend = backend
+        self._fernet_type = Fernet
+        self._hashes = hashes
+        self._hkdf_type = HKDF
+        try:
+            decoded = base64.urlsafe_b64decode(encryption_key)
+        except (ValueError, TypeError):
+            decoded = b""
+        self._key = decoded if len(decoded) == 32 else encryption_key.encode("utf-8")
+
+    def _cipher(self, session_id: str) -> Fernet:
+        derived = self._hkdf_type(
+            algorithm=self._hashes.SHA256(),
+            length=32,
+            salt=session_id.encode("utf-8"),
+            info=b"agents.canonical-session-store.hkdf.v1",
+        ).derive(self._key)
+        return self._fernet_type(base64.urlsafe_b64encode(derived))
+
+    def _decrypt(self, session_id: str, stored: str) -> str:
+        envelope: Any = None
+        document: Any = None
+        payload = b""
+        text = ""
+        try:
+            envelope = json.loads(stored)
+            if envelope["format"] != "agents.canonical.encrypted.v1":
+                raise ValueError
+            payload = self._cipher(session_id).decrypt(envelope["ciphertext"].encode("ascii"))
+            text = payload.decode("utf-8")
+            document = json.loads(text)
+            if (
+                document["revision"] != envelope["revision"]
+                or document["write_id"] != envelope["write_id"]
+            ):
+                raise ValueError
+            return text
+        except Exception:
+            pass
+        finally:
+            # Failed authentication must not retain data in completed frames.
+            envelope = document = None
+            payload = b""
+            text = stored = ""
+        # Raise outside the handler so raw crypto/parse exceptions are detached.
+        raise RuntimeError("Encrypted canonical storage authentication failed")
+
+    def acquire(self, session_id: str) -> str:
+        return self.backend.acquire(session_id)
+
+    def read(self, session_id: str, token: str) -> str | None:
+        stored = self.backend.read(session_id, token)
+        try:
+            return None if stored is None else self._decrypt(session_id, stored)
+        finally:
+            stored = None
+
+    def commit(
+        self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str
+    ) -> None:
+        document: Any = None
+        stored: str | None = None
+        previous = encrypted = ""
+        try:
+            document = json.loads(payload)
+            if document["revision"] != expected_revision + 1 or document["write_id"] != write_id:
+                raise RuntimeError("Invalid canonical revision")
+            stored = self.backend.read(session_id, token)
+            if stored is not None:
+                previous = self._decrypt(session_id, stored)
+                if json.loads(previous)["write_id"] == write_id:
+                    if previous != payload:
+                        raise RuntimeError("Canonical storage write identifier conflict")
+                    # Reuse the accepted envelope after a lost commit acknowledgement.
+                    self.backend.commit(session_id, token, expected_revision, write_id, stored)
+                    return
+            encrypted = json.dumps(
+                {
+                    "format": "agents.canonical.encrypted.v1",
+                    "revision": document["revision"],
+                    "write_id": write_id,
+                    "ciphertext": self._cipher(session_id)
+                    .encrypt(payload.encode("utf-8"))
+                    .decode("ascii"),
+                },
+                separators=(",", ":"),
+            )
+            self.backend.commit(session_id, token, expected_revision, write_id, encrypted)
+        finally:
+            document = stored = None
+            payload = previous = encrypted = ""
+
+    def flush(self, session_id: str, token: str) -> None:
+        self.backend.flush(session_id, token)
+
+    def release(self, session_id: str, token: str) -> None:
+        self.backend.release(session_id, token)
+
+
+# Bind deferred annotations after the adapter exists, including leaf-first imports.
+from .canonical_storage import SessionStore  # noqa: E402
+
+_preserve_module_identity(globals(), "agents.canonical_storage")
