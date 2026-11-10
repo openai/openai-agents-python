@@ -2,7 +2,7 @@
 
 Use `NativeAgents` for workspace delegation within one conversation. Native children share the parent's executor workspace and selected tools, so give each child a task that can safely run alongside the others.
 
-`NativeAgents` requires an `Environment` with `exec_command`, `write_stdin`, and `apply_patch`, even when the delegated task only calls Python or MCP tools. For delegation without an executor workspace, call separately configured `Agent` instances and let your application coordinate their inputs, results, and lifetimes.
+`NativeAgents` requires an `Environment` with `exec_command`, `write_stdin`, and `apply_patch`, even when the delegated task only calls Python or MCP tools. For delegation without an executor workspace, call separately configured `Agent` instances and let your application coordinate their inputs, results, and lifetimes. Matching development builds have also been supporting [Agent handoffs within the same conversation](sessions.md#hand-off-the-conversation-to-another-agent), using `Agent.handoffs`, `session.get_active_agent()` and idle `session.update(agent=...)`.
 
 Before running the examples:
 

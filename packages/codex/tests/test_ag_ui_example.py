@@ -7,6 +7,7 @@ run through the actual native runtime. Install examples/codex/ag_ui/requirements
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -894,3 +895,39 @@ async def test_child_cancel_uses_settled_native_outcome_and_preserves_live_sibli
             assert len(peer.child_requests["alpha"]) == 1
             assert len(peer.child_requests["beta"]) == 2
             await requests.aclose()
+
+
+@pytest.mark.parametrize("mode", ["plain", "empty", "typed"])
+@pytest.mark.parametrize(
+    "observed", [False, True], ids=["missing-commentary", "observed-commentary"]
+)
+async def test_completion_requires_commentary_even_with_typed_final(responses, mode, observed):
+    from agents import PromptedOutput
+
+    selected = PromptedOutput(str) if mode == "typed" else None
+    output = "" if mode == "empty" else "Final answer"
+    raw = json.dumps(output) if mode == "typed" else output
+    commentary = assistant_output("Retained commentary")
+    commentary["item"].update(id="ui_commentary", phase="commentary")
+    events = text_response("ui_commentary", "Retained commentary") if observed else [commentary]
+    if observed:
+        events[-1]["item"]["phase"] = "commentary"
+    if mode in {"typed", "empty"}:
+        final = assistant_output(raw)
+        final["item"].update(id="ui_final", phase="final_answer")
+        events.append(final)
+    else:
+        final_events = text_response("ui_final", raw)
+        final_events[-1]["item"]["phase"] = "final_answer"
+        events.extend(final_events)
+    responses.respond(*events)
+    async with Agent(instructions="Reply.", provider=provider(responses)).session() as session:
+        turn = await session.submit("Reply.", output_type=selected)
+        frames = await read_body(stream_turn(turn, session=session, output_type=selected))
+        assert (await turn.get_result()).final_output == output
+        finish = observed and mode != "empty"
+        assert isinstance(frames[-1], agui.RunFinishedEvent) is finish
+        if not finish:
+            assert isinstance(frames[-1], agui.RunErrorEvent)
+            assert frames[-1].code == "resync_required"
+        assert len(responses.requests) == 1

@@ -155,8 +155,10 @@ async def test_history_rejection_drops_media_from_sdk_traceback(
 
 @pytest.mark.parametrize(
     "text",
-    ["a" * (2 * 1024 * 1024 + 1), "\x00" * 350_000],
-    ids=["ascii-budget", "escaped-budget"],
+    [
+        pytest.param("a" * (2 * 1024 * 1024 + 1), id="oversized-plain-text"),
+        pytest.param("\x00" * 350_000, id="json-escape-expansion"),
+    ],
 )
 @pytest.mark.parametrize("outer", [tuple, UserList])
 @pytest.mark.parametrize("mapping", [dict, MappingProxyType, UserDict])

@@ -292,6 +292,27 @@ The policy accepts `allowed_domains` and `denied_domains`. A denial takes preced
 
 On a macOS executor, `NetworkPolicy(allowed_domains=("api.example.com",))` permits that host through the managed proxy without granting Unix socket access.
 
+### Allow outbound public hosts
+
+Matching [development builds](installation.md#preview-availability) have been providing `NetworkPolicy.allow_all()`. The `0.24.0-alpha.7` wheel has not been including this factory. The factory has been selecting the existing `allowed_domains=("**",)` public-host wildcard, with explicit denials retaining precedence. Unix-socket access and local binding have been requiring separate choices.
+
+This declaration has been enabling the required socket grant for a job-private Linux executor with an existing `/workspace` directory:
+
+```python
+from agents import Environment, NetworkPolicy
+
+environment = Environment.local(
+    cwd="/workspace",
+    tools=["exec_command"],
+    network=NetworkPolicy.allow_all(
+        denied_domains=["blocked.example.com"],
+        allow_all_unix_sockets=True,
+    ),
+)
+```
+
+The wildcard has been permitting uploads and downloads to public hosts through the managed proxy. Linux has been requiring `allow_all_unix_sockets=True` for every explicit network policy, including this factory. That grant has been permitting every reachable Unix socket, so the application has been retaining responsibility for executor isolation. On macOS, `NetworkPolicy.allow_all()` has been allowing public hosts without the socket grant. Local binding has been requiring the separate `allow_local_binding=True` choice.
+
 ### Grant local access
 
 On Linux and macOS executors, `allow_all_unix_sockets=True` grants access to every reachable Unix socket. Use this grant only on an executor private to the job. Keep every socket the job does not need out of reach. The SDK rejects grants for individual socket paths.

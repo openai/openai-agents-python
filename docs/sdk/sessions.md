@@ -206,13 +206,37 @@ The script prints text deltas as they arrive, then prints the final answer after
 
 Use `session.events()` to observe the whole Session until it ends. Session-wide lifecycle and gap records do not identify a submission.
 
-Observations are passive, and the SDK retains a limited number. A slow reader can receive `EventGap` after the SDK drops records. Text deltas can differ from final output. Use the completed result and canonical history as the source of truth.
+The default observation buffer has been retaining a limited suffix. Slow readers have been receiving `EventGap` after the SDK drops records. Observations have been providing passive progress; completed results and canonical history have been providing accepted output.
+
+Matching [development builds](installation.md#preview-availability) have been accepting the explicit choices `observation_retention="bounded"` and `observation_retention="all"`. The `0.24.0-alpha.7` wheel has not been accepting this keyword. Full retention has been supporting late readers:
+
+```python
+async with agent.session(observation_retention="all") as session:
+    turn = await session.submit("Explain the result.")
+    result = await turn.get_result()
+    async for event in turn.events(after=0):
+        print(event.type, event.sequence)
+    print(result.final_output)
+```
+
+Full retention has been keeping every emitted observation in memory while Session references remain reachable. Memory use has been growing with emitted payloads. Source gaps have still been appearing when the runtime cannot supply an observation; full retention has not been reconstructing missing source records. Text deltas have also been preceding final output validation.
+
+The same development-build option has been supporting late observation after an asynchronous one-shot run. This fragment has been keeping the run and reader on the same event loop:
+
+```python
+result = await agent.run("Explain the result.", observation_retention="all")
+async for event in result.turn.events():
+    print(event.type, event.sequence)
+print(result.final_output)
+```
+
+`run_sync()` has been returning a `Completed` result for synchronous callers. Callers have been retaining access to its `final_output`, `thread_usage`, and optional `state` after return. Its Turn has been retaining its opening-loop ownership, so a new `asyncio.run()` call has not been providing a supported way to read that Turn's observations.
 
 `TurnFinished` marks the end of one native step. Accepted steering can start a continuation after that step. Use `await turn.get_result()` to wait for the captured root and its continuations, including when observations have been dropped.
 
 ### Reconnect an observer
 
-Record `event.sequence` to resume an observer with `events(after=last_seen)`. The sequence belongs to one live Session and its in-memory buffer. It is not a durable restart token. After reopening from a profile or checkpoint, start a new cursor and read canonical history for earlier work.
+Record `event.sequence` to resume an observer with `events(after=last_seen)`. The sequence belongs to one live Session and its in-memory buffer. It is not a durable restart token. Reopening from a profile or checkpoint has been starting a fresh buffer and sequence. Checkpoints have not been storing the retention choice. Each new opening has been accepting its own retention setting; canonical history has been retaining earlier conversation records.
 
 This async helper reads one record, then disconnects only its reader. Call it again with the returned sequence to resume on the same open `session`:
 
@@ -372,7 +396,7 @@ Interpret the records as follows:
 
 Dispatch can precede encoding failure or any socket write. It does not prove provider receipt, success, or billing. The observations cover root sampling, including separate output-correction roots with their parent submission link. They exclude native children, compaction, warmup, and background or reviewer requests. Restored manual work emits fresh events; earlier dispatch events are not replayed.
 
-Events are bounded and best effort. Cancellation or retirement can suppress a link even when history retains the response. A missing join stays unknown. Retained responses do not guarantee complete attempt coverage and are not a billing ledger. This example prints identifiers and counters; apply your application's data policy before logging them.
+Event readers have been following the selected retention policy and receiving best-effort source records. Cancellation or retirement can suppress a link even when history retains the response. A missing join stays unknown. Retained responses do not guarantee complete attempt coverage and are not a billing ledger. This example prints identifiers and counters; apply your application's data policy before logging them.
 
 ## Failures and recovery
 
@@ -411,6 +435,41 @@ These types are public imports from `agents`. `InteractionRequired` can carry a 
 ## Update tools, instructions and model settings
 
 Declare the available tools when you open the Session. By default, the Session uses the Agent's tools. `agent.session(tools=[...])` replaces that opening tool list for this Session. Include `NativeAgents()` in the list if this Session needs subagents.
+
+### Hand off the conversation to another Agent
+
+Matching [development builds](installation.md#preview-availability) have been supporting a captured graph of native Agents through `Agent.handoffs`. This feature has not been shipping in `0.24.0-alpha.7`. Graph handoffs have been continuing the same Session conversation under a separately configured Agent; [native children](delegation.md) have been supporting independent child turns in a shared workspace.
+
+This async fragment has been declaring the original target before opening, then switching Agents while idle:
+
+```python
+from agents import Agent
+
+billing = Agent(
+    name="billing",
+    model="gpt-5.5",
+    instructions="Answer billing questions using the conversation so far.",
+)
+triage = Agent(
+    name="triage",
+    model="gpt-5.5",
+    instructions="Record the account label and answer briefly.",
+    handoffs=[billing],
+)
+async with triage.session() as session:
+    first = await session.submit("My account label is atlas.")
+    await first.get_result()
+    await session.update(agent=billing)
+    assert await session.get_active_agent() is billing
+    second = await session.submit("What account label did I give you?")
+    print((await second.get_result()).final_output)
+```
+
+The SDK has been capturing reachable declarations at opening and exposing model-selected handoff tools for declared targets. `get_active_agent()` has been returning the original Agent object currently selected in native history. `update(agent=...)` has been accepting one captured Agent in a separate idle update; a same-named replacement object has not been acquiring that identity.
+
+Graph Agents have been sharing the Session provider, programmatic-tool-calling mode, compatible output mode/schema/wrapping, and native runtime grants. Each target has been supplying its captured instructions, model/settings, callbacks, and default tools. Explicit per-operation tool selections have been retaining the original operation's ceiling across handoffs. Omitted selections have been inheriting the destination's defaults, and `tools=[]` has been withholding model tools.
+
+Portable restore has been requiring the original graph root, even when another Agent had been active at capture. Reconstructed caller-supplied Agents have been supplying current callbacks and bindings through a matching graph. Saved names have not been restoring executable callbacks or granting new tools. The restored active Agent has been resolving to its corresponding object in that current graph.
 
 ### Update default tools
 
