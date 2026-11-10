@@ -12,7 +12,7 @@ import pytest
 from agents import Agent, Environment
 from agents.observation import TurnStarted
 from tests.native_fixtures import assistant_output, function_call, responses as responses
-from tests.test_native_agent import provider
+from tests.test_native_agent import function_declarations, provider
 
 
 async def test_project_guidance_requires_an_executor(responses) -> None:
@@ -124,14 +124,16 @@ async def test_guidance_tool_refs_use_the_opening_grant(
                 await session.submit("Answer.", tools=[ToolRef(name, "functions")])
             ).get_result()
             assert completed.final_output == "selected"
-            assert {tool.get("name") for tool in responses.requests[0].get("tools", [])} == {name}
+            assert {tool.get("name") for tool in function_declarations(responses.requests[0])} == {
+                name
+            }
             assert (
                 await (await session.submit("Answer.", tools=[])).get_result()
             ).final_output == "empty"
-            assert not responses.requests[1].get("tools")
+            assert not function_declarations(responses.requests[1])
             assert (
                 await (await session.submit("Answer.", tools=[environment])).get_result()
             ).final_output == "workspace"
             assert {"read_text_file", "view_image"}.issubset(
-                {tool.get("name") for tool in responses.requests[2].get("tools", [])}
+                {tool.get("name") for tool in function_declarations(responses.requests[2])}
             )
