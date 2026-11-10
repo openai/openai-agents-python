@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "00e591916889c3ed1ef82cde882f8606a41c7ea0",
+  "baseline_commit": "69245714c2a12282041cd9f6461fd494284ccaf2",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -3513,7 +3513,7 @@
       "agents.classic.sandbox.session.sandbox_client": {
         "declarations": [
           "ClientOptionsT = TypeVar('ClientOptionsT')",
-          "class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):\n    backend_id: str\n    supports_default_options: bool = False\n    _dependencies: Dependencies | None = None\n\n    def resolve_trusted_manifest_for_resume(self, manifest: Manifest, options: ClientOptionsT) -> Manifest:\n        pass\n\n    @abc.abstractmethod\n    async def create(self, *, snapshot: SnapshotSpec | SnapshotBase | None=None, manifest: Manifest | None=None, options: ClientOptionsT) -> SandboxSession:\n        pass\n\n    @abc.abstractmethod\n    async def delete(self, session: SandboxSession) -> SandboxSession:\n        pass\n\n    @abc.abstractmethod\n    async def resume(self, state: SandboxSessionState) -> SandboxSession:\n        pass\n\n    @redact_mount_error_data_sync\n    def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:\n        pass\n\n    @abc.abstractmethod\n    def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:\n        pass"
+          "class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):\n    backend_id: str\n    supports_default_options: bool = False\n    _dependencies: Dependencies | None = None\n\n    async def assert_borrowed_session_authority(self, session: SandboxSession, options: ClientOptionsT) -> None:\n        pass\n\n    def resolve_trusted_manifest_for_resume(self, manifest: Manifest, options: ClientOptionsT) -> Manifest:\n        pass\n\n    @abc.abstractmethod\n    async def create(self, *, snapshot: SnapshotSpec | SnapshotBase | None=None, manifest: Manifest | None=None, options: ClientOptionsT) -> SandboxSession:\n        pass\n\n    @abc.abstractmethod\n    async def delete(self, session: SandboxSession) -> SandboxSession:\n        pass\n\n    @abc.abstractmethod\n    async def resume(self, state: SandboxSessionState) -> SandboxSession:\n        pass\n\n    @redact_mount_error_data_sync\n    def serialize_session_state(self, state: SandboxSessionState) -> dict[str, object]:\n        pass\n\n    @abc.abstractmethod\n    def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:\n        pass"
         ],
         "exports": {},
         "imports": [

@@ -964,9 +964,14 @@ async def test_borrowed_vercel_uses_current_provider_manifest_defaults() -> None
     assert connected == []
 
 
-@pytest.mark.parametrize("change", ["unchanged", "removed", "source", "read_only"])
+@pytest.mark.parametrize(
+    "change",
+    ["unchanged", "removed", "source", "read_only", "network_tightened", "network_unchanged"],
+)
 async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, change: str) -> None:
     from agents.classic.sandbox.sandboxes.docker import (
+        DockerSandboxClient,
+        DockerSandboxClientOptions,
         DockerSandboxSession,
         DockerSandboxSessionState,
     )
@@ -981,7 +986,11 @@ async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, c
         attrs = {
             "Mounts": [
                 {"Type": "bind", "Source": str(host), "Destination": "/mnt/trusted", "RW": True}
-            ]
+            ],
+            "HostConfig": {"NetworkMode": "none" if change == "network_unchanged" else "bridge"},
+            "NetworkSettings": {
+                "Networks": {} if change == "network_unchanged" else {"bridge": {}}
+            },
         }
 
         def reload(self) -> None:
@@ -996,6 +1005,7 @@ async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, c
                 manifest=manifest,
                 image="synthetic",
                 container_id="synthetic-container",
+                network_mode="none" if change == "network_unchanged" else None,
             ),
         )
     )
@@ -1014,15 +1024,20 @@ async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, c
         events.append("connect")
         yield Environment(url="wss://executor.invalid", cwd="/workspace")
 
+    if change.startswith("network_"):
+        client = DockerSandboxClient(None)
+        options = DockerSandboxClientOptions(image="synthetic", network_mode="none")
+    else:
+        options = Options()
     source = sandbox_environment(
-        client, manifest=current, options=Options(), session=live, connect=connect
+        client, manifest=current, options=options, session=live, connect=connect
     )
-    if change == "unchanged":
+    if change in {"unchanged", "network_unchanged"}:
         async with source:
             pass
         assert events.count("connect") == 1
     else:
-        with pytest.raises(ValueError, match="bind mounts|path grant mount"):
+        with pytest.raises(ValueError, match="bind mounts|path grant mount|network configuration"):
             async with source:
                 pytest.fail("Changed host authority must fail before gateway connection")
         assert "connect" not in events and not {"close", "delete"}.intersection(events)

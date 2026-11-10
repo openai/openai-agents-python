@@ -111,6 +111,12 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
     supports_default_options: bool = False
     _dependencies: Dependencies | None = None
 
+    async def assert_borrowed_session_authority(
+        self, session: SandboxSession, options: ClientOptionsT
+    ) -> None:
+        """Validate current provider policy before a borrowed resource is connected."""
+        return None
+
     def resolve_trusted_manifest_for_resume(
         self, manifest: Manifest, options: ClientOptionsT
     ) -> Manifest:
