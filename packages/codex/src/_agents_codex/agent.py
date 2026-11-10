@@ -773,7 +773,6 @@ class Agent(Generic[ContextT, OutputT]):
     """
 
     instructions: str
-    realtime: RealtimeAgentConfig | None
     name: str | None
     tools: tuple[Tool[ContextT], ...]
     handoffs: tuple[
@@ -788,6 +787,7 @@ class Agent(Generic[ContextT, OutputT]):
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
     decisions: DecisionProvider | None
+    realtime: RealtimeAgentConfig | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -849,7 +849,6 @@ class Agent(Generic[ContextT, OutputT]):
         self: Agent[ContextT, str],  # pyright: ignore[reportInvalidTypeVarUse]
         *,
         instructions: str,
-        realtime: RealtimeAgentConfig | None = None,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         handoffs: Sequence[
@@ -865,6 +864,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     @overload
@@ -872,7 +872,6 @@ class Agent(Generic[ContextT, OutputT]):
         self,
         *,
         instructions: str,
-        realtime: RealtimeAgentConfig | None = None,
         name: str | None = None,
         output_type: OutputSpec[OutputT],
         tools: Sequence[Tool[ContextT]] | None = None,
@@ -888,13 +887,13 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None: ...
 
     def __init__(
         self,
         *,
         instructions: str,
-        realtime: RealtimeAgentConfig | None = None,
         name: str | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         handoffs: Sequence[
@@ -910,6 +909,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        realtime: RealtimeAgentConfig | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")

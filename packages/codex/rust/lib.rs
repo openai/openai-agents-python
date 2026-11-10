@@ -2008,6 +2008,22 @@ impl NativeThread {
         })
     }
 
+    fn _discard_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            agent_profiles::discard_realtime_graph(&inner.thread, &generation, &receipt)
+                .map_err(py_error)
+        })
+    }
+
     fn _restore_realtime_agent_graph<'py>(
         &self,
         py: Python<'py>,

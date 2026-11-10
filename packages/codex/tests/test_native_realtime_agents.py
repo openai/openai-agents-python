@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
+from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession, realtime_handoff
 from tests._asyncio import timeout
 from tests.test_native_realtime import realtime_peer as realtime_peer
 
@@ -290,6 +290,53 @@ async def test_acknowledged_session_overrides_survive_voice_agent_change(realtim
         assert refreshed["session"]["instructions"] == instructions
         assert refreshed["session"]["prompt"] == prompt
         assert await voice.get_active_agent() is target
+
+
+async def test_failed_configuration_does_not_exhaust_voice_agent_graphs(realtime_peer, monkeypatch):
+    peer = realtime_peer
+    monkeypatch.setattr(RealtimeSession, "_HANDOFF_LIMIT", 3)
+
+    @function_tool
+    def retained_lookup() -> str:
+        return "retained-result"
+
+    def fail(_):
+        raise RuntimeError("Configuration failed")
+
+    accepted = Agent(name="Accepted", instructions="Keep me", tools=[retained_lookup])
+    child = Agent(name="Child", instructions="Unused handoff target")
+    rejected = Agent(
+        name="Rejected",
+        instructions="Never published",
+        realtime=RealtimeAgentConfig(instructions=fail),
+        handoffs=[realtime_handoff(child)],
+    )
+    replacement = Agent(name="Replacement", instructions="Valid replacement")
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-configuration-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Opening backend", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        await voice.update_agent(accepted)
+        start = len(peer.frames)
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="^Configuration failed$"):
+                await voice.update_agent(rejected)
+            assert await voice.get_active_agent() is accepted
+        assert all(frame["type"] != "session.update" for frame in peer.frames[start:])
+
+        await peer.function("retained_lookup", {}, "after-rejected-graphs")
+        result = await peer.frame(
+            lambda frame: frame.get("item", {}).get("call_id") == "after-rejected-graphs"
+        )
+        assert result["item"]["output"] == "retained-result"
+        await voice.update_agent(replacement)
+        assert await voice.get_active_agent() is replacement
 
 
 async def test_agent_configuration_uses_override_accepted_during_callback(realtime_peer):

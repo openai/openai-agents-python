@@ -1419,7 +1419,9 @@ class RealtimeSession:
         Existing issued calls keep their original callbacks and approval source.
         The new Agent controls direct voice tools, instructions and handoffs.
         It must share the Session's provider, output contract and runtime grants.
-        Graph identities and callbacks remain retained until voice cleanup.
+        Accepted graph identities and callbacks remain retained until voice cleanup.
+        A configuration callback failure leaves the acknowledged Agent active.
+        A failure during native publication closes the voice session.
 
         The background_agent bridge continues using the caller-owned Session
         and its original backend tool selection, including acknowledged Session
@@ -1485,24 +1487,8 @@ class RealtimeSession:
                     self._session._profile_generation_high_water = max(
                         self._session._profile_generation_high_water, *catalogs.values()
                     )
-                    self._has_agent_guardrails = self._has_agent_guardrails or any(
-                        runtime.profile.declaration.realtime is not None
-                        and runtime.profile.declaration.realtime.output_guardrails
-                        for runtime in runtimes.values()
-                    )
-                    self._has_agent_prompt = self._has_agent_prompt or any(
-                        runtime.profile.declaration.realtime is not None
-                        and runtime.profile.declaration.realtime.prompt is not None
-                        for runtime in runtimes.values()
-                    )
                     self._check_live()
-                    previous = self._direct_tools
-                    self._direct_tools = None
-                    try:
-                        await self._apply_profile(None, active)
-                    except BaseException:
-                        self._direct_tools = previous
-                        raise
+                    await self._apply_profile(None, active, unpublished_profiles=tuple(runtimes))
 
                 await _join(asyncio.create_task(admit()))
 
@@ -1522,6 +1508,15 @@ class RealtimeSession:
         if self._voice_target is not None:
             return self._session._voice_profiles[self._voice_target["profile_id"]].profile.agent
         return await self._session.get_active_agent()
+
+    def _forget_voice_profiles(self, keys: Iterable[str]) -> None:
+        for key in keys:
+            runtime = self._session._voice_profiles.pop(key, None)
+            if runtime is not None:
+                catalog_key = (key, runtime.catalog.generation)
+                self._session._profile_catalogs.pop(catalog_key, None)
+                self._session._catalog_bindings.pop(catalog_key, None)
+            self._voice_profile_ids.discard(key)
 
     async def approve_hosted_mcp(
         self,
@@ -1883,12 +1878,7 @@ class RealtimeSession:
         await self._cancel_work()
         if self._voice_registry_used:
             await self._session._native._restore_realtime_agent_graph(self._generation)
-            for key in self._voice_profile_ids:
-                runtime = self._session._voice_profiles.pop(key, None)
-                if runtime is not None:
-                    self._session._profile_catalogs.pop((key, runtime.catalog.generation), None)
-                    self._session._catalog_bindings.pop((key, runtime.catalog.generation), None)
-            self._voice_profile_ids.clear()
+            self._forget_voice_profiles(tuple(self._voice_profile_ids))
             self._voice_target = None
             self._voice_registry_used = False
         if self._session._realtime is self:
@@ -2597,27 +2587,49 @@ class RealtimeSession:
         target: dict[str, Any] | None,
         *,
         delegation_id: str | None = None,
+        unpublished_profiles: tuple[str, ...] | None = None,
     ) -> None:
         source_profile = None
         source_snapshot = None
-        if target is not None and target["profile_id"] in self._voice_profile_ids:
-            source_profile = self._session._voice_profiles[target["profile_id"]].profile
-            source_snapshot = json.loads(
-                await self._session._native._realtime_agent_source(
-                    self._generation, json.dumps(target)
+        has_new_guardrails = False
+        has_new_prompt = False
+        try:
+            for key in unpublished_profiles or ():
+                defaults = self._session._voice_profiles[key].profile.declaration.realtime
+                if defaults is not None:
+                    has_new_guardrails |= bool(defaults.output_guardrails)
+                    has_new_prompt |= defaults.prompt is not None
+            if target is not None and target["profile_id"] in self._voice_profile_ids:
+                source_profile = self._session._voice_profiles[target["profile_id"]].profile
+                source_snapshot = json.loads(
+                    await self._session._native._realtime_agent_source(
+                        self._generation, json.dumps(target)
+                    )
                 )
+            instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
+                self._session,
+                self._instructions_override,
+                self._prompt_settings,
+                None if unpublished_profiles is not None else self._direct_tools,
+                target=target,
+                allow_missing=True,
+                reset_prompt=self._has_agent_prompt or has_new_prompt,
+                source_snapshot=source_snapshot,
+                source_profile=source_profile,
             )
-        instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
-            self._session,
-            self._instructions_override,
-            self._prompt_settings,
-            self._direct_tools,
-            target=target,
-            allow_missing=True,
-            reset_prompt=self._has_agent_prompt,
-            source_snapshot=source_snapshot,
-            source_profile=source_profile,
-        )
+        except BaseException as error:
+            if self._live and unpublished_profiles is not None:
+                assert target is not None
+                try:
+                    await self._session._native._discard_realtime_agent_graph(
+                        self._generation, json.dumps(target)
+                    )
+                except BaseException as cleanup_error:
+                    _retain_cleanup_error(error, cleanup_error, ())
+                    self._finish(cleanup_error)
+                else:
+                    self._forget_voice_profiles(unpublished_profiles)
+            raise
         async with self._configuration_lock:
             if not self._live:
                 return
@@ -2627,20 +2639,34 @@ class RealtimeSession:
                 instructions = self._instructions_override
             if instructions is not None:
                 update["instructions"] = instructions
-            # Core validates this exact committed target and waits for its receipt.
-            acknowledgement = await self._call(
-                "update",
-                update=update,
-                profile={
-                    "response_id": response_id,
-                    "delegation_id": delegation_id,
-                    "target": target,
-                    "function_tools": definitions,
-                    "expected_selection_id": selection_id,
-                },
-            )
-            if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
-                return
+            # Output can arrive as soon as the provider accepts the new source.
+            previous_guardrails = self._has_agent_guardrails
+            self._has_agent_guardrails |= has_new_guardrails
+            try:
+                acknowledgement = await self._call(
+                    "update",
+                    update=update,
+                    profile={
+                        "response_id": response_id,
+                        "delegation_id": delegation_id,
+                        "target": target,
+                        "function_tools": definitions,
+                        "expected_selection_id": selection_id,
+                    },
+                )
+                if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
+                    self._has_agent_guardrails = previous_guardrails
+                    return
+            except BaseException as error:
+                self._has_agent_guardrails = previous_guardrails
+                if unpublished_profiles is not None:
+                    # A failed native reply can leave publication uncertain.
+                    # Keep the sources until the voice owner closes.
+                    self._finish(error)
+                raise
+            if unpublished_profiles is not None:
+                self._direct_tools = None
+                self._has_agent_prompt |= has_new_prompt
             if source_profile is not None and target is not None:
                 self._voice_target = dict(target)
 

@@ -22,14 +22,24 @@ from tests.test_native_realtime_transports import CallPeer, call_peer as call_pe
 @pytest.mark.parametrize(
     "item",
     [
-        {"type": "function_call", "call_id": "old-call", "name": "old_tool", "arguments": "{}"},
+        {
+            "type": "function_call",
+            "call_id": "old-call",
+            "name": "old_tool",
+            "arguments": "{}",
+            "status": "completed",
+        },
         {"type": "function_call_output", "call_id": "old-call", "output": "old reply"},
-        {"type": "mcp_call", "server_label": "old-server", "name": "old_tool"},
+        {
+            "type": "mcp_call",
+            "server_label": "old-server",
+            "name": "old_tool",
+            "output": "old reply",
+        },
         {"type": "mcp_list_tools", "server_label": "old-server", "tools": []},
-        {"type": "mcp_approval_request", "server_label": "old-server", "name": "old_tool"},
         {"type": "mcp_approval_response", "approval_request_id": "old-request", "approve": True},
     ],
-    ids=["function", "function-output", "mcp-call", "mcp-catalog", "approval", "approval-response"],
+    ids=["function", "function-output", "mcp-call", "mcp-catalog", "approval-response"],
 )
 async def test_native_sip_deletes_unobserved_external_records_after_exact_ack(
     call_peer: CallPeer, item: dict[str, object]
@@ -108,6 +118,82 @@ async def test_native_sip_deletes_unobserved_external_records_after_exact_ack(
                     for frame in peer.frames[cursor:]
                 )
                 assert not peer.disconnected.is_set()
+            finally:
+                if not deleting.done():
+                    await voice.aclose()
+                await asyncio.gather(deleting, return_exceptions=True)
+
+
+async def test_native_sip_rechecks_external_function_completion_before_deletion(
+    call_peer: CallPeer,
+) -> None:
+    peer = call_peer
+    item = {
+        "id": "external-function",
+        "type": "function_call",
+        "call_id": "external-call",
+        "name": "other_controller_tool",
+        "arguments": "{}",
+        "status": "in_progress",
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-native-call-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            instructions="Preserve active external work.", provider=provider
+        ).session() as session,
+    ):
+        peer.sessions["rtc_external_function"] = await session.build_realtime_sip_config()
+        async with session.realtime(
+            config=RealtimeConfig(transport=RealtimeSIP("rtc_external_function"))
+        ) as voice:
+            assert peer.socket is not None
+            cursor = len(peer.frames)
+            deleting = asyncio.create_task(voice.delete_conversation_item(item["id"]))
+            unexpected_delete = asyncio.create_task(
+                peer.frame(lambda frame: frame["type"] == "conversation.item.delete", after=cursor)
+            )
+            try:
+                lookup = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                assert lookup["item_id"] == item["id"]
+                await peer.socket.send_json({"type": "conversation.item.retrieved", "item": item})
+                settled, _ = await asyncio.wait(
+                    [deleting, unexpected_delete], return_when=asyncio.FIRST_COMPLETED
+                )
+                assert deleting in settled and unexpected_delete not in settled
+                with pytest.raises(RuntimeError):
+                    await deleting
+            finally:
+                unexpected_delete.cancel()
+                if not deleting.done():
+                    await voice.aclose()
+                await asyncio.gather(deleting, unexpected_delete, return_exceptions=True)
+
+            assert not peer.disconnected.is_set()
+            cursor = len(peer.frames)
+            deleting = asyncio.create_task(voice.delete_conversation_item(item["id"]))
+            try:
+                lookup = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                assert lookup["item_id"] == item["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.retrieved", "item": {**item, "status": "completed"}}
+                )
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.delete", after=cursor
+                )
+                assert request["item_id"] == item["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.deleted", "item_id": item["id"]}
+                )
+                await deleting
             finally:
                 if not deleting.done():
                     await voice.aclose()

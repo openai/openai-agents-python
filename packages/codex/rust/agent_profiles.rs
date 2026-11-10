@@ -490,6 +490,25 @@ struct AgentProfiles {
 struct VoiceProfileRegistry {
     generation: String,
     previous: Option<Arc<AgentProfiles>>,
+    last_admission: Option<VoiceGraphAdmission>,
+}
+
+struct VoiceGraphAdmission {
+    receipt: AgentProfileReceipt,
+    previous: Option<Arc<AgentProfiles>>,
+}
+
+fn set_profiles(thread: &CodexThread, profiles: Option<Arc<AgentProfiles>>) {
+    match profiles {
+        Some(profiles) => {
+            thread.thread_extension_data().insert(profiles);
+        }
+        None => {
+            thread
+                .thread_extension_data()
+                .remove::<Arc<AgentProfiles>>();
+        }
+    }
 }
 
 async fn prepare_profile(
@@ -636,22 +655,28 @@ pub(crate) async fn admit_realtime_graph(
     let receipt = match captured {
         Ok(receipt) => receipt,
         Err(error) => {
-            match current {
-                Some(current) => {
-                    thread.thread_extension_data().insert(current);
-                }
-                None => {
-                    thread
-                        .thread_extension_data()
-                        .remove::<Arc<AgentProfiles>>();
-                }
-            }
+            set_profiles(thread, current);
+            return Err(error.into());
+        }
+    };
+    let (selection_id, function_tools) = match thread
+        .realtime_agent_source_selection(Some(generation), Some(&receipt))
+        .await
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            thread.release_realtime_agent_profile_source(generation, &receipt);
+            set_profiles(thread, current);
             return Err(error.into());
         }
     };
     thread.thread_extension_data().insert(VoiceProfileRegistry {
         generation: generation.to_owned(),
         previous: original,
+        last_admission: Some(VoiceGraphAdmission {
+            receipt: receipt.clone(),
+            previous: current,
+        }),
     });
     let catalogs = roster
         .iter()
@@ -662,12 +687,37 @@ pub(crate) async fn admit_realtime_graph(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let (selection_id, function_tools) = thread
-        .realtime_agent_source_selection(Some(generation), Some(&receipt))
-        .await?;
     Ok(
         json!({"active": receipt, "catalogs": catalogs, "selection_id": selection_id, "function_tools": function_tools, "generation_high_water": profiles.tools.generation_high_water()}),
     )
+}
+
+pub(crate) fn discard_realtime_graph(
+    thread: &CodexThread,
+    generation: &str,
+    receipt: &AgentProfileReceipt,
+) -> Result<()> {
+    let registry = thread
+        .thread_extension_data()
+        .get::<VoiceProfileRegistry>()
+        .context("Voice graph is unavailable")?;
+    ensure!(
+        registry.generation == generation,
+        "Voice graph belongs to another generation"
+    );
+    let admission = registry
+        .last_admission
+        .as_ref()
+        .filter(|admission| &admission.receipt == receipt)
+        .context("Voice graph does not match the last admission")?;
+    thread.release_realtime_agent_profile_source(generation, receipt);
+    set_profiles(thread, admission.previous.clone());
+    thread.thread_extension_data().insert(VoiceProfileRegistry {
+        generation: generation.to_owned(),
+        previous: registry.previous.clone(),
+        last_admission: None,
+    });
+    Ok(())
 }
 
 pub(crate) async fn restore_realtime_graph(
@@ -679,16 +729,7 @@ pub(crate) async fn restore_realtime_graph(
             registry.generation == generation,
             "Voice graph belongs to another generation"
         );
-        match &registry.previous {
-            Some(previous) => {
-                thread.thread_extension_data().insert(previous.clone());
-            }
-            None => {
-                thread
-                    .thread_extension_data()
-                    .remove::<Arc<AgentProfiles>>();
-            }
-        }
+        set_profiles(thread, registry.previous.clone());
         thread.release_realtime_agent_profile_sources(generation);
         thread
             .thread_extension_data()
