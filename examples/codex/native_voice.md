@@ -114,7 +114,7 @@ python examples/codex/native_realtime_adapter.py 'Explain a rainbow briefly' ada
 
 It implements the factory, incoming iterator, send, and cleanup methods with the `websockets` dependency from the `voice` extra. It forwards canonical frames unchanged to the native-selected endpoint and records a fixed window of PCM16 audio. It does not translate another model's protocol.
 
-Call `update()`, `approve_hosted_mcp()`, `delete_conversation_item()`, and `send_audio(..., commit=True)` from application code outside this owner's adapter callbacks. They need the same ordered transport and reject calls from its active callbacks. An adapter callback can submit nested text when no committed audio call is pending. Once a committed audio call is waiting or running, callbacks also reject nested input behind it. This includes a commit waiting to acquire the input lock.
+Call `update()`, `approve_hosted_mcp()`, `delete_conversation_item()`, `send_event()`, and `send_audio(..., commit=True)` from application code outside this owner's adapter callbacks. They share the ordered transport and reject calls from its active callbacks. A pending committed audio call, raw input-buffer event, or raw `response.create` also blocks nested input from adapter callbacks. This includes operations waiting to acquire the input lock.
 
 The native runtime still checks configuration acknowledgements, tools, ordering, and history. A translating adapter must implement the applicable [Realtime client events](https://developers.openai.com/api/reference/resources/realtime/client-events) and [server events](https://developers.openai.com/api/reference/resources/realtime/server-events), including configuration acknowledgements and actual response/item IDs. Replacing I/O does not bypass these checks.
 
@@ -183,13 +183,48 @@ async def main(image_path: str) -> None:
 asyncio.run(main(sys.argv[1]))
 ```
 
+### Send provider-wire events
+
+Inside an open voice context, `await voice.send_event(event)` sends a supported provider-wire event through the native owner. Core validates the event and preserves native tool and approval authority. This method accepts a JSON-compatible mapping, captures it before waiting, and shares the connection's 128-operation/8 MiB input budget. It rejects calls from the same owner's adapter callbacks. Cancellation waits for native acceptance to settle.
+
+For example, use an open `voice` owner to request a response with provider metadata and an event ID:
+
+```python
+await voice.send_event(
+    {
+        "type": "response.create",
+        "event_id": "application-response-1",
+        "response": {
+            "output_modalities": ["text"],
+            "instructions": "Reply briefly.",
+            "metadata": {"request": "application-request-1"},
+        },
+    }
+)
+```
+
+Core accepts these event names with guarded payloads:
+
+- `session.update` accepts existing sparse session settings and waits for the provider acknowledgement. Raw tool declarations remain unsupported; use the Session's admitted tools.
+- `response.create` accepts instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Alternate input and out-of-band responses remain unsupported. Admission and coalescing match `request_response()`.
+- `response.cancel` retires native work and local buffered output for the exact accepted response IDs. Consume `RealtimePlaybackInterrupted` and discard the indicated unplayed application audio, as with `interrupt()`.
+- `conversation.item.create` accepts supported message rows, an optional item ID, and a known `previous_item_id`. Native validation rejects fabricated function, MCP, and approval rows. Creation waits for the matching provider acknowledgement.
+- `conversation.item.retrieve` returns the full provider item as a dictionary. `conversation.item.delete` waits for the matching provider acknowledgement.
+- `conversation.item.truncate` requires known received assistant audio and a valid playback offset.
+- `input_audio_buffer.append`, `input_audio_buffer.clear`, and `input_audio_buffer.commit` use the native media queue. Audio appends use base64 data in the configured input format.
+- `output_audio_buffer.clear` applies only to provider-managed media.
+
+Every event can carry an `event_id`. Sends other than item retrieval return `None`. The existing message, response, audio, and history methods remain available for their typed operations.
+
+### Edit provider history
+
 `delete_conversation_item(provider_item_id)` deletes an eligible item from the current provider conversation. Use the provider ID from `RealtimeConversationItemObserved`, whose `status` is `"added"` or `"done"`. Canonical history IDs are separate. Native checks reject unknown or incomplete items and items still needed by unfinished work. The call completes after the matching provider acknowledgement and durable history update; `RealtimeConversationItemDeleted` reports that deletion.
 
 Canonical history keeps prior transcripts and appends a `provider_item_deleted` entry with its target in `provider_item_id`. Shared Session history, tool outcomes, and approval records remain intact. Deletion cannot retract output already generated or change context a response already consumed. A later voice connection can use retained Session context. This operation prunes the current provider conversation rather than erasing Session history.
 
 Use `await voice.retrieve_conversation_item(provider_item_id)` to retrieve a known provider item with its available media, including an item from before SIP attachment. Retrieval rejects IDs still recorded as deleted. Retrieving an ID absent from the observed history does not add it to that history's order. `await voice.retrieve_conversation_history()` retrieves full items for IDs observed during this connection, in observed order. The result can include audio and image data and can be large. It cannot discover items from before SIP attachment. These requests are separate from the synchronous `voice.history` audit view.
 
-Pass an edited list of those provider items to `await voice.update_history(items)` to update the observed portion of the provider conversation. The method supports adding, correcting, removing, and reordering supported system, user, and assistant messages. Keep tool, MCP, and approval items unchanged and in order; messages cannot move across them. Native validation checks the replacement before sending changes and waits for provider acknowledgements. It cannot erase unobserved items or rewrite the Session's audit, background work, or retained context. An interrupted edit or a provider failure after some acknowledgements can leave partial edits. If the connection remains active, retrieve the observed history before retrying.
+Pass an edited list of those provider items to `await voice.update_history(items)` to update the observed portion of the provider conversation. The method supports adding, correcting, removing, and reordering supported system, user, and assistant messages. Keep surviving tool, MCP, and approval items byte-for-byte unchanged and in their relative order. You can remove them only after their native work has settled. Supported messages can move across retained items. Removing a settled item prunes provider context; it does not retract execution or approval authority. Native validation checks the replacement before sending changes and waits for provider acknowledgements. It cannot erase unobserved items or rewrite the Session's audit, background work, or retained context. An interrupted edit or a provider failure after some acknowledgements can leave partial edits. If the connection remains active, retrieve the observed history before retrying.
 
 The connection retains 128 recent deletion receipts. Within this window, you can restore a message removed by an interrupted `update_history()` under its original ID. Supply a supported message after refreshing the observed history. IDs deleted directly with `delete_conversation_item()` or by another controller, and tool or control identities, remain protected while their receipts are retained. Recovery preserves the canonical deletion audit. Deletions observed from another controller also remove items from observed provider history. They do not cancel or approve pending native work.
 
