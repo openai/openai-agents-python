@@ -6488,7 +6488,14 @@ class Session(Generic[ContextT, OutputT]):
 
         with _clear_current(), _private_task(deliver_and_continue()) as (delivery, delivered):
             state.add_callback(delivery)
-            return cast(Turn[Any], await _join(delivery, outcome=delivered))
+            try:
+                return cast(Turn[Any], await _join(delivery, outcome=delivered))
+            except asyncio.CancelledError as error:
+                # Retirement may cancel delivery after selecting a native failure.
+                # A passive caller's cancellation has a different identity.
+                if delivered.done() and delivered.exception() is error and state.failure.done():
+                    raise state.failure.result() from None
+                raise
 
     async def _continue_restored_turn(self, submission: _Submission) -> None:
         assert submission.handle is not None

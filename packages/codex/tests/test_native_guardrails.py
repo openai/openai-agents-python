@@ -356,11 +356,14 @@ async def test_explicit_child_input_guards_block_or_overlap_then_trip(
         (False, "erase"),
         (True, "erase"),
         (False, "duplicate"),
+        (False, "duplicate-caller-cancel"),
         (False, "prior"),
         (False, "manual"),
     ],
 )
-async def test_held_terminal_resume_checks_before_ordinary_admission(responses, reject, marker):
+async def test_held_terminal_resume_checks_before_ordinary_admission(
+    responses, monkeypatch, reject, marker
+):
     from agents import FunctionTool, function_tool
     from agents.state import SessionState
     from tests.native_fixtures import function_call
@@ -409,15 +412,45 @@ async def test_held_terminal_resume_checks_before_ordinary_admission(responses, 
         elif marker not in ("keep", "erase"):
             outcomes["held_call_ids"] = {
                 "duplicate": ["held-call", "held-call"],
+                "duplicate-caller-cancel": ["held-call", "held-call"],
                 "prior": ["prior-call"],
                 "manual": ["manual-call"],
             }[marker]
+            failed, release = asyncio.Event(), asyncio.Event()
+            if marker == "duplicate-caller-cancel":
+                from agents import _native
+
+                original_continue = _native.NativeThread._continue_manual
+
+                async def parked_native_failure(native, *args, **kwargs):
+                    try:
+                        return await original_continue(native, *args, **kwargs)
+                    except RuntimeError:
+                        failed.set()
+                        await release.wait()
+                        raise
+
+                monkeypatch.setattr(_native.NativeThread, "_continue_manual", parked_native_failure)
             with pytest.raises(
                 (ValueError, RuntimeError), match="Invalid held terminal reply identities"
             ):
                 async with agent.session(state=SessionState.from_json(json.dumps(raw))) as restored:
                     request = await next_request(restored.interactions(), manual)
-                    await request.respond("manual accepted")
+                    if marker == "duplicate-caller-cancel":
+                        responding = asyncio.create_task(request.respond("manual accepted"))
+                        try:
+                            await failed.wait()
+                            responding.cancel("synthetic caller cancellation")
+                            release.set()
+                            with pytest.raises(
+                                asyncio.CancelledError, match="synthetic caller cancellation"
+                            ):
+                                await responding
+                        finally:
+                            release.set()
+                            await asyncio.gather(responding, return_exceptions=True)
+                    else:
+                        await request.respond("manual accepted")
                     assert restored.restored_turn is not None
                     await restored.restored_turn.get_result()
             assert effects == ["executed"]
