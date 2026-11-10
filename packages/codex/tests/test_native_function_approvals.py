@@ -18,9 +18,11 @@ from agents import (
     Allow,
     ApprovalRequested,
     Deny,
+    FunctionTool,
     InteractionExpiredError,
     ReplaceArguments,
     ToolContext,
+    ToolOutput,
     TurnStoppedError,
     function_tool,
 )
@@ -782,3 +784,70 @@ async def test_approved_terminal_function_finishes_without_another_sample(respon
         assert result.tool_call.call_id == "terminal-approval"
         assert effects == ["A"]
         assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("restored", [False, True])
+async def test_approved_terminal_waits_for_pending_manual_sibling(responses, restored):
+    effects = []
+
+    @function_tool(needs_approval=True, finish_turn=True)
+    def risky() -> str:
+        effects.append("effect")
+        return "terminal result"
+
+    class ReviewInput(BaseModel):
+        pass
+
+    review = FunctionTool(
+        name="review", description="Review.", input_type=ReviewInput, output_type=str
+    )
+    responses.respond(
+        function_call("risky", {}, "approved-terminal"),
+        function_call("review", {}, "manual-sibling"),
+    )
+    responses.respond(assistant_output("unexpected model continuation"))
+    agent = Agent(instructions="Use both.", tools=[risky, review], provider=provider(responses))
+    state = None
+    async with timeout(25):
+        if restored:
+            async with agent.session() as source:
+                await source.submit("begin")
+                await next_request(source.interactions(), risky)
+                await next_request(source.interactions(), review)
+                state = await source.suspend()
+        async with agent.session(state=state) as session:
+            turn = session.restored_turn if restored else await session.submit("begin")
+            approval = await next_request(session.interactions(), risky)
+            manual = await next_request(session.interactions(), review)
+            await approval.approve()
+            await manual.respond("accepted manual sibling")
+            result = await turn.get_result()
+            assert result.final_output == "terminal result"
+            assert result.tool_call.call_id == "approved-terminal"
+            assert effects == ["effect"]
+            assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_approval_preserves_rich_callback_result(responses, automatic):
+    effects = []
+
+    @function_tool(needs_approval=(lambda context: False) if automatic else True)
+    def risky() -> ToolOutput | str:
+        effects.append("effect")
+        return ToolOutput.text("validated result")
+
+    responses.respond(function_call("risky", {}, "rich-result"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(25),
+        Agent(
+            instructions="Use risky.", tools=[risky], provider=provider(responses)
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        if not automatic:
+            await (await next_request(session.interactions(), risky)).approve()
+        assert (await turn.get_result()).final_output == "done"
+        assert effects == ["effect"]
+        assert "validated result" in json.dumps(responses.requests[1])
