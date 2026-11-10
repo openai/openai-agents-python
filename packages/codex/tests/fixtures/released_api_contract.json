@@ -656,7 +656,7 @@
           "@dataclass(frozen=True)\nclass RealtimePlaybackInterrupted:\n    response_id: str | None\n    playback: RealtimePlaybackPosition | None = None\n    retired_response_ids: tuple[str, ...] = ()\n    cancelled_response_id: str | None = None",
           "@dataclass(frozen=True)\nclass RealtimeText:\n    role: Literal['user', 'assistant']\n    text: str\n    final: bool\n    response_id: str | None = None\n    item_id: str | None = None\n    content_index: int | None = None\n    output_index: int | None = None\n    output_kind: Literal['text', 'audio_transcript'] | None = None",
           "@dataclass(frozen=True)\nclass RealtimeLifecycle:\n    status: Literal['started', 'updated', 'speech_started', 'closed']\n    session_id: str | None = None\n    reason: str | None = None",
-          "@dataclass(frozen=True)\nclass RealtimeResponse:\n    status: Literal['created', 'done', 'cancelled']\n    response_id: str | None",
+          "@dataclass(frozen=True)\nclass RealtimeResponse:\n    status: Literal['created', 'done', 'cancelled']\n    response_id: str | None\n    usage: RealtimeUsage | None = None",
           "@dataclass(frozen=True)\nclass RealtimeDelegation:\n    handoff_id: str\n    status: Literal['started', 'completed', 'failed']\n    error: Exception | None = None",
           "@dataclass(frozen=True)\nclass RealtimeToolCall:\n    call_id: str\n    name: str\n    status: Literal['started', 'completed', 'failed']\n    error: Exception | None = None",
           "@dataclass(frozen=True)\nclass RealtimeToolBatchError:\n    response_id: str\n    call_ids: tuple[str, ...]\n    error: Exception",
@@ -669,7 +669,7 @@
           "@dataclass(frozen=True)\nclass RealtimeHistoryItem:\n    id: str\n    session_id: str\n    kind: str\n    role: str | None = None\n    text: str = ''\n    turn_id: str | None = None\n    item_id: str | None = None\n    outcome: str | None = None\n    presentation: str | None = None\n    presentation_index: int | None = None\n    provider_item_id: str | None = None",
           "@dataclass(frozen=True)\nclass RealtimeHistory:\n    item: RealtimeHistoryItem\n    completed: bool",
           "RealtimeEvent: TypeAlias = RealtimeAudio | RealtimeText | RealtimeLifecycle | RealtimeResponse | RealtimeDelegation | RealtimeToolCall | RealtimeToolBatchError | RealtimeHistory | RealtimeConversationItemObserved | RealtimeConversationItemDeleted | RealtimeGuardrailEvent | RealtimePlaybackInterrupted | RealtimeHostedMcpApprovalRequested | RealtimeHostedMcpToolsListed | RealtimeHostedMcpCallCompleted",
-          "class RealtimeSession:\n    _EVENT_LIMIT = 128\n    _HANDOFF_LIMIT = 1024\n    _PENDING_LIMIT = 16\n    _GUARDRAIL_TEXT_LIMIT = 1048576\n    _GUARDRAIL_TEXT_WORK_LIMIT = 64 * 1024 * 1024\n    _HISTORY_TEXT_WORK_LIMIT = 256 * 1024 * 1024\n    _BUFFER_BYTES_LIMIT = 8 * 1024 * 1024\n    _KINDS = frozenset({'realtime_conversation_started', 'realtime_conversation_realtime', 'realtime_conversation_closed', 'realtime_conversation_sdp'})\n\n    def __init__(self, session: Session[Any, Any], *, config: RealtimeConfig) -> None:\n        pass\n\n    @property\n    def history(self) -> tuple[RealtimeHistoryItem, ...]:\n        pass\n\n    @property\n    def call_id(self) -> str | None:\n        pass\n\n    async def answer_sdp(self) -> str:\n        pass\n\n    async def __aenter__(self) -> RealtimeSession:\n        pass\n\n    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass\n\n    async def send_text(self, text: str) -> None:\n        pass\n\n    async def send_message(self, message: RealtimeUserInput, *, trigger_response: bool=True) -> None:\n        pass\n\n    async def request_response(self, response: NativeRealtimeResponseOptions | None=None) -> None:\n        pass\n\n    async def delete_conversation_item(self, provider_item_id: str) -> None:\n        pass\n\n    async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:\n        pass\n\n    async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:\n        pass\n\n    async def retrieve_conversation_history(self) -> list[dict[str, Any]]:\n        pass\n\n    async def update(self, update: NativeRealtimeSessionUpdate) -> None:\n        pass\n\n    async def approve_hosted_mcp(self, request: RealtimeHostedMcpApprovalRequested, *, approve: bool, reason: str | None=None) -> None:\n        pass\n\n    async def send_audio(self, audio: bytes | RealtimeAudioInput, *, commit: bool=False) -> None:\n        pass\n\n    async def events(self) -> AsyncIterator[RealtimeEvent]:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def report_playback(self, position: RealtimePlaybackPosition) -> None:\n        pass\n\n    async def interrupt(self, response_id: str | None=None, *, playback: RealtimePlaybackPosition | None=None, feedback: str | None=None) -> None:\n        pass"
+          "class RealtimeSession:\n    _EVENT_LIMIT = 128\n    _HANDOFF_LIMIT = 1024\n    _PENDING_LIMIT = 16\n    _GUARDRAIL_TEXT_LIMIT = 1048576\n    _GUARDRAIL_TEXT_WORK_LIMIT = 64 * 1024 * 1024\n    _HISTORY_TEXT_WORK_LIMIT = 256 * 1024 * 1024\n    _BUFFER_BYTES_LIMIT = 8 * 1024 * 1024\n    _KINDS = frozenset({'realtime_conversation_started', 'realtime_conversation_realtime', 'realtime_conversation_closed', 'realtime_conversation_sdp'})\n\n    def __init__(self, session: Session[Any, Any], *, config: RealtimeConfig) -> None:\n        pass\n\n    @property\n    def usage(self) -> RealtimeUsage | None:\n        pass\n\n    @property\n    def history(self) -> tuple[RealtimeHistoryItem, ...]:\n        pass\n\n    @property\n    def call_id(self) -> str | None:\n        pass\n\n    async def answer_sdp(self) -> str:\n        pass\n\n    async def __aenter__(self) -> RealtimeSession:\n        pass\n\n    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass\n\n    async def send_text(self, text: str) -> None:\n        pass\n\n    async def send_message(self, message: RealtimeUserInput, *, trigger_response: bool=True) -> None:\n        pass\n\n    async def request_response(self, response: NativeRealtimeResponseOptions | None=None) -> None:\n        pass\n\n    async def delete_conversation_item(self, provider_item_id: str) -> None:\n        pass\n\n    async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:\n        pass\n\n    async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:\n        pass\n\n    async def retrieve_conversation_history(self) -> list[dict[str, Any]]:\n        pass\n\n    async def update(self, update: NativeRealtimeSessionUpdate) -> None:\n        pass\n\n    async def approve_hosted_mcp(self, request: RealtimeHostedMcpApprovalRequested, *, approve: bool, reason: str | None=None) -> None:\n        pass\n\n    async def send_audio(self, audio: bytes | RealtimeAudioInput, *, commit: bool=False) -> None:\n        pass\n\n    async def events(self) -> AsyncIterator[RealtimeEvent]:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def report_playback(self, position: RealtimePlaybackPosition) -> None:\n        pass\n\n    async def interrupt(self, response_id: str | None=None, *, playback: RealtimePlaybackPosition | None=None, feedback: str | None=None) -> None:\n        pass"
         ],
         "exports": {
           "BackgroundResult": "agents.realtime.BackgroundResult",
@@ -721,6 +721,7 @@
           "RealtimeText": "agents.realtime.RealtimeText",
           "RealtimeToolBatchError": "agents.realtime.RealtimeToolBatchError",
           "RealtimeToolCall": "agents.realtime.RealtimeToolCall",
+          "RealtimeUsage": "agents.realtime.RealtimeUsage",
           "RealtimeUserInput": "RealtimeUserInput",
           "RealtimeUserInputImage": "agents.realtime.RealtimeUserInputImage",
           "RealtimeUserInputMessage": "agents.realtime.RealtimeUserInputMessage",
@@ -737,6 +738,7 @@
           "from .realtime_guardrails import RealtimeGuardrailEvent as RealtimeGuardrailEvent, RealtimeGuardrailInput as RealtimeGuardrailInput, RealtimeGuardrailResult as RealtimeGuardrailResult, RealtimeOutputGuardrail as RealtimeOutputGuardrail",
           "from .realtime_result import BackgroundResult as BackgroundResult, background_result as background_result",
           "from .realtime_settings import NativeRealtimeCustomVoice as NativeRealtimeCustomVoice, NativeRealtimeHostedMcpTool as NativeRealtimeHostedMcpTool, NativeRealtimeMcpApprovalFilter as NativeRealtimeMcpApprovalFilter, NativeRealtimeMcpToolFilter as NativeRealtimeMcpToolFilter, NativeRealtimeNoiseReduction as NativeRealtimeNoiseReduction, NativeRealtimePrompt as NativeRealtimePrompt, NativeRealtimePromptFile as NativeRealtimePromptFile, NativeRealtimePromptImage as NativeRealtimePromptImage, NativeRealtimePromptText as NativeRealtimePromptText, NativeRealtimeReasoning as NativeRealtimeReasoning, NativeRealtimeResponseOptions as NativeRealtimeResponseOptions, NativeRealtimeSemanticVad as NativeRealtimeSemanticVad, NativeRealtimeServerVad as NativeRealtimeServerVad, NativeRealtimeSessionUpdate as NativeRealtimeSessionUpdate, NativeRealtimeSettings as NativeRealtimeSettings, NativeRealtimeToolChoice as NativeRealtimeToolChoice, NativeRealtimeToolChoiceFunction as NativeRealtimeToolChoiceFunction, NativeRealtimeTracing as NativeRealtimeTracing, NativeRealtimeTranscription as NativeRealtimeTranscription",
+          "from .realtime_usage import RealtimeUsage as RealtimeUsage",
           "from ._function_tools import FunctionTool",
           "from .session import Session"
         ],
@@ -769,6 +771,7 @@
           "RealtimeGuardrailInput": "_agents_codex.realtime_guardrails.RealtimeGuardrailInput",
           "RealtimeGuardrailResult": "_agents_codex.realtime_guardrails.RealtimeGuardrailResult",
           "RealtimeOutputGuardrail": "_agents_codex.realtime_guardrails.RealtimeOutputGuardrail",
+          "RealtimeUsage": "_agents_codex.realtime_usage.RealtimeUsage",
           "Session": "agents.session.Session",
           "background_result": "_agents_codex.realtime_result.background_result"
         }
@@ -1184,6 +1187,9 @@
           "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Sequence[_ScriptItem] | ScriptedResponse) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
         ],
         "exports": {
+          "RealtimeConnectCall": "agents.testing.RealtimeConnectCall",
+          "RealtimeStep": "agents.testing.RealtimeStep",
+          "ScriptedRealtimeAdapter": "agents.testing.ScriptedRealtimeAdapter",
           "ScriptedResponse": "agents.testing.ScriptedResponse",
           "ScriptedResponses": "agents.testing.ScriptedResponses",
           "text": "agents.testing.text",
@@ -1195,11 +1201,15 @@
           "from dataclasses import dataclass as dataclass, field as field",
           "from types import TracebackType as TracebackType",
           "from .agent import NativeProvider as NativeProvider",
-          "from .config import JsonValue as JsonValue"
+          "from .config import JsonValue as JsonValue",
+          "from .testing_realtime import RealtimeConnectCall as RealtimeConnectCall, RealtimeStep as RealtimeStep, ScriptedRealtimeAdapter as ScriptedRealtimeAdapter"
         ],
         "references": {
           "JsonValue": "agents.config.JsonValue",
-          "NativeProvider": "agents.agent.NativeProvider"
+          "NativeProvider": "agents.agent.NativeProvider",
+          "RealtimeConnectCall": "_agents_codex.testing_realtime.RealtimeConnectCall",
+          "RealtimeStep": "_agents_codex.testing_realtime.RealtimeStep",
+          "ScriptedRealtimeAdapter": "_agents_codex.testing_realtime.ScriptedRealtimeAdapter"
         }
       },
       "agents.tools": {
@@ -1609,6 +1619,38 @@
           "from typing_extensions import Required, TypedDict"
         ],
         "references": {}
+      },
+      "_agents_codex.realtime_usage": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass RealtimeUsage:\n    input_tokens: int | None = None\n    output_tokens: int | None = None\n    total_tokens: int | None = None\n    input_token_details: Mapping[str, Any] | None = None\n    output_token_details: Mapping[str, Any] | None = None"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping",
+          "from dataclasses import dataclass",
+          "from typing import Any"
+        ],
+        "references": {}
+      },
+      "_agents_codex.testing_realtime": {
+        "declarations": [
+          "RealtimeFrame = dict[str, Any]",
+          "RealtimeMatcher = str | RealtimeFrame | Callable[[RealtimeFrame], bool]",
+          "RealtimeEmission = Iterable[RealtimeFrame] | Callable[[RealtimeFrame], Iterable[RealtimeFrame]]",
+          "@dataclass(frozen=True)\nclass RealtimeStep:\n    expect: RealtimeMatcher\n    emit: RealtimeEmission = ()\n    error: Exception | None = None",
+          "@dataclass(frozen=True)\nclass RealtimeConnectCall:\n    model: str | None\n    headers_provided: bool",
+          "class ScriptedRealtimeAdapter:\n\n    def __init__(self, steps: Iterable[RealtimeStep]=(), *, connect_events: Iterable[RealtimeFrame]=(), connect_error: Exception | None=None, close_error: Exception | None=None, strict: bool=True) -> None:\n        pass\n\n    @property\n    def sent_events(self) -> tuple[RealtimeFrame, ...]:\n        pass\n\n    @property\n    def connect_calls(self) -> tuple[RealtimeConnectCall, ...]:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    async def connect(self, context: RealtimeAdapterContext) -> ScriptedRealtimeAdapter:\n        pass\n\n    @property\n    def incoming(self) -> AsyncIterator[str]:\n        pass\n\n    def emit(self, *frames: RealtimeFrame) -> None:\n        pass\n\n    async def send(self, frame: str) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def assert_complete(self) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import AsyncIterator, Callable, Iterable",
+          "from dataclasses import dataclass",
+          "from typing import Any",
+          "from .realtime_adapter import RealtimeAdapterContext"
+        ],
+        "references": {
+          "RealtimeAdapterContext": "_agents_codex.realtime_adapter.RealtimeAdapterContext"
+        }
       },
       "agents._events": {
         "declarations": [

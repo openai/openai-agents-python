@@ -1,0 +1,16 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index b4dbad8..98997cb 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1792,7 +1792,10 @@ impl RealtimeWebsocketClient {
+         } else {
+             None
+         };
+-        let v2_initial_update = if config.v2.is_some() || !config.function_tools.is_empty() {
++        let v2_initial_update = if config.event_parser == RealtimeEventParser::RealtimeV2
++            || config.v2.is_some()
++            || !config.function_tools.is_empty()
++        {
+             Some(serde_json::json!({"type": "session.update", "session": expected.as_ref().expect("V2 settings payload")}).to_string())
+         } else {
+             None

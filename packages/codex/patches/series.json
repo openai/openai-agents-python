@@ -349,9 +349,17 @@
       "sha256": "a6305497e7ab25cce8a4a54e3484e24ef1a3685bc808aa1310e334470774e036"
     },
     {
+      "path": "0150-native-realtime-canonical-startup.patch",
+      "sha256": "214aa39eb9e2eed63fee553fff1a425066cbcebc37bd9ac7d3c2bb35c9852ea8"
+    },
+    {
+      "path": "0151-native-realtime-response-usage.patch",
+      "sha256": "cd078f600aafb1078014ec3005198de0637d2f66c7a45c2a3ca35f1d054dd4af"
+    },
+    {
       "path": "0068-decisions.patch",
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
     }
   ],
-  "result_tree": "f9b8a7551974ae75b161ff6f74f98999766da7e5"
+  "result_tree": "054297b00a11edfe3e731caaffc36e1c768fee70"
 }

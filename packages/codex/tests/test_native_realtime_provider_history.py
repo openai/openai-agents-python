@@ -759,7 +759,13 @@ async def test_native_history_response_race_fails_edit_and_keeps_call_open(
             # Drain the already-written retrieval before accepting another history command.
             await peer.socket.send_json({"type": "conversation.item.retrieved", "item": original})
             await peer.socket.send_json(
-                {"type": "response.done", "response": {"id": "racing-provider-response"}}
+                {
+                    "type": "response.done",
+                    "response": {
+                        "id": "racing-provider-response",
+                        "usage": {"input_tokens": 5, "output_tokens": 4, "total_tokens": 9},
+                    },
+                }
             )
             async for event in events:
                 if (
@@ -767,7 +773,11 @@ async def test_native_history_response_race_fails_edit_and_keeps_call_open(
                     and event.response_id == "racing-provider-response"
                     and event.status == "done"
                 ):
+                    assert event.usage is not None
+                    assert event.usage.total_tokens == 9
                     break
+            assert voice.usage is not None
+            assert voice.usage.total_tokens == 9
             assert not any(
                 frame["type"] in ("conversation.item.delete", "conversation.item.create")
                 for frame in peer.frames[cursor:]
