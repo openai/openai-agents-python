@@ -751,17 +751,13 @@ class DockerSandboxSession(BaseSandboxSession):
         if image is None:
             return None
         image_config = image.attrs.get("Config") or {}
-        image_environment: dict[str, str] = {}
+        image_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         for entry in image_config.get("Env") or ():
-            name, separator, value = entry.partition("=")
-            if separator:
-                image_environment[name] = value
+            if entry.startswith("PATH="):
+                image_path = entry.removeprefix("PATH=")
 
-        # Use the immutable image's PATH. The container configuration already
-        # includes the manifest overlay and is only used to remove its extra keys.
-        image_path = image_environment.get(
-            "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        )
+        # Only carry the image's vetted PATH into the checkout. Other inherited
+        # settings can change meaning when the copy runs from another directory.
         image_workdir = image_config.get("WorkingDir") or "/"
         read_link = cache(self._git_copy_link_target)
         if read_link(PurePosixPath("/")) is None:
@@ -776,14 +772,11 @@ class DockerSandboxSession(BaseSandboxSession):
         copy_path = _git_copy_tool_path(directories, workspace, read_link)
         if not copy_path:
             return None
-        image_environment["PATH"] = copy_path
 
         container_config = self._container.attrs.get("Config") or {}
         container_keys = [entry.partition("=")[0] for entry in container_config.get("Env") or ()]
-        return [
-            *(f"{name}={value}" for name, value in image_environment.items()),
-            *(name for name in container_keys if name not in image_environment),
-        ]
+        # Docker's exec API removes an inherited value when passed a bare name.
+        return [f"PATH={copy_path}", *(name for name in container_keys if name != "PATH")]
 
     def _git_copy_link_target(self, path: PurePosixPath) -> str | None:
         api = self._docker_client.api

@@ -281,6 +281,34 @@ async def test_default_git_copy_uses_a_clean_child_environment(
     assert result.stdout == b"selected directory"
 
 
+def test_docker_git_copy_clears_image_and_manifest_environment() -> None:
+    pytest.importorskip("docker")
+    from agents.classic.sandbox.sandboxes.docker import DockerSandboxSession
+
+    image = SimpleNamespace(attrs={"Config": {"Env": ["PATH=/tools", "SDK_IMAGE_TEST=value"]}})
+    container = SimpleNamespace(
+        image=image,
+        attrs={
+            "Config": {
+                "Env": ["PATH=/workspace/tools", "SDK_IMAGE_TEST=value", "SDK_MANIFEST_TEST=value"]
+            }
+        },
+    )
+    session = cast(
+        DockerSandboxSession,
+        SimpleNamespace(
+            _container=container,
+            _git_copy_link_target=lambda path: "",
+            state=SimpleNamespace(manifest=Manifest()),
+        ),
+    )
+    assert DockerSandboxSession._git_copy_environment(session) == [
+        "PATH=/tools:/usr/bin:/bin",
+        "SDK_IMAGE_TEST",
+        "SDK_MANIFEST_TEST",
+    ]
+
+
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
 async def test_git_repo_reports_unavailable_directory_as_copy_error(
     tmp_path: Path, git_fixture: Path, subpath: str
