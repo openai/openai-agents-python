@@ -73,9 +73,9 @@ Pass application state through `context=...` and read it in a callback with `Too
 
 ## Provider connection
 
-Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. It does not accept an `openai.OpenAI` or `openai.AsyncOpenAI` instance as the model connection.
+Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. The default transport has been accepting endpoint settings rather than an OpenAI client instance. Matching source builds have also been accepting [application-owned model clients](#use-an-application-owned-model-client) through an adapter.
 
-Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient. Use the [endpoint checks](providers.md) to test the features your application needs.
+The default transport has been requiring Responses support from custom endpoints. The [endpoint checks](providers.md) have been exercising that transport. The application-model route below has been supporting Chat Completions separately.
 
 API-key connections use these defaults.
 
@@ -85,6 +85,51 @@ API-key connections use these defaults.
 - In streaming mode, `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Use an application-owned model client
+
+Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) have been accepting `NativeProvider(model_backend=...)`. The `0.24.0-alpha.7` wheel has not been including this option. The native runtime has been retaining ownership of the tool loop and conversation history while the application has been supplying each completed model response.
+
+The complete script below has been illustrating an asynchronous OpenAI client borrowed through `ChatCompletionsModel`. Its prerequisites have been including a wheel built and installed from the same checkout and `OPENAI_API_KEY` in the environment. Running `python borrowed_client.py` has been starting a live model request with possible charges.
+
+```python
+import asyncio
+
+from openai import AsyncOpenAI
+
+from agents import Agent, ChatCompletionsModel, NativeProvider
+
+
+async def main() -> None:
+    async with AsyncOpenAI() as client:
+        async with NativeProvider(
+            model_backend=ChatCompletionsModel(client),
+        ) as provider:
+            agent = Agent(
+                instructions="Answer briefly.",
+                model="gpt-4.1",
+                provider=provider,
+            )
+            result = await agent.run("Reply with atlas.")
+            print(result.final_output)
+
+
+asyncio.run(main())
+```
+
+The application has been owning the client and its credentials. The nested context managers have been closing the one-shot Session, then the provider, then the borrowed client. `ChatCompletionsModel` has been requesting one complete response per model step rather than token streaming. The application has been choosing its endpoint through `AsyncOpenAI(base_url=...)` when needed.
+
+Other public adapters have been supporting the following clients:
+
+| Adapter from `agents` | Borrowed client |
+| --- | --- |
+| `ResponsesModel(client)` | An asynchronous client with `responses.create`. |
+| `LitellmModel(client, model=...)` | An installed LiteLLM module or compatible object with `acompletion`. |
+| `AnyLLMModel(client, model=...)` | An application-created AnyLLM provider with `acompletion`. |
+
+Applications have also been implementing `NativeModel.complete(request)` or `ModelProvider.get_model(model_name)` directly. `ModelRequest.body` has been carrying the native request, and `ModelResponse` has been carrying completed Responses-format output items and optional usage counters. The [model reference](reference.md#application-models) has been describing these signatures.
+
+This route has been using the HTTP-mode native loop and rejecting `supports_websockets=True`, `CodexLogin`, and native child agents configured through `NativeAgents`. Cancellation has been joining the admitted model callback and discarding its late response. The runtime has not been falling back to its built-in HTTP client after an adapter failure. Providers have been determining which request settings they support; the adapters have been rejecting unsupported conversions rather than silently replaying work. Applications have been checking their required tools, output formats, and model controls before migration.
 
 ### Buffer model responses
 

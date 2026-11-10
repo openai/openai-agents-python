@@ -323,7 +323,7 @@ async def test_unsafe_local_read_roots_refuse_native_startup(
         source = workspace / "source"
         source.write_text("SYNTHETIC_SHARED_CONTENT\n")
         os.link(source, shared / "alias")
-        reason = "hard link"
+        reason = r"\bhard(?: link|-linked file)\b"
     elif kind == "fifo":
         os.mkfifo(shared / "pipe")
         reason = "must contain only regular files, directories, or symlinks"
@@ -346,9 +346,11 @@ async def test_unsafe_local_read_roots_refuse_native_startup(
 
 @native_sandbox
 @pytest.mark.skipif(sys.platform != "darwin", reason="local read grants require macOS")
-@pytest.mark.parametrize("kind", ["login", "refresh_parent", "private_hardlink"])
+@pytest.mark.parametrize(
+    "kind", ["login", "refresh_parent", "private_hardlink", "home_alias", "configured_home_alias"]
+)
 async def test_local_read_roots_reject_saved_login_and_refresh_parent(
-    responses: ResponsesFixture, tmp_path: Path, kind: str
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     from tests.test_native_codex_login import saved_login
 
@@ -356,6 +358,7 @@ async def test_local_read_roots_reject_saved_login_and_refresh_parent(
     workspace = root / "workspace"
     workspace.mkdir()
     home = saved_login(root / "login")
+    login = CodexLogin(codex_home=home)
     granted = home
     reason = "saved Codex login"
     if kind == "refresh_parent":
@@ -374,9 +377,20 @@ async def test_local_read_roots_reject_saved_login_and_refresh_parent(
         granted.mkdir()
         os.link(home / "auth.json", granted / "alias")
         reason = "hard link to a private native SDK file"
+    elif kind in ("home_alias", "configured_home_alias"):
+        granted = root / "shared"
+        granted.mkdir()
+        alias = granted / "login"
+        alias.symlink_to(home, target_is_directory=True)
+        if kind == "configured_home_alias":
+            monkeypatch.setenv("CODEX_HOME", str(alias))
+            login = CodexLogin()
+        else:
+            login = CodexLogin(codex_home=alias)
+        reason = "saved Codex login and refresh directories"
     agent = Agent(
         instructions="Use the selected command.",
-        provider=NativeProvider(auth=CodexLogin(codex_home=home)),
+        provider=NativeProvider(auth=login),
     )
     with pytest.raises(RuntimeError, match=reason):
         async with agent.session(

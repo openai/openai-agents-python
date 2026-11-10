@@ -66,6 +66,7 @@ pub(crate) struct LocalStorageHome<'a> {
 pub(crate) struct LocalPrivatePaths<'a> {
     pub storage_home: Option<LocalStorageHome<'a>>,
     pub saved_login_file: Option<&'a Path>,
+    pub saved_login_home_alias: Option<&'a Path>,
 }
 
 pub async fn for_unattached_threads(
@@ -468,6 +469,9 @@ impl EnvironmentOptions {
             // the login directory when auth.json is a symlink.
             let overlap =
                 "read_only_roots must stay outside saved Codex login and refresh directories";
+            if let Some(alias) = private_paths.saved_login_home_alias {
+                check_local_write_root_overlap(alias, &grants, overlap)?;
+            }
             let target = check_local_write_root_overlap(file, &grants, overlap)?;
             for path in [file, target.as_path()] {
                 let parent = path
@@ -1116,6 +1120,7 @@ fn check_local_private_write_roots(
     let LocalPrivatePaths {
         storage_home,
         saved_login_file,
+        ..
     } = private_paths;
     let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home

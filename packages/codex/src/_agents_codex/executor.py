@@ -16,7 +16,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager
 from dataclasses import dataclass as dataclass, field as field
 from ipaddress import IPv6Address as IPv6Address
-from os import PathLike as PathLike, fspath as fspath
+from os import PathLike as PathLike, fsencode as fsencode, fspath as fspath
 from pathlib import Path as Path, PurePosixPath as PurePosixPath, PureWindowsPath as PureWindowsPath
 from types import MappingProxyType as MappingProxyType
 from typing import (
@@ -29,7 +29,11 @@ from typing import (
     cast as cast,
     get_origin as get_origin,
 )
-from urllib.parse import unquote as unquote, urlsplit as urlsplit
+from urllib.parse import (
+    quote_from_bytes as quote_from_bytes,
+    unquote as unquote,
+    urlsplit as urlsplit,
+)
 
 from typing_extensions import Self as Self, TypeVar as TypeVar
 
@@ -721,7 +725,19 @@ def _path_uri(value: str) -> str:
     if value.startswith("file:"):
         return value
     path = PurePosixPath(value) if value.startswith("/") else PureWindowsPath(value)
-    return path.as_uri()
+    if sys.version_info < (3, 12):
+        return path.as_uri()
+    if not path.is_absolute():
+        raise ValueError("relative path can't be expressed as a file URI")
+    # Keep the executor's path flavor, independent of the application host.
+    # PurePath.as_uri() is deprecated in Python 3.14.
+    if len(path.drive) == 2 and path.drive[1] == ":":
+        prefix, encoded_path = "file:///" + path.drive, path.as_posix()[2:]
+    elif path.drive:
+        prefix, encoded_path = "file:", path.as_posix()
+    else:
+        prefix, encoded_path = "file://", str(path)
+    return prefix + quote_from_bytes(fsencode(encoded_path))
 
 
 def _writable_roots(
@@ -755,7 +771,7 @@ def _writable_roots(
             valid = False
         if not valid:
             raise ValueError(f"{name} must contain absolute executor directories")
-        roots.add(path.as_uri())
+        roots.add(_path_uri(str(path)))
     return tuple(sorted(roots))
 
 

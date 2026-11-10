@@ -337,6 +337,9 @@ impl EngineState {
             saved_login_file: codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            saved_login_home_alias: codex_account
+                .as_ref()
+                .and_then(|account| account.auth_home_alias.as_deref()),
         };
         let environment_options = runtime_options.environment()?;
         if let Some(environment) = &environment_options {
@@ -1509,6 +1512,10 @@ impl EngineState {
                 .codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            saved_login_home_alias: self
+                .codex_account
+                .as_ref()
+                .and_then(|account| account.auth_home_alias.as_deref()),
         }
     }
 
