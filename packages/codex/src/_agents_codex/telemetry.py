@@ -1273,9 +1273,11 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                     descriptors = batch.get("root_descriptors", {})
                     descriptor = descriptors.get(str(event["sequence"])) if descriptors else None
                     snapshot = _freeze(
-                        {**event, "root_descriptor": descriptor}
-                        if descriptor is not None
-                        else event
+                        {
+                            **event,
+                            "recovery_sequence": _processor_recovery_epoch,
+                            **({"root_descriptor": descriptor} if descriptor is not None else {}),
+                        }
                     )
                     for identifier in event.get("processor_ids", []):
                         routes.setdefault(identifier, []).append(snapshot)

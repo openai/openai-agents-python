@@ -80,7 +80,8 @@ class OpenAITraceExporter:
     runtime key is reserved for the native marker; other flattened native
     sdk.metadata attributes are preserved without guessing their JSON types.
     After native record loss, the SDK drains through a captured native sequence
-    watermark then invalidates uncertain descriptors. Only fresh root starts can
+    watermark then invalidates uncertain descriptors. Fresh root starts and native
+    descriptors born after that watermark can
     re-establish identity; old child/end records fail closed. Native flush keeps
     reporting loss. Lossless active roots retain their original eviction guarantee.
     """
@@ -147,7 +148,7 @@ class OpenAITraceExporter:
             self._credentials = (object(), headers)
             self.set_api_key(api_key)
             self._traces: OrderedDict[str, _TraceState] = OrderedDict()
-            self._requires_root_start = False
+            self._recovery_sequence: int | None = None
         finally:
             del api_key, endpoint, organization, project, value, address, headers
 
@@ -177,10 +178,10 @@ class OpenAITraceExporter:
         finally:
             del self, api_key
 
-    def _on_native_trace_loss(self) -> None:
+    def _on_native_trace_loss(self, sequence: int = 0) -> None:
         # A lost end invalidates liveness; never guess which active roots survived.
         self._traces.clear()
-        self._requires_root_start = True
+        self._recovery_sequence = max(self._recovery_sequence or 0, sequence)
 
     def _prepare_events(
         self, events: Sequence[Mapping[str, Any]], revision: object
@@ -189,13 +190,24 @@ class OpenAITraceExporter:
         admitted: list[Mapping[str, Any]] = []
         admission_error = None
         for event in events:
+            recovery = event.get("recovery_sequence", 0)
+            if recovery > (self._recovery_sequence or 0):
+                self._on_native_trace_loss(recovery)
+            if self._recovery_sequence is not None and event["sequence"] <= self._recovery_sequence:
+                admission_error = admission_error or "Native trace root descriptor is unavailable"
+                continue
             trace_id = "trace_" + event["trace_id"]
             root = event.get("parent_span_id") is None
             state = self._traces.get(trace_id)
             if state is None:
-                retained = event.get("root_descriptor") if not self._requires_root_start else None
+                retained = event.get("root_descriptor")
+                if (
+                    self._recovery_sequence is not None
+                    and (retained or {}).get("start_sequence", 0) <= self._recovery_sequence
+                ):
+                    retained = None
                 if (not root and retained is None) or (
-                    self._requires_root_start and (not root or event["lifecycle"] != "start")
+                    self._recovery_sequence is not None and root and event["lifecycle"] != "start"
                 ):
                     admission_error = (
                         admission_error or "Native trace root descriptor is unavailable"
