@@ -355,6 +355,229 @@ async def test_output_waits_for_acceptance_and_preserves_inherited_settings():
     assert not turn.cancelled.is_set()
 
 
+async def test_early_speech_yields_before_completion_and_does_not_repeat_final(responses):
+    responses.delta_gate = asyncio.Event()
+    responses.respond(*text_response("early-answer", "First ", "answer."))
+    responses.respond(*text_response("next-answer", "Next answer."))
+    agent = Agent(
+        instructions="Answer the question.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        workflow = NativeSessionVoiceWorkflow(session, early_speech=True)
+        async with aclosing(workflow.run("first question")) as stream:
+            assert await anext(stream) == "First "
+            # The synthetic peer has not sent the second delta or terminal yet.
+            assert not responses.delta_gate.is_set()
+            responses.delta_gate.set()
+            assert [chunk async for chunk in stream] == ["answer."]
+        assert await collect(workflow, "second question") == "Next answer."
+        assert "first question" in str(responses.requests[1]["input"])
+        assert "First answer." in str(responses.requests[1]["input"])
+
+
+async def test_early_speech_retains_identical_final_only_answer_after_tool_preamble(responses):
+    @function_tool
+    async def lookup() -> str:
+        """Read a synthetic record."""
+        return "private tool payload"
+
+    responses.respond(*text_response("preamble", "Same answer."), function_call("lookup", {}, "c"))
+    responses.respond(text_response("final-only", "Same answer.")[-1])
+    agent = Agent(
+        instructions="Answer the question.",
+        tools=[lookup],
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        chunks = [
+            text
+            async for text in NativeSessionVoiceWorkflow(session, early_speech=True).run("question")
+        ]
+        assert chunks == ["Same answer.", "Same answer."]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+async def test_early_speech_retains_final_only_or_missing_suffix(responses, partial):
+    events = text_response("answer", "Complete ", "answer.")
+    responses.respond(*(events[:2] if partial else []), events[-1])
+    agent = Agent(
+        instructions="Answer the question.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        chunks = [
+            text
+            async for text in NativeSessionVoiceWorkflow(session, early_speech=True).run("question")
+        ]
+    assert chunks == (["Complete ", "answer."] if partial else ["Complete answer."])
+
+
+async def test_early_speech_stops_provisional_output_after_observation_gap(responses, monkeypatch):
+    from agents import Turn
+    from agents.observation import EventGap, OutputTextDelta
+
+    original_events = Turn.events
+
+    async def events_with_gap(turn):
+        inserted = False
+        async with aclosing(original_events(turn)) as events:
+            async for event in events:
+                yield event
+                if isinstance(event, OutputTextDelta) and not inserted:
+                    inserted = True
+                    yield EventGap(
+                        session_id=event.session_id, sequence=event.sequence, first_sequence=1
+                    )
+
+    monkeypatch.setattr(Turn, "events", events_with_gap)
+    responses.respond(*text_response("gap-answer", "A", "middle", "Z"))
+    agent = Agent(
+        instructions="Answer the question.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        chunks = [
+            text
+            async for text in NativeSessionVoiceWorkflow(session, early_speech=True).run("question")
+        ]
+    assert chunks == ["A", "middleZ"]
+
+
+async def test_early_speech_propagates_validation_failure_after_provisional_text(responses):
+    from agents import OutputValidationError, PromptedOutput
+
+    responses.respond(*text_response("unvalidated", "Rejected provisional text."))
+    agent = Agent(
+        instructions="Answer the question.",
+        output_type=PromptedOutput(str, max_retries=0),
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    chunks = []
+    async with timeout(10), agent.session() as session:
+        with pytest.raises(OutputValidationError):
+            async for text in NativeSessionVoiceWorkflow(session, early_speech=True).run(
+                "question"
+            ):
+                chunks.append(text)
+    assert chunks == ["Rejected provisional text."]
+
+
+async def test_early_speech_omits_provisional_repair_and_speaks_accepted_result(responses):
+    from agents import PromptedOutput
+
+    responses.respond(*text_response("unvalidated", "Rejected provisional text."))
+    responses.respond(*text_response("corrected", '"Validated final answer."'))
+    agent = Agent(
+        instructions="Answer the question.",
+        output_type=PromptedOutput(str, max_retries=1),
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        chunks = [
+            text
+            async for text in NativeSessionVoiceWorkflow(session, early_speech=True).run("question")
+        ]
+    assert chunks == ["Rejected provisional text.", "Validated final answer."]
+
+
+async def test_early_speech_close_joins_native_turn_and_retains_session(responses):
+    responses.delta_gate = asyncio.Event()
+    responses.respond(*text_response("cancelled-answer", "Early words.", "Never finished."))
+    responses.respond(*text_response("next-answer", "Next answer."))
+    agent = Agent(
+        instructions="Answer the question.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        workflow = NativeSessionVoiceWorkflow(session, early_speech=True)
+        async with aclosing(workflow.run("cancel this")) as stream:
+            assert await anext(stream) == "Early words."
+        responses.delta_gate.set()
+        assert await collect(workflow, "next question") == "Next answer."
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_on_turn_receives_exact_owned_turn_once_and_rejects_reentry(asynchronous):
+    turn = ControlledTurn()
+    observed = []
+
+    def observe(owned):
+        observed.append(owned)
+
+    async def observe_async(owned):
+        observe(owned)
+        with pytest.raises(RuntimeError, match="active run"):
+            await collect(workflow, "reentrant")
+
+    workflow = NativeSessionVoiceWorkflow(
+        cast(Session[Any, Any], ControlledSession(turn)),
+        on_turn=observe_async if asynchronous else observe,
+    )
+    assert await collect(workflow) == "accepted answer"
+    assert observed == [turn]
+    assert turn.result_reads == 1
+
+
+async def test_on_turn_failure_joins_turn_before_propagating():
+    turn = ControlledTurn()
+    turn.release_cleanup.clear()
+    session = ControlledSession(turn)
+
+    def fail(owned):
+        assert owned is turn
+        raise ValueError("callback failed")
+
+    workflow = NativeSessionVoiceWorkflow(cast(Session[Any, Any], session), on_turn=fail)
+    reading = asyncio.create_task(collect(workflow))
+    await turn.cancelled.wait()
+    assert not reading.done()
+    turn.release_cleanup.set()
+    with pytest.raises(ValueError, match="callback failed"):
+        await reading
+    assert turn.result_reads == 0
+
+
+async def test_on_turn_can_cancel_workflow_without_deadlock_or_speech():
+    turn = ControlledTurn()
+
+    async def cancel(owned):
+        assert owned is turn
+        await workflow.cancel()
+
+    workflow = NativeSessionVoiceWorkflow(
+        cast(Session[Any, Any], ControlledSession(turn)), on_turn=cancel
+    )
+    async with timeout(5):
+        with pytest.raises(asyncio.CancelledError):
+            await collect(workflow)
+    assert turn.cancelled.is_set()
+    assert turn.result_reads == 0
+
+
+async def test_cancelled_on_turn_callback_joins_owned_cleanup():
+    turn = ControlledTurn()
+    turn.release_cleanup.clear()
+    entered = asyncio.Event()
+
+    async def observe(owned):
+        assert owned is turn
+        entered.set()
+        await asyncio.Event().wait()
+
+    workflow = NativeSessionVoiceWorkflow(
+        cast(Session[Any, Any], ControlledSession(turn)), on_turn=observe
+    )
+    reading = asyncio.create_task(collect(workflow))
+    await entered.wait()
+    reading.cancel()
+    await turn.cancelled.wait()
+    assert not reading.done()
+    turn.release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+
+
 @pytest.mark.parametrize("output", ["", "accepted answer"])
 async def test_completed_iterator_close_does_not_cancel_settled_turn(output):
     turn = ControlledTurn(output=output)

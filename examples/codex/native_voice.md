@@ -303,6 +303,10 @@ python examples/codex/voice.py input.wav spoken-answer.wav
 
 `agents.voice` exposes `VoicePipeline`, speech model settings, streamed audio input, and `NativeSessionVoiceWorkflow`.
 
-Speech providers and audio delivery reuse the retained speech engine; the workflow executes native turns. It preserves Session history, tools, output validation, and approvals. Synthesis starts only after the native turn accepts final text. Use a custom workflow to render accepted structured output. The application owns audio input, output playback, stream consumption, and the Session lifetime.
+The workflow uses the speech providers and runs each transcription as a native turn with the Session's history, tools, and approvals. By default, synthesis starts after the turn accepts its final text. Use a custom workflow to render accepted structured output. The application owns audio input, playback, stream consumption, and the Session lifetime.
+
+Pass `early_speech=True` to synthesize text deltas while the turn is running. Playback can include intermediate assistant text or words from a turn that later fails validation. Spoken audio cannot be retracted.
+
+Pass `on_turn=observe_turn` to observe the submitted `Turn` before speech. The workflow awaits an async callback. A callback failure cancels and joins that turn.
 
 Pass `NativeSessionVoiceWorkflow(session, tools=[lookup])` to limit every transcription to selected tools. The workflow captures the sequence when constructed. Omit `tools` to use the Session's current defaults, or pass `tools=[]` to exclude all tools. Selected opening tools use their current acknowledged replacements. Submission fails if a different active Agent does not admit the selection. Realtime background delegation carries the Realtime owner's captured selection into the workflow, including an explicit empty selection.

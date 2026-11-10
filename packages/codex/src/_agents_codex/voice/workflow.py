@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Sequence
+import inspect
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from .._function_tools import FunctionTool, Tool
 from .._public import preserve_module_identity as _preserve_module_identity
+from ..observation import EventGap, OutputTextDelta
 from ..session import Session, _split_tools
 from ..tools import ToolRef
 from ..turn import Turn
@@ -34,7 +36,11 @@ async def _join(task: asyncio.Task[Any]) -> None:
 class NativeSessionVoiceWorkflow:
     """Speak accepted native output with the Session's history and policies.
 
-    Speech starts after native output validation and completion acceptance.
+    By default, speech starts after output validation and completion acceptance.
+    Set early_speech=True to speak native text deltas as they arrive. These
+    provisional words may include intermediate assistant messages and may later
+    fail output validation; spoken audio cannot be retracted. Tool payloads and
+    provisional output-repair messages are not spoken.
     Use a text-output Session; a structured result requires a custom workflow
     that selects and renders the fields the application wants spoken.
 
@@ -43,6 +49,10 @@ class NativeSessionVoiceWorkflow:
     an already busy Session follows its normal rejection policy. Close a run
     iterator explicitly when stopping early, for example with contextlib.aclosing.
     Closing or cancelling a run stops and joins only its own native turn.
+    The optional on_turn callback receives that exact Turn once after admission,
+    before speech. An awaitable callback is awaited. Callback failures stop and
+    join the owned turn; the callback may observe or cancel that turn, but a
+    concurrent run on this workflow is rejected.
 
     Omit tools to use the Session's current defaults for each run. An explicit
     sequence is captured at construction and limits each submitted turn; an
@@ -52,10 +62,21 @@ class NativeSessionVoiceWorkflow:
     """
 
     def __init__(
-        self, session: Session[Any, Any], *, tools: Sequence[Tool[Any] | ToolRef] | None = None
+        self,
+        session: Session[Any, Any],
+        *,
+        tools: Sequence[Tool[Any] | ToolRef] | None = None,
+        early_speech: bool = False,
+        on_turn: Callable[[Turn[Any]], None | Awaitable[None]] | None = None,
     ) -> None:
+        if type(early_speech) is not bool:
+            raise TypeError("early_speech must be a bool")
+        if on_turn is not None and not callable(on_turn):
+            raise TypeError("on_turn must be callable")
         self._session = session
         self._tools = tuple(tools) if tools is not None else None
+        self._early_speech = early_speech
+        self._on_turn = on_turn
         self._invocation: _Invocation | None = None
 
     async def on_start(self) -> AsyncGenerator[str, None]:
@@ -64,7 +85,7 @@ class NativeSessionVoiceWorkflow:
         yield
 
     async def run(self, transcription: str) -> AsyncGenerator[str, None]:
-        """Yield only accepted final text after inherited output validation."""
+        """Yield accepted final text, or explicitly opted-in provisional deltas."""
         if not isinstance(transcription, str) or not transcription.strip():
             raise ValueError("transcription must be a nonempty string")
         if self._invocation is not None:
@@ -106,6 +127,34 @@ class NativeSessionVoiceWorkflow:
             if not invocation.submission.done():
                 await asyncio.wait((invocation.submission,))
             turn = invocation.submission.result()
+            if invocation.cancellation is not None:
+                raise asyncio.CancelledError
+            if self._on_turn is not None:
+                callback_result = self._on_turn(turn)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+                if invocation.cancellation is not None:
+                    raise asyncio.CancelledError
+            spoken: dict[str, list[str]] = {}
+            if self._early_speech:
+                events = turn.events()
+                interrupted_stream = False
+                try:
+                    async for event in events:
+                        if invocation.cancellation is not None:
+                            raise asyncio.CancelledError
+                        # The Turn cursor includes output-validation repair work.
+                        # Only the original task's text is opted into early speech.
+                        if getattr(event, "parent_submission_id", None) is not None:
+                            continue
+                        if isinstance(event, EventGap):
+                            interrupted_stream = True
+                        if isinstance(event, OutputTextDelta) and not interrupted_stream:
+                            if event.delta:
+                                spoken.setdefault(event.item_id, []).append(event.delta)
+                                yield event.delta
+                finally:
+                    await events.aclose()
             result = await turn.get_result()
             if invocation.cancellation is not None:
                 raise asyncio.CancelledError
@@ -115,8 +164,31 @@ class NativeSessionVoiceWorkflow:
                     "NativeSessionVoiceWorkflow requires a string final_output; "
                     "use a text-output Session or a custom workflow to render structured output"
                 )
-            if result.final_output:
-                yield result.final_output
+            text = result.final_output
+            # A done-only message has its own item identity, even when it repeats
+            # an earlier tool preamble. A partial stream needs its accepted suffix.
+            previous = ""
+            if spoken and not result.repair_attempts:
+                final_item_id: str | None = None
+                turn_ids = {step.turn_id for step in turn._steps()}
+                async for item in self._session.items():
+                    if (
+                        item["type"] == "message"
+                        and item["role"] == "assistant"
+                        and item["turn_id"] in turn_ids
+                        and item["status"] == "completed"
+                    ):
+                        displayed = item.get("display_text")
+                        if displayed is None:
+                            displayed = "".join(part.get("text", "") for part in item["content"])
+                        if displayed == text:
+                            final_item_id = item["id"]
+                if final_item_id is not None:
+                    previous = "".join(spoken.get(final_item_id, []))
+            if previous and text.startswith(previous):
+                text = text[len(previous) :]
+            if text:
+                yield text
         except BaseException as error:
             primary_error = error
             raise
