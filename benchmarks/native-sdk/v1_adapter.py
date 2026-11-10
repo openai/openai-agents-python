@@ -18,7 +18,12 @@ class Adapter:
         with_tool: bool = False,
         sync_tool: bool = False,
         response_mode: str = "streaming",
+        transport: str = "http",
     ):
+        if transport not in ("http", "websocket") or (
+            transport == "websocket" and response_mode != "streaming"
+        ):
+            raise ValueError("WebSocket transport requires streaming response mode")
         if response_mode not in ("streaming", "buffered"):
             raise ValueError("Unknown native response mode")
         if response_mode == "buffered" and stream:
@@ -30,7 +35,7 @@ class Adapter:
         self.provider = NativeProvider(
             base_url=base_url,
             api_key="synthetic-benchmark-key",
-            supports_websockets=False,
+            supports_websockets=transport == "websocket",
             **provider_options,
         )
 

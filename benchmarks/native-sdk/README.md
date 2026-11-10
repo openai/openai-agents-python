@@ -159,3 +159,44 @@ Rows record the native response mode and expected wire transport, checked agains
 `elapsed_ms`, `cpu_ms` and latency p50/p95 still cover measured operations after prefill. For oneshot cases, these are warmed fresh-conversation measurements. New `full_owner_wall_ms` and `full_owner_cpu_ms` span Adapter construction through successful joined provider/telemetry exit, including prefill and ordinary client scheduling, prompt work and in-scope peer-stat requests. They exclude SDK import, peer startup and final correctness validation. These spans overlap the existing metrics and must not be added to them. Failed runs cannot qualify.
 
 `charged_operations = concurrency * (prefill + iterations)` counts turns, including prefill. It counts fresh conversations only for oneshot cases; conversation cases reuse Sessions. Summaries apply the existing paired estimator to `full_owner_wall_ms_per_operation` and `full_owner_cpu_ms_per_operation`, retaining raw totals and matched vectors. Import-only rows have no owner/operation/transport metrics. RSS stays unqualified and does not enter comparisons. The existing confidence-interval limitations and engineering parity rule still apply.
+
+## Focused native WebSocket reproduction
+
+The `--reference-engine v1` option has been selecting a native adapter for the reference slot named `--v0-python`. The target slot has been continuing to use the native adapter. Both adapters have been retaining one Provider while each `Agent.run` has been opening a fresh conversation. HTTP has been remaining the default transport.
+
+This WebSocket mode has been accepting only `--cases oneshot_text` with streaming response mode. The peer has been checking one generating request per socket, reconstructing only that socket's own optional warmup input, and rejecting continuation from another response. Worker validation has been requiring WebSocket receipts and joined socket retirement. Warmup frames have been appearing separately as `websocket_warmups`, outside the generating-request count.
+
+Prerequisites: the same interpreter, dependency and bytecode conditions described above; two native-wheel environments with recorded source commits and wheel hashes. `REFERENCE_NATIVE_PY` has been naming the reference environment's Python, and `NATIVE_PY` has been naming the candidate environment's Python. The peer has been continuing to run in its separate process. Existing override-clearing instructions have been applying to both commands.
+
+```sh
+# Select the exact reference wheel produced from its recorded source revision.
+REFERENCE_WHEEL="$LAB/reference-wheels/exact-reference-native-wheel.whl"
+sha256sum "$REFERENCE_WHEEL" > "$LAB/reference-native-wheel.sha256"
+uv venv --python "$BASE_PY" "$LAB/reference-native"
+REFERENCE_NATIVE_PY="$LAB/reference-native/bin/python"
+uv pip install --compile-bytecode --python "$REFERENCE_NATIVE_PY" "$REFERENCE_WHEEL" \
+  'pydantic==2.12.3' 'typing-extensions==4.16.0' \
+  'jsonschema==4.26.0' 'referencing==0.37.0'
+REFERENCE_NATIVE_VERSION="$("$REFERENCE_NATIVE_PY" -c 'from importlib.metadata import version; print(version("openai-agents"))')"
+
+"$PEER_PY" "$BENCH/validate_peer.py" --check-websocket
+"$PEER_PY" "$BENCH/compare.py" \
+  --reference-engine v1 --native-transport websocket \
+  --v0-python "$REFERENCE_NATIVE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version "$REFERENCE_NATIVE_VERSION" --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/native-websocket" \
+  --samples 5 --iterations 100 --timeout 60 --cases oneshot_text
+```
+
+Native-reference summaries have been labeling measurements `reference` and `target`, including `ratio_target_over_reference`. The alternating process order, all-thread client process CPU, full-owner measurements and paired bootstrap have been remaining unchanged. Peer CPU has been remaining separate from client CPU. Five samples have been supplying an exploratory comparison, without reproducing a larger fixed multi-arm qualification.
+
+A separate context command has been comparing stable v0 over HTTP with the native candidate over WebSockets. Its output directory has been keeping that context distinct from the native before/after comparison:
+
+```sh
+"$PEER_PY" "$BENCH/compare.py" \
+  --native-transport websocket \
+  --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version 0.24.0 --v1-version "$NATIVE_VERSION" \
+  --server-python "$PEER_PY" --output-dir "$LAB/stable-http-context" \
+  --samples 5 --iterations 100 --timeout 60 --cases oneshot_text
+```

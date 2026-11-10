@@ -88,6 +88,8 @@ def validate_sample(
     identities,
     iterations=None,
     v1_response_mode="streaming",
+    reference_engine="v0",
+    native_transport="http",
 ):
     """Check scheduling, declared identities and existing worker count receipts."""
     if row.get("errors") != 0:
@@ -98,7 +100,16 @@ def validate_sample(
         or row.get("instrumentation") != []
     ):
         raise ValueError("Diagnostic/profiled/instrumented rows cannot enter a comparison")
-    if row.get("engine") != side or row.get("case") != case:
+    engine = reference_engine if side == "v0" else "v1"
+    if reference_engine not in ("v0", "v1") or native_transport not in ("http", "websocket"):
+        raise ValueError("Unknown scheduled reference engine or native transport")
+    if native_transport == "websocket" and (
+        case != "oneshot_text" or v1_response_mode != "streaming"
+    ):
+        raise ValueError("WebSocket reproduction requires native final-only oneshot_text")
+    if engine == "v1" and row.get("native_transport", "http") != native_transport:
+        raise ValueError("Native transport metadata differs from its schedule")
+    if row.get("engine") != engine or row.get("case") != case:
         raise ValueError("Worker engine/case differs from its scheduled sample")
     if type(row.get("sample_index")) is not int or row["sample_index"] != sample:
         raise ValueError("Worker sample index differs from its matched process pair")
@@ -141,15 +152,17 @@ def validate_sample(
         raise ValueError("Worker workload differs from the scheduled work")
     if v1_response_mode not in ("streaming", "buffered"):
         raise ValueError("Unknown scheduled native response mode")
-    expected_mode = v1_response_mode if side == "v1" and case != "startup_import" else None
+    expected_mode = v1_response_mode if engine == "v1" and case != "startup_import" else None
     if "response_mode" not in row or row["response_mode"] != expected_mode:
         raise ValueError("Native response mode differs from the scheduled mode")
     expected_transport = (
         None
         if case == "startup_import"
+        else "websocket"
+        if engine == "v1" and native_transport == "websocket"
         else (
             "sse"
-            if (workload.stream if side == "v0" else v1_response_mode == "streaming")
+            if (workload.stream if engine == "v0" else v1_response_mode == "streaming")
             else "json"
         )
     )
@@ -173,7 +186,11 @@ def validate_sample(
         if v1_response_mode == "buffered" and workload.stream:
             raise ValueError("Buffered benchmarks cannot measure token-live workloads")
         validate_transport(
-            workload, row.get("server", {}), engine=side, response_mode=v1_response_mode
+            workload,
+            row.get("server", {}),
+            engine=engine,
+            response_mode=v1_response_mode,
+            native_transport=native_transport,
         )
         charged = workload.concurrency * (workload.prefill + workload.iterations)
         if type(row.get("charged_operations")) is not int or row["charged_operations"] != charged:
@@ -228,7 +245,15 @@ def validate_sample(
     identities[side] = identity
 
 
-def summarize(records, *, expected_versions, iterations=None, v1_response_mode="streaming"):
+def summarize(
+    records,
+    *,
+    expected_versions,
+    iterations=None,
+    v1_response_mode="streaming",
+    reference_engine="v0",
+    native_transport="http",
+):
     summary, identities = {}, {}
     for case, sides in records.items():
         if set(sides) != {"v0", "v1"}:
@@ -256,6 +281,8 @@ def summarize(records, *, expected_versions, iterations=None, v1_response_mode="
                     identities=identities,
                     iterations=iterations,
                     v1_response_mode=v1_response_mode,
+                    reference_engine=reference_engine,
+                    native_transport=native_transport,
                 )
         fields = ["import_ms"]
         if case != "startup_import":
@@ -279,6 +306,14 @@ def summarize(records, *, expected_versions, iterations=None, v1_response_mode="
             )
             for field in fields
         }
+        if reference_engine == "v1":
+            metrics = {
+                field: {
+                    key.replace("stable", "reference").replace("native", "target"): value
+                    for key, value in metric.items()
+                }
+                for field, metric in metrics.items()
+            }
         primary = (
             "import_ms"
             if case == "startup_import"
@@ -289,6 +324,8 @@ def summarize(records, *, expected_versions, iterations=None, v1_response_mode="
             )
         )
         summary[case] = {
+            "reference_engine": reference_engine,
+            "native_transport": native_transport,
             "primary_metric": primary,
             "primary": metrics[primary],
             "sample_indices": list(range(len(paired["v0"]))),
@@ -300,6 +337,8 @@ def summarize(records, *, expected_versions, iterations=None, v1_response_mode="
 def main():
     reject_inherited_overrides()
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reference-engine", choices=["v0", "v1"], default="v0")
+    parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--v0-python", type=Path, required=True)
     parser.add_argument("--v1-python", type=Path, required=True)
     parser.add_argument("--v0-version", required=True)
@@ -331,6 +370,10 @@ def main():
         or not args.v1_version.strip()
     ):
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
+    if args.native_transport == "websocket" and (
+        args.cases != ["oneshot_text"] or args.v1_response_mode != "streaming"
+    ):
+        parser.error("WebSocket reproduction requires --cases oneshot_text and streaming mode")
     if args.v1_response_mode == "buffered" and any(
         case != "startup_import" and WORKLOADS[case].stream for case in args.cases
     ):
@@ -367,6 +410,8 @@ def main():
         },
         "sample_order": [],
         "expected_sdk_versions": expected_versions,
+        "reference_engine": args.reference_engine,
+        "native_transport": args.native_transport,
         "v1_response_mode": args.v1_response_mode,
         "completed": False,
         "rss_scope": "Unqualified raw process ru_maxrss only; no RSS comparison or verdict",
@@ -409,13 +454,16 @@ def main():
                         "-B",
                         str(directory / "worker.py"),
                         "--engine",
-                        side,
+                        args.reference_engine if side == "v0" else "v1",
                         "--output",
                         str(output),
                         "--sample-index",
                         str(sample),
                     ]
-                    if side == "v1" and args.v1_response_mode == "buffered":
+                    engine = args.reference_engine if side == "v0" else "v1"
+                    if engine == "v1" and args.native_transport != "http":
+                        command += ["--native-transport", args.native_transport]
+                    if engine == "v1" and args.v1_response_mode == "buffered":
                         command += ["--response-mode", "buffered"]
                     if case == "startup_import":
                         command.append("--import-only")
@@ -498,6 +546,8 @@ def main():
                         identities=identities,
                         iterations=args.iterations,
                         v1_response_mode=args.v1_response_mode,
+                        reference_engine=args.reference_engine,
+                        native_transport=args.native_transport,
                     )
                     records[case][side].append(data)
                     value = data.get("latency_p50_ms", data["import_ms"])
@@ -511,11 +561,18 @@ def main():
                 expected_versions=expected_versions,
                 iterations=args.iterations,
                 v1_response_mode=args.v1_response_mode,
+                reference_engine=args.reference_engine,
+                native_transport=args.native_transport,
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             primary = summary[case]["primary"]
+            ratio_key = (
+                "ratio_target_over_reference"
+                if args.reference_engine == "v1"
+                else "ratio_native_over_stable"
+            )
             print(
-                f"{case}: ratio={primary['ratio_native_over_stable']:.4f}, "
+                f"{case}: ratio={primary[ratio_key]:.4f}, "
                 f"CI={primary['ratio_bootstrap_95pct']}, {primary['verdict']}",
                 flush=True,
             )
