@@ -369,9 +369,13 @@
       "sha256": "c63b869586bce016995d99f7f4d64328833e850ade390580902aa0432bbef4bf"
     },
     {
+      "path": "0152-sdk-codex-login-terminal-rate-limits.patch",
+      "sha256": "18e553a5981488043c85a1c6c22cb87a436036d647a278bd1a0b0270fa939bf4"
+    },
+    {
       "path": "sdk-bwrap-search-path.patch",
       "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
     }
   ],
-  "result_tree": "671dbfbf15681c2731239272816c68d2128d095e"
+  "result_tree": "be8af9918071cb08d2b2524e160598cd1dbfe6e6"
 }
