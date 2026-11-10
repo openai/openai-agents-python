@@ -489,9 +489,13 @@
       "sha256": "cb5f96565d84dcb0626c122c4e5d399c2fe3d56753b87d3f6c06c914fba19be9"
     },
     {
+      "path": "sdk-bounded-original-history-reads.patch",
+      "sha256": "9c2091df8d9532c8d9f201172cee0440cdde554e811b0f2c15525128e92dabbb"
+    },
+    {
       "path": "sdk-terminal-candidate-admission.patch",
-      "sha256": "714aa890bd48e9144df756461c115d20eff34d9c04928b9cceda99d7db163825"
+      "sha256": "d6209dee5cd2b26507a6f0ac9a024367dd688b8dd70b7f7ceb7a3ca313601047"
     }
   ],
-  "result_tree": "59ef1aa9b3e8cc24ad1888fcb40f5f79af65a42c"
+  "result_tree": "c8cace12767762f932756b3b9104e25b3e721c8a"
 }

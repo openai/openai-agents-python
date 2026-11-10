@@ -1,0 +1,2708 @@
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 0ada5223..ff883d5d 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -797,43 +797,18 @@ impl ContextManager {
+ 
+         // Apply the same acceptance boundary to the parent model window. The independent
+         // transcript owns its rollback provenance even after this window is compacted.
+-        let mut retained_items = snapshot[..cut_idx]
++        let first_turn_id = snapshot[first_instruction_turn_idx].turn_id();
++        let retained_items = snapshot[..cut_idx]
+             .iter()
+-            .filter(|envelope| {
+-                !source.acceptance_order().is_some_and(|boundary| {
+-                    (matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "assistant")
+-                        || matches!(&envelope.item, ResponseItem::FunctionCall { .. } | ResponseItem::ComputerCall { .. }))
+-                        && RetainedInputSource::from(envelope.metadata.as_ref())
+-                            .acceptance_order().is_some_and(|order| order >= boundary)
+-                })
++            .filter_map(|item| {
++                rollback_retained_item(
++                    item,
++                    source,
++                    cut_idx == first_instruction_turn_idx,
++                    first_turn_id,
++                )
+             })
+-            .cloned()
+             .collect::<Vec<_>>();
+-        if cut_idx == first_instruction_turn_idx
+-            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
+-        {
+-            retained_items.retain_mut(|item| {
+-                if item.turn_id() == Some(first_turn_id)
+-                    && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
+-                {
+-                    let Some(mut content) = to_annotated_content(&mut item.item) else {
+-                        return false;
+-                    };
+-                    content.retain(|content| {
+-                        // Rebuild these from the next step's model and effort after rollback.
+-                        !matches!(
+-                            content.content(),
+-                            ContentItem::InputText { text }
+-                                if ModelSwitchInstructions::matches_text(text)
+-                                    || PersistentModeState::matches_text(text)
+-                        )
+-                    });
+-                    !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
+-                } else {
+-                    true
+-                }
+-            });
+-        }
+ 
+         let mut retained_context = Arc::clone(&self.retained_context);
+         let removed_turns = snapshot[cut_idx..]
+@@ -1011,30 +986,77 @@ impl ContextManager {
+         mut cut_idx: usize,
+     ) -> usize {
+         while cut_idx > first_instruction_turn_idx {
+-            match &snapshot[cut_idx - 1].item {
+-                ResponseItem::Message { role, content, .. }
+-                    if role == "developer" && is_contextual_dev_message_content(content) =>
+-                {
+-                    if has_non_contextual_dev_message_content(content) {
+-                        // Mixed `build_initial_context` bundles are not reconstructible from
+-                        // steady-state diffs once trimmed, so the next real turn must fully
+-                        // reinject context instead of diffing against a stale baseline.
++            match rollback_context_update(&snapshot[cut_idx - 1].item) {
++                Some(clear_reference_context) => {
++                    if clear_reference_context {
+                         self.reference_context_item = None;
+                     }
+                     cut_idx -= 1;
+                 }
+-                ResponseItem::Message { role, content, .. }
+-                    if role == "user" && is_contextual_user_message_content(content) =>
+-                {
+-                    cut_idx -= 1;
+-                }
+-                _ => break,
++                None => break,
+             }
+         }
+         cut_idx
+     }
+ }
+ 
++/// Classify the contiguous context updates immediately before a removed instruction turn.
++/// The boolean requests the existing baseline reset for a mixed developer bundle.
++pub(crate) fn rollback_context_update(item: &ResponseItem) -> Option<bool> {
++    match item {
++        ResponseItem::Message { role, content, .. }
++            if role == "developer" && is_contextual_dev_message_content(content) =>
++        {
++            Some(has_non_contextual_dev_message_content(content))
++        }
++        ResponseItem::Message { role, content, .. }
++            if role == "user" && is_contextual_user_message_content(content) =>
++        {
++            Some(false)
++        }
++        _ => None,
++    }
++}
++
++/// Apply the owning rollback's acceptance and first-turn developer selection to one item.
++/// Cutoff selection and retained-context/review state remain with the caller.
++pub(crate) fn rollback_retained_item(
++    item: &ResponseItemEnvelope,
++    source: RetainedInputSource,
++    trim_first_turn_developer: bool,
++    first_turn_id: Option<&str>,
++) -> Option<ResponseItemEnvelope> {
++    if source.acceptance_order().is_some_and(|boundary| {
++        (matches!(&item.item, ResponseItem::Message { role, .. } if role == "assistant")
++            || matches!(
++                &item.item,
++                ResponseItem::FunctionCall { .. } | ResponseItem::ComputerCall { .. }
++            ))
++            && RetainedInputSource::from(item.metadata.as_ref())
++                .acceptance_order()
++                .is_some_and(|order| order >= boundary)
++    }) {
++        return None;
++    }
++    let mut item = item.clone();
++    if trim_first_turn_developer
++        && first_turn_id.is_some_and(|turn| item.turn_id() == Some(turn))
++        && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
++    {
++        let mut content = to_annotated_content(&mut item.item)?;
++        content.retain(|content| {
++            // Rebuild these from the next step's model and effort after rollback.
++            !matches!(content.content(), ContentItem::InputText { text }
++                if ModelSwitchInstructions::matches_text(text)
++                    || PersistentModeState::matches_text(text))
++        });
++        if content.is_empty() || set_annotated_content(&mut item.item, content).is_none() {
++            return None;
++        }
++    }
++    Some(item)
++}
++
+ /// Configuration updates require harness provenance; raw system messages are never retained.
+ pub(crate) fn is_api_message(
+     message: &ResponseItem,
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index b2c816f5..3f61ee6d 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -9,3 +9,6 @@ pub(crate) use history::estimate_item_token_count;
+ pub(crate) use history::is_user_turn_boundary;
+ 
+ pub(crate) use history::is_api_message;
++
++pub(crate) use history::rollback_context_update;
++pub(crate) use history::rollback_retained_item;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 276739a2..04252c2c 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -277,6 +277,48 @@ impl Session {
+         if let Some(snapshot) = self.state.lock().await.sdk_originals.snapshot(limit) {
+             return Ok(snapshot);
+         }
++        if let Some(limit) = limit {
++            use codex_protocol::error::CodexErr;
++            let unavailable =
++                || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
++            let (token, total, policy) = {
++                let state = self.state.lock().await;
++                (
++                    (
++                        state.sdk_originals.revision().map(str::to_owned),
++                        state.sdk_originals.read_token().1,
++                    ),
++                    state.sdk_originals.len(),
++                    state.sdk_originals_replay_policy.unwrap_or(
++                        codex_utils_output_truncation::TruncationPolicy::Bytes(usize::MAX),
++                    ),
++                )
++            };
++            let live = self.live_thread().ok_or_else(unavailable)?;
++            live.flush().await.map_err(|_| unavailable())?;
++            let snapshot =
++                live.read_original_history(Box::new(
++                    super::original_history_read::SnapshotReader { limit, policy },
++                ))
++                .await
++                .map_err(|_| unavailable())?;
++            let state = self.state.lock().await;
++            if token
++                != (
++                    state.sdk_originals.revision().map(str::to_owned),
++                    state.sdk_originals.read_token().1,
++                )
++                || total.is_some_and(|total| total != snapshot.1)
++                || token
++                    .0
++                    .as_ref()
++                    .is_some_and(|revision| revision != &snapshot.0)
++            {
++                return Err(unavailable());
++            }
++            // A partial read never hydrates or replaces the cache's complete revision state.
++            return Ok(snapshot);
++        }
+         Ok(self.sdk_load_original_history().await?.snapshot(limit))
+     }
+ 
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 68851c0e..7a2faed0 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -242,6 +242,8 @@ mod guardian_checkpoint;
+ mod handlers;
+ mod inject;
+ pub(crate) mod initial_turn;
++mod original_history_lookup;
++mod original_history_read;
+ mod reasoning_effort;
+ mod submission;
+ pub(crate) use reasoning_effort::RequestEffortUsage;
+diff --git a/codex-rs/core/src/session/original_history_cursor.rs b/codex-rs/core/src/session/original_history_cursor.rs
+new file mode 100644
+index 00000000..dac67083
+--- /dev/null
++++ b/codex-rs/core/src/session/original_history_cursor.rs
+@@ -0,0 +1,307 @@
++//! Structural cursor for selective journal decoding. Large ignored values stay in the reader.
++//! serde_json keeps primitive grammar/recursion validation; only object/array navigation is local.
++
++use serde::de::IgnoredAny;
++use std::io::{self, BufRead, Seek, SeekFrom};
++#[path = "original_history_json_string.rs"]
++mod json_string;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Span {
++    pub start: u64,
++    pub end: u64,
++}
++
++pub struct Cursor<R> {
++    reader: R,
++}
++
++fn invalid() -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, "invalid history record")
++}
++
++impl<R: BufRead + Seek> Cursor<R> {
++    pub fn new(reader: R) -> Self {
++        Self { reader }
++    }
++    pub fn position(&mut self) -> io::Result<u64> {
++        self.reader.stream_position()
++    }
++    pub fn seek(&mut self, position: u64) -> io::Result<()> {
++        self.reader.seek(SeekFrom::Start(position))?;
++        Ok(())
++    }
++    fn peek(&mut self) -> io::Result<Option<u8>> {
++        Ok(self.reader.fill_buf()?.first().copied())
++    }
++    fn whitespace(&mut self) -> io::Result<()> {
++        while self.peek()?.is_some_and(|b| b" \r\n\t".contains(&b)) {
++            self.reader.consume(1);
++        }
++        Ok(())
++    }
++    fn take(&mut self, wanted: u8) -> io::Result<()> {
++        self.whitespace()?;
++        if self.peek()? != Some(wanted) {
++            return Err(invalid());
++        }
++        self.reader.consume(1);
++        Ok(())
++    }
++    pub fn eof(&mut self) -> io::Result<bool> {
++        self.whitespace()?;
++        Ok(self.peek()?.is_none())
++    }
++
++    /// Unknown or oversized keys are distinguishable from every known schema key without buffering.
++    pub fn small_string(&mut self) -> io::Result<Option<String>> {
++        self.whitespace()?;
++        let mut value = [0; 64];
++        let mut length: usize = 0;
++        let mut oversized = false;
++        json_string::decode_json_string(&mut self.reader, |chunk| {
++            if !oversized && length.saturating_add(chunk.len()) <= value.len() {
++                value[length..length + chunk.len()].copy_from_slice(chunk);
++                length += chunk.len();
++            } else {
++                oversized = true;
++            }
++            Ok(())
++        })?;
++        if oversized {
++            Ok(None)
++        } else {
++            String::from_utf8(value[..length].to_vec())
++                .map(Some)
++                .map_err(|_| invalid())
++        }
++    }
++
++    pub fn string(&mut self, sink: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
++        self.whitespace()?;
++        json_string::decode_json_string(&mut self.reader, sink)
++    }
++
++    pub fn unsigned(&mut self) -> io::Result<u64> {
++        self.whitespace()?;
++        let mut value = 0_u64;
++        let mut count = 0;
++        let mut leading_zero = false;
++        while let Some(digit @ b'0'..=b'9') = self.peek()? {
++            if count != 0 && leading_zero {
++                return Err(invalid());
++            }
++            leading_zero = count == 0 && digit == b'0';
++            value = value
++                .checked_mul(10)
++                .and_then(|v| v.checked_add(u64::from(digit - b'0')))
++                .ok_or_else(invalid)?;
++            count += 1;
++            self.reader.consume(1);
++        }
++        if count == 0 {
++            return Err(invalid());
++        }
++        Ok(value)
++    }
++
++    pub fn line_end(&mut self) -> io::Result<u64> {
++        loop {
++            match self.peek()? {
++                Some(b'\n') => {
++                    self.reader.consume(1);
++                    return self.position();
++                }
++                Some(b' ' | b'\t' | b'\r') => self.reader.consume(1),
++                None => return self.position(),
++                _ => return Err(invalid()),
++            }
++        }
++    }
++    pub fn peek_value(&mut self) -> io::Result<Option<u8>> {
++        self.whitespace()?;
++        self.peek()
++    }
++    pub fn begin_array(&mut self) -> io::Result<()> {
++        self.take(b'[')
++    }
++    pub fn next_array(&mut self, first: bool) -> io::Result<Option<Span>> {
++        self.whitespace()?;
++        if self.peek()? == Some(b']') {
++            self.reader.consume(1);
++            return Ok(None);
++        }
++        if !first {
++            self.take(b',')?;
++        }
++        self.skip().map(Some)
++    }
++    pub fn value<T: serde::de::DeserializeOwned>(&mut self) -> io::Result<T> {
++        self.whitespace()?;
++        let start = self.position()?;
++        let (value, consumed) = {
++            let mut values =
++                serde_json::Deserializer::from_reader(&mut self.reader).into_iter::<T>();
++            let value = values
++                .next()
++                .transpose()
++                .map_err(|_| invalid())?
++                .ok_or_else(invalid)?;
++            (
++                value,
++                u64::try_from(values.byte_offset()).map_err(|_| invalid())?,
++            )
++        };
++        self.seek(start.checked_add(consumed).ok_or_else(invalid)?)?;
++        Ok(value)
++    }
++    pub fn skip(&mut self) -> io::Result<Span> {
++        self.whitespace()?;
++        let start = self.position()?;
++        // A number decoder may peek at the following separator. Restore the exact consumed offset
++        // before dropping serde's private lookahead, keeping the enclosing structural cursor intact.
++        let consumed = {
++            let mut values =
++                serde_json::Deserializer::from_reader(&mut self.reader).into_iter::<IgnoredAny>();
++            values
++                .next()
++                .transpose()
++                .map_err(|_| invalid())?
++                .ok_or_else(invalid)?;
++            u64::try_from(values.byte_offset()).map_err(|_| invalid())?
++        };
++        let end = start.checked_add(consumed).ok_or_else(invalid)?;
++        self.seek(end)?;
++        Ok(Span { start, end })
++    }
++
++    pub fn object(
++        &mut self,
++        mut field: impl FnMut(Option<&str>, &mut Self) -> io::Result<()>,
++    ) -> io::Result<()> {
++        self.take(b'{')?;
++        self.whitespace()?;
++        if self.peek()? == Some(b'}') {
++            self.reader.consume(1);
++            return Ok(());
++        }
++        loop {
++            let key = self.small_string()?;
++            self.take(b':')?;
++            let before = self.position()?;
++            field(key.as_deref(), self)?;
++            if self.position()? <= before {
++                return Err(invalid());
++            }
++            self.whitespace()?;
++            match self.peek()? {
++                Some(b'}') => {
++                    self.reader.consume(1);
++                    return Ok(());
++                }
++                Some(b',') => self.reader.consume(1),
++                _ => return Err(invalid()),
++            }
++        }
++    }
++
++    pub fn array(&mut self, mut item: impl FnMut(&mut Self) -> io::Result<()>) -> io::Result<()> {
++        self.take(b'[')?;
++        self.whitespace()?;
++        if self.peek()? == Some(b']') {
++            self.reader.consume(1);
++            return Ok(());
++        }
++        loop {
++            let before = self.position()?;
++            item(self)?;
++            if self.position()? <= before {
++                return Err(invalid());
++            }
++            self.whitespace()?;
++            match self.peek()? {
++                Some(b']') => {
++                    self.reader.consume(1);
++                    return Ok(());
++                }
++                Some(b',') => self.reader.consume(1),
++                _ => return Err(invalid()),
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::io::{BufReader, Cursor as Bytes};
++
++    #[test]
++    fn skipped_scalars_preserve_every_following_separator() {
++        let mut cursor = Cursor::new(BufReader::with_capacity(
++            2,
++            Bytes::new(br#"{"one":17,"two":true,"three":null,"four":[{"value":"text"}]}"#),
++        ));
++        let mut fields = Vec::new();
++        cursor
++            .object(|key, cursor| {
++                fields.push(key.unwrap().to_owned());
++                cursor.skip()?;
++                Ok(())
++            })
++            .unwrap();
++        assert_eq!(fields, ["one", "two", "three", "four"]);
++        assert!(cursor.eof().unwrap());
++    }
++
++    #[test]
++    fn payload_ranges_allow_a_bounded_second_pass_in_any_field_order() {
++        let mut cursor = Cursor::new(BufReader::with_capacity(
++            3,
++            Bytes::new(br#"{"payload":{"items":["first","last"]},"type":"compacted"}"#),
++        ));
++        let mut payload = None;
++        cursor
++            .object(|key, cursor| {
++                if key == Some("payload") {
++                    payload = Some(cursor.skip()?);
++                } else {
++                    cursor.skip()?;
++                }
++                Ok(())
++            })
++            .unwrap();
++        cursor.seek(payload.unwrap().start).unwrap();
++        let mut items = Vec::new();
++        cursor
++            .object(|key, cursor| {
++                if key == Some("items") {
++                    cursor.array(|cursor| {
++                        items.push(cursor.small_string()?.unwrap());
++                        Ok(())
++                    })?;
++                } else {
++                    cursor.skip()?;
++                }
++                Ok(())
++            })
++            .unwrap();
++        assert_eq!(items, ["first", "last"]);
++    }
++
++    #[test]
++    fn invalid_structure_and_unconsumed_values_reject() {
++        for input in [b"{\"x\":1,}".as_slice(), b"{\"x\":}", b"{\"x\":01}"] {
++            assert!(
++                Cursor::new(Bytes::new(input))
++                    .object(|_, c| c.skip().map(|_| ()))
++                    .is_err()
++            );
++        }
++        assert!(
++            Cursor::new(Bytes::new(b"{\"x\":1}"))
++                .object(|_, _| Ok(()))
++                .is_err()
++        );
++    }
++}
+diff --git a/codex-rs/core/src/session/original_history_json_string.rs b/codex-rs/core/src/session/original_history_json_string.rs
+new file mode 100644
+index 00000000..b02c60af
+--- /dev/null
++++ b/codex-rs/core/src/session/original_history_json_string.rs
+@@ -0,0 +1,199 @@
++//! Incremental decoding for an original stored as a JSON string in the journal.
++//! No complete JSONL record or decoded original is buffered here.
++
++use std::io::{self, BufRead};
++
++fn byte(reader: &mut impl BufRead) -> io::Result<u8> {
++    let value =
++        reader.fill_buf()?.first().copied().ok_or_else(|| {
++            io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete JSON string")
++        })?;
++    reader.consume(1);
++    Ok(value)
++}
++
++fn invalid() -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, "invalid JSON string")
++}
++
++fn hex_quad(reader: &mut impl BufRead) -> io::Result<u32> {
++    let mut value = 0;
++    for _ in 0..4 {
++        let digit = match byte(reader)? {
++            c @ b'0'..=b'9' => u32::from(c - b'0'),
++            c @ b'a'..=b'f' => u32::from(c - b'a' + 10),
++            c @ b'A'..=b'F' => u32::from(c - b'A' + 10),
++            _ => return Err(invalid()),
++        };
++        value = (value << 4) | digit;
++    }
++    Ok(value)
++}
++
++pub fn decode_json_string(
++    reader: &mut impl BufRead,
++    mut sink: impl FnMut(&[u8]) -> io::Result<()>,
++) -> io::Result<()> {
++    if byte(reader)? != b'"' {
++        return Err(invalid());
++    }
++    let mut output = [0_u8; 4096];
++    let mut used = 0;
++    loop {
++        let mut character = [0_u8; 4];
++        let size = match byte(reader)? {
++            b'"' => {
++                if used != 0 {
++                    sink(&output[..used])?;
++                }
++                return Ok(());
++            }
++            b'\\' => match byte(reader)? {
++                c @ (b'"' | b'\\' | b'/') => {
++                    character[0] = c;
++                    1
++                }
++                c @ (b'b' | b'f' | b'n' | b'r' | b't') => {
++                    character[0] = match c {
++                        b'b' => 8,
++                        b'f' => 12,
++                        b'n' => b'\n',
++                        b'r' => b'\r',
++                        _ => b'\t',
++                    };
++                    1
++                }
++                b'u' => {
++                    let first = hex_quad(reader)?;
++                    let scalar = match first {
++                        0xd800..=0xdbff => {
++                            if byte(reader)? != b'\\' || byte(reader)? != b'u' {
++                                return Err(invalid());
++                            }
++                            let second = hex_quad(reader)?;
++                            if !(0xdc00..=0xdfff).contains(&second) {
++                                return Err(invalid());
++                            }
++                            0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)
++                        }
++                        0xdc00..=0xdfff => return Err(invalid()),
++                        scalar => scalar,
++                    };
++                    char::from_u32(scalar)
++                        .ok_or_else(invalid)?
++                        .encode_utf8(&mut character)
++                        .len()
++                }
++                _ => return Err(invalid()),
++            },
++            c @ 0x20..=0x7f => {
++                character[0] = c;
++                1
++            }
++            first => {
++                let size = match first {
++                    0xc2..=0xdf => 2,
++                    0xe0..=0xef => 3,
++                    0xf0..=0xf4 => 4,
++                    _ => return Err(invalid()),
++                };
++                character[0] = first;
++                for next in &mut character[1..size] {
++                    *next = byte(reader)?;
++                }
++                std::str::from_utf8(&character[..size]).map_err(|_| invalid())?;
++                size
++            }
++        };
++        if used + size > output.len() {
++            sink(&output[..used])?;
++            used = 0;
++        }
++        output[used..used + size].copy_from_slice(&character[..size]);
++        used += size;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::io::{BufReader, Cursor, Read};
++
++    #[test]
++    fn escapes_unicode_and_delimiter_consumption() {
++        let mut input = BufReader::with_capacity(
++            2,
++            Cursor::new(br#""a\n\u00e9\ud83d\ude00\\\"\/\b\f\r\t",tail"#),
++        );
++        let mut output = Vec::new();
++        decode_json_string(&mut input, |bytes| {
++            output.extend_from_slice(bytes);
++            Ok(())
++        })
++        .unwrap();
++        assert_eq!(
++            String::from_utf8(output).unwrap(),
++            "a\né😀\\\"/\x08\x0c\r\t"
++        );
++        assert_eq!(byte(&mut input).unwrap(), b',');
++        let mut input = BufReader::with_capacity(1, Cursor::new("\"é😀\""));
++        let mut output = Vec::new();
++        decode_json_string(&mut input, |bytes| {
++            output.extend_from_slice(bytes);
++            Ok(())
++        })
++        .unwrap();
++        assert_eq!(String::from_utf8(output).unwrap(), "é😀");
++    }
++
++    #[test]
++    fn a_large_escaped_string_has_only_fixed_decoder_buffers() {
++        // A generated source and counting sink retain neither the encoded nor decoded string.
++        let count = 131_072;
++        struct RepeatedEscape {
++            remaining: usize,
++            position: usize,
++        }
++        impl Read for RepeatedEscape {
++            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
++                let count = self.remaining.min(output.len());
++                for value in &mut output[..count] {
++                    *value = b"\\u0061"[self.position % 6];
++                    self.position += 1;
++                }
++                self.remaining -= count;
++                Ok(count)
++            }
++        }
++        let source = Cursor::new(b"\"")
++            .chain(RepeatedEscape {
++                remaining: count * 6,
++                position: 0,
++            })
++            .chain(Cursor::new(b"\""));
++        let mut reader = BufReader::with_capacity(257, source);
++        let mut decoded = 0;
++        decode_json_string(&mut reader, |bytes| {
++            assert!(bytes.len() <= 4096);
++            assert!(bytes.iter().all(|&value| value == b'a'));
++            decoded += bytes.len();
++            Ok(())
++        })
++        .unwrap();
++        assert_eq!(decoded, count);
++    }
++
++    #[test]
++    fn malformed_strings_and_invalid_utf8_reject() {
++        for source in [
++            b"\"\\ud800\"".as_slice(),
++            b"\"\\udc00\"",
++            b"\"\\x\"",
++            b"\"\x01\"",
++            b"\"\xf0\x80\x80\x80\"",
++            b"\"\\ud800\\u0000\"",
++        ] {
++            assert!(decode_json_string(&mut Cursor::new(source), |_| Ok(())).is_err());
++        }
++    }
++}
+diff --git a/codex-rs/core/src/session/original_history_lookup.rs b/codex-rs/core/src/session/original_history_lookup.rs
+new file mode 100644
+index 00000000..89428b45
+--- /dev/null
++++ b/codex-rs/core/src/session/original_history_lookup.rs
+@@ -0,0 +1,207 @@
++//! Query-local occurrence lookup. Anonymous files contain source positions only.
++use std::collections::hash_map::RandomState;
++use std::fs::File;
++use std::hash::{BuildHasher, Hash, Hasher};
++use std::io::{self, Read, Seek, SeekFrom, Write};
++
++use codex_protocol::models::ResponseItem;
++
++#[derive(Clone, Copy, Default)]
++struct Slot {
++    key: u64,
++    head: u64,
++    tail: u64,
++}
++
++pub(super) struct Occurrences {
++    slots: File,
++    next: File,
++    capacity: u64,
++    hash: RandomState,
++}
++fn invalid() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidData,
++        "invalid original position lookup",
++    )
++}
++impl Occurrences {
++    pub(super) fn new(count: usize) -> io::Result<Self> {
++        let capacity = u64::try_from(count)
++            .map_err(|_| invalid())?
++            .checked_mul(2)
++            .and_then(|n| n.checked_add(1))
++            .and_then(u64::checked_next_power_of_two)
++            .ok_or_else(invalid)?;
++        let slots = tempfile::tempfile()?;
++        slots.set_len(capacity.checked_mul(24).ok_or_else(invalid)?)?;
++        let next = tempfile::tempfile()?;
++        next.set_len((count as u64).checked_mul(8).ok_or_else(invalid)?)?;
++        Ok(Self {
++            slots,
++            next,
++            capacity,
++            hash: RandomState::new(),
++        })
++    }
++    fn slot(&mut self, index: u64) -> io::Result<Slot> {
++        let mut bytes = [0; 24];
++        self.slots
++            .seek(SeekFrom::Start(index.checked_mul(24).ok_or_else(invalid)?))?;
++        self.slots.read_exact(&mut bytes)?;
++        Ok(Slot {
++            key: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
++            head: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
++            tail: u64::from_le_bytes(bytes[16..].try_into().unwrap()),
++        })
++    }
++    fn put(&mut self, index: u64, slot: Slot) -> io::Result<()> {
++        let mut bytes = [0; 24];
++        for (part, value) in bytes
++            .chunks_exact_mut(8)
++            .zip([slot.key, slot.head, slot.tail])
++        {
++            part.copy_from_slice(&value.to_le_bytes());
++        }
++        self.slots
++            .seek(SeekFrom::Start(index.checked_mul(24).ok_or_else(invalid)?))?;
++        self.slots.write_all(&bytes)
++    }
++    fn hash(&self, item: &ResponseItem) -> io::Result<u64> {
++        let mut hash = self.hash.build_hasher();
++        if let Some(id) = item.id() {
++            hash.write_u8(1);
++            hash.write(id.as_str().as_bytes());
++        } else {
++            hash.write_u8(0);
++            // Value's existing Hash honors object equality even with preserve_order enabled.
++            // This temporary is one projected item, never the catalog or replacement line.
++            serde_json::to_value(item)
++                .map_err(|_| invalid())?
++                .hash(&mut hash);
++        }
++        Ok(hash.finish())
++    }
++    fn find(
++        &mut self,
++        item: &ResponseItem,
++        mut same: impl FnMut(usize) -> io::Result<bool>,
++    ) -> io::Result<(u64, Slot)> {
++        let start = self.hash(item)? & (self.capacity - 1);
++        for step in 0..self.capacity {
++            let index = start.wrapping_add(step) & (self.capacity - 1);
++            let slot = self.slot(index)?;
++            if slot.key == 0 || same(usize::try_from(slot.key - 1).map_err(|_| invalid())?)? {
++                return Ok((index, slot));
++            }
++        }
++        Err(invalid())
++    }
++    pub(super) fn insert(
++        &mut self,
++        item: &ResponseItem,
++        position: usize,
++        same: impl FnMut(usize) -> io::Result<bool>,
++    ) -> io::Result<()> {
++        let pointer = u64::try_from(position)
++            .map_err(|_| invalid())?
++            .checked_add(1)
++            .ok_or_else(invalid)?;
++        let (index, mut slot) = self.find(item, same)?;
++        if slot.key == 0 {
++            slot = Slot {
++                key: pointer,
++                head: pointer,
++                tail: pointer,
++            };
++        } else if item.id().is_some() {
++            slot.head = pointer;
++            slot.tail = pointer;
++        } else {
++            self.next.seek(SeekFrom::Start(
++                (slot.tail - 1).checked_mul(8).ok_or_else(invalid)?,
++            ))?;
++            self.next.write_all(&pointer.to_le_bytes())?;
++            slot.tail = pointer;
++        }
++        self.put(index, slot)
++    }
++    pub(super) fn take(
++        &mut self,
++        item: &ResponseItem,
++        same: impl FnMut(usize) -> io::Result<bool>,
++    ) -> io::Result<Option<usize>> {
++        let (index, mut slot) = self.find(item, same)?;
++        if slot.key == 0 || slot.head == 0 {
++            return Ok(None);
++        }
++        let position = usize::try_from(slot.head - 1).map_err(|_| invalid())?;
++        if item.id().is_some() {
++            slot.head = 0;
++        } else {
++            self.next.seek(SeekFrom::Start(
++                (slot.head - 1).checked_mul(8).ok_or_else(invalid)?,
++            ))?;
++            let mut bytes = [0; 8];
++            self.next.read_exact(&mut bytes)?;
++            slot.head = u64::from_le_bytes(bytes);
++        }
++        self.put(index, slot)?;
++        Ok(Some(position))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++    fn message(id: Option<&str>, text: &str) -> ResponseItem {
++        let mut value =
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":text}]});
++        if let Some(id) = id {
++            value["id"] = id.into();
++        }
++        serde_json::from_value(value).unwrap()
++    }
++    #[test]
++    fn ids_select_last_once_and_idless_items_consume_in_order() {
++        let rows = [
++            message(Some("shared"), "first"),
++            message(Some("shared"), "last"),
++            message(None, "equal"),
++            message(None, "equal"),
++        ];
++        let mut index = Occurrences::new(rows.len()).unwrap();
++        for (position, row) in rows.iter().enumerate() {
++            index
++                .insert(row, position, |other| {
++                    Ok(match (row.id(), rows[other].id()) {
++                        (Some(a), Some(b)) => a == b,
++                        (None, None) => row == &rows[other],
++                        _ => false,
++                    })
++                })
++                .unwrap();
++        }
++        assert_eq!(
++            index
++                .take(&rows[0], |other| Ok(rows[other].id() == rows[0].id()))
++                .unwrap(),
++            Some(1)
++        );
++        assert_eq!(
++            index
++                .take(&rows[0], |other| Ok(rows[other].id() == rows[0].id()))
++                .unwrap(),
++            None
++        );
++        for expected in [Some(2), Some(3), None] {
++            assert_eq!(
++                index
++                    .take(&rows[2], |other| Ok(rows[other] == rows[2]))
++                    .unwrap(),
++                expected
++            );
++        }
++    }
++}
+diff --git a/codex-rs/core/src/session/original_history_read.rs b/codex-rs/core/src/session/original_history_read.rs
+new file mode 100644
+index 00000000..72b861ae
+--- /dev/null
++++ b/codex-rs/core/src/session/original_history_read.rs
+@@ -0,0 +1,916 @@
++//! Limited original-history snapshots without a second payload catalog.
++#[path = "original_history_stream.rs"]
++mod stream;
++use std::fs::File;
++use std::io::{self, Read, Seek, SeekFrom, Write};
++
++use codex_history::sdk_originals::{SdkOriginalHistoryCheckpoint, SdkOriginalSnapshotFold};
++use codex_history::{ResponseItemEnvelope, RetainedInputSource, RolloutItem};
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::EventMsg;
++use codex_thread_store::{
++    OriginalHistoryReader, OriginalHistorySegment, OriginalHistorySnapshot, ThreadStoreError,
++    ThreadStoreResult,
++};
++use codex_utils_output_truncation::TruncationPolicy;
++
++use crate::context_manager::{
++    ContextManager, is_api_message, is_user_turn_boundary, rollback_context_update,
++    rollback_retained_item,
++};
++
++// Only fixed-size source positions and rewrite flags enter this anonymous query scratch.
++// Original text, projected content, ids and application metadata remain in the owning store.
++#[derive(Clone, Copy, Default)]
++struct Position {
++    kind: u64,
++    record: u64,
++    item: u64,
++}
++#[derive(Clone, Copy, Default)]
++struct Entry {
++    original: Position,
++    projection: Position,
++    strip_developer: bool,
++}
++const ENTRY_BYTES: u64 = 64;
++struct Positions {
++    file: File,
++    len: usize,
++}
++impl Positions {
++    fn new() -> io::Result<Self> {
++        Ok(Self {
++            file: tempfile::tempfile()?,
++            len: 0,
++        })
++    }
++    fn clear(&mut self) -> io::Result<()> {
++        self.file.set_len(0)?;
++        self.len = 0;
++        Ok(())
++    }
++    fn push(&mut self, entry: Entry) -> io::Result<()> {
++        self.write(self.len, entry)?;
++        self.len = self.len.checked_add(1).ok_or_else(invalid)?;
++        Ok(())
++    }
++    fn write(&mut self, index: usize, entry: Entry) -> io::Result<()> {
++        self.file.seek(SeekFrom::Start(
++            (index as u64)
++                .checked_mul(ENTRY_BYTES)
++                .ok_or_else(invalid)?,
++        ))?;
++        for value in [
++            entry.original.kind,
++            entry.original.record,
++            entry.original.item,
++            entry.projection.kind,
++            entry.projection.record,
++            entry.projection.item,
++            u64::from(entry.strip_developer),
++            0,
++        ] {
++            self.file.write_all(&value.to_le_bytes())?;
++        }
++        Ok(())
++    }
++    fn get(&mut self, index: usize) -> io::Result<Entry> {
++        if index >= self.len {
++            return Err(invalid());
++        }
++        self.file.seek(SeekFrom::Start(
++            (index as u64)
++                .checked_mul(ENTRY_BYTES)
++                .ok_or_else(invalid)?,
++        ))?;
++        let mut words = [0u64; 8];
++        for word in &mut words {
++            let mut bytes = [0; 8];
++            self.file.read_exact(&mut bytes)?;
++            *word = u64::from_le_bytes(bytes);
++        }
++        Ok(Entry {
++            original: Position {
++                kind: words[0],
++                record: words[1],
++                item: words[2],
++            },
++            projection: Position {
++                kind: words[3],
++                record: words[4],
++                item: words[5],
++            },
++            strip_developer: words[6] != 0,
++        })
++    }
++}
++fn invalid() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidData,
++        "invalid original history stream",
++    )
++}
++
++pub(super) struct SnapshotReader {
++    pub(super) limit: usize,
++    pub(super) policy: TruncationPolicy,
++}
++impl SnapshotReader {
++    fn native_projection(&self, row: &ResponseItemEnvelope) -> Option<ResponseItemEnvelope> {
++        let mut projected = ContextManager::new();
++        let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
++            let mut normalized = row.clone();
++            if let Some(content) =
++                codex_context_fragments::to_annotated_content(&mut normalized.item)
++            {
++                let _ =
++                    codex_context_fragments::set_annotated_content(&mut normalized.item, content);
++            }
++            Some(normalized)
++        } else {
++            None
++        };
++        projected.replay_annotated_item(normalized.as_ref().unwrap_or(row), self.policy);
++        projected.annotated_items().last().cloned()
++    }
++    fn row<'a>(&self, items: &'a [RolloutItem], position: Position) -> io::Result<Row<'a>> {
++        let record = items
++            .get(usize::try_from(position.record).map_err(|_| invalid())?)
++            .ok_or_else(invalid)?;
++        match (position.kind, record) {
++            (1, RolloutItem::ResponseItem(row)) => Ok(Row::Native(row)),
++            (2, RolloutItem::Compacted(checkpoint)) => {
++                let Some(SdkOriginalHistoryCheckpoint::Replace(history)) =
++                    &checkpoint.sdk_originals
++                else {
++                    return Err(invalid());
++                };
++                Ok(Row::Original(
++                    history
++                        .items
++                        .get(position.item as usize)
++                        .ok_or_else(invalid)?,
++                ))
++            }
++            (3, RolloutItem::Compacted(checkpoint)) => Ok(Row::Native(
++                checkpoint
++                    .replacement_history
++                    .as_ref()
++                    .and_then(|rows| rows.get(position.item as usize))
++                    .ok_or_else(invalid)?,
++            )),
++            _ => Err(invalid()),
++        }
++    }
++    fn projection(
++        &self,
++        source: &mut dyn OriginalSource,
++        entry: Entry,
++    ) -> io::Result<Option<ResponseItemEnvelope>> {
++        if entry.projection.kind == 0 {
++            return Ok(None);
++        }
++        Ok(source.projection(entry.projection, self)?.and_then(|row| {
++            if entry.strip_developer {
++                let turn = row.turn_id().map(str::to_owned);
++                rollback_retained_item(&row, RetainedInputSource::Inherited, true, turn.as_deref())
++            } else {
++                Some(row)
++            }
++        }))
++    }
++    fn fold_original(
++        &self,
++        source: &mut dyn OriginalSource,
++        entry: Entry,
++        fold: &mut SdkOriginalSnapshotFold,
++    ) -> io::Result<()> {
++        fold.begin_item().map_err(|_| invalid())?;
++        source.original(entry.original, self, fold)?;
++        fold.end_item().map_err(|_| invalid())
++    }
++    fn read(&self, items: &[RolloutItem]) -> io::Result<OriginalHistorySnapshot> {
++        self.read_source(&mut MemorySource::new(items))
++    }
++    fn read_source(&self, source: &mut dyn OriginalSource) -> io::Result<OriginalHistorySnapshot> {
++        // Identify the final replacement and whether its suffix has rollback. No payload retained.
++        let mut generation = 0usize;
++        let mut total = 0usize;
++        let mut has_rollback = false;
++        while let Some(action) = source.next(self)? {
++            match action {
++                Action::Reset => {
++                    generation = generation.checked_add(1).ok_or_else(invalid)?;
++                    total = 0;
++                    has_rollback = false;
++                }
++                Action::Append(_) => total = total.checked_add(1).ok_or_else(invalid)?,
++                Action::Rollback(_) => has_rollback = true,
++            }
++        }
++        source.rewind()?;
++        let mut seen_generation = 0usize;
++        if !has_rollback {
++            let mut fold = SdkOriginalSnapshotFold::new(total, self.limit);
++            while let Some(action) = source.next(self)? {
++                match action {
++                    Action::Reset => seen_generation += 1,
++                    Action::Append(entry) if seen_generation == generation => {
++                        self.fold_original(source, entry, &mut fold)?
++                    }
++                    _ => {}
++                }
++            }
++            if seen_generation != generation {
++                return Err(invalid());
++            }
++            return fold.finish().map_err(|_| invalid());
++        }
++        // Rollback needs only an ephemeral sparse sequence of source positions.
++        let mut positions = Positions::new()?;
++        while let Some(action) = source.next(self)? {
++            match action {
++                Action::Reset => {
++                    seen_generation += 1;
++                }
++                Action::Append(entry) if seen_generation == generation => positions.push(entry)?,
++                Action::Rollback(turns) if seen_generation == generation => {
++                    self.rollback(source, &mut positions, turns)?
++                }
++                _ => {}
++            }
++        }
++        if seen_generation != generation {
++            return Err(invalid());
++        }
++        let mut fold = SdkOriginalSnapshotFold::new(positions.len, self.limit);
++        for index in 0..positions.len {
++            self.fold_original(source, positions.get(index)?, &mut fold)?;
++        }
++        fold.finish().map_err(|_| invalid())
++    }
++    fn rollback(
++        &self,
++        source: &mut dyn OriginalSource,
++        positions: &mut Positions,
++        turns: u32,
++    ) -> io::Result<()> {
++        let mut boundaries = 0usize;
++        let mut projection_total = 0usize;
++        for index in 0..positions.len {
++            if let Some(row) = self.projection(source, positions.get(index)?)? {
++                projection_total = projection_total.checked_add(1).ok_or_else(invalid)?;
++                if is_user_turn_boundary(&row.item) {
++                    boundaries = boundaries.checked_add(1).ok_or_else(invalid)?;
++                }
++            }
++        }
++        let unchanged_projection = turns == 0 || boundaries == 0;
++        let removed_boundary = boundaries.saturating_sub(turns as usize);
++        let mut seen_boundaries = 0;
++        let mut projection_index = 0;
++        let mut first = None;
++        let mut first_turn = None;
++        let mut context_start = None;
++        let mut cut = unchanged_projection.then_some(projection_total);
++        let mut rollback_source = RetainedInputSource::Inherited;
++        for index in 0..positions.len {
++            if unchanged_projection {
++                break;
++            }
++            let Some(row) = self.projection(source, positions.get(index)?)? else {
++                continue;
++            };
++            if is_user_turn_boundary(&row.item) {
++                if first.is_none() {
++                    first = Some(projection_index);
++                    first_turn = row.turn_id().map(str::to_owned);
++                }
++                if seen_boundaries == removed_boundary {
++                    cut = Some(
++                        context_start
++                            .unwrap_or(projection_index)
++                            .max(first.unwrap()),
++                    );
++                    rollback_source = RetainedInputSource::from(row.metadata.as_ref());
++                    break;
++                }
++                seen_boundaries += 1;
++            }
++            if rollback_context_update(&row.item).is_some() {
++                context_start.get_or_insert(projection_index);
++            } else {
++                context_start = None;
++            }
++            projection_index += 1;
++        }
++        let cut = cut.ok_or_else(invalid)?;
++        let mut retained = Positions::new()?;
++        projection_index = 0;
++        for index in 0..positions.len {
++            let mut entry = positions.get(index)?;
++            let Some(row) = self.projection(source, entry)? else {
++                continue;
++            };
++            if projection_index >= cut {
++                break;
++            }
++            projection_index += 1;
++            if let Some(kept) = rollback_retained_item(
++                &row,
++                rollback_source,
++                Some(cut) == first,
++                first_turn.as_deref(),
++            ) {
++                entry.strip_developer |= kept.item != row.item;
++                retained.push(entry)?;
++            }
++        }
++        // Preserve the existing occurrence-consuming raw/audit boundary, including legacy ids.
++        let mut next_retained_user = 0;
++        let mut boundary = positions.len;
++        for index in 0..positions.len {
++            let Some(row) = self.projection(source, positions.get(index)?)? else {
++                continue;
++            };
++            if !matches!(&row.item, ResponseItem::Message { role, .. } if role == "user") {
++                continue;
++            }
++            let mut found = false;
++            while next_retained_user < retained.len {
++                let kept = self
++                    .projection(source, retained.get(next_retained_user)?)?
++                    .ok_or_else(invalid)?;
++                if !matches!(&kept.item, ResponseItem::Message { role, .. } if role == "user") {
++                    next_retained_user += 1;
++                    continue;
++                }
++                found = row
++                    .item
++                    .id()
++                    .map_or_else(|| kept.item == row.item, |id| kept.item.id() == Some(id));
++                if found {
++                    next_retained_user += 1;
++                }
++                break;
++            }
++            if !found {
++                boundary = index;
++                break;
++            }
++        }
++        let mut occurrences = super::original_history_lookup::Occurrences::new(retained.len)?;
++        for candidate in 0..retained.len {
++            let row = self
++                .projection(source, retained.get(candidate)?)?
++                .ok_or_else(invalid)?;
++            occurrences.insert(&row.item, candidate, |other| {
++                let kept = self
++                    .projection(source, retained.get(other)?)?
++                    .ok_or_else(invalid)?;
++                Ok(same_occurrence_key(&row.item, &kept.item))
++            })?;
++        }
++        let mut result = Positions::new()?;
++        for index in 0..boundary {
++            let mut entry = positions.get(index)?;
++            let Some(row) = self.projection(source, entry)? else {
++                result.push(entry)?;
++                continue;
++            };
++            let matched = occurrences.take(&row.item, |other| {
++                let kept = self
++                    .projection(source, retained.get(other)?)?
++                    .ok_or_else(invalid)?;
++                Ok(same_occurrence_key(&row.item, &kept.item))
++            })?;
++            if let Some(candidate) = matched {
++                let reference = retained.get(candidate)?;
++                entry.projection = reference.projection;
++                entry.strip_developer = reference.strip_developer;
++                result.push(entry)?;
++            }
++        }
++        *positions = result;
++        Ok(())
++    }
++}
++enum Action {
++    Reset,
++    Append(Entry),
++    Rollback(u32),
++}
++trait OriginalSource {
++    fn next(&mut self, reader: &SnapshotReader) -> io::Result<Option<Action>>;
++    fn rewind(&mut self) -> io::Result<()>;
++    fn projection(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<Option<ResponseItemEnvelope>>;
++    fn original(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++        fold: &mut SdkOriginalSnapshotFold,
++    ) -> io::Result<()>;
++}
++struct MemorySource<'a> {
++    items: &'a [RolloutItem],
++    record: usize,
++    nested: Option<usize>,
++}
++impl<'a> MemorySource<'a> {
++    fn new(items: &'a [RolloutItem]) -> Self {
++        Self {
++            items,
++            record: 0,
++            nested: None,
++        }
++    }
++}
++impl OriginalSource for MemorySource<'_> {
++    fn rewind(&mut self) -> io::Result<()> {
++        self.record = 0;
++        self.nested = None;
++        Ok(())
++    }
++    fn next(&mut self, _reader: &SnapshotReader) -> io::Result<Option<Action>> {
++        loop {
++            let Some(record) = self.items.get(self.record) else {
++                return Ok(None);
++            };
++            let base = Position {
++                kind: 1,
++                record: self.record as u64,
++                item: 0,
++            };
++            if let Some(nested) = self.nested {
++                let RolloutItem::Compacted(checkpoint) = record else {
++                    return Err(invalid());
++                };
++                self.nested = Some(nested.checked_add(1).ok_or_else(invalid)?);
++                let entry = match &checkpoint.sdk_originals {
++                    Some(SdkOriginalHistoryCheckpoint::Replace(history)) => {
++                        history.items.get(nested).map(|row| {
++                            let position = Position {
++                                kind: 2,
++                                item: nested as u64,
++                                ..base
++                            };
++                            Entry {
++                                original: position,
++                                projection: if row.projection.is_some() {
++                                    position
++                                } else {
++                                    Position::default()
++                                },
++                                ..Default::default()
++                            }
++                        })
++                    }
++                    None => checkpoint
++                        .replacement_history
++                        .as_ref()
++                        .and_then(|rows| rows.get(nested))
++                        .map(|row| {
++                            let position = Position {
++                                kind: 3,
++                                item: nested as u64,
++                                ..base
++                            };
++                            Entry {
++                                original: position,
++                                projection: if is_api_message(&row.item, row.metadata.as_ref()) {
++                                    position
++                                } else {
++                                    Position::default()
++                                },
++                                ..Default::default()
++                            }
++                        }),
++                    _ => return Err(invalid()),
++                };
++                if let Some(entry) = entry {
++                    if entry.original.kind == 3 && entry.projection.kind == 0 {
++                        continue;
++                    }
++                    return Ok(Some(Action::Append(entry)));
++                }
++                self.nested = None;
++                self.record += 1;
++                continue;
++            }
++            match record {
++                RolloutItem::ResponseItem(row) => {
++                    self.record += 1;
++                    if is_api_message(&row.item, row.metadata.as_ref()) {
++                        return Ok(Some(Action::Append(Entry {
++                            original: base,
++                            projection: base,
++                            ..Default::default()
++                        })));
++                    }
++                }
++                RolloutItem::Compacted(checkpoint)
++                    if matches!(
++                        &checkpoint.sdk_originals,
++                        Some(SdkOriginalHistoryCheckpoint::Replace(_))
++                    ) || (checkpoint.sdk_originals.is_none()
++                        && checkpoint.replacement_history.is_some()) =>
++                {
++                    self.nested = Some(0);
++                    return Ok(Some(Action::Reset));
++                }
++                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(event)) => {
++                    self.record += 1;
++                    return Ok(Some(Action::Rollback(event.num_turns)));
++                }
++                _ => self.record += 1,
++            }
++        }
++    }
++    fn projection(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<Option<ResponseItemEnvelope>> {
++        Ok(match reader.row(self.items, position)? {
++            Row::Native(row) => reader.native_projection(row),
++            Row::Original(row) => row.projection.clone(),
++        })
++    }
++    fn original(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++        fold: &mut SdkOriginalSnapshotFold,
++    ) -> io::Result<()> {
++        match reader.row(self.items, position)? {
++            Row::Native(row) => {
++                serde_json::to_writer(FoldWriter(fold), &row.item).map_err(|_| invalid())
++            }
++            Row::Original(row) => fold
++                .write_item(row.original.as_bytes())
++                .map_err(|_| invalid()),
++        }
++    }
++}
++
++fn same_occurrence_key(left: &ResponseItem, right: &ResponseItem) -> bool {
++    match (left.id(), right.id()) {
++        (Some(left), Some(right)) => left == right,
++        (None, None) => left == right,
++        _ => false,
++    }
++}
++
++enum Row<'a> {
++    Native(&'a ResponseItemEnvelope),
++    Original(&'a codex_history::sdk_originals::SdkOriginalItem),
++}
++struct FoldWriter<'a>(&'a mut SdkOriginalSnapshotFold);
++impl Write for FoldWriter<'_> {
++    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++        self.0.write_item(bytes).map_err(|_| invalid())?;
++        Ok(bytes.len())
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++impl OriginalHistoryReader for SnapshotReader {
++    fn read_items(&mut self, items: &[RolloutItem]) -> ThreadStoreResult<OriginalHistorySnapshot> {
++        self.read(items).map_err(|_| ThreadStoreError::Internal {
++            message: "original history stream unavailable".to_string(),
++        })
++    }
++    fn read_segments(
++        &mut self,
++        _segments: &[OriginalHistorySegment],
++    ) -> ThreadStoreResult<OriginalHistorySnapshot> {
++        self.read_source(&mut stream::LocalSource::new(_segments))
++            .map_err(|_| ThreadStoreError::Internal {
++                message: "original history stream unavailable".into(),
++            })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_history::sdk_originals::{SdkOriginalHistory, SdkOriginalItem, input_projection};
++    use codex_protocol::protocol::ThreadRolledBackEvent;
++    use serde_json::json;
++
++    fn checkpoint(values: &[serde_json::Value]) -> RolloutItem {
++        let mut originals = SdkOriginalHistory::default();
++        for value in values {
++            let original = value.to_string();
++            let projection = input_projection(&original)
++                .unwrap()
++                .map(ResponseItemEnvelope::new);
++            originals.append(SdkOriginalItem {
++                original,
++                projection,
++            });
++        }
++        let mut compacted: codex_history::CompactedItem =
++            serde_json::from_value(json!({"message":""})).unwrap();
++        compacted.sdk_originals = Some(originals.into());
++        RolloutItem::Compacted(compacted)
++    }
++    fn full(reader: &SnapshotReader, records: &[RolloutItem]) -> SdkOriginalHistory {
++        SdkOriginalHistory::replay(
++            records,
++            |row| reader.native_projection(row),
++            |items, turns| {
++                let mut history = ContextManager::new();
++                history.replace_annotated(items.to_vec());
++                history.drop_last_n_user_turns(turns);
++                history.annotated_items().to_vec()
++            },
++        )
++    }
++    #[test]
++    fn borrowed_checkpoint_tail_keeps_complete_revision_and_total() {
++        let records = vec![checkpoint(&[
++            json!({"type":"unknown","large":"a".repeat(8 * 1024 * 1024),"__proto__":{"safe":true}}),
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"tail"}]}),
++        ])];
++        for limit in [0, 1, 2, 20] {
++            let reader = SnapshotReader {
++                limit,
++                policy: TruncationPolicy::Bytes(4096),
++            };
++            assert_eq!(
++                reader.read(&records).unwrap(),
++                full(&reader, &records).snapshot(Some(limit))
++            );
++        }
++    }
++    #[test]
++    fn borrowed_rollback_matches_full_owner_with_duplicate_idless_users_and_audit_rows() {
++        let message =
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"same"}]});
++        let mut records = vec![checkpoint(&[
++            message.clone(),
++            json!({"audit":"first"}),
++            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"one"}]}),
++            message,
++            json!({"audit":"removed"}),
++            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"two"}]}),
++        ])];
++        for turns in [1, 1, 20] {
++            records.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
++                ThreadRolledBackEvent { num_turns: turns },
++            )));
++            for limit in [0, 1, 20] {
++                let reader = SnapshotReader {
++                    limit,
++                    policy: TruncationPolicy::Bytes(4096),
++                };
++                assert_eq!(
++                    reader.read(&records).unwrap(),
++                    full(&reader, &records).snapshot(Some(limit))
++                );
++            }
++        }
++    }
++    #[tokio::test]
++    async fn live_memory_store_runs_borrowed_reader_without_full_history_load() {
++        use codex_protocol::protocol::{SessionSource, ThreadHistoryMode, ThreadMemoryMode};
++        use codex_thread_store::{
++            CreateThreadParams, InMemoryThreadStore, LiveThread, ThreadPersistenceMetadata,
++        };
++        use std::sync::Arc;
++        let store = Arc::new(InMemoryThreadStore::default());
++        let id = codex_protocol::ThreadId::new();
++        let live = LiveThread::create(
++            store.clone(),
++            CreateThreadParams {
++                sdk_mcp_source_required: false,
++                creator_user_id: None,
++                creator_account_id: None,
++                session_id: id.into(),
++                thread_id: id,
++                extra_config: None,
++                forked_from_id: None,
++                parent_thread_id: None,
++                source: SessionSource::Exec,
++                thread_source: None,
++                originator: "bounded-history-test".into(),
++                base_instructions: Default::default(),
++                dynamic_tools: vec![],
++                selected_capability_roots: vec![],
++                multi_agent_version: None,
++                history_mode: ThreadHistoryMode::Legacy,
++                history_base: None,
++                subagent_history_start_ordinal: None,
++                initial_window_id: uuid::Uuid::now_v7().to_string(),
++                runtime_workspace_roots: None,
++                metadata: ThreadPersistenceMetadata {
++                    cwd: None,
++                    model_provider: "test".into(),
++                    memory_mode: ThreadMemoryMode::Enabled,
++                },
++            },
++        )
++        .await
++        .unwrap();
++        let records = vec![
++            checkpoint(&[
++                json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}),
++                json!({"type":"future","audit":"retained"}),
++                json!({"type":"message","role":"user","content":[{"type":"input_text","text":"removed"}]}),
++                json!({"type":"future","audit":"removed"}),
++            ]),
++            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
++                num_turns: 1,
++            })),
++        ];
++        let reader = SnapshotReader {
++            limit: 1,
++            policy: TruncationPolicy::Bytes(4096),
++        };
++        let expected = full(&reader, &records).snapshot(Some(1));
++        live.append_items(&records).await.unwrap();
++        let before = store.calls().await;
++        let actual = live.read_original_history(Box::new(reader)).await.unwrap();
++        let after = store.calls().await;
++        assert_eq!(actual, expected);
++        assert_eq!(before.load_history, after.load_history);
++        assert_eq!(
++            before.load_latest_model_context,
++            after.load_latest_model_context
++        );
++        live.shutdown().await.unwrap();
++    }
++    #[test]
++    fn local_replacement_line_and_rollback_match_full_owner() {
++        let mut records = vec![checkpoint(&[
++            json!({"type":"future","large":"x".repeat(8*1024*1024)}),
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}),
++            json!({"audit":"first turn"}),
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}),
++            json!({"audit":"second turn"}),
++        ])];
++        let mut preserve: codex_history::CompactedItem =
++            serde_json::from_value(json!({"message":"tiny summary"})).unwrap();
++        preserve.sdk_originals = Some(SdkOriginalHistoryCheckpoint::preserve());
++        records.push(RolloutItem::Compacted(preserve));
++        records.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
++            ThreadRolledBackEvent { num_turns: 1 },
++        )));
++        let mut file = tempfile::NamedTempFile::new().unwrap();
++        for record in &records {
++            serde_json::to_writer(
++                file.as_file_mut(),
++                &codex_history::RolloutLine {
++                    timestamp: "2026-11-10T00:00:00Z".into(),
++                    ordinal: None,
++                    item: record.clone(),
++                },
++            )
++            .unwrap();
++            file.as_file_mut().write_all(b"\n").unwrap();
++        }
++        file.as_file_mut().flush().unwrap();
++        let segments = [OriginalHistorySegment {
++            rollout_path: file.path().to_owned(),
++            end_byte_offset: file.as_file().metadata().unwrap().len(),
++        }];
++        for limit in [0, 1, 20] {
++            let mut reader = SnapshotReader {
++                limit,
++                policy: TruncationPolicy::Bytes(4096),
++            };
++            assert_eq!(
++                reader.read_segments(&segments).unwrap(),
++                full(&reader, &records).snapshot(Some(limit))
++            );
++        }
++    }
++    #[test]
++    fn zero_and_no_user_rollback_preserve_full_owner_occurrence_semantics() {
++        for turns in [0, 1] {
++            let records = vec![
++                checkpoint(&[
++                    json!({"type":"message","id":"same","role":"assistant","content":[{"type":"output_text","text":"first"}]}),
++                    json!({"audit":"between"}),
++                    json!({"type":"message","id":"same","role":"assistant","content":[{"type":"output_text","text":"last"}]}),
++                ]),
++                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
++                    num_turns: turns,
++                })),
++            ];
++            let reader = SnapshotReader {
++                limit: 1,
++                policy: TruncationPolicy::Bytes(4096),
++            };
++            assert_eq!(
++                reader.read(&records).unwrap(),
++                full(&reader, &records).snapshot(Some(1))
++            );
++        }
++    }
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn local_limited_snapshot_streams_huge_replacement_with_bounded_rss() {
++        const CHILD: &str = "CODEX_TEST_BOUNDED_HISTORY_RSS_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let output = std::process::Command::new(std::env::current_exe().unwrap())
++                .args([
++                    "--exact",
++                    "session::original_history_read::tests::local_limited_snapshot_streams_huge_replacement_with_bounded_rss",
++                    "--test-threads=1",
++                ])
++                .env(CHILD, "1")
++                .output()
++                .unwrap();
++            assert!(
++                output.status.success(),
++                "{}",
++                String::from_utf8_lossy(&output.stdout)
++            );
++            return;
++        }
++        fn peak_rss() -> usize {
++            std::fs::read_to_string("/proc/self/status")
++                .unwrap()
++                .lines()
++                .find_map(|line| {
++                    line.strip_prefix("VmHWM:").map(|value| {
++                        value
++                            .split_whitespace()
++                            .next()
++                            .unwrap()
++                            .parse::<usize>()
++                            .unwrap()
++                            * 1024
++                    })
++                })
++                .unwrap()
++        }
++        const PAYLOAD: usize = 128 * 1024 * 1024;
++        let record = checkpoint(&[
++            json!({"type":"future","large":"HUGE_HISTORY_PLACEHOLDER"}),
++            json!({"type":"future","tail":true}),
++        ]);
++        let line = serde_json::to_string(&codex_history::RolloutLine {
++            timestamp: "2026-11-10T00:00:00Z".into(),
++            ordinal: None,
++            item: record,
++        })
++        .unwrap();
++        let (before, after) = line.split_once("HUGE_HISTORY_PLACEHOLDER").unwrap();
++        let mut file = tempfile::NamedTempFile::new().unwrap();
++        file.write_all(before.as_bytes()).unwrap();
++        let chunk = [b'x'; 16 * 1024];
++        for _ in 0..PAYLOAD / chunk.len() {
++            file.write_all(&chunk).unwrap();
++        }
++        file.write_all(after.as_bytes()).unwrap();
++        file.write_all(b"\n").unwrap();
++        file.flush().unwrap();
++        let segments = [OriginalHistorySegment {
++            rollout_path: file.path().to_owned(),
++            end_byte_offset: file.as_file().metadata().unwrap().len(),
++        }];
++        let baseline = peak_rss();
++        let mut reader = SnapshotReader {
++            limit: 1,
++            policy: TruncationPolicy::Bytes(4096),
++        };
++        let snapshot = reader.read_segments(&segments).unwrap();
++        let bounded_peak = peak_rss();
++        assert_eq!(snapshot.1, 2);
++        assert_eq!(
++            snapshot.2,
++            vec![json!({"type":"future","tail":true}).to_string()]
++        );
++        assert!(
++            bounded_peak.saturating_sub(baseline) < 16 * 1024 * 1024,
++            "limited reader RSS growth: {} bytes",
++            bounded_peak.saturating_sub(baseline)
++        );
++        // Positive sensitivity control: full decoding has been intentionally allocating
++        // the complete requested original, unlike the limited production reader above.
++        let complete: RolloutItem =
++            serde_json::from_reader(std::io::BufReader::new(File::open(file.path()).unwrap()))
++                .unwrap();
++        let RolloutItem::Compacted(compacted) = complete else {
++            panic!("checkpoint expected")
++        };
++        let Some(SdkOriginalHistoryCheckpoint::Replace(originals)) = compacted.sdk_originals else {
++            panic!("replacement expected")
++        };
++        assert!(originals.items[0].original.len() > PAYLOAD);
++        assert_eq!(snapshot.0, originals.snapshot(Some(1)).0);
++        assert!(
++            peak_rss().saturating_sub(baseline) > PAYLOAD / 2,
++            "full decode sensitivity control has not crossed half the source payload"
++        );
++    }
++}
+diff --git a/codex-rs/core/src/session/original_history_stream.rs b/codex-rs/core/src/session/original_history_stream.rs
+new file mode 100644
+index 00000000..9c56597a
+--- /dev/null
++++ b/codex-rs/core/src/session/original_history_stream.rs
+@@ -0,0 +1,427 @@
++//! Selective local JSONL source. Replacement catalogs never become a whole line or Vec.
++use super::{Action, Entry, FoldWriter, OriginalSource, Position, SnapshotReader, invalid};
++use codex_history::ResponseItemEnvelope;
++use codex_history::sdk_originals::SdkOriginalSnapshotFold;
++use codex_thread_store::OriginalHistorySegment;
++use std::fs::File;
++use std::io::{self, BufReader, Read, Seek, SeekFrom};
++
++#[path = "original_history_cursor.rs"]
++mod cursor;
++use cursor::{Cursor, Span};
++
++struct Prefix {
++    file: File,
++    end: u64,
++}
++impl Read for Prefix {
++    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
++        let left = self.end.saturating_sub(self.file.stream_position()?);
++        let count = output
++            .len()
++            .min(usize::try_from(left).unwrap_or(usize::MAX));
++        self.file.read(&mut output[..count])
++    }
++}
++impl Seek for Prefix {
++    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
++        let target = match from {
++            SeekFrom::Start(value) => value,
++            SeekFrom::Current(delta) => self
++                .file
++                .stream_position()?
++                .checked_add_signed(delta)
++                .ok_or_else(invalid)?,
++            SeekFrom::End(delta) => self.end.checked_add_signed(delta).ok_or_else(invalid)?,
++        };
++        if target > self.end {
++            return Err(invalid());
++        }
++        self.file.seek(SeekFrom::Start(target))
++    }
++}
++type Input = Cursor<BufReader<Prefix>>;
++#[derive(Clone, Copy)]
++struct Array {
++    segment: usize,
++    next: u64,
++    first: bool,
++    legacy: bool,
++}
++struct Frame {
++    kind: Option<String>,
++    payload: Option<Span>,
++    metadata: Option<Span>,
++    end: u64,
++}
++
++pub(super) struct LocalSource<'a> {
++    segments: &'a [OriginalHistorySegment],
++    segment: usize,
++    next_record: u64,
++    array: Option<Array>,
++    input: Option<(usize, Input)>,
++}
++impl<'a> LocalSource<'a> {
++    pub(super) fn new(segments: &'a [OriginalHistorySegment]) -> Self {
++        Self {
++            segments,
++            segment: 0,
++            next_record: 0,
++            array: None,
++            input: None,
++        }
++    }
++    fn cursor(&mut self, segment: usize, position: u64) -> io::Result<&mut Input> {
++        if self.input.as_ref().map(|(index, _)| *index) != Some(segment) {
++            let source = self.segments.get(segment).ok_or_else(invalid)?;
++            let file = codex_rollout::open_rollout_seekable_reader(&source.rollout_path)?;
++            if file.metadata()?.len() < source.end_byte_offset {
++                return Err(invalid());
++            }
++            self.input = Some((
++                segment,
++                Cursor::new(BufReader::with_capacity(
++                    16 * 1024,
++                    Prefix {
++                        file,
++                        end: source.end_byte_offset,
++                    },
++                )),
++            ));
++        }
++        let (_, input) = self.input.as_mut().unwrap();
++        input.seek(position)?;
++        Ok(input)
++    }
++    fn frame(&mut self, segment: usize, position: u64) -> io::Result<Frame> {
++        let input = self.cursor(segment, position)?;
++        let mut kind = None;
++        let mut payload = None;
++        let mut metadata = None;
++        input.object(|key, input| {
++            match key {
++                Some("type") => {
++                    if kind.is_some() {
++                        return Err(invalid());
++                    }
++                    kind = input.small_string()?;
++                }
++                Some("payload") => {
++                    if payload.is_some() {
++                        return Err(invalid());
++                    }
++                    payload = Some(input.skip()?);
++                }
++                Some("metadata") => {
++                    if metadata.is_some() {
++                        return Err(invalid());
++                    }
++                    metadata = Some(input.skip()?);
++                }
++                _ => {
++                    input.skip()?;
++                }
++            }
++            Ok(())
++        })?;
++        Ok(Frame {
++            kind,
++            payload,
++            metadata,
++            end: input.line_end()?,
++        })
++    }
++    fn native(&mut self, position: Position) -> io::Result<ResponseItemEnvelope> {
++        let segment = usize::try_from(position.record).map_err(|_| invalid())?;
++        let frame = self.frame(segment, position.item)?;
++        if frame.kind.as_deref() != Some("response_item") {
++            return Err(invalid());
++        }
++        let payload = self
++            .cursor(segment, frame.payload.ok_or_else(invalid)?.start)?
++            .value::<serde_json::Value>()?;
++        let mut value = serde_json::Map::new();
++        value.insert("type".into(), "response_item".into());
++        value.insert("payload".into(), payload);
++        if let Some(metadata) = frame.metadata {
++            value.insert(
++                "metadata".into(),
++                self.cursor(segment, metadata.start)?.value()?,
++            );
++        }
++        // Reuse the canonical RolloutItem decoder, including its persisted response normalization.
++        match serde_json::from_value::<codex_history::RolloutItem>(serde_json::Value::Object(value))
++            .map_err(|_| invalid())?
++        {
++            codex_history::RolloutItem::ResponseItem(row) => Ok(row),
++            _ => Err(invalid()),
++        }
++    }
++    fn envelope(&mut self, position: Position) -> io::Result<Option<ResponseItemEnvelope>> {
++        let value = self
++            .cursor(position.record as usize, position.item)?
++            .value::<serde_json::Value>()?;
++        serde_json::from_value(value).map_err(|_| invalid())
++    }
++    fn array(&mut self, segment: usize, start: u64, legacy: bool) -> io::Result<()> {
++        let input = self.cursor(segment, start)?;
++        input.begin_array()?;
++        let next = input.position()?;
++        self.array = Some(Array {
++            segment,
++            next,
++            first: true,
++            legacy,
++        });
++        Ok(())
++    }
++    fn compacted(&mut self, segment: usize, payload: Span) -> io::Result<Option<Action>> {
++        let input = self.cursor(segment, payload.start)?;
++        let mut originals = None;
++        let mut replacement = None;
++        input.object(|key, input| {
++            match key {
++                Some("sdk_originals") => {
++                    if originals.is_some() {
++                        return Err(invalid());
++                    }
++                    originals = Some(input.skip()?);
++                }
++                Some("replacement_history") => {
++                    if replacement.is_some() {
++                        return Err(invalid());
++                    }
++                    replacement = Some(input.skip()?);
++                }
++                _ => {
++                    input.skip()?;
++                }
++            }
++            Ok(())
++        })?;
++        if let Some(originals) = originals {
++            let input = self.cursor(segment, originals.start)?;
++            if input.peek_value()? != Some(b'n') {
++                let mut preserve = None;
++                let mut version = None;
++                let mut items = None;
++                input.object(|key, input| {
++                    match key {
++                        Some("preserve") => {
++                            if preserve.is_some() {
++                                return Err(invalid());
++                            }
++                            preserve = Some(input.value::<bool>()?);
++                        }
++                        Some("format_version") => {
++                            if version.is_some() {
++                                return Err(invalid());
++                            }
++                            version = Some(input.unsigned()?);
++                        }
++                        Some("items") => {
++                            if items.is_some() {
++                                return Err(invalid());
++                            }
++                            items = Some(input.skip()?);
++                        }
++                        _ => {
++                            input.skip()?;
++                        }
++                    }
++                    Ok(())
++                })?;
++                if preserve == Some(true) && version.is_none() && items.is_none() {
++                    return Ok(None);
++                }
++                if preserve.is_some() || version != Some(1) {
++                    return Err(invalid());
++                }
++                self.array(segment, items.ok_or_else(invalid)?.start, false)?;
++                return Ok(Some(Action::Reset));
++            }
++        }
++        if let Some(replacement) = replacement {
++            if self.cursor(segment, replacement.start)?.peek_value()? != Some(b'n') {
++                self.array(segment, replacement.start, true)?;
++                return Ok(Some(Action::Reset));
++            }
++        }
++        Ok(None)
++    }
++}
++impl OriginalSource for LocalSource<'_> {
++    fn rewind(&mut self) -> io::Result<()> {
++        self.segment = 0;
++        self.next_record = 0;
++        self.array = None;
++        Ok(())
++    }
++    fn next(&mut self, reader: &SnapshotReader) -> io::Result<Option<Action>> {
++        loop {
++            if let Some(mut array) = self.array.take() {
++                let input = self.cursor(array.segment, array.next)?;
++                let Some(item) = input.next_array(array.first)? else {
++                    continue;
++                };
++                array.first = false;
++                array.next = input.position()?;
++                self.array = Some(array);
++                if array.legacy {
++                    let position = Position {
++                        kind: 13,
++                        record: array.segment as u64,
++                        item: item.start,
++                    };
++                    let row = self.envelope(position)?.ok_or_else(invalid)?;
++                    if !crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                        continue;
++                    }
++                    return Ok(Some(Action::Append(Entry {
++                        original: position,
++                        projection: position,
++                        ..Default::default()
++                    })));
++                }
++                let input = self.cursor(array.segment, item.start)?;
++                let mut original = None;
++                let mut projection = None;
++                input.object(|key, input| {
++                    match key {
++                        Some("original") => {
++                            if original.is_some() || input.peek_value()? != Some(b'"') {
++                                return Err(invalid());
++                            }
++                            original = Some(input.skip()?);
++                        }
++                        Some("projection") => {
++                            if projection.is_some() {
++                                return Err(invalid());
++                            }
++                            let present = input.peek_value()? != Some(b'n');
++                            let span = input.skip()?;
++                            projection = Some((present, span));
++                        }
++                        _ => {
++                            input.skip()?;
++                        }
++                    }
++                    Ok(())
++                })?;
++                let original = Position {
++                    kind: 11,
++                    record: array.segment as u64,
++                    item: original.ok_or_else(invalid)?.start,
++                };
++                let projection = projection
++                    .filter(|(present, _)| *present)
++                    .map(|(_, span)| Position {
++                        kind: 12,
++                        record: array.segment as u64,
++                        item: span.start,
++                    })
++                    .unwrap_or_default();
++                return Ok(Some(Action::Append(Entry {
++                    original,
++                    projection,
++                    ..Default::default()
++                })));
++            }
++            if self.segment >= self.segments.len() {
++                return Ok(None);
++            }
++            let segment = self.segment;
++            let position = self.next_record;
++            if self.cursor(segment, position)?.eof()? {
++                self.segment += 1;
++                self.next_record = 0;
++                continue;
++            }
++            let frame = self.frame(segment, position)?;
++            self.next_record = frame.end;
++            match frame.kind.as_deref() {
++                Some("response_item") => {
++                    let position = Position {
++                        kind: 10,
++                        record: segment as u64,
++                        item: position,
++                    };
++                    let row = self.native(position)?;
++                    if crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()) {
++                        return Ok(Some(Action::Append(Entry {
++                            original: position,
++                            projection: position,
++                            ..Default::default()
++                        })));
++                    }
++                }
++                Some("compacted") => {
++                    if let Some(action) =
++                        self.compacted(segment, frame.payload.ok_or_else(invalid)?)?
++                    {
++                        return Ok(Some(action));
++                    }
++                }
++                Some("event_msg") => {
++                    let input = self.cursor(segment, frame.payload.ok_or_else(invalid)?.start)?;
++                    let mut kind = None;
++                    let mut turns = None;
++                    input.object(|key, input| {
++                        match key {
++                            Some("type") => kind = input.small_string()?,
++                            Some("num_turns") => turns = Some(input.skip()?),
++                            _ => {
++                                input.skip()?;
++                            }
++                        }
++                        Ok(())
++                    })?;
++                    if kind.as_deref() == Some("thread_rolled_back") {
++                        let turns = self
++                            .cursor(segment, turns.ok_or_else(invalid)?.start)?
++                            .value::<u32>()?;
++                        return Ok(Some(Action::Rollback(turns)));
++                    }
++                }
++                Some(_) => {}
++                None => return Err(invalid()),
++            }
++            let _ = reader;
++        }
++    }
++    fn projection(
++        &mut self,
++        position: Position,
++        reader: &SnapshotReader,
++    ) -> io::Result<Option<ResponseItemEnvelope>> {
++        match position.kind {
++            10 => Ok(reader.native_projection(&self.native(position)?)),
++            12 => self.envelope(position),
++            13 => Ok(self
++                .envelope(position)?
++                .and_then(|row| reader.native_projection(&row))),
++            _ => Err(invalid()),
++        }
++    }
++    fn original(
++        &mut self,
++        position: Position,
++        _reader: &SnapshotReader,
++        fold: &mut SdkOriginalSnapshotFold,
++    ) -> io::Result<()> {
++        match position.kind {
++            11 => self
++                .cursor(position.record as usize, position.item)?
++                .string(|bytes| fold.write_item(bytes).map_err(|_| invalid())),
++            10 => serde_json::to_writer(FoldWriter(fold), &self.native(position)?.item)
++                .map_err(|_| invalid()),
++            13 => serde_json::to_writer(
++                FoldWriter(fold),
++                &self.envelope(position)?.ok_or_else(invalid)?.item,
++            )
++            .map_err(|_| invalid()),
++            _ => Err(invalid()),
++        }
++    }
++}
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index b8a07d35..686aa8da 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -265,12 +265,90 @@ impl OriginalIndex {
+             self.hash.update(b",");
+         }
+         self.hash.update(original.as_bytes());
++        self.complete();
++    }
++
++    fn complete(&mut self) {
+         let mut completed = self.hash.clone();
+         completed.update(b"]");
+         self.revision = format!("{:x}", completed.finalize());
+     }
+ }
+ 
++/// Folds a complete effective original stream while retaining only its requested suffix.
++///
++/// The first pass supplies the complete count. Readers must then feed every effective original,
++/// in order, using decoded UTF-8 chunks. No full catalog or skipped original string is required
++/// merely to compute the complete revision. Journal selection and JSON validation remain with
++/// the reader; this fold grants no replacement authority to a partial stream.
++pub struct SdkOriginalSnapshotFold {
++    expected_total: usize,
++    completed: usize,
++    skip: usize,
++    index: OriginalIndex,
++    items: Vec<String>,
++    active: bool,
++    current: Option<Vec<u8>>,
++}
++
++impl SdkOriginalSnapshotFold {
++    pub fn new(total: usize, limit: usize) -> Self {
++        Self {
++            expected_total: total,
++            completed: 0,
++            skip: total.saturating_sub(limit),
++            index: OriginalIndex::default(),
++            items: Vec::new(),
++            active: false,
++            current: None,
++        }
++    }
++
++    pub fn begin_item(&mut self) -> Result<(), &'static str> {
++        if self.active || self.completed == self.expected_total {
++            return Err("inconsistent original stream");
++        }
++        if self.completed != 0 {
++            self.index.hash.update(b",");
++        }
++        self.active = true;
++        self.current = (self.completed >= self.skip).then(Vec::new);
++        Ok(())
++    }
++
++    pub fn write_item(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
++        if !self.active {
++            return Err("inconsistent original stream");
++        }
++        self.index.hash.update(bytes);
++        if let Some(current) = &mut self.current {
++            current.extend_from_slice(bytes);
++        }
++        Ok(())
++    }
++
++    pub fn end_item(&mut self) -> Result<(), &'static str> {
++        if !self.active {
++            return Err("inconsistent original stream");
++        }
++        if let Some(current) = self.current.take() {
++            self.items
++                .push(String::from_utf8(current).map_err(|_| "invalid original stream encoding")?);
++        }
++        self.active = false;
++        self.completed += 1;
++        self.index.complete();
++        Ok(())
++    }
++
++    pub fn finish(self) -> Result<(String, usize, Vec<String>), &'static str> {
++        if self.active || self.completed != self.expected_total {
++            return Err("incomplete original stream");
++        }
++        Ok((self.index.revision, self.completed, self.items))
++    }
++}
++
+ impl Default for OriginalIndex {
+     fn default() -> Self {
+         let mut hash = Sha256::new();
+@@ -550,6 +628,78 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn streamed_snapshot_has_the_complete_revision_with_only_the_requested_suffix() {
++        let originals = [r#"{"type":"future","value":17}"#, r#"{"text":"é😀"}"#, "{}"];
++        let mut history = SdkOriginalHistory::default();
++        for original in originals {
++            history.append(SdkOriginalItem {
++                original: original.to_owned(),
++                projection: None,
++            });
++        }
++        for limit in [0, 1, 2, 3, 100] {
++            let mut fold = SdkOriginalSnapshotFold::new(originals.len(), limit);
++            for original in originals {
++                fold.begin_item().unwrap();
++                for bytes in original.as_bytes().chunks(3) {
++                    fold.write_item(bytes).unwrap();
++                }
++                fold.end_item().unwrap();
++            }
++            assert_eq!(fold.finish().unwrap(), history.snapshot(Some(limit)));
++        }
++    }
++
++    #[test]
++    fn skipped_large_original_is_hashed_without_a_retained_payload() {
++        let mut fold = SdkOriginalSnapshotFold::new(2, 1);
++        let mut expected = Sha256::new();
++        expected.update(b"[");
++        fold.begin_item().unwrap();
++        let prefix = br#"{"data":""#;
++        fold.write_item(prefix).unwrap();
++        expected.update(prefix);
++        let chunk = [b'x'; 4096];
++        for _ in 0..2048 {
++            fold.write_item(&chunk).unwrap();
++            expected.update(chunk);
++            assert!(fold.current.is_none());
++        }
++        let suffix = br#""}"#;
++        fold.write_item(suffix).unwrap();
++        expected.update(suffix);
++        fold.end_item().unwrap();
++        assert!(fold.items.is_empty());
++        fold.begin_item().unwrap();
++        fold.write_item(b"{}").unwrap();
++        fold.end_item().unwrap();
++        expected.update(b",{}]");
++        assert_eq!(
++            fold.finish().unwrap(),
++            (
++                format!("{:x}", expected.finalize()),
++                2,
++                vec!["{}".to_owned()]
++            )
++        );
++    }
++
++    #[test]
++    fn partial_stream_never_returns_complete_snapshot_metadata() {
++        assert!(SdkOriginalSnapshotFold::new(1, 0).finish().is_err());
++        let mut fold = SdkOriginalSnapshotFold::new(1, 0);
++        fold.begin_item().unwrap();
++        fold.write_item(b"{}").unwrap();
++        assert!(fold.finish().is_err());
++        let mut empty = SdkOriginalSnapshotFold::new(0, 1);
++        assert!(empty.begin_item().is_err());
++        assert_eq!(
++            empty.finish().unwrap(),
++            SdkOriginalHistory::default().snapshot(None)
++        );
++    }
++
+     #[test]
+     fn idle_catalog_cache_stays_byte_bounded_across_ten_thousand_originals() {
+         let mut cache = SdkOriginalHistoryCache::default();
+diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
+index a5acf45b..7845ccbb 100644
+--- a/codex-rs/thread-store/src/in_memory.rs
++++ b/codex-rs/thread-store/src/in_memory.rs
+@@ -970,6 +970,29 @@ impl ThreadStore for InMemoryThreadStore {
+         Box::pin(InMemoryThreadStore::load_history(self, params))
+     }
+ 
++    fn read_original_history(
++        &self,
++        params: LoadThreadHistoryParams,
++        mut reader: Box<dyn crate::OriginalHistoryReader>,
++    ) -> ThreadStoreFuture<'_, crate::OriginalHistorySnapshot> {
++        Box::pin(async move {
++            // Preserve canonical ownership through the blocking fold without cloning records.
++            let state = self.state.clone().lock_owned().await;
++            tokio::task::spawn_blocking(move || {
++                let items = state.histories.get(&params.thread_id).ok_or(
++                    ThreadStoreError::ThreadNotFound {
++                        thread_id: params.thread_id,
++                    },
++                )?;
++                reader.read_items(items)
++            })
++            .await
++            .map_err(|_| ThreadStoreError::Internal {
++                message: "original history reader task failed".to_string(),
++            })?
++        })
++    }
++
+     fn load_latest_model_context(
+         &self,
+         params: LoadThreadHistoryParams,
+diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
+index 9cf12675..8060d931 100644
+--- a/codex-rs/thread-store/src/lib.rs
++++ b/codex-rs/thread-store/src/lib.rs
+@@ -8,6 +8,7 @@ mod error;
+ mod in_memory;
+ mod live_thread;
+ mod local;
++mod original_history;
+ mod projects;
+ mod queue_store;
+ mod store;
+@@ -42,6 +43,9 @@ pub use local::RolloutMigrationOutcome;
+ pub use local::RolloutMigrationProgress;
+ pub use local::RolloutMigrationReport;
+ pub use local::RolloutMigrationStatus;
++pub use original_history::OriginalHistoryReader;
++pub use original_history::OriginalHistorySegment;
++pub use original_history::OriginalHistorySnapshot;
+ pub use projects::CreateProjectParams;
+ pub use projects::CreatedProject;
+ pub use projects::DeletedProject;
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index f4c1140d..cfb6c524 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -373,6 +373,21 @@ impl LiveThread {
+             .await
+     }
+ 
++    pub async fn read_original_history(
++        &self,
++        reader: Box<dyn crate::OriginalHistoryReader>,
++    ) -> ThreadStoreResult<crate::OriginalHistorySnapshot> {
++        self.thread_store
++            .read_original_history(
++                LoadThreadHistoryParams {
++                    thread_id: self.thread_id,
++                    include_archived: false,
++                },
++                reader,
++            )
++            .await
++    }
++
+     pub async fn read_thread(
+         &self,
+         include_archived: bool,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index f0edcaac..a0481f9a 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -577,6 +577,76 @@ impl ThreadStore for LocalThreadStore {
+         Box::pin(LocalThreadStore::load_history(self, params))
+     }
+ 
++    fn read_original_history(
++        &self,
++        params: LoadThreadHistoryParams,
++        mut reader: Box<dyn crate::OriginalHistoryReader>,
++    ) -> ThreadStoreFuture<'_, crate::OriginalHistorySnapshot> {
++        Box::pin(async move {
++            let path = if let Ok(path) = live_writer::rollout_path(self, params.thread_id).await {
++                if !params.include_archived
++                    && helpers::rollout_path_is_archived(
++                        self.config.codex_home.as_path(),
++                        path.as_path(),
++                    )
++                {
++                    return Err(crate::ThreadStoreError::InvalidRequest {
++                        message: format!("thread {} is archived", params.thread_id),
++                    });
++                }
++                path
++            } else {
++                read_thread::read_thread(
++                    self,
++                    ReadThreadParams {
++                        thread_id: params.thread_id,
++                        include_archived: params.include_archived,
++                        include_history: false,
++                    },
++                )
++                .await?
++                .rollout_path
++                .ok_or_else(|| crate::ThreadStoreError::Internal {
++                    message: "original history rollout path unavailable".into(),
++                })?
++            };
++            let session_meta =
++                codex_rollout::read_session_meta_line(&path)
++                    .await
++                    .map_err(|_| crate::ThreadStoreError::Internal {
++                        message: "original history rollout unavailable".into(),
++                    })?;
++            if session_meta.meta.id != params.thread_id {
++                return Err(crate::ThreadStoreError::ThreadNotFound {
++                    thread_id: params.thread_id,
++                });
++            }
++            // Match the existing SDK complete-audit boundary: this authorized thread's rollout.
++            // Do not silently prepend reference ancestors and change original snapshot revisions.
++            tokio::task::spawn_blocking(move || {
++                let file = codex_rollout::open_rollout_seekable_reader(&path).map_err(|_| {
++                    crate::ThreadStoreError::Internal {
++                        message: "original history rollout unavailable".into(),
++                    }
++                })?;
++                let end_byte_offset = file
++                    .metadata()
++                    .map_err(|_| crate::ThreadStoreError::Internal {
++                        message: "original history rollout unavailable".into(),
++                    })?
++                    .len();
++                reader.read_segments(&[crate::OriginalHistorySegment {
++                    rollout_path: path,
++                    end_byte_offset,
++                }])
++            })
++            .await
++            .map_err(|_| crate::ThreadStoreError::Internal {
++                message: "original history reader task failed".into(),
++            })?
++        })
++    }
++
+     fn load_latest_model_context(
+         &self,
+         params: LoadThreadHistoryParams,
+diff --git a/codex-rs/thread-store/src/original_history.rs b/codex-rs/thread-store/src/original_history.rs
+new file mode 100644
+index 00000000..be9fcd83
+--- /dev/null
++++ b/codex-rs/thread-store/src/original_history.rs
+@@ -0,0 +1,28 @@
++//! Borrowed canonical records for bounded original-history queries.
++//!
++//! The reader owns query logic, while the store owns record lifetime and frozen fork ranges.
++//! This boundary never substitutes a complete cloned journal for a targeted read.
++use std::path::PathBuf;
++
++use codex_rollout::RolloutItem;
++
++use crate::ThreadStoreResult;
++
++pub type OriginalHistorySnapshot = (String, usize, Vec<String>);
++
++/// A frozen logical JSONL prefix. Offsets refer to the decoded rollout representation.
++#[derive(Debug)]
++pub struct OriginalHistorySegment {
++    pub rollout_path: PathBuf,
++    pub end_byte_offset: u64,
++}
++
++/// Native read-only query run against store-owned canonical history.
++/// Implementations must discard partial output on any decoding or I/O error.
++pub trait OriginalHistoryReader: Send + 'static {
++    fn read_items(&mut self, items: &[RolloutItem]) -> ThreadStoreResult<OriginalHistorySnapshot>;
++    fn read_segments(
++        &mut self,
++        segments: &[OriginalHistorySegment],
++    ) -> ThreadStoreResult<OriginalHistorySnapshot>;
++}
+diff --git a/codex-rs/thread-store/src/store.rs b/codex-rs/thread-store/src/store.rs
+index d604f478..6f5b4d01 100644
+--- a/codex-rs/thread-store/src/store.rs
++++ b/codex-rs/thread-store/src/store.rs
+@@ -206,6 +206,20 @@ pub trait ThreadStore: Any + Send + Sync {
+         params: LoadThreadHistoryParams,
+     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
+ 
++    /// Runs a bounded reader against borrowed records or immutable rollout prefixes.
++    /// There is deliberately no full-history fallback for stores without this capability.
++    fn read_original_history(
++        &self,
++        _params: LoadThreadHistoryParams,
++        _reader: Box<dyn crate::OriginalHistoryReader>,
++    ) -> ThreadStoreFuture<'_, crate::OriginalHistorySnapshot> {
++        Box::pin(async {
++            Err(ThreadStoreError::Unsupported {
++                operation: "read_original_history",
++            })
++        })
++    }
++
+     /// Loads the persisted rollout items needed to reconstruct the latest model-visible context.
+     ///
+     /// Implementations that cannot perform a targeted read may return the full persisted history.
