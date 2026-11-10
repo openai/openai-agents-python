@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><title>Native MCP counter</title>
+  <h1>Native MCP counter</h1>
+  <p>Local synthetic model and tool. No API key required.</p>
+  <button id="start">Open counter</button>
+  <p id="status">Ready</p>
+  <h2>Assistant text</h2>
+  <pre id="text"></pre>
+  <h2>Native tool data</h2>
+  <pre id="tools"></pre>
+  <iframe id="app" title="Counter app" sandbox="allow-scripts" hidden></iframe>
+  <pre id="error"></pre>
+  <script type="module" src="/client.js"></script>
+</html>

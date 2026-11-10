@@ -361,9 +361,13 @@
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
     },
     {
+      "path": "sdk-realtime-raw-events-and-history.patch",
+      "sha256": "4675d414b2e5ff22f463581e1e72ec6b1b44fca1bcf226d7eaf3fb18559f7406"
+    },
+    {
       "path": "0152-sdk-codex-login-terminal-rate-limits.patch",
       "sha256": "18e553a5981488043c85a1c6c22cb87a436036d647a278bd1a0b0270fa939bf4"
     }
   ],
-  "result_tree": "f68aa6bed9a9366af3c7e30603dfb4e4d63be1a0"
+  "result_tree": "3d2861b1c9c999fe9a8bd26e3ead394734922fd4"
 }

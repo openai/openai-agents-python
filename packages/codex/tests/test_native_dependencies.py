@@ -204,6 +204,8 @@ def test_pack_cleans_own_package_and_excludes_cargo_configuration(helper, monkey
     (target / "own.rlib").write_text("own")
     (target / "cargo-timings").mkdir()
     (target / "cargo-timings/report.html").write_text("old timings")
+    (target / "pgo").mkdir()
+    (target / "pgo/instrumented.rlib").write_text("training build")
     dist = Path("dist")
     dist.mkdir()
     (dist / "native-provenance.json").write_text('{"run":"123"}')
@@ -236,6 +238,8 @@ def test_pack_cleans_own_package_and_excludes_cargo_configuration(helper, monkey
     assert "target/dependency" in names
     assert "upstream/dependency" in names
     assert "target/own.rlib" not in names
+    assert not any(name == "target/pgo" or name.startswith("target/pgo/") for name in names)
+    assert (target / "pgo/instrumented.rlib").is_file()
     assert (target / "cargo-timings/report.html").read_text() == "old timings"
     assert not any(
         "credentials" in name or "config.toml" in name or "timings" in name for name in names
