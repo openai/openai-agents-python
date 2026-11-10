@@ -1,5 +1,6 @@
 """Git repository hosts retain authority-only HTTPS configuration."""
 
+import sys
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,12 +15,14 @@ from agents.classic.sandbox.entries import BaseEntry, Dir, GitRepo
 from agents.classic.sandbox.manifest import Manifest
 from agents.classic.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 from agents.classic.sandbox.sandbox_agent import SandboxAgent
-from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.classic.sandbox.session import manifest_ops
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.session.manifest_application import ManifestApplier
 from agents.classic.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.classic.sandbox.types import ExecResult, User
+
+if sys.platform != "win32":
+    from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
 
 def recording_session() -> SimpleNamespace:
@@ -149,6 +152,7 @@ async def test_invalid_git_host_rejects_before_session_work(host: str) -> None:
     session._exec_checked_nonzero.assert_not_awaited()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="UnixLocal requires Unix")
 async def test_create_rejects_invalid_nested_git_host(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     manifest = Manifest(
@@ -169,6 +173,7 @@ async def test_create_rejects_invalid_nested_git_host(tmp_path: Path) -> None:
     assert not workspace.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="UnixLocal requires Unix")
 async def test_session_boundaries_reject_invalid_git_host_before_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
