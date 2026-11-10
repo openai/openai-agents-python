@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import ssl
+import stat
 import sys
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta, timezone
@@ -221,11 +222,21 @@ async def test_sessions_share_one_refresh_of_a_copied_login_and_restart(
 
 
 @pytest.mark.serial
+@pytest.mark.parametrize(
+    "denied_mode",
+    [
+        pytest.param(0, id="restart"),
+        pytest.param(0o222, id="failed-save"),
+        pytest.param(0o333, id="failed-search"),
+    ],
+)
 async def test_saved_login_survives_cancelled_rotation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_mode: int
 ) -> None:
     from _agents_codex import session as session_module
 
+    if denied_mode and (os.name != "posix" or os.geteuid() == 0):
+        pytest.skip("requires a POSIX process subject to directory permissions")
     source = saved_login(tmp_path / "browser-host") / "auth.json"
     home = tmp_path / "headless-host"
     home.mkdir()
@@ -237,6 +248,7 @@ async def test_saved_login_survives_cancelled_rotation(
     api_key = "unused-synthetic-api-key"
     admitted = asyncio.Event()
     release_reply = asyncio.Event()
+    reply_sent = asyncio.Event()
     both_expired = asyncio.Event()
     oauth_calls = replays = expired = rotated = fallback = unexpected = 0
 
@@ -294,9 +306,13 @@ async def test_saved_login_survives_cancelled_rotation(
             return web.json_response({"error": "invalid_grant"}, status=400)
         admitted.set()
         await release_reply.wait()
-        return web.json_response(replacement)
+        reply = web.json_response(replacement)
+        await reply.prepare(request)
+        await reply.write_eof()
+        reply_sent.set()
+        return reply
 
-    async def force_cancel(turn: Turn) -> bool:
+    async def force_cancel(turn: Turn[str]) -> bool:
         await turn.cancel(mode="force")
         try:
             await turn.get_result()
@@ -340,8 +356,9 @@ async def test_saved_login_survives_cancelled_rotation(
 
             async def close_refresh_owner() -> bool:
                 await owner.aclose()
-                return cache_has_rotation()
+                return not denied_mode and cache_has_rotation()
 
+            original_mode = stat.S_IMODE(home.stat().st_mode)
             try:
                 first = await owner.submit("Recover the saved login.")
                 async with timeout(10):
@@ -357,6 +374,15 @@ async def test_saved_login_survives_cancelled_rotation(
                 cancelled = sum(result is True for result in results)
                 assert cancelled == 2
                 assert expired == 4
+                if denied_mode:
+                    home.chmod(original_mode & ~denied_mode)
+                    if os.access(home, os.W_OK) or (
+                        denied_mode & 0o111 and os.access(home, os.X_OK)
+                    ):
+                        pytest.skip("chmod did not enforce the saved-login directory permissions")
+                    if denied_mode & 0o111:
+                        with pytest.raises(PermissionError):
+                            cache.stat()
 
                 closing_owner = asyncio.create_task(close_refresh_owner())
                 closing_peer = asyncio.create_task(peer.aclose())
@@ -365,30 +391,54 @@ async def test_saved_login_survives_cancelled_rotation(
                 await closing_peer
                 assert not closing_owner.done()
                 release_reply.set()
+                await reply_sent.wait()
                 cache_rotated_at_session_close = await closing_owner
+            finally:
+                release_reply.set()
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                finally:
+                    if denied_mode:
+                        home.chmod(original_mode)
+
+            if denied_mode:
+                old_cache_unchanged = cache.read_bytes() == original_bytes
+                assert old_cache_unchanged
+                with pytest.raises(RuntimeError) as failure:
+                    await provider.aclose()
+                sanitized = (
+                    failure.value.args == ("Could not save the refreshed Codex login",)
+                    and failure.value.__cause__ is None
+                    and failure.value.__context__ is None
+                )
+                assert sanitized
+                with pytest.raises(RuntimeError, match="^NativeProvider is closed$"):
+                    async with provider:
+                        pass
+                await provider.aclose()
+            else:
                 assert cache_rotated_at_session_close
                 await provider.aclose()
                 cache_rotated_at_provider_close = cache_has_rotation()
                 assert cache_rotated_at_provider_close
-                if original_file is not None:
-                    old_record_preserved = original_file.read() == original_bytes
-                    assert old_record_preserved
+            if original_file is not None:
+                old_record_preserved = original_file.read() == original_bytes
+                assert old_record_preserved
+                if not denied_mode:
                     assert cache.stat().st_mode & 0o077 == 0
-            finally:
-                release_reply.set()
-                await asyncio.gather(*tasks, return_exceptions=True)
 
         assert rotated == 0
-        try:
-            async with timeout(15):
-                await run_after_restart(home, endpoint)
-        except AssertionError:
-            restarted = False
-        else:
-            restarted = True
-        assert restarted
+        if not denied_mode:
+            try:
+                async with timeout(15):
+                    await run_after_restart(home, endpoint)
+            except AssertionError:
+                restarted = False
+            else:
+                restarted = True
+            assert restarted
+            assert rotated == 1
         assert expired == 4
-        assert rotated == 1
         assert oauth_calls == 1
         assert replays == fallback == unexpected == 0
         source_preserved = source.read_bytes() == original_bytes
