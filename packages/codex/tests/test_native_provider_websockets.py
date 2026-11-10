@@ -32,7 +32,6 @@ from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 from tests.test_native_agent_observation import text_response
-from tests.test_sdk_session_tls import TLS_FIXTURES
 
 
 def unauthorized() -> web.Response:
@@ -1033,6 +1032,8 @@ async def test_plain_websocket_rechecks_custom_ca_before_fresh_connections(
 async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
+    from tests.test_sdk_session_tls import TLS_FIXTURES
+
     for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
         monkeypatch.delenv(name, raising=False)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
