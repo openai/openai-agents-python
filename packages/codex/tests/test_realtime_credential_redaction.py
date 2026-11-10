@@ -106,6 +106,7 @@ async def test_admission_failure_drops_credentials_from_sdk_traceback(
         },
     )
     voice = RealtimeSession(session, config=config)
+    session._realtime = voice
     voice._live = True
     with pytest.raises(type(failure)) as caught:
         await voice._admit()
@@ -186,6 +187,7 @@ async def test_startup_releases_owned_static_credentials_and_keeps_caller_config
         },
     )
     voice = RealtimeSession(session, config=config)
+    session._realtime = voice
     voice._live = True
     if failure_phase is None:
         await voice._admit()
@@ -275,6 +277,7 @@ async def test_failed_webrtc_startup_releases_sdk_owned_offer(phase: str, cancel
         ),
     )
     voice = RealtimeSession(session, config=config)
+    session._realtime = voice
     voice._live = True
     with pytest.raises(type(failure)) as caught:
         await voice._admit()
@@ -326,6 +329,7 @@ async def test_successful_webrtc_startup_preserves_public_answer() -> None:
     )
     transport = RealtimeWebRTC(offer)
     voice = RealtimeSession(session, config=RealtimeConfig(transport=transport))
+    session._realtime = voice
     voice._live = True
     voice._start = asyncio.create_task(voice._admit())
     await voice._start
@@ -477,6 +481,7 @@ async def test_public_sip_builder_releases_config_from_exception_frames(
         SimpleNamespace(
             _check_open=check_open,
             _check_callback_operation=lambda _: None,
+            _realtime=None,
             _prepare_realtime_mcp=prepare_mcp,
             _realtime_function_tools=tools,
             _native=SimpleNamespace(call=call),
@@ -539,6 +544,7 @@ async def test_connection_tool_selection_failure_releases_original_config() -> N
         },
     )
     voice = RealtimeSession(session, config=config)
+    session._realtime = voice
     voice._live = True
     with pytest.raises(ValueError, match="outside the captured source") as caught:
         await voice._admit()

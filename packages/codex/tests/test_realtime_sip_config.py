@@ -97,6 +97,7 @@ async def test_sip_config_default_and_native_rejection() -> None:
             _check_callback_operation=lambda _: None,
             _realtime_function_tools=tools,
             _prepare_realtime_mcp=prepare_mcp,
+            _realtime=None,
         ),
     )
     with pytest.raises(ValueError, match="Captured source"):
@@ -158,6 +159,7 @@ async def test_sip_attachment_forwards_repeated_call_accept_options() -> None:
             transport=RealtimeSIP("rtc_repeated_options"),
         ),
     )
+    session._realtime = voice
     voice._live = True
     await voice._admit()
     params = requests[0][1]["params"]
