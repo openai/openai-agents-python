@@ -34,6 +34,15 @@ _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
+# Start the copy shell with a clean environment before it changes directories.
+_GIT_COPY_LAUNCHER = """set -eu
+system_env=$(command -p -v env)
+system_shell=$(command -p -v sh)
+case "$system_env" in /*) ;; *) exit 1 ;; esac
+case "$system_shell" in /*) ;; *) exit 1 ;; esac
+exec "$system_env" -i "$system_shell" -c "$@"
+"""
+
 
 def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(path))
@@ -798,6 +807,8 @@ class GitRepo(BaseEntry):
             copy = await session.exec(
                 "sh",
                 "-c",
+                _GIT_COPY_LAUNCHER,
+                "sandbox-git-copy-launcher",
                 """set -eu
 copy_program=$(command -p -v cp)
 case "$copy_program" in

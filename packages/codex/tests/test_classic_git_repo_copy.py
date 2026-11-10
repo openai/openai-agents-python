@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from typing import cast
 import pytest
 
 from agents.classic.sandbox.entries import GitRepo
+from agents.classic.sandbox.entries.artifacts import _GIT_COPY_LAUNCHER
 from agents.classic.sandbox.errors import GitCopyError
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.types import ExecResult
@@ -118,6 +120,27 @@ async def test_git_repo_uses_system_copy_with_a_limited_path(
 
     assert await entry.apply(cast(BaseSandboxSession, session), destination, tmp_path) == []
     assert (destination / "root.txt").read_text() == "root fixture\n"
+
+
+def test_git_copy_launcher_clears_the_inherited_environment(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "sh",
+            "-c",
+            _GIT_COPY_LAUNCHER,
+            "git-copy-test-launcher",
+            'printf "%s\\n" "${SDK_GIT_COPY_TEST_CONTEXT-unset}" "$1"',
+            "git-copy-test",
+            "ordinary argument",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "SDK_GIT_COPY_TEST_CONTEXT": "fixture"},
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+
+    assert result.stdout == "unset\nordinary argument\n"
 
 
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
