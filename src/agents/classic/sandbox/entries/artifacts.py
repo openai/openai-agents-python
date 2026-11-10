@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import io
+import ipaddress
 import os
 import re
 import stat
@@ -10,7 +11,6 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from ..session.base_sandbox_session import BaseSandboxSession
 
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+_GIT_AUTHORITY_RE = re.compile(r"(?:([^:\[\]]+)|\[([0-9a-fA-F:.]+)\])(?::([0-9]+))?")
+_GIT_REG_NAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
@@ -740,7 +742,7 @@ class LocalDir(BaseEntry):
 class GitRepo(BaseEntry):
     type: Literal["git_repo"] = "git_repo"
     is_dir: bool = True
-    host: str = "github.com"  # Unescaped host with an optional numeric port.
+    host: str = Field(default="github.com", repr=False)
     repo: str  # "owner/name" (or any host-specific path)
     ref: str  # tag/branch/sha
     subpath: str | None = None
@@ -755,7 +757,10 @@ class GitRepo(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        self._validate_host()
+        if not self._valid_host(self.host):
+            # Keep the rejected configuration out of this exception's frame locals.
+            del self
+            raise ValueError("GitRepo host must be an HTTPS authority without userinfo")
         git_subpath = self._validate_subpath()
 
         # Ensure git exists in the container.
@@ -813,30 +818,24 @@ class GitRepo(BaseEntry):
         # require reading each file back out of the container.)
         return []
 
-    def _validate_host(self) -> None:
-        # Validate at application time so Pydantic errors cannot retain host values.
-        valid = (
-            bool(self.host)
-            and not self.host.endswith(":")
-            and not any(
-                char.isspace() or ord(char) < 32 or ord(char) == 127 or char in "%@/\\?#"
-                for char in self.host
-            )
-        )
-        if valid:
-            try:
-                authority = urlsplit(f"//{self.host}")
-                valid = bool(authority.hostname) and authority.netloc == self.host
-                # Accessing port validates its syntax and supported numeric range.
-                _ = authority.port
-                if self.host.startswith("["):
-                    suffix = self.host[self.host.index("]") + 1 :]
-                    valid = valid and (not suffix or suffix.startswith(":"))
-            except ValueError:
-                valid = False
-        if not valid:
-            # Raise outside the parser's exception handler to discard its context too.
-            raise ValueError("GitRepo host must be an HTTPS authority without userinfo")
+    @staticmethod
+    def _valid_host(host: str) -> bool:
+        authority = _GIT_AUTHORITY_RE.fullmatch(host)
+        if authority is None:
+            return False
+        name, ipv6, port = authority.groups()
+        port = (port or "").lstrip("0")
+        if len(port) > 5 or (port and int(port) > 65535):
+            return False
+        try:
+            if ipv6 is not None:
+                ipaddress.IPv6Address(ipv6)
+                return True
+            if not name.isascii():
+                name = name.encode("idna").decode("ascii")
+            return _GIT_REG_NAME_RE.fullmatch(name) is not None
+        except ValueError:
+            return False
 
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:

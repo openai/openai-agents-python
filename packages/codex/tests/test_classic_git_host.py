@@ -1,5 +1,6 @@
 """Git repository hosts retain authority-only HTTPS configuration."""
 
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -25,7 +26,14 @@ def recording_session() -> SimpleNamespace:
 
 @pytest.mark.parametrize(
     "host",
-    ["github.com", "git.example.test:8443", "xn--bcher-kva.example.test", "[::1]", "[::1]:8443"],
+    [
+        "github.com",
+        "git.example.test:8443",
+        "xn--bcher-kva.example.test",
+        "bücher.example.test",
+        "[::1]",
+        "[::1]:8443",
+    ],
 )
 @pytest.mark.parametrize("ref", ["release/stable", "0123456789abcdef"])
 async def test_git_host_preserves_https_authority_and_refs(host: str, ref: str) -> None:
@@ -56,6 +64,7 @@ async def test_git_host_preserves_https_authority_and_refs(host: str, ref: str) 
     [
         "",
         "account@example.test",
+        "account:synthetic-password@example.test",
         "example.test/path",
         "https://example.test",
         "example.test?query",
@@ -66,9 +75,16 @@ async def test_git_host_preserves_https_authority_and_refs(host: str, ref: str) 
         "example%2etest",
         "example.test:invalid",
         "example.test:",
+        "example.test:65536",
         "[::1]:",
         "[not-an-address]",
+        "[1234]",
         "[::1]suffix",
+        "example{test}",
+        "example|test",
+        'example"test',
+        "example<test>",
+        "example`test",
     ],
 )
 async def test_invalid_git_host_rejects_before_session_work(host: str) -> None:
@@ -81,6 +97,12 @@ async def test_invalid_git_host_rejects_before_session_work(host: str) -> None:
     assert caught.value.args == ("GitRepo host must be an HTTPS authority without userinfo",)
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+    if host:
+        diagnostic = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+        frame_locals = diagnostic.stack[-1].locals
+        assert frame_locals is not None
+        assert all(host not in value for value in frame_locals.values())
+        assert host not in repr(entry)
     session.exec.assert_not_awaited()
     session.mkdir.assert_not_awaited()
     session._exec_checked_nonzero.assert_not_awaited()
