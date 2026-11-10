@@ -1575,10 +1575,10 @@ index 44998634da52145deeb6beb50ef088cbbc32530a..7fd56784c426d4bddd20d8bfda0007d5
                  assert!(state.expire_read());
 diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8daded69cb9aafb87b6083f567c26755d5425944
+index 0000000000000000000000000000000000000000..8d45f1ad9ef9c0e7c08d334631a8bd6716382423
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,356 @@
 +use std::collections::BTreeMap;
 +use std::sync::Arc;
 +use std::sync::atomic::Ordering;
@@ -1651,7 +1651,13 @@ index 0000000000000000000000000000000000000000..8daded69cb9aafb87b6083f567c26755
 +    max_output_tokens: Option<RealtimeMaxOutputTokens>,
 +    metadata: Option<BTreeMap<String, String>>,
 +    parallel_tool_calls: Option<bool>,
-+    reasoning: Option<RealtimeReasoning>,
++    reasoning: Option<Reasoning>,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Reasoning {
++    effort: Option<String>,
 +}
 +
 +fn invalid(message: &str) -> CodexErr {
@@ -1684,7 +1690,9 @@ index 0000000000000000000000000000000000000000..8daded69cb9aafb87b6083f567c26755
 +        max_output_tokens: response.max_output_tokens,
 +        metadata: response.metadata,
 +        parallel_tool_calls: response.parallel_tool_calls,
-+        reasoning: response.reasoning,
++        reasoning: response
++            .reasoning
++            .map(|Reasoning { effort }| RealtimeReasoning { effort }),
 +        event_id,
 +    })
 +}

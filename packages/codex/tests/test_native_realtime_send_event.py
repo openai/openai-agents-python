@@ -116,6 +116,16 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
         session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
     ):
         cursor = len(peer.frames)
+        with pytest.raises(
+            RuntimeError, match="Unsupported or invalid raw Realtime response options"
+        ):
+            await voice.send_event(
+                {
+                    "type": "response.create",
+                    "event_id": "invalid-raw-response-event",
+                    "response": {"reasoning": {"effort": "low", "unknown": True}},
+                }
+            )
         assert (
             await voice.send_event(
                 {"type": "response.create", "event_id": "raw-response-event", "response": response}
@@ -124,6 +134,9 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
         )
         frame = await peer.frame(lambda frame: frame["type"] == "response.create", after=cursor)
         assert frame["event_id"] == "raw-response-event"
+        assert not any(
+            sent.get("event_id") == "invalid-raw-response-event" for sent in peer.frames[cursor:]
+        )
         for key, value in response.items():
             assert frame["response"][key] == value
         assert not any(

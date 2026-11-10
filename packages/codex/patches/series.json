@@ -362,8 +362,8 @@
     },
     {
       "path": "sdk-realtime-raw-events-and-history.patch",
-      "sha256": "98af42b99ec923bf501866782ef1c91a9a74e7dd5c5529e3834adb2126619e45"
+      "sha256": "8c4a9c24c29845c54937f779202a08bb6d5a12e44fa4253694ba4d5e6d44f450"
     }
   ],
-  "result_tree": "db1e12ea032b390bd3d598d0319191abc627e616"
+  "result_tree": "34f7aeef46d056c9ab7adeb4c83a720048eed8f7"
 }
