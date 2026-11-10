@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_serializer, field_validator
 
@@ -754,6 +755,7 @@ class GitRepo(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        self._validate_host()
         git_subpath = self._validate_subpath()
 
         # Ensure git exists in the container.
@@ -810,6 +812,27 @@ class GitRepo(BaseEntry):
         # Receipt: leave checksums empty for now. (Computing them would
         # require reading each file back out of the container.)
         return []
+
+    def _validate_host(self) -> None:
+        # Validate at application time so Pydantic errors cannot retain host values.
+        valid = bool(self.host) and not any(
+            char.isspace() or ord(char) < 32 or ord(char) == 127 or char in "@/\\?#"
+            for char in self.host
+        )
+        if valid:
+            try:
+                authority = urlsplit(f"//{self.host}")
+                valid = bool(authority.hostname) and authority.netloc == self.host
+                # Accessing port validates its syntax and supported numeric range.
+                _ = authority.port
+                if self.host.startswith("["):
+                    suffix = self.host[self.host.index("]") + 1 :]
+                    valid = valid and (not suffix or suffix.startswith(":"))
+            except ValueError:
+                valid = False
+        if not valid:
+            # Raise outside the parser's exception handler to discard its context too.
+            raise ValueError("GitRepo host must be an HTTPS authority without userinfo")
 
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:
