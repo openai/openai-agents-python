@@ -4016,7 +4016,11 @@ class Session(Generic[ContextT, OutputT]):
                     thread._select_steps(
                         bool(session._profiles)
                         or bool(session._mcp_tools)
-                        or restored_operation_refs is not None,
+                        or restored_operation_refs is not None
+                        or any(
+                            isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                            for tool in session._bindings
+                        ),
                         _native_tool_refs(restored_operation_refs)
                         if restored_operation_refs is not None
                         else None,
@@ -4024,6 +4028,10 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             native_agents.before_step is not None
                             or session._has_child_input_guardrails()
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in session._bindings
+                            )
                         ),
                     )
                     # The native reader can receive restored requests during preparation.
@@ -8945,6 +8953,10 @@ class Session(Generic[ContextT, OutputT]):
                             or state.budget is not None
                             or state.before_step is not None
                             or bool(self._mcp_tools)
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in self._bindings
+                            )
                             or state.operation_slots is not None
                         ),
                         _native_tool_refs(state.operation_refs)
@@ -8954,6 +8966,10 @@ class Session(Generic[ContextT, OutputT]):
                         and (
                             self._native_agents.before_step is not None
                             or self._has_child_input_guardrails()
+                            or any(
+                                isinstance(tool, FunctionTool) and tool.is_enabled is not True
+                                for tool in self._bindings
+                            )
                         ),
                     )
                     if input is None:
@@ -11140,6 +11156,35 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if ceiling is not None:
                     refs.intersection_update(resolve(ref) for ref in ceiling)
+            for tool in source_bindings:
+                if not isinstance(tool, FunctionTool):
+                    continue
+                ref = resolve(tool.ref)
+                if ref not in refs:
+                    continue
+                enabled = tool.is_enabled
+                if callable(enabled):
+                    step_context = (
+                        ChildStepContext(
+                            context=self._context, child=state.handle, step_index=index
+                        )
+                        if isinstance(state, _ChildCallbacks)
+                        else self.active_turn or state.handle
+                    )
+                    predicate = enabled
+                    enabled = await self._call_decision_callback(
+                        state,
+                        message,
+                        lambda step, predicate=predicate: predicate(self._context, step),
+                        active,
+                        step_context,
+                    )
+                    if not active():
+                        return
+                if type(enabled) is not bool:
+                    raise TypeError("FunctionTool is_enabled must return a bool")
+                if not enabled:
+                    refs.discard(ref)
             candidates = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]

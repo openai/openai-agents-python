@@ -69,6 +69,7 @@ from .tools import (
 
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
+    from .native_agents import ChildStepContext
     from .turn import Turn
 
 ToolContextT = TypeVar("ToolContextT")
@@ -239,8 +240,13 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     finish_turn: bool = False
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False
     run_before_approval: bool = False
+    is_enabled: (
+        bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
+    ) = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
+            raise TypeError("FunctionTool is_enabled must be a bool or callable")
         if self.namespace is not None and (
             not isinstance(self.namespace, str) or not self.namespace.strip()
         ):
@@ -470,6 +476,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -483,6 +491,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[object, object]: ...
 
 
@@ -502,6 +512,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -521,6 +533,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -540,6 +554,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -559,6 +575,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -578,6 +596,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -599,6 +619,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -630,6 +652,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -665,6 +689,11 @@ def function_tool(
     namespace_description describes that native namespace. Equal short names
     in different namespaces remain distinct. Manual functions do not support
     namespaces. A Session captures this identity before native opening.
+
+    is_enabled filters schema advertisement before each model step within the
+    current opening and operation grants. A predicate receives the application
+    context and existing Turn or ChildStepContext, before any tool call exists.
+    Returning False omits this tool; it never adds another declaration.
 
     Observe tool starts and results through Session.events().
 
@@ -751,6 +780,7 @@ def function_tool(
             finish_turn=finish_turn,
             needs_approval=needs_approval,
             run_before_approval=run_before_approval,
+            is_enabled=is_enabled,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             namespace=namespace,
