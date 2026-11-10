@@ -718,6 +718,57 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
+def _macos_identity_probe(directory: Path) -> str:
+    source = directory / "identity-probe.c"
+    probe = directory / "identity-probe"
+    source.write_text(
+        r"""
+#include <mach/mach.h>
+#include <mach/task_special_ports.h>
+#include <stdio.h>
+#include <unistd.h>
+
+// Match the no-report global-name query in the pinned Seatbelt tests.
+extern const int SANDBOX_CHECK_NO_REPORT;
+extern int sandbox_check(pid_t, const char *, int, ...);
+
+int main(void) {
+    const int global_name_filter = 2;
+    const char *services[] = {
+        "com.apple.system.opendirectoryd.libinfo",
+        "com.apple.system.DirectoryService.libinfo_v1",
+        "com.apple.system.opendirectoryd.membership",
+    };
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t status = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &port);
+    int present = status == KERN_SUCCESS && MACH_PORT_VALID(port);
+    printf("bootstrap port status=%d present=%d\n", status, present);
+    if (present) {
+        mach_port_deallocate(mach_task_self(), port);
+    }
+    for (size_t i = 0; i < sizeof(services) / sizeof(services[0]); ++i) {
+        int result = sandbox_check(
+            getpid(), "mach-lookup", global_name_filter | SANDBOX_CHECK_NO_REPORT, services[i]
+        );
+        printf("mach-lookup %s=%d\n", services[i], result);
+    }
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-o", str(probe), str(source)],
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"printf 'identity probe build unavailable (%s)\\n' {type(error).__name__}"
+    return f"{shlex.quote(str(probe))} || printf 'identity probe exit=%s\\n' \"$?\""
+
+
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @(
     pytest.mark.requires_native_linux_sandbox
@@ -797,12 +848,18 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     macos_uid_lookup = ("/usr/bin/id", "-F")
     ssh_command = "ssh -G -T -F /dev/null credential.example.invalid"
     if sys.platform == "darwin":
+        identity_probe = _macos_identity_probe(linked)
         ssh_probe = (
             f"ssh_config=$({ssh_command} & ssh_pid=$!; "
             'if ! wait "$ssh_pid"; then '
             f"uid_status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || uid_status=$?; "
             'printf "trusted SSH pid=%s, UID lookup exit=%s\\n" "$ssh_pid" "$uid_status" >&2; '
-            "exit 1; fi); printf '%s\\n' \"$ssh_config\" | grep -q '^user '; "
+            "exit 1; fi) && printf '%s\\n' \"$ssh_config\" | grep -q '^user '; "
+        )
+        # Keep checking Git and write grants after recording the real SSH exit.
+        ssh_probe = (
+            f"{identity_probe}; ssh_status=0; ({ssh_probe}) || ssh_status=$?; "
+            'printf "trusted SSH config exit=%s\\n" "$ssh_status"; '
         )
     else:
         ssh_probe = f"{ssh_command} | grep -q '^user '; "
@@ -841,22 +898,10 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         turn = await session.submit("Create and commit the artifact.")
         assert (await turn.get_result()).final_output == "done"
     output = tool_output(responses.requests[-1], "trusted")
+    failure = output
     if sys.platform == "darwin" and (
         probe := re.search(r"^trusted SSH pid=([0-9]+), UID lookup exit=[0-9]+\r?$", output, re.M)
     ):
-        host_lookup = "unavailable"
-        try:
-            host_lookup = str(
-                subprocess.run(
-                    macos_uid_lookup,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                ).returncode
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
         pid = probe[1]
         denial = "no matching Mach lookup denial visible"
         try:
@@ -879,8 +924,42 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
                 denial = match[0]
         except (OSError, subprocess.TimeoutExpired):
             pass
-        pytest.fail(f"{output}\nHost UID lookup exit={host_lookup}\n{denial}")
-    assert "Process exited with code 0" in output
+        control = (
+            f"status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || status=$?; "
+            'printf "UID lookup exit=%s\\n" "$status"; '
+            f"status=0; /usr/bin/{ssh_command} >/dev/null 2>&1 || status=$?; "
+            'printf "SSH config exit=%s\\n" "$status"; '
+            f"{identity_probe}"
+        )
+        host_lookup = "identity probe unavailable"
+        try:
+            host_lookup = subprocess.run(
+                ["/bin/sh", "-c", control],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": control, "login": False, "yield_time_ms": 5000},
+                "strict-identity",
+            )
+        )
+        responses.respond(assistant_output("done"))
+        strict_environment = Environment.local(cwd=linked, tools=["exec_command"])
+        try:
+            async with timeout(20), agent.session(environment=strict_environment) as session:
+                turn = await session.submit("Check account lookup.")
+                await turn.get_result()
+            strict_lookup = tool_output(responses.requests[-1], "strict-identity")
+        except (AssertionError, TimeoutError, NativeError) as error:
+            strict_lookup = f"identity probe unavailable ({type(error).__name__})"
+        failure = f"{output}\nHost {host_lookup}\nStrict {strict_lookup}\n{denial}"
+    assert "Process exited with code 0" in output, failure
     advertised = json.dumps(responses.requests[0])
     assert "Fixture for selected-skill" in advertised
     assert "Fixture for hidden-skill" not in advertised
@@ -891,6 +970,10 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     assert (linked / ".agents" / "marker").read_text() == "protected"
     (job_result,) = job_temp.glob("sdk-job.*/result")
     assert job_result.read_text() == "job"
+    if sys.platform == "darwin":
+        assert "trusted SSH config exit=0" in output.splitlines(), (
+            f"{failure}\nTrusted Git, job temp, and write-fence assertions passed."
+        )
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Xcode and Homebrew")
