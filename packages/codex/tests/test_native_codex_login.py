@@ -224,6 +224,28 @@ async def test_trusted_local_executor_denies_selected_saved_login_reads(
     )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS")
+@pytest.mark.requires_native_macos_sandbox
+async def test_trusted_macos_requires_saved_login_directory(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = saved_login(tmp_path / "mixed")
+    (home / "ordinary").write_text("readable")
+    agent = codex_agent(home)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"on macOS requires CodexLogin\.credential_directory or strict write policy",
+    ):
+        async with agent.session(
+            environment=Environment.local(cwd=workspace, write_policy="trusted_workspace_write")
+        ):
+            pytest.fail("Trusted execution opened a mixed credential directory")
+    assert codex_endpoint.requests == []
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux storage mounts")
 @pytest.mark.requires_native_linux_sandbox
 async def test_mixed_saved_login_remains_usable_with_strict_execution(

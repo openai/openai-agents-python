@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import ssl
 import stat
@@ -21,9 +22,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from agents import Turn, TurnStoppedError
+from agents import Environment, Turn, TurnStoppedError
 from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output
+from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 from tests.test_core_schema_transport import connect_proxy
 from tests.test_native_codex_login import ACCOUNT, codex_agent, saved_login, submit
 
@@ -219,6 +220,123 @@ async def test_sessions_share_one_refresh_of_a_copied_login_and_restart(
         assert refresh_tokens == ["synthetic-refresh-token"]
         connect_request = f"CONNECT {authority} HTTP/1.1\r\n".encode()
         assert any(request.startswith(connect_request) for request in connects)
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS")
+@pytest.mark.requires_native_macos_sandbox
+async def test_trusted_macos_keeps_saved_login_private_during_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from _agents_codex import session as session_module
+
+    tmp_path = tmp_path.resolve()
+    directory = saved_login(tmp_path / "credentials")
+    cache = directory / "auth.json"
+    cache.chmod(0o600)
+    original = cache.stat()
+    home = tmp_path / "home"
+    home.mkdir()
+    alias = home / "auth.json"
+    alias.symlink_to(cache)
+    note = home / "ordinary"
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    staging = directory / "staging"
+    staging.mkdir()
+    marker = staging / "inert"
+
+    command = (
+        "set -eu; for phase in before during after; do "
+        'until [ -f "$phase.go" ]; do /bin/sleep 0.05; done; '
+        f'test "$(/bin/cat {shlex.quote(str(note))})" = "$phase"; '
+        f"for path in {shlex.join([str(alias), str(cache), str(marker)])}; do "
+        'if ( : < "$path" ) 2>/dev/null; then exit 17; fi; '
+        'done; : > "$phase.ok"; done'
+    )
+    peer = ResponsesFixture()
+    peer.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "probe"
+        )
+    )
+    peer.respond(assistant_output("Probe running."))
+    peer.respond(assistant_output("Login refreshed."))
+    expired = False
+    refresh_count = 0
+
+    async def probe(phase: str) -> None:
+        note.write_text(phase, encoding="utf-8")
+        (workspace / f"{phase}.go").touch()
+        async with timeout(5):
+            while not (workspace / f"{phase}.ok").exists():
+                await asyncio.sleep(0.05)
+
+    async def model_response(request: web.Request) -> web.StreamResponse:
+        assert request.headers["ChatGPT-Account-ID"] == ACCOUNT
+        bearer = request.headers["Authorization"]
+        if expired and bearer == "Bearer saved-token":
+            return web.json_response({"error": {"message": "Expired"}}, status=401)
+        assert bearer == ("Bearer rotated-token" if expired else "Bearer saved-token")
+        return await peer.handle(request)
+
+    async def refresh(request: web.Request) -> web.Response:
+        nonlocal refresh_count
+        refresh_count += 1
+        grant = await request.json()
+        assert grant["grant_type"] == "refresh_token"
+        assert grant["refresh_token"] == "synthetic-refresh-token"
+        assert cache.stat().st_ino == original.st_ino
+        await probe("during")
+        return web.json_response(
+            {"access_token": "rotated-token", "refresh_token": "rotated-refresh-token"}
+        )
+
+    model_app = web.Application(handler_args={"auto_decompress": False})
+    model_app.router.add_post("/v1/responses", model_response)
+    auth_app = web.Application()
+    auth_app.router.add_post("/oauth/token", refresh)
+    ca_file, tls = refresh_server_tls(tmp_path)
+    async with timeout(40), AsyncExitStack() as peers:
+        model = await peers.enter_async_context(TestServer(model_app))
+        auth = TestServer(auth_app, scheme="https")
+        peers.push_async_callback(auth.close)
+        await auth.start_server(ssl=tls)
+        proxy, _ = await peers.enter_async_context(
+            connect_proxy(str(auth.make_url("/")), authority=f"{AUTH_HOST}:443")
+        )
+        for variable in ("HTTPS_PROXY", "https_proxy"):
+            monkeypatch.setenv(variable, proxy)
+        for variable in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(variable, "127.0.0.1")
+        for variable in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("CODEX_CA_CERTIFICATE", str(ca_file))
+        monkeypatch.setattr(session_module, "_CODEX_RESPONSES_BASE_URL", str(model.make_url("/v1")))
+
+        agent = codex_agent(home, credential_directory=directory)
+        environment = Environment.local(
+            cwd=workspace, tools=["exec_command"], write_policy="trusted_workspace_write"
+        )
+        async with agent.session(environment=environment) as session:
+            assert (await submit(session, "Start the isolation probe.")).final_output == (
+                "Probe running."
+            )
+            assert "Process running with session ID" in tool_output(peer.requests[-1], "probe")
+            marker.touch()
+            await probe("before")
+            expired = True
+            assert (await submit(session, "Refresh the saved login.")).final_output == (
+                "Login refreshed."
+            )
+            assert refresh_count == 1
+            assert cache.stat().st_ino != original.st_ino
+            assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+            assert json.loads(cache.read_text(encoding="utf-8"))["tokens"]["access_token"] == (
+                "rotated-token"
+            )
+            assert alias.is_symlink() and alias.resolve() == cache
+            await probe("after")
 
 
 @pytest.mark.serial

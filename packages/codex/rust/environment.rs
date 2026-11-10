@@ -1085,6 +1085,10 @@ async fn strict_write_profile(
             }
             let denied = match private_paths.credential_directory {
                 Some(directory) => vec![directory],
+                None if cfg!(target_os = "macos") => anyhow::bail!(
+                    "trusted local execution with a saved Codex login on macOS requires \
+                     CodexLogin.credential_directory or strict write policy"
+                ),
                 None if file != target => vec![file, target.as_path()],
                 None => vec![file],
             };
