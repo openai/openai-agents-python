@@ -1078,9 +1078,17 @@ class RealtimeSession:
             raise ValueError("provider_item_id must be a nonempty string")
         await _join(asyncio.create_task(self._call("delete_item", item_id=provider_item_id)))
 
-    async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:
+    async def update_history(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        expected_items: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None:
         """Edit provider history observed during this connection, in the supplied order.
 
+        By default, this replaces the full observed list. Pass the last retrieved
+        snapshot as ``expected_items`` to reject stale edits before provider mutations.
+        Use ``delete_conversation_item(id)`` for a targeted deletion.
         Supply unique item IDs. Only supported message rows are editable. Retain
         surviving tool, MCP, and approval rows byte-for-byte and in relative order;
         remove them only after native work has settled. Supported messages may move
@@ -1092,26 +1100,37 @@ class RealtimeSession:
         Queued history inputs share the 128-operation/8 MiB Realtime input budget.
         """
         captured: Any = None
+        expected: Any = None
+        rows: Any = None
+        params: dict[str, Any] = {}
         item: Any = None
         try:
             self._check_live()
             self._check_adapter_operation("update history in its own Realtime session")
             size = 256
             try:
-                for item in items:
-                    size += _hosted_mcp_schema_size(
-                        item, _INPUT_QUEUE_BYTES_LIMIT - size, json_text=True
-                    )
+                for rows in (items, expected_items):
+                    if rows is not None:
+                        for item in rows:
+                            size += _hosted_mcp_schema_size(
+                                item, _INPUT_QUEUE_BYTES_LIMIT - size, json_text=True
+                            )
             except RuntimeError:
                 raise ValueError("Realtime history exceeds its 8 MiB input limit") from None
             with self._input_admission(size):
                 captured = json.loads(json.dumps(list(items), default=_realtime_history_mapping))
-                await _join(asyncio.create_task(self._call("update_history", items=captured)))
+                params = {"items": captured}
+                if expected_items is not None:
+                    expected = json.loads(
+                        json.dumps(list(expected_items), default=_realtime_history_mapping)
+                    )
+                    params["expected_items"] = expected
+                await _join(asyncio.create_task(self._call("update_history", **params)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
         finally:
-            del items, captured, item
+            del items, expected_items, captured, expected, rows, params, item
 
     async def retrieve_conversation_item(self, provider_item_id: str) -> dict[str, Any]:
         """Retrieve one provider item, including media absent from ``history``.

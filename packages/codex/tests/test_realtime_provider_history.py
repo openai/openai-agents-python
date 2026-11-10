@@ -125,8 +125,10 @@ async def test_history_update_cancellation_joins_native_acceptance(
     assert accepted.is_set()
 
 
+@pytest.mark.parametrize("in_expected_snapshot", [False, True])
 async def test_history_rejection_drops_media_from_sdk_traceback(
     monkeypatch: pytest.MonkeyPatch,
+    in_expected_snapshot: bool,
 ) -> None:
     voice, _ = owner()
     media = "synthetic-private-audio-payload"
@@ -137,8 +139,10 @@ async def test_history_rejection_drops_media_from_sdk_traceback(
 
     monkeypatch.setattr(voice._session._native, "call", reject)
     with pytest.raises(RuntimeError, match="Provider rejected") as caught:
+        private = [{"id": "private", "content": [{"type": "input_audio", "audio": media}]}]
         await voice.update_history(
-            [{"id": "private", "content": [{"type": "input_audio", "audio": media}]}]
+            [] if in_expected_snapshot else private,
+            expected_items=private if in_expected_snapshot else None,
         )
     traceback = caught.value.__traceback__
     frames = []
@@ -274,3 +278,28 @@ async def test_history_captures_declared_nested_mapping_inputs(mapping: Any, out
             },
         )
     ]
+
+
+async def test_history_expected_snapshot_is_captured_and_forwarded() -> None:
+    voice, requests = owner()
+    expected = [{"id": "before", "content": [{"text": "original"}]}]
+    updating = asyncio.create_task(voice.update_history([], expected_items=expected))
+    await asyncio.sleep(0)
+    expected[0]["content"][0]["text"] = "mutated"
+    await updating
+    assert requests[0][1]["items"] == []
+    assert requests[0][1]["expected_items"] == [{"id": "before", "content": [{"text": "original"}]}]
+
+
+async def test_history_empty_expected_snapshot_remains_explicit() -> None:
+    voice, requests = owner()
+    await voice.update_history([], expected_items=[])
+    assert requests[0][1]["expected_items"] == []
+
+
+async def test_history_expected_snapshot_shares_input_budget() -> None:
+    voice, requests = owner()
+    oversized = [{"id": "large", "content": [{"text": "a" * (2 * 1024 * 1024 + 1)}]}]
+    with pytest.raises(ValueError, match="8 MiB"):
+        await voice.update_history([], expected_items=oversized)
+    assert requests == []
