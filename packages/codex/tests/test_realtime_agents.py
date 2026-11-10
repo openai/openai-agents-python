@@ -58,22 +58,16 @@ async def test_superseded_handoff_configuration_preserves_new_acknowledged_sourc
         return {"applied": False}
 
     monkeypatch.setattr(realtime, "_resolve_realtime_configuration", resolve)
-    owner = SimpleNamespace(
-        _voice_profile_ids={old["profile_id"]},
-        _voice_target=current,
-        _session=SimpleNamespace(
-            _voice_profiles={old["profile_id"]: SimpleNamespace(profile=object())},
-            _native=SimpleNamespace(_realtime_agent_source=source),
-        ),
-        _generation="voice",
-        _config=RealtimeConfig(),
-        _prompt_settings={},
-        _direct_tools=None,
-        _has_agent_prompt=False,
-        _live=True,
-        _call=update,
+    session = SimpleNamespace(
+        _voice_profiles={old["profile_id"]: SimpleNamespace(profile=object())},
+        _native=SimpleNamespace(_realtime_agent_source=source),
     )
-    await realtime.RealtimeSession._apply_profile(owner, "old-response", old)
+    owner = realtime.RealtimeSession(session, config=RealtimeConfig())
+    owner._voice_profile_ids.add(old["profile_id"])
+    owner._voice_target = current
+    owner._live = True
+    owner._call = update
+    await owner._apply_profile("old-response", old)
     assert owner._voice_target is current
     assert owner._live
     assert requests[0][1]["profile"]["response_id"] == "old-response"
