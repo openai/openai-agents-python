@@ -34,10 +34,25 @@ _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
-# Start the copy shell with a clean environment before it changes directories.
-_GIT_COPY_LAUNCHER = """set -eu
-export PATH=/usr/bin:/bin
-exec env -i PATH="$PATH" sh -c "$@"
+# Discover the sandbox's tools before the checkout exists. Anchor relative PATH entries
+# to the original working directory and return absolute paths, even with standalone ash.
+_GIT_TOOL_CHECK = r"""command -v git >/dev/null 2>&1 || exit 1
+CDPATH=
+set -f
+IFS=:
+tool_path="${PATH-}:/usr/bin:/bin"
+for tool in env sh cp; do
+    executable=
+    for directory in $tool_path; do
+        candidate=$(cd -P "${directory:-.}" 2>/dev/null && printf '%s/%s' "${PWD%/}" "$tool") ||
+            continue
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            executable=$candidate
+            break
+        fi
+    done
+    printf '%s\000' "$executable"
+done
 """
 
 
@@ -762,8 +777,8 @@ class GitRepo(BaseEntry):
     ) -> list[MaterializedFile]:
         git_subpath = self._validate_subpath()
 
-        # Ensure git exists in the container.
-        git_check = await session.exec("command -v git >/dev/null 2>&1")
+        # Check Git and discover the copy tools in the configured sandbox environment.
+        git_check = await session.exec(_GIT_TOOL_CHECK, shell=["sh", "-c"])
         if not git_check.ok():
             context: dict[str, object] = {"repo": self.repo, "ref": self.ref}
             image = getattr(session.state, "image", None)
@@ -772,6 +787,20 @@ class GitRepo(BaseEntry):
             raise GitMissingInImageError(context=context)
 
         tmp_dir = f"/tmp/sandbox-git-{session.state.session_id.hex}-{uuid.uuid4().hex}"
+        git_src_root = self._git_src_root(tmp_dir, git_subpath)
+        copy_tools = git_check.stdout.split(b"\0")
+        if (
+            len(copy_tools) != 4
+            or copy_tools[3]
+            or not all(tool.startswith(b"/") for tool in copy_tools[:3])
+        ):
+            raise GitCopyError(
+                src_root=git_src_root,
+                dest=dest,
+                stderr="Unable to locate executable env, sh, and cp tools in the sandbox",
+                context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
+            )
+        env_program, shell_program, copy_program = map(os.fsdecode, copy_tools[:3])
         url = f"https://{self.host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
@@ -795,26 +824,18 @@ class GitRepo(BaseEntry):
                     context={"repo": self.repo, "subpath": self.subpath},
                 )
 
-            git_src_root = self._git_src_root(tmp_dir, git_subpath)
-
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
-            # Resolve the system copy utility before changing directories.
-            # Keep the verified physical source as the copy process's working directory.
+            # Clear the environment before starting the copy shell. Pass the executable as
+            # an assignment so sandbox backends preserve the absolute path across chdir.
             copy = await session.exec(
-                "sh",
+                env_program,
+                "-i",
+                "PATH=/usr/bin:/bin",
+                f"COPY_PROGRAM={copy_program}",
+                shell_program,
                 "-c",
-                _GIT_COPY_LAUNCHER,
-                "sandbox-git-copy-launcher",
                 """set -eu
-if [ -x /usr/bin/cp ]; then
-    copy_program=/usr/bin/cp
-elif [ -x /bin/cp ]; then
-    copy_program=/bin/cp
-else
-    echo 'System copy utility is unavailable' >&2
-    exit 1
-fi
 CDPATH=
 cd -P .
 destination=$3
@@ -836,7 +857,7 @@ case "$source_root" in
     "$repo_root"|"$repo_root"/*) ;;
     *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
 esac
-exec "$copy_program" -R -P -- . "$destination/"
+exec "$COPY_PROGRAM" -R -P -- . "$destination/"
 """,
                 "sandbox-git-copy",
                 tmp_dir,

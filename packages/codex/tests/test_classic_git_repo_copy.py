@@ -2,8 +2,8 @@
 
 import asyncio
 import os
+import shlex
 import shutil
-import subprocess
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +12,6 @@ from typing import cast
 import pytest
 
 from agents.classic.sandbox.entries import GitRepo
-from agents.classic.sandbox.entries.artifacts import _GIT_COPY_LAUNCHER
 from agents.classic.sandbox.errors import GitCopyError
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.types import ExecResult
@@ -29,25 +28,20 @@ class FixtureGitSession:
         self.state = SimpleNamespace(session_id=uuid.uuid4())
         self.checkout: Path | None = None
 
-    async def exec(self, *args: str, shell: bool = True) -> ExecResult:
+    async def exec(self, *args: str, shell: bool | list[str] = True) -> ExecResult:
         if args[:2] == ("git", "clone"):
             self.checkout = Path(args[-1])
             shutil.copytree(self.fixture, self.checkout, symlinks=True)
             return ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if shell:
-            process = await asyncio.create_subprocess_shell(
-                args[0],
-                cwd=self.cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                cwd=self.cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            prefix = shell if isinstance(shell, list) else ["sh", "-c"]
+            args = (*prefix, args[0])
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=self.cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         stdout, stderr = await process.communicate()
         assert process.returncode is not None
         return ExecResult(stdout=stdout, stderr=stderr, exit_code=process.returncode)
@@ -125,25 +119,34 @@ async def test_git_repo_uses_system_copy_with_a_limited_path(
     assert (destination / "root.txt").read_text() == "root fixture\n"
 
 
-def test_git_copy_launcher_clears_the_inherited_environment(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            "sh",
-            "-c",
-            _GIT_COPY_LAUNCHER,
-            "git-copy-test-launcher",
-            'printf "%s\\n" "${SDK_GIT_COPY_TEST_CONTEXT-unset}" "$1"',
-            "git-copy-test",
-            "ordinary argument",
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "SDK_GIT_COPY_TEST_CONTEXT": "fixture"},
-        capture_output=True,
-        check=True,
-        text=True,
+async def test_git_repo_uses_custom_copy_with_a_clean_environment(
+    tmp_path: Path, git_fixture: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system_copy = shutil.which("cp")
+    assert system_copy is not None
+    tool_bin = tmp_path / "custom tools"
+    tool_bin.mkdir()
+    copy_marker = tmp_path / "copy marker"
+    custom_copy = tool_bin / "cp"
+    custom_copy.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'test "${SDK_GIT_COPY_TEST_CONTEXT-unset}" = unset\n'
+        f"printf '%s' 'custom copy' > {shlex.quote(str(copy_marker))}\n"
+        f'exec {shlex.quote(system_copy)} "$@"\n',
+        encoding="utf-8",
     )
+    custom_copy.chmod(0o755)
+    monkeypatch.setenv("PATH", tool_bin.name, prepend=os.pathsep)
+    monkeypatch.setenv("SDK_GIT_COPY_TEST_CONTEXT", "fixture")
 
-    assert result.stdout == "unset\nordinary argument\n"
+    session = FixtureGitSession(git_fixture, tmp_path)
+    entry = GitRepo(repo="fixture/repository", ref="main")
+    destination = tmp_path / "output"
+
+    assert await entry.apply(cast(BaseSandboxSession, session), destination, tmp_path) == []
+    assert (destination / "root.txt").read_text() == "root fixture\n"
+    assert copy_marker.read_text(encoding="utf-8") == "custom copy"
 
 
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
