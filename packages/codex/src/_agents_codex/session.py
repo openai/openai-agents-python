@@ -946,6 +946,7 @@ class _Submission:
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
     completion_continuations: int = 0
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: UserInput | None = field(default=None, repr=False)
@@ -1031,6 +1032,7 @@ class _ChildCallbacks:
     callbacks: dict[asyncio.Task[None], _NativeCallback | None] = field(default_factory=dict)
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
+    terminal_observations: dict[str, ToolStarted] = field(default_factory=dict, repr=False)
     completion_continuations: int = 0
     guardrail_results: list[GuardrailRecord] = field(default_factory=list)
     guardrail_input: tuple[dict[str, Any], ...] | None = field(default=None, repr=False)
@@ -9242,6 +9244,7 @@ class Session(Generic[ContextT, OutputT]):
         error: BaseException | None,
         outcome: Completed[Any] | None,
     ) -> None:
+        self._drain_terminal_observations(state)
         continuation: _Submission | None = None
         if state.cleanup_error is not None:
             if error is None:
@@ -9620,6 +9623,73 @@ class Session(Generic[ContextT, OutputT]):
             submission_id=submission_id,
         )
 
+    def _observe_function_finished(
+        self,
+        started: ToolStarted,
+        status: Literal["completed", "failed", "cancelled"],
+        output: ToolOutput | None = None,
+    ) -> None:
+        self._observations.append(
+            ToolFinished(
+                session_id=self.id,
+                turn_id=started.turn_id,
+                submission_id=started.submission_id,
+                call_id=started.call_id,
+                name=started.name,
+                namespace=started.namespace,
+                status=status,
+                output=output,
+            )
+        )
+
+    def _release_terminal_observation(self, state: _CallbackState, item: Any) -> None:
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            return
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str):
+            return
+        started = state.terminal_observations.pop(call_id, None)
+        if started is None:
+            return
+        body = item.get("output")
+        parts: list[dict[str, Any]] | None = None
+        if isinstance(body, str):
+            parts = [{"type": "inputText", "text": body}]
+        elif isinstance(body, list):
+            parts = []
+            kinds = {
+                "input_text": "inputText",
+                "input_image": "inputImage",
+                "input_file": "inputFile",
+                "input_audio": "inputAudio",
+            }
+            for raw in body:
+                if not isinstance(raw, dict) or raw.get("type") not in kinds:
+                    parts = None
+                    break
+                part = dict(raw)
+                kind = part.pop("type")
+                if kind in {"input_image", "input_audio"}:
+                    fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
+                    part = {fields.get(key, key): value for key, value in part.items()}
+                parts.append({"type": kinds[kind], **part})
+        output = None
+        if parts is not None:
+            try:
+                output = ToolOutput(parts)
+                output._validate()
+            except (TypeError, ValueError):
+                output = None
+        self._observe_function_finished(started, "completed", output)
+
+    def _drain_terminal_observations(self, state: _CallbackState) -> None:
+        pending = tuple(state.terminal_observations.values())
+        state.terminal_observations.clear()
+        for started in pending:
+            self._observe_function_finished(
+                started, "cancelled" if _native_callback_cancelled(state) else "completed"
+            )
+
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
         assert handle is not None
@@ -9804,6 +9874,7 @@ class Session(Generic[ContextT, OutputT]):
                 cancel_once(task)
             await asyncio.gather(*state.callbacks, return_exceptions=True)
         finally:
+            self._drain_terminal_observations(state)
             state.stopping = True
             state.tool_completion = None
             state.request_keys.clear()
@@ -9909,6 +9980,7 @@ class Session(Generic[ContextT, OutputT]):
             "turn_aborted",
             "token_count",
             "hosted_tool_call_progress",
+            "raw_response_item",
         }:
             turn_id = turn_id or event["id"]
         if not turn_id and kind == "elicitation_request":
@@ -9948,7 +10020,7 @@ class Session(Generic[ContextT, OutputT]):
             return
         if not turn_id:
             return
-        if kind in {"token_count", "hosted_tool_call_progress"}:
+        if kind in {"token_count", "hosted_tool_call_progress", "raw_response_item"}:
             # Passive progress must not create a never-settling owner without
             # native admission.
             current = self._child_callbacks.get((event["subagent_id"], incarnation, turn_id))
@@ -9969,6 +10041,8 @@ class Session(Generic[ContextT, OutputT]):
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
             state.observed.set_result(None)
+        if kind == "raw_response_item":
+            self._release_terminal_observation(state, message["item"])
         self._observe_mcp(event, state)
         self._observe_progress(event, state.handle, event["subagent_id"])
         if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -11594,6 +11668,7 @@ class Session(Generic[ContextT, OutputT]):
                     state.failure.set_result(NativeError("Native MCP result policy failed"))
                 elif kind == "raw_response_item" and event["id"] == handle.turn_id:
                     item = message["item"]
+                    self._release_terminal_observation(state, item)
                     if item.get("type") == "message" and item.get("role") == "assistant":
                         texts = [
                             part["text"]
@@ -12226,6 +12301,7 @@ class Session(Generic[ContextT, OutputT]):
         acquired = False
         status: Literal["completed", "failed", "cancelled"] = "cancelled"
         observed_output: ToolOutput | None = None
+        deferred_observation = False
         try:
             request = json.dumps(message)
             marker = message["_sdk_python_tool"]
@@ -12620,14 +12696,20 @@ class Session(Generic[ContextT, OutputT]):
             del response
             if not self._admit_tool(state, request):
                 return
+            if entry.finish_turn and response_output["success"] and started is not None:
+                if started.call_id in state.terminal_observations:
+                    raise NativeError("Repeated terminal tool observation identity")
+                state.terminal_observations[started.call_id] = started
+                deferred_observation = True
             accepted = await self._respond_tool(state, reply)
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:
                 status = "completed" if response_output["success"] else "failed"
-                observed_output = ToolOutput(
-                    deepcopy(response_output["contentItems"]), response_output["success"]
-                )
+                if not deferred_observation:
+                    observed_output = ToolOutput(
+                        deepcopy(response_output["contentItems"]), response_output["success"]
+                    )
         except BaseException as error:  # report every callback exit to its owner
             status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
             if _native_callback_cancelled(state):
@@ -12655,18 +12737,15 @@ class Session(Generic[ContextT, OutputT]):
                 )
             try:
                 if started is not None:
-                    self._observations.append(
-                        ToolFinished(
-                            session_id=self.id,
-                            turn_id=started.turn_id,
-                            submission_id=started.submission_id,
-                            call_id=started.call_id,
-                            name=started.name,
-                            namespace=started.namespace,
-                            status=status,
-                            output=observed_output if status != "cancelled" else None,
+                    if not deferred_observation:
+                        self._observe_function_finished(
+                            started, status, observed_output if status != "cancelled" else None
                         )
-                    )
+                    elif (
+                        status != "completed"
+                        and state.terminal_observations.pop(started.call_id, None) is not None
+                    ):
+                        self._observe_function_finished(started, status)
             finally:
                 scope.active = False
                 _invocation.reset(token)

@@ -9,7 +9,14 @@ from dataclasses import replace
 import pytest
 from pydantic import BaseModel, model_validator
 
-from agents import Agent, GuardrailResult, GuardrailTripwire, NativeOutput, OutputGuardrail
+from agents import (
+    Agent,
+    GuardrailResult,
+    GuardrailTripwire,
+    NativeOutput,
+    OutputGuardrail,
+    ToolContext,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, responses as responses
 from tests.test_native_agent import provider
@@ -462,3 +469,215 @@ async def test_held_terminal_resume_checks_before_ordinary_admission(responses, 
             assert checked == ["held-call"]
             assert effects == ["executed"]
             assert len(responses.requests) == (2 if reject else 3)
+
+
+@pytest.mark.parametrize("mode", ["approve", "reject", "cancel", "error", "siblings", "duplicate"])
+async def test_terminal_observations_wait_for_committed_admission(responses, monkeypatch, mode):
+    from agents import NativeError, TurnStoppedError, _native, function_tool
+    from agents.observation import ToolFinished
+    from tests.native_fixtures import function_call
+
+    if mode == "duplicate":
+        original_next = _native.NativeThread._next_session_event
+        pending = {}
+        duplicated = set()
+
+        async def duplicate_publication(native):
+            key = id(native)
+            if key in pending:
+                return pending.pop(key)
+            raw = await original_next(native)
+            if raw is None:
+                return raw
+            event = json.loads(raw)
+            item = (event or {}).get("msg", {}).get("item", {})
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and item.get("call_id") == "terminal-call"
+                and key not in duplicated
+            ):
+                pending[key] = raw
+                duplicated.add(key)
+            return raw
+
+        monkeypatch.setattr(_native.NativeThread, "_next_session_event", duplicate_publication)
+
+    @function_tool
+    def prior() -> str:
+        return "accepted-prior-sibling"
+
+    @function_tool(finish_turn=True)
+    def done() -> str:
+        return "terminal-admission-sentinel"
+
+    @function_tool(finish_turn=True)
+    def other() -> str:
+        return "other-terminal-sibling"
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def check(request, source):
+        assert request.tool_call is not None
+        assert request.tool_call.call_id == "terminal-call"
+        entered.set()
+        await release.wait()
+        if mode == "error":
+            raise ValueError("synthetic guard error")
+        return GuardrailResult(mode == "reject")
+
+    responses.respond(function_call("prior", {}, "prior-call"))
+    calls = [function_call("done", {}, "terminal-call")]
+    if mode == "siblings":
+        calls.append(function_call("other", {}, "sibling-call"))
+    responses.respond(*calls)
+    async with (
+        timeout(30),
+        Agent(
+            instructions="Use prior then done.",
+            tools=[prior, done, other],
+            provider=provider(responses),
+            output_guardrails=[OutputGuardrail("admission", check)],
+        ).session() as session,
+    ):
+        turn = await session.submit("begin")
+        events = []
+
+        async def read_events():
+            async for event in turn.events(include_execution_details=True):
+                events.append(event)
+
+        reading = asyncio.create_task(read_events())
+        try:
+            await entered.wait()
+            await asyncio.sleep(0)
+            assert "terminal-admission-sentinel" not in repr(events)
+            assert "terminal-admission-sentinel" not in json.dumps(
+                [item async for item in session.items()]
+            )
+            if mode == "cancel":
+                stopping = asyncio.create_task(turn.cancel())
+                await asyncio.sleep(0)
+                release.set()
+                await stopping
+            else:
+                release.set()
+            if mode == "reject":
+                with pytest.raises(GuardrailTripwire):
+                    await turn.get_result()
+            elif mode == "cancel":
+                with pytest.raises((asyncio.CancelledError, TurnStoppedError, NativeError)):
+                    await turn.get_result()
+            elif mode == "error":
+                with pytest.raises(ValueError, match="synthetic guard error"):
+                    await turn.get_result()
+            else:
+                assert (await turn.get_result()).final_output == "terminal-admission-sentinel"
+            await reading
+            finished = [event for event in events if isinstance(event, ToolFinished)]
+            selected = [event for event in finished if event.call_id == "terminal-call"]
+            assert len(selected) == 1
+            assert "accepted-prior-sibling" in repr(
+                [event for event in finished if event.call_id == "prior-call"]
+            )
+            if mode in {"approve", "duplicate", "siblings"}:
+                assert "terminal-admission-sentinel" in repr(selected)
+            else:
+                assert "terminal-admission-sentinel" not in repr(events)
+            if mode == "siblings":
+                sibling = [event for event in finished if event.call_id == "sibling-call"]
+                assert len(sibling) == 1
+                assert "other-terminal-sibling" in repr(sibling)
+        finally:
+            release.set()
+            await asyncio.gather(reading, return_exceptions=True)
+
+
+@pytest.mark.parametrize("reject_one", [False, True])
+async def test_child_terminal_observations_keep_equal_call_ids_separate(
+    tmp_path, monkeypatch, reject_one
+):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from agents import NativeAgents, function_tool
+    from agents.observation import ToolFinished
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.native_fixtures import function_call
+    from tests.test_native_child_agents import ChildPeer, metadata, trust
+    from tests.test_native_executor_tools import declaration
+
+    class Peer(ChildPeer):
+        async def hold(self, event):
+            pass
+
+        def response(self):
+            body = self.requests[-1]
+            path = metadata(body, self.request_headers[-1])["agent_name"]
+            if path == "/root":
+                return super().response()
+            self.child_requests.setdefault(path, []).append(body)
+            return [function_call("done", {}, "same-child-call")]
+
+    @function_tool(finish_turn=True)
+    def done(context: ToolContext[None]) -> str:
+        return f"child-output:{context.call.child_id}"
+
+    blocked = []
+
+    def check(request, source):
+        if request.tool_call is None:
+            return GuardrailResult(False)
+        child_id = request.tool_call.child_id
+        assert request.final_output == f"child-output:{child_id}"
+        if reject_one and not blocked:
+            blocked.append(child_id)
+        return GuardrailResult(child_id in blocked)
+
+    peer = Peer(("default", "default"))
+    app = web.Application()
+    app.router.add_post("/v1/responses", peer.handle)
+    app.router.add_get("/v1/responses", peer.websocket)
+    app.on_shutdown.append(peer.close_sockets)
+    async with (
+        timeout(30),
+        TestServer(app, shutdown_timeout=1) as server,
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+    ):
+        peer.url = str(server.make_url("/v1"))
+        trust(executor, tmp_path, monkeypatch)
+        async with Agent(
+            instructions="Spawn alpha and beta.",
+            model="gpt-5.5",
+            tools=[NativeAgents(max_children=2), done],
+            provider=peer.provider(websocket=False),
+            output_guardrails=[OutputGuardrail("children", check)],
+        ).session(environment=declaration(executor)) as session:
+            await (await session.submit("begin")).get_result()
+            children = [child async for child in session.subagents()]
+            assert len(children) == 2
+            for child in children:
+                assert child.turn is not None
+                if child.id in blocked:
+                    with pytest.raises(GuardrailTripwire):
+                        await child.turn.get_result()
+                else:
+                    assert (
+                        await child.turn.get_result()
+                    ).final_output == f"child-output:{child.id}"
+                events = [
+                    event async for event in child.turn.events(include_execution_details=True)
+                ]
+                finished = [
+                    event
+                    for event in events
+                    if isinstance(event, ToolFinished) and event.call_id == "same-child-call"
+                ]
+                assert len(finished) == 1
+                if child.id in blocked:
+                    assert f"child-output:{child.id}" not in repr(events)
+                else:
+                    assert f"child-output:{child.id}" in repr(finished)
+                for sibling in children:
+                    if sibling.id != child.id:
+                        assert f"child-output:{sibling.id}" not in repr(finished)
