@@ -8,6 +8,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -60,6 +61,18 @@ from _agents_shared.token_truncation import TruncationPolicy, truncate_text
 
 # isort: split
 
+from _agents_shared.snapshot_defaults import (
+    cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots,
+    default_local_snapshot_base_dir as default_local_snapshot_base_dir,
+    resolve_default_local_snapshot_spec,
+)
+from agents.classic.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
+
+from ._managed_workspace import (
+    _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
+    ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
+    _ManagedWorkspaceSource,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .executor import Environment
 
@@ -125,8 +138,13 @@ def sandbox_environment(
     authorized_resume_state: SandboxSessionState | None = None,
     concurrency_limits: SandboxConcurrencyLimits | None = None,
     archive_limits: SandboxArchiveLimits | None = None,
+    managed_workspace: bool = False,
 ) -> AbstractAsyncContextManager[Environment[_ContextT]]:
     """Own a provider-selected sandbox and its native gateway for one native Session.
+
+    Each prepared acquisition has been supplying filesystem and mount guidance to
+    the native Session. Entry descriptions have been appearing in model context,
+    requiring text without secrets.
 
     The connect manager must connect to the supplied sandbox and own gateway cleanup.
     The provider validates and materializes the captured manifest for create and
@@ -153,6 +171,23 @@ def sandbox_environment(
     except (ValueError, TypeError) as error:
         raise _configuration_error(error, "options") from None
 
+    if type(managed_workspace) is not bool:
+        raise TypeError("managed_workspace must be a bool")
+    if managed_workspace and session is not None:
+        raise ValueError("Managed retirement requires an owned sandbox")
+    if (
+        managed_workspace
+        and snapshot is not None
+        and not isinstance(
+            snapshot, (LocalSnapshot, LocalSnapshotSpec, RemoteSnapshot, RemoteSnapshotSpec)
+        )
+    ):
+        raise ValueError("Managed retirement requires a LocalSnapshot or RemoteSnapshot factory")
+    if managed_workspace and snapshot is None and authorized_resume_state is None:
+        snapshot = resolve_default_local_snapshot_spec()
+    managed_source: _ManagedWorkspaceSource | None = None
+    original_authorized_state = authorized_resume_state
+    authorized_payload = None
     captured_manifest = _manifest(manifest)
     if session is not None or authorized_resume_state is not None:
         captured_manifest = _manifest(
@@ -194,6 +229,10 @@ def sandbox_environment(
         )
         authorized_resume_state.manifest = _manifest(captured_manifest)
         client.assert_resume_state_authority(authorized_resume_state, captured_options)
+        if managed_workspace and not isinstance(
+            authorized_resume_state.snapshot, (LocalSnapshot, RemoteSnapshot)
+        ):
+            raise ValueError("Managed resume requires a supported snapshot factory")
 
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:
@@ -210,12 +249,35 @@ def sandbox_environment(
                     )
                 )
                 owners.push_async_callback(client.delete, selected)
-                owners.push_async_callback(selected.aclose)
+
+                async def retire_selected() -> None:
+                    assert selected is not None
+                    await selected.aclose()
+                    if managed_source is not None and managed_source.capture_requested:
+                        if not isinstance(selected.state.snapshot, (LocalSnapshot, RemoteSnapshot)):
+                            raise ValueError(
+                                "Managed retirement produced no supported durable snapshot"
+                            )
+                        managed_source.publish(client.serialize_session_state(selected.state))
+
+                owners.push_async_callback(retire_selected)
                 if concurrency_limits is not None:
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
                 await selected.start()
+                if managed_source is not None and authorized_resume_state is not None:
+                    previous_snapshot = selected.state.snapshot
+                    # Restore first; subsequent publication must preserve the saved pair.
+                    if isinstance(previous_snapshot, LocalSnapshot):
+                        publication = LocalSnapshotSpec(base_path=previous_snapshot.base_path)
+                    elif isinstance(previous_snapshot, RemoteSnapshot):
+                        publication = RemoteSnapshotSpec(
+                            client_dependency_key=previous_snapshot.client_dependency_key
+                        )
+                    else:
+                        raise ValueError("Managed resume requires a supported snapshot factory")
+                    selected.state.snapshot = publication.build(uuid4().hex)
             else:
                 _assert_current_mount_authority(selected.state, captured_manifest)
                 await selected._validate_manifest_application(manifest=captured_manifest)
@@ -224,9 +286,25 @@ def sandbox_environment(
                     selected._set_concurrency_limits(concurrency_limits)
                 if archive_limits is not None:
                     selected._set_archive_limits(archive_limits)
-            yield await owners.enter_async_context(connect(selected))
+            environment = await owners.enter_async_context(connect(selected))
+            setattr(
+                source_manager,
+                _WORKSPACE_INSTRUCTIONS_ATTRIBUTE,
+                _render_workspace_instructions(selected.state.manifest, environment),
+            )
+            yield environment
 
-    return source()
+    source_manager = source()
+    if managed_workspace:
+        if original_authorized_state is not None:
+            authorized_payload = client.serialize_session_state(original_authorized_state)
+        managed_source = _ManagedWorkspaceSource(
+            source_manager,
+            backend_id=client.backend_id,
+            authorized_payload=authorized_payload,
+        )
+        return managed_source
+    return source_manager
 
 
 @redact_mount_error_data_sync
@@ -262,6 +340,23 @@ def render_storage_layout(manifest: Manifest) -> str:
         ensure_ascii=True,
         indent=2,
     )
+
+
+def _render_workspace_instructions(manifest: Manifest, environment: Environment[Any]) -> str:
+    captured = _manifest(manifest)
+    sections = [
+        "# Current SDK workspace snapshot",
+        "This snapshot replaces all earlier SDK workspace descriptions. "
+        "Mount modes describe storage; current tool and executor grants control access.",
+        "Working directory: " + json.dumps(environment.cwd, ensure_ascii=True),
+        "Executor read-only: " + json.dumps(environment.read_only),
+        "Filesystem layout:\n" + captured.describe(depth=3),
+        "Declared storage access:\n" + render_storage_layout(captured),
+    ]
+    policy = build_remote_mount_policy_instructions(captured, allow_direct_edits=False)
+    if policy is not None:
+        sections.append(policy)
+    return "\n\n".join(sections)
 
 
 __all__ = [

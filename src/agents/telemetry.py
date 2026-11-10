@@ -9,6 +9,7 @@ from __future__ import annotations
 from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
+    ConsoleDiagnostics as ConsoleDiagnostics,
     ConsoleTraceProcessor as ConsoleTraceProcessor,
     ContextVar as ContextVar,
     Coroutine as Coroutine,
@@ -107,6 +108,7 @@ from _agents_codex.telemetry import (
 __all__ = [
     "OpenAITraceExporter",
     "ConsoleTraceProcessor",
+    "ConsoleDiagnostics",
     "TraceContext",
     "OtelTlsConfig",
     "OtlpGrpc",

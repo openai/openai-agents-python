@@ -14,6 +14,7 @@ from _agents_codex.sandbox import (
     LocalFile as LocalFile,
     LocalSnapshot as LocalSnapshot,
     LocalSnapshotSpec as LocalSnapshotSpec,
+    ManagedWorkspaceCheckpoint as ManagedWorkspaceCheckpoint,
     Manifest as Manifest,
     Mount as Mount,
     MountpointMountPattern as MountpointMountPattern,
@@ -34,13 +35,20 @@ from _agents_codex.sandbox import (
     SnapshotSpec as SnapshotSpec,
     TruncationPolicy as TruncationPolicy,
     apply_diff as apply_diff,
+    cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots,
+    default_local_snapshot_base_dir as default_local_snapshot_base_dir,
     render_storage_layout as render_storage_layout,
+    resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec,
     retry_async as retry_async,
     sandbox_environment as sandbox_environment,
     truncate_text as truncate_text,
 )
 
 __all__ = [
+    "ManagedWorkspaceCheckpoint",
+    "cleanup_stale_default_local_snapshots",
+    "default_local_snapshot_base_dir",
+    "resolve_default_local_snapshot_spec",
     "RemoteSnapshotSpec",
     "RemoteSnapshot",
     "NoopSnapshotSpec",
