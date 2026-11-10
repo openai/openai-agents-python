@@ -262,6 +262,14 @@ impl EngineState {
         };
         // Capture one typed runtime at the original first accessor decode point.
         let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
+        let user_instructions: Arc<dyn codex_extension_api::UserInstructionsProvider> =
+            if runtime_options.sdk_discover_agents_md {
+                let home =
+                    find_codex_home().context("Unable to locate Codex home for AGENTS.md")?;
+                Arc::new(CodexHomeUserInstructionsProvider::new(home))
+            } else {
+                Arc::new(options::EmptyUserInstructions)
+            };
         let native_turn_control = runtime_options.native_turn_control();
         let sdk_user_input_enabled = runtime_options
             .sdk_native_config()
@@ -507,7 +515,6 @@ impl EngineState {
         };
         let environment = Arc::new(environment);
         let installation_id = ThreadId::new().to_string();
-        let user_instructions = Arc::new(options::EmptyUserInstructions);
         let extension_events = Arc::new(extensions::Events::new());
         let code_mode = runtime_options.code_mode_provider(&config).or_else(|| {
             // Mirror ThreadManager's pinned default if no package helper was

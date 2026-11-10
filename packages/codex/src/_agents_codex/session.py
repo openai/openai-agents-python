@@ -2788,6 +2788,7 @@ class Session(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        discover_agents_md: bool = False,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
@@ -2813,6 +2814,8 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("restored_output_type requires a pending restored turn")
         _validate_function_concurrency(max_function_concurrency)
         parent_trace = _trace_context(parent_trace)
+        if not isinstance(discover_agents_md, bool):
+            raise TypeError("discover_agents_md must be a bool")
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
@@ -3195,6 +3198,8 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+            if discover_agents_md:
+                runtime["_sdk_discover_agents_md"] = True
 
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {
