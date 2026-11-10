@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
 from tests.test_native_codex_cli import cli
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="Synthetic executable uses a Unix shebang")
 
 
 async def call(session, responses, thread_id=None, *, succeeds=True):
