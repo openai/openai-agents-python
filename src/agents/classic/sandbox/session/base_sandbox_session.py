@@ -29,7 +29,6 @@ from ..errors import (
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
-    _redact_git_host_error_data,
 )
 from ..files import FileEntry
 from ..manifest import Manifest
@@ -232,7 +231,6 @@ class BaseSandboxSession(abc.ABC):
         return False
 
     @redact_mount_error_data
-    @_redact_git_host_error_data
     async def start(self) -> None:
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
@@ -1461,7 +1459,6 @@ class BaseSandboxSession(abc.ABC):
         resolved_manifest._validate_git_repo_hosts()
 
     @redact_mount_error_data
-    @_redact_git_host_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
         await self._validate_manifest_application(only_ephemeral=only_ephemeral)
         return await self._apply_manifest(

@@ -10,13 +10,14 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
+from ...exceptions import _detach_source_exception_traceback, _raise_data_redacted_error
 from ...run_config import SandboxArchiveLimits, SandboxConcurrencyLimits
 from ...tracing import Span, custom_span, get_current_trace
 from .._mount_security import (
     redact_mount_error_data,
     validate_manifest_mount_credential_boundaries,
 )
-from ..errors import OpName, SandboxError, _redact_git_host_error_data
+from ..errors import OpName, SandboxError, _InvalidGitHostError, _redact_git_host_error_data
 from ..files import FileEntry
 from ..manifest import Manifest
 from ..materialization import MaterializationResult
@@ -72,6 +73,8 @@ def instrumented_op(
                 outputs=outputs,
             )
 
+        if op == "start":
+            return cast(F, _redact_git_host_error_data(_wrapped))
         return cast(F, _wrapped)
 
     return _decorator
@@ -523,7 +526,6 @@ class SandboxSession(BaseSandboxSession):
 
         await self._instrumentation.emit(event)
 
-    @_redact_git_host_error_data
     @instrumented_op("start")
     async def start(self) -> None:
         await self._inner.start()
@@ -551,9 +553,14 @@ class SandboxSession(BaseSandboxSession):
             session_running=session_running,
         )
 
-    @_redact_git_host_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:
-        return await super().apply_manifest(only_ephemeral=only_ephemeral)
+        try:
+            return await super().apply_manifest(only_ephemeral=only_ephemeral)
+        except _InvalidGitHostError as error:
+            _detach_source_exception_traceback(error)
+
+        del self
+        _raise_data_redacted_error(_InvalidGitHostError())
 
     @instrumented_op(
         "exec",

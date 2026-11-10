@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_serializer, field_validator
 
+from ...exceptions import _detach_source_exception_traceback, _raise_data_redacted_error
 from ..errors import (
     GitCloneError,
     GitCopyError,
@@ -88,20 +89,25 @@ class Dir(BaseEntry):
         _ = context
         self.permissions.directory = True
 
-    @_redact_git_host_error_data
     async def apply(
         self,
         session: BaseSandboxSession,
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        _validate_git_repo_entry_hosts(self.children.values())
-        await session.mkdir(dest, parents=True)
-        await self._apply_metadata(session, dest)
-        return await session._apply_entry_batch(
-            [(dest / Path(rel_dest), artifact) for rel_dest, artifact in self.children.items()],
-            base_dir=base_dir,
-        )
+        try:
+            _validate_git_repo_entry_hosts(self.children.values())
+            await session.mkdir(dest, parents=True)
+            await self._apply_metadata(session, dest)
+            return await session._apply_entry_batch(
+                [(dest / Path(rel_dest), artifact) for rel_dest, artifact in self.children.items()],
+                base_dir=base_dir,
+            )
+        except _InvalidGitHostError as error:
+            _detach_source_exception_traceback(error)
+
+        del self, session, dest, base_dir
+        _raise_data_redacted_error(_InvalidGitHostError())
 
 
 class File(BaseEntry):
