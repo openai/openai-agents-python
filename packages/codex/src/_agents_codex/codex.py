@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -37,6 +38,47 @@ from _agents_shared.codex_cli.turn_options import (
 from ._function_tools import ToolContext, _PythonTool, function_tool
 from ._lifecycle import _join
 from ._public import preserve_module_identity as _preserve_module_identity
+
+_CLI_ENVIRONMENT_NAMES = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "SYSTEMROOT",
+        "WINDIR",
+        "SYSTEMDRIVE",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "SHELL",
+        "LOGNAME",
+        "USER",
+        "USERNAME",
+        "USERDOMAIN",
+        "TERM",
+        "CODEX_HOME",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
 
 
 @dataclass
@@ -97,6 +139,11 @@ def codex_tool(
     the stream's subprocess. TurnOptions supports stdout inactivity timeouts.
     Its signal also cancels calls awaiting persistent-session admission.
 
+    Default subprocess environment: platform paths, Codex credentials and
+    transport settings only. Explicit CodexOptions.env mappings and supplied
+    Codex clients retain their application-owned environment policy. For full
+    inheritance, pass CodexOptions(env=dict(os.environ)).
+
     persist_session reuses the most recently completed CLI thread within the
     invoking native Session and serializes that Session's calls. Separate native
     Sessions never implicitly share a thread. Model-supplied thread_id explicitly
@@ -111,6 +158,15 @@ def codex_tool(
         raise TypeError("on_event must be callable or None")
     client = codex
     captured_codex_options = deepcopy(coerce_codex_options(codex_options))
+    if client is None and (captured_codex_options is None or captured_codex_options.env is None):
+        captured_codex_options = replace(
+            captured_codex_options or CodexOptions(),
+            env={
+                name: value
+                for name, value in os.environ.items()
+                if name.upper() in _CLI_ENVIRONMENT_NAMES
+            },
+        )
     captured_thread_options = deepcopy(coerce_thread_options(thread_options))
     turn_options = coerce_turn_options(turn_options)
     captured_turn_options = (
