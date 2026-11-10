@@ -3581,6 +3581,7 @@ class Session(Generic[ContextT, OutputT]):
                         and observation_retention == "bounded"
                         and context is None
                         and not owned_provider
+                        and provider is not None
                         and provider.model_backend is None
                         and not available
                         and not agent.handoffs
