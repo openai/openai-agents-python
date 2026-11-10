@@ -21,6 +21,7 @@ from agents import (
     MCPCallContext,
     NativeError,
     SessionBusyError,
+    StopTurn,
     ToolContext,
     TurnStoppedError,
     function_tool,
@@ -916,7 +917,7 @@ def test_raw_mcp_reference_selection_uses_captured_identity() -> None:
 async def test_partial_mcp_graph_policy_survives_accepted_update(
     responses: ResponsesFixture, phase: str
 ) -> None:
-    from agents import CapabilityError, StopTurn
+    from agents import CapabilityError
 
     peer = Peer(names=("a.b", "a_b"))
     calls: list[str] = []

@@ -7328,7 +7328,7 @@ pub(crate) mod managed_tests {
             let response: DynamicToolResponse = serde_json::from_value(json!({
                 "contentItems":[{"type":"inputText","text":"approved lookup value"}], "success":true
             })).unwrap();
-            assert!(tools.respond_manual(&resumed.id.to_string(), &grant, response));
+            assert!(tools.respond_manual(&resumed.id.to_string(), &grant, response, true));
             assert!(!tools.check_manual(&resumed.id.to_string(), &grant));
 
             let store = restored_engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
@@ -8229,9 +8229,9 @@ pub(crate) mod managed_tests {
             content_items: vec![],
             success: true,
         };
-        assert!(tools.respond_manual("owner", &grant, response.clone()));
+        assert!(tools.respond_manual("owner", &grant, response.clone(), true));
         assert!(result.try_recv().is_ok());
-        assert!(!tools.respond_manual("owner", &grant, response));
+        assert!(!tools.respond_manual("owner", &grant, response, true));
         let (_, _, next) = tools
             .enqueue(
                 "owner",
