@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         _tracing_context: str
 
     from ._function_tools import Tool
+    from ._managed_workspace import ManagedWorkspaceCheckpoint
     from .canonical_storage import CustomStorage
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
@@ -1112,7 +1113,7 @@ class Agent(Generic[ContextT, OutputT]):
         self: Agent[None, OutputT],
         *,
         context: None = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1140,7 +1141,7 @@ class Agent(Generic[ContextT, OutputT]):
         self: Agent[object, OutputT],
         *,
         context: object = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1168,7 +1169,7 @@ class Agent(Generic[ContextT, OutputT]):
         self,
         *,
         context: ContextT,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1196,7 +1197,7 @@ class Agent(Generic[ContextT, OutputT]):
         self: Agent[SessionContextT, OutputT],
         *,
         context: SessionContextT | None = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -1377,7 +1378,7 @@ class Agent(Generic[ContextT, OutputT]):
         self: Agent[SessionContextT, OutputT],
         *,
         context: SessionContextT | None = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
         storage: LocalStorage | CustomStorage | None = None,

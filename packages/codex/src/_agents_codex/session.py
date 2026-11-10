@@ -78,6 +78,7 @@ from ._lifecycle import (
     _sync_run as _sync_run,
     _SyncRun as _SyncRun,
 )
+from ._managed_workspace import ManagedWorkspaceCheckpoint, _ManagedWorkspaceSource
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
@@ -87,6 +88,14 @@ from ._projection import (
     project_model_output_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._stored_history import (
+    StoredItemPage,
+    StoredMatchPage,
+    StoredTurnPage,
+    _item_page as _stored_item_page,
+    _options as _stored_options,
+    _turn_page as _stored_turn_page,
+)
 from ._trace_context import (
     TraceContext as TraceContext,
     _native_trace_context as _native_trace_context,
@@ -3085,7 +3094,7 @@ class Session(Generic[ContextT, OutputT]):
         agent: Agent[ContextT, OutputT],
         *,
         context: ContextT | None = None,
-        state: SessionState | None = None,
+        state: SessionState | ManagedWorkspaceCheckpoint | None = None,
         restored_output_type: OutputSpec[Any] | None = None,
         initial_messages_json: str | None = None,
         storage: LocalStorage | CustomStorage | None = None,
@@ -3110,6 +3119,13 @@ class Session(Generic[ContextT, OutputT]):
         _completed_input: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
+        if isinstance(state, ManagedWorkspaceCheckpoint):
+            captured_pair = ManagedWorkspaceCheckpoint.from_json(state.to_json())
+            if managed_source is None:
+                raise ValueError("Managed checkpoint requires a current managed sandbox source")
+            managed_source.validate_resume(captured_pair)
+            state = captured_pair.conversation
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -3925,6 +3941,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
+                session._managed_workspace = managed_source
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
@@ -4318,6 +4335,7 @@ class Session(Generic[ContextT, OutputT]):
         self._provider_lease: Any = None
         self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
+        self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
@@ -4423,6 +4441,7 @@ class Session(Generic[ContextT, OutputT]):
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
+        self._stored_close_action: Any | None = None
         self._scope_close_task: asyncio.Task[None] | None = None
         self._interaction_handler: _InteractionHandler | None = None
         self._interaction_error: BaseException | None = None
@@ -5342,6 +5361,15 @@ class Session(Generic[ContextT, OutputT]):
 
     def _check_open(self) -> None:
         self._check_loop()
+        managed = self._managed_workspace
+        if (
+            managed is not None
+            and managed.capture_task is not None
+            and not managed.capture_task.done()
+            and asyncio.current_task()
+            not in {managed.capture_task, self._checkpoint_task, self._close_task}
+        ):
+            raise SessionBusyError("Session is retiring a managed workspace checkpoint")
         if self._interaction_error is not None:
             raise self._interaction_error
         if (
@@ -12969,6 +12997,96 @@ class Session(Generic[ContextT, OutputT]):
                     # Cleanup and the native reply ACK are already settled.
                     permit.release()
 
+    async def revert_stored(self, *, before_turn_id: str) -> None:
+        """Core has been closing this Session before reverting its stored conversation.
+
+        The named turn and every later turn: excluded. Immutable Session.id;
+        subsequent opening through the same LocalStorage and current Agent.
+        Close/join before mutation; mandatory resource cleanup even on failure.
+        """
+        if not isinstance(before_turn_id, str) or not before_turn_id:
+            raise ValueError("before_turn_id must be a nonempty string")
+        await self._close_stored_history({"kind": "revert", "before_turn_id": before_turn_id})
+
+    async def delete_stored(self) -> None:
+        """Core has been closing this Session before deleting its stored conversation.
+
+        LocalStorage only; native writer/reference exclusion and sidecar cleanup.
+        Explicit rejection after a concurrent prior close; no silent success.
+        """
+        await self._close_stored_history({"kind": "delete"})
+
+    async def _close_stored_history(self, action: dict[str, Any]) -> None:
+        self._check_callback_operation("change stored history while closing its own Session")
+        self._check_idle_update()
+        if self._close_task is not None or self._scope_close_task is not None:
+            raise RuntimeError("Stored history operation requires an open Session before close")
+        self._stored_close_action = self._native._stored_history_close_action(json.dumps(action))
+        await self.aclose()
+
+    async def stored_turns(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        direction: Literal["asc", "desc"] = "asc",
+        include_summary: bool = False,
+    ) -> StoredTurnPage:
+        """Core has been returning committed turn metadata and optional summary items.
+
+        Active/approval-paused availability. Opaque store cursors;
+        no complete history snapshot, original-item fidelity or CAS revision.
+        Full projected item detail through stored_items; explicit unsupported-store errors.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor, direction)
+        if type(include_summary) is not bool:
+            raise TypeError("include_summary must be a bool")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "turns", **options, "include_items": include_summary})
+        )
+        return _stored_turn_page(json.loads(value))
+
+    async def stored_items(
+        self,
+        *,
+        turn_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+        direction: Literal["asc", "desc"] = "asc",
+    ) -> StoredItemPage:
+        """Core has been paging its committed item projections in creation order.
+
+        Store-owned JSON projections; raw originals through history_snapshot.
+        No hidden full-journal fallback for stores without an index.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor, direction)
+        if turn_id is not None and (not isinstance(turn_id, str) or not turn_id):
+            raise ValueError("turn_id must be a nonempty string or None")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "items", **options, "turn_id": turn_id})
+        )
+        return _stored_item_page(json.loads(value))
+
+    async def search_history(
+        self, text: str, *, limit: int = 50, cursor: str | None = None
+    ) -> StoredMatchPage:
+        """Core has been searching indexed visible messages by literal substring.
+
+        Case-insensitive matching; UTF-16 match offsets within each snippet.
+        Inclusive turn_cursor for stored_turns at the matching turn.
+        """
+        self._check_open()
+        options = _stored_options(limit, cursor)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Stored history search requires nonempty text")
+        options.pop("descending")
+        value = await self._native._stored_history(
+            json.dumps({"kind": "search", **options, "text": text})
+        )
+        return cast(StoredMatchPage, json.loads(value))
+
     async def items(self, *, subagent_id: str | None = None) -> AsyncIterator[SessionItem]:
         """Iterate a snapshot of recorded items, including inherited child history."""
         self._check_open()
@@ -13084,6 +13202,45 @@ class Session(Generic[ContextT, OutputT]):
             return cast(NativeGoal, json.loads(value))
 
         return await self._join_mutation(asyncio.create_task(write()))
+
+    async def suspend_workspace(self) -> ManagedWorkspaceCheckpoint:
+        """Retire this owned sandbox Session and capture its paired workspace."""
+        self._check_loop()
+        self._check_callback_operation("suspend its managed workspace")
+        managed = self._managed_workspace
+        if managed is None:
+            raise CapabilityError(
+                "Managed workspace capture requires an owned managed sandbox source"
+            )
+        if managed.capture_task is not None:
+            return await asyncio.shield(managed.capture_task)
+        self._check_open()
+        self._check_portable_capture()
+        active = self._active
+        if active is not None:
+            self._check_manual_capture(active)
+        self._check_checkpoint_admission(active)
+        if any(
+            child.continuation is not None and not child.continuation.done()
+            for child in self._child_callbacks.values()
+        ):
+            raise SessionBusyError("Managed capture requires settled child continuations")
+        # Intent precedes export, so racing close cannot skip provider serialization.
+        managed.capture_requested = True
+
+        async def retire() -> ManagedWorkspaceCheckpoint:
+            try:
+                state = await self._checkpoint(active, managed_retire=True)
+            except BaseException as error:
+                await _close_after_error(error, self.aclose)
+                raise
+            await self.aclose()
+            if managed.receipt is None:
+                raise NativeError("Managed provider retirement omitted its workspace receipt")
+            return ManagedWorkspaceCheckpoint._capture(state.to_json(), managed.receipt)
+
+        managed.capture_task = asyncio.create_task(retire())
+        return await asyncio.shield(managed.capture_task)
 
     async def save_state(self) -> SessionState:
         """Snapshot an idle session without retiring it.
@@ -13251,6 +13408,7 @@ class Session(Generic[ContextT, OutputT]):
         before_seal: Callable[[], None] | None = None,
         fork: bool = False,
         probe: bool = False,
+        managed_retire: bool = False,
     ) -> SessionState:
         while True:
             self._check_checkpoint_admission(active)
@@ -13266,7 +13424,11 @@ class Session(Generic[ContextT, OutputT]):
             # These checks belong to the Session. Passive preparation must
             # neither cancel them nor hold checkpoint ownership across close.
             await asyncio.gather(*(asyncio.shield(task) for task in continuations))
-        with _private_task(self._capture_checkpoint(active, before_seal, fork, probe=probe)) as (
+        with _private_task(
+            self._capture_checkpoint(
+                active, before_seal, fork, probe=probe, managed_retire=managed_retire
+            )
+        ) as (
             pending,
             outcome,
         ):
@@ -13287,6 +13449,7 @@ class Session(Generic[ContextT, OutputT]):
         fork: bool,
         *,
         probe: bool = False,
+        managed_retire: bool = False,
     ) -> str:
         active_uses_executor = active is not None and (
             active.operation_refs is None
@@ -13515,6 +13678,8 @@ class Session(Generic[ContextT, OutputT]):
                 interaction.state = state
                 if not active.failure.done():
                     active.failure.set_result(interaction)
+            if managed_retire:
+                self._sealed_checkpoint = raw
             return raw
         except BaseException as error:
             if active is not None:
@@ -13832,7 +13997,10 @@ class Session(Generic[ContextT, OutputT]):
                             state.retain_cleanup_error(error)
                         raise
                     try:
+                        stored_action, self._stored_close_action = self._stored_close_action, None
                         await self._native.close()
+                        if stored_action is not None:
+                            await stored_action.apply()
                     except BaseException as error:
                         if state is not None and state.deferred_close is not None:
                             state.retain_cleanup_error(error)
@@ -13853,6 +14021,7 @@ class Session(Generic[ContextT, OutputT]):
                         ):
                             errors.append(result)
                     try:
+                        self._stored_close_action = None
                         await self._engine.close()
                         engine_closed = True
                     finally:

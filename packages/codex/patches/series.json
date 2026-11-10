@@ -523,7 +523,11 @@
     {
       "path": "sdk-suspended-terminal-guard-only.patch",
       "sha256": "7ab156a284a8f1bde203cd46fbe2e63f2ffc73bb78ee655278d98bd6c7dc6073"
+    },
+    {
+      "path": "sdk-host-trace-credentials.patch",
+      "sha256": "88a7876ebaee3fd063e0edfa5ae0997e6c36dae38b7df6b8ff4eb2c0128c88e7"
     }
   ],
-  "result_tree": "efc0c07ca91fabb5aca94104f95a6ff02b8da2a7"
+  "result_tree": "17b865d2cbc8099db9808b76d9864d85c513a5c9"
 }

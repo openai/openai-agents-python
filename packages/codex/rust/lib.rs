@@ -12,6 +12,7 @@ mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
 mod config;
+mod console_diagnostics;
 mod context;
 mod decisions;
 mod engine;
@@ -37,6 +38,7 @@ mod realtime_adapter;
 mod recovery_guard;
 mod response_integrity;
 mod storage;
+mod stored_history;
 mod subagents;
 mod telemetry;
 mod turn_settlement;
@@ -928,6 +930,31 @@ impl NativeThread {
         async_bridge::future_into_py(py, async move {
             let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _stored_history<'py>(
+        &self,
+        py: Python<'py>,
+        query_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let query = serde_json::from_str(query_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let value = stored_history::read(&inner, query)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _stored_history_close_action(&self, action_json: &str) -> PyResult<StoredHistoryClose> {
+        let inner = self.current()?;
+        Ok(StoredHistoryClose {
+            inner: Arc::new(
+                stored_history::CloseAction::capture(&inner, action_json).map_err(py_error)?,
+            ),
+            owner: Arc::downgrade(&self.inner),
         })
     }
 
@@ -3476,6 +3503,31 @@ impl NativeThread {
     }
 }
 
+#[pyclass(frozen, name = "_StoredHistoryClose", module = "agents._native")]
+struct StoredHistoryClose {
+    inner: Arc<stored_history::CloseAction>,
+    owner: std::sync::Weak<std::sync::Mutex<NativeThreadOwner>>,
+}
+
+#[pymethods]
+impl StoredHistoryClose {
+    fn apply<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        {
+            let owner = self
+                .owner
+                .upgrade()
+                .ok_or_else(|| py_error("Native thread shutdown cannot be verified"))?;
+            if owner.lock().map_err(py_error)?.live.is_some() {
+                return Err(py_error(
+                    "Stored history mutation requires confirmed native thread shutdown",
+                ));
+            }
+        }
+        let inner = Arc::clone(&self.inner);
+        async_bridge::future_into_py(py, async move { inner.apply().await.map_err(py_error) })
+    }
+}
+
 // Deliberately private: Session owns the transaction and its durable decision.
 #[pyclass(module = "agents._native")]
 struct ContextChange {
@@ -4142,6 +4194,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
+    module.add_class::<StoredHistoryClose>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapter>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapterRequest>()?;
     module.add_class::<live::NativeLiveSession>()?;

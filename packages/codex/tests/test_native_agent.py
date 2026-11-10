@@ -51,6 +51,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "plan_usage",
         "cancel_all",
         "suspend",
+        "suspend_workspace",
         "subagents",
         "model_context",
         "list_mcp_resources",
