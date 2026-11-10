@@ -57,6 +57,7 @@ impl EngineState {
             model_http_pool: parent.model_http_pool.clone(),
             initial_config_available: AtomicBool::new(true),
             interception: parent.interception.clone(),
+            recovery: parent.recovery.clone(),
             restored_creation_times: Mutex::new(HashMap::new()),
             managed_execution: Some(profile),
             runtime_parent: Some(parent),
