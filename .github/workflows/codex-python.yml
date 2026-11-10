@@ -47,7 +47,11 @@ jobs:
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' ||
-        github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' &&
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+           (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
+           inputs.native_source_run == '' && '{"group":"codex-runners","labels":"codex-windows-x64-xl"}' ||
+           '{"group":"codex-runners","labels":"codex-windows-x64"}') ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'macos-latest' &&
           (inputs.native_source_run != '' && '"macos-15"' || '"macos-15-xlarge"') ||
         toJSON(inputs.runner)
@@ -134,6 +138,26 @@ jobs:
               printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
             done
           } >> "$GITHUB_ENV"
+      - name: Configure cold harness PR builds
+        # The dependency cache uses the standard build settings.
+        if: >-
+          github.repository == 'openai/openai-agents-python' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
+          inputs.native_source_run == '' && inputs.native_dependency_run == ''
+        env:
+          COLD_PR_RUST_OPT_LEVEL: ${{ runner.os == 'macOS' && 's' || '1' }}
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            echo "MATURIN_PGO=false" >> "$GITHUB_ENV"
+          else
+            {
+              echo "CARGO_PROFILE_RELEASE_LTO=off"
+              echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+              echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
+            } >> "$GITHUB_ENV"
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"

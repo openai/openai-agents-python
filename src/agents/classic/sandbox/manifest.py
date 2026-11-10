@@ -21,6 +21,7 @@ from .._config_coercion import coerce_pydantic_config
 from ..util._asyncio_tasks import gather_with_cancel
 from ._mount_security import redact_mount_validation_error_data_sync
 from .entries import BaseEntry, Dir, LocalDir, LocalFile, Mount, resolve_workspace_path
+from .entries.artifacts import _validate_git_repo_entry_hosts
 from .errors import InvalidManifestPathError
 from .manifest_render import render_manifest_description
 from .types import Group, User
@@ -292,6 +293,9 @@ class Manifest(BaseModel):
         for _path, _artifact in self.iter_entries():
             pass
         return validated
+
+    def _validate_git_repo_hosts(self) -> None:
+        _validate_git_repo_entry_hosts(self.entries.values())
 
     @redact_mount_validation_error_data_sync
     def with_in_container_mount_credential_exposure_acknowledged(

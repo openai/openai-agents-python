@@ -1661,7 +1661,7 @@ class CloudflareSandboxClient(BaseSandboxClient[CloudflareSandboxClientOptions])
             raise TypeError(
                 "CloudflareSandboxClient.resume expects a CloudflareSandboxSessionState"
             )
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         if state.mount_authority_rebound or _manifest_has_configured_mount_authority(
             state.manifest
         ):
