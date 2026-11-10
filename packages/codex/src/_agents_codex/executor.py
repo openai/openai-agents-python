@@ -53,6 +53,31 @@ ExecutorToolName = Literal[
     "exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep"
 ]
 
+# Core's private credentials, runtime-owned values, and SDK bootstrap controls.
+_RESERVED_ENVIRONMENT_NAMES = frozenset(
+    {
+        "CODEX_SDK_BWRAP_SEARCH_PATH",
+        "CARGO_BIN_EXE_BWRAP",
+        "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+        "CODEX_SANDBOX_COMMAND_ENV_JSON",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CODEX_VERSION",
+        "CODEX_PERMISSION_PROFILE",
+        "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+        "CODEX_PLUGIN_METRICS_OUTPUT",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "NODE_REPL_AUTH_TOKEN",
+        "CODEX_GUARDIAN_DECISIONS_API_KEY",
+        "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    }
+)
+_RESERVED_ENVIRONMENT_PREFIX = re.compile(
+    r"CODEX_SANDBOX_COMMAND_ENV_JSON_", re.IGNORECASE | re.ASCII
+)
+
 
 def _domain_pattern(value: str) -> str:
     if value == "*":
@@ -345,6 +370,8 @@ class Environment(Generic[ContextT_contra]):
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
     write_policy: Literal["strict", "legacy"] = "strict"
     read_only: bool = False
+    # Captured command overrides; current declarations only, excluded from saved state.
+    env: Mapping[str, str] | None = field(default=None, repr=False)
 
     @classmethod
     def local(
@@ -372,6 +399,7 @@ class Environment(Generic[ContextT_contra]):
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
         write_policy: Literal["strict"] = "strict",
         read_only: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -397,6 +425,7 @@ class Environment(Generic[ContextT_contra]):
             url=_path_uri(path),
             cwd=path,
             tools=tools,
+            env=env,
             writable_roots=writable_roots,
             network=network,
             capability_directories=capability_directories,
@@ -555,6 +584,32 @@ class Environment(Generic[ContextT_contra]):
                 raise ValueError("Invalid executor header value")
             headers[key] = value
         object.__setattr__(self, "headers", MappingProxyType(headers))
+        if self.env is not None:
+            if not isinstance(self.env, Mapping):
+                raise TypeError("Executor environment must be a string mapping")
+            values = dict(self.env)
+            for name, value in values.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or "\0" in name
+                    or "=" in name
+                    or (name.isascii() and name.upper() in _RESERVED_ENVIRONMENT_NAMES)
+                    or _RESERVED_ENVIRONMENT_PREFIX.match(name) is not None
+                ):
+                    raise ValueError("Invalid executor environment variable name")
+                if not isinstance(value, str) or "\0" in value:
+                    raise ValueError("Invalid executor environment variable value")
+                valid_unicode = True
+                try:
+                    name.encode("utf-8")
+                    value.encode("utf-8")
+                except UnicodeError:
+                    valid_unicode = False
+                if not valid_unicode:
+                    # Raise outside the handler so its context cannot retain the rejected string.
+                    raise ValueError("Executor environment must contain valid Unicode") from None
+            object.__setattr__(self, "env", MappingProxyType(values))
         object.__setattr__(self, "tools", selected)
         if self.capability_directories is not None:
             if isinstance(self.capability_directories, str):
@@ -607,6 +662,8 @@ class Environment(Generic[ContextT_contra]):
             "headers": dict(self.headers),
             "connect_timeout": self.connect_timeout,
         }
+        if self.env is not None:
+            result["env_json"] = json.dumps(dict(self.env))
         if self.read_only:
             result["read_only"] = True
         if self._is_local:

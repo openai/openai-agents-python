@@ -40,11 +40,13 @@ from .turn_receipt import TurnReceipt as TurnReceipt
 
 @dataclass(frozen=True)
 class CanonicalHistorySnapshot:
-    """Detached effective canonical response items and their content revision.
+    """Copies of original JSON objects and their revision.
 
-    ``total`` counts the full canonical input, even for a bounded tail read.
-    Canonical edits preserve raw rollout audit records; they do not erase bytes
-    from storage. Tool output already truncated by Core cannot be recovered.
+    ``total``: all original records, including audit-only imported objects.
+    ``items``: the requested suffix, with imported unknown fields and missing
+    IDs unchanged. Native payloads before model-context truncation; no recovery
+    of bytes already lost before original capture or in older checkpoints.
+    Separate model projections and raw rollout audit records.
     """
 
     revision: str
