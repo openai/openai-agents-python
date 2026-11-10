@@ -474,8 +474,8 @@
     },
     {
       "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
-      "sha256": "a6b4eaeb9af659fdae5b8ca5c3b5be454739c2f1997f8db2f4d4bbc1ae69d61b"
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     }
   ],
-  "result_tree": "55c867957e306ab5608170c57404c1062dc569da"
+  "result_tree": "c8b2622b98f5d50cc2adab6ddc0f119697f45efd"
 }
