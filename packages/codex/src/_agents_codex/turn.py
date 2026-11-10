@@ -86,6 +86,12 @@ class Turn(Generic[OutputT]):
     _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)
     _native: Any = field(repr=False, compare=False)
     _observation_after: int = field(repr=False, compare=False)
+    _guardrail_results: list[Any] = field(repr=False, compare=False)
+
+    @property
+    def guardrail_results(self) -> tuple[Any, ...]:
+        """Completed guardrail diagnostics on this exact owning run."""
+        return tuple(self._guardrail_results)
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:
         raise TypeError("Turns are issued by a Session or Subagent")
@@ -312,6 +318,9 @@ class ChildTurn(Protocol):
     @property
     def instance_id(self) -> int | None: ...
 
+    @property
+    def guardrail_results(self) -> tuple[Any, ...]: ...
+
     async def get_result(self) -> Completed[str, ChildTurn]: ...
     async def wait_for_request_or_result(
         self,
@@ -329,6 +338,7 @@ def _root_turn(
     submission_id: str,
     completion: asyncio.Future[Any],
     observation_after: int = 0,
+    guardrail_results: list[Any] | None = None,
 ) -> Turn[Any]:
     result = object.__new__(Turn)
     for name, value in {
@@ -344,6 +354,7 @@ def _root_turn(
         "_result": None,
         "_native": None,
         "_observation_after": observation_after,
+        "_guardrail_results": [] if guardrail_results is None else guardrail_results,
     }.items():
         object.__setattr__(result, name, value)
     return result
@@ -369,6 +380,7 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "_continuation": None,
         "_result": None,
         "_native": native,
+        "_guardrail_results": observed.guardrail_results if observed is not None else [],
         "_observation_after": observed.observation_after
         if observed is not None
         else session._observations.sequence,

@@ -405,6 +405,7 @@ pub(crate) struct TurnAdmission {
     prepared_operation: Option<u64>,
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
+    held_tool_outputs: Arc<codex_extension_api::HeldToolCompletionResults>,
     graceful_requested: AtomicBool,
     sampling_stop: Arc<TurnSamplingStop>,
     // A turn born while the graph is stopped must stay fenced even if a
@@ -3397,6 +3398,90 @@ impl PythonTools {
             .unwrap_or_default()
     }
 
+    /// Publication classification from the currently admitted catalogue, never saved markers.
+    pub(crate) fn private_terminal_calls(
+        &self,
+        source: Option<&codex_extension_api::CapturedAgentProfile>,
+        history: &[codex_history::RolloutItem],
+        private_calls: &HashSet<String>,
+    ) -> Result<HashSet<String>> {
+        let generation = if let Some(source) = source {
+            source
+                .profile
+                .data
+                .get::<ProfileCatalog>()
+                .context("Captured source has no tool catalog")?
+                .generation
+                .clone()
+        } else {
+            ensure!(
+                !self.managed_profiles.load(Ordering::Acquire),
+                "Missing captured terminal source"
+            );
+            self.snapshot()
+        };
+        ensure!(
+            self.admits_generation(&generation),
+            "Expired terminal source catalog"
+        );
+        let published: HashSet<_> = history
+            .iter()
+            .filter_map(|row| match row {
+                codex_history::RolloutItem::ResponseItem(envelope) => match &envelope.item {
+                    ResponseItem::FunctionCallOutput {
+                        call_id: Some(id), ..
+                    } => Some(id),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        Ok(history
+            .iter()
+            .filter_map(|row| {
+                let codex_history::RolloutItem::ResponseItem(envelope) = row else {
+                    return None;
+                };
+                let ResponseItem::FunctionCall {
+                    call_id,
+                    name,
+                    namespace,
+                    ..
+                } = &envelope.item
+                else {
+                    return None;
+                };
+                (private_calls.contains(call_id)
+                    && !published.contains(call_id)
+                    && generation.entries.iter().any(|entry| {
+                        entry.finish_turn
+                            && entry.name == ToolName::new(namespace.clone(), name.clone())
+                    }))
+                .then(|| call_id.clone())
+            })
+            .collect())
+    }
+
+    pub(crate) fn held_tool_outputs(
+        &self,
+        turn: &str,
+    ) -> Vec<(codex_history::ResponseItemEnvelope, bool)> {
+        self.admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn)
+            .map(|receipt| {
+                receipt
+                    .held_tool_outputs
+                    .outputs
+                    .lock()
+                    .expect("held terminal outputs poisoned")
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn pending_manual_keys(&self, owner: &str) -> Result<Vec<PendingKey>> {
         let pending = self.pending.lock().expect("Python replies poisoned");
         ensure!(!pending.is_empty(), "No pending manual calls");
@@ -3981,7 +4066,8 @@ pub(crate) struct RecoveredToolCompletionSeed {
     pending: Mutex<
         Option<(
             crate::manual_checkpoint::ToolOutcomes,
-            FreshTerminalReceipts,
+            Option<FreshTerminalReceipts>,
+            Vec<(codex_history::ResponseItemEnvelope, bool)>,
         )>,
     >,
 }
@@ -3990,11 +4076,12 @@ impl RecoveredToolCompletionSeed {
     pub(crate) fn new(
         turn: String,
         outcomes: crate::manual_checkpoint::ToolOutcomes,
-        fresh: FreshTerminalReceipts,
+        fresh: Option<FreshTerminalReceipts>,
+        held_outputs: Vec<(codex_history::ResponseItemEnvelope, bool)>,
     ) -> Self {
         Self {
             turn,
-            pending: Mutex::new(Some((outcomes, fresh))),
+            pending: Mutex::new(Some((outcomes, fresh, held_outputs))),
         }
     }
     pub(crate) fn attach(self, init: &mut codex_extension_api::ExtensionDataInit) {
@@ -4005,14 +4092,18 @@ impl RecoveredToolCompletionSeed {
             return;
         }
         // Take on the first matching start, including starts cancelled before sampling.
-        if let Some((outcomes, fresh)) = self
+        if let Some((outcomes, fresh, held_outputs)) = self
             .pending
             .lock()
             .expect("terminal recovery seed poisoned")
             .take()
         {
-            input.turn_store.insert(outcomes.candidates(input.turn_id));
-            input.turn_store.insert(fresh);
+            input
+                .turn_store
+                .insert(outcomes.candidates(input.turn_id, held_outputs));
+            if let Some(fresh) = fresh {
+                input.turn_store.insert(fresh);
+            }
         }
     }
 }
@@ -4058,6 +4149,44 @@ impl ToolLifecycleContributor for PythonContributor {
 }
 
 impl TurnLifecycleContributor for PythonContributor {
+    fn hold_tool_completion(&self, input: codex_extension_api::ToolCompletionInput<'_>) -> bool {
+        let Some(tools) = input.thread_store.get::<PythonTools>() else {
+            return false;
+        };
+        let Some(step) = input.step_store.get::<StepCatalog>() else {
+            return false;
+        };
+        let ResponseItem::FunctionCall {
+            call_id,
+            name,
+            namespace,
+            ..
+        } = input.call
+        else {
+            return false;
+        };
+        if !tools.admits_generation(&step.generation) {
+            return false;
+        }
+        let qualified = ToolName::new(namespace.clone(), name.clone());
+        step.accepted
+            .lock()
+            .expect("Terminal receipts poisoned")
+            .keys()
+            .any(|key| {
+                key.call == *call_id
+                    && key.turn == input.turn_id
+                    && key.reply.thread == input.thread_store.level_id()
+                    && key.reply.generation == step.generation.id
+                    && key.reply.instance == tools.instance
+                    && step
+                        .generation
+                        .entries
+                        .get(key.reply.slot)
+                        .is_some_and(|entry| entry.finish_turn && entry.name == qualified)
+            })
+    }
+
     fn propose_tool_completion<'a>(
         &'a self,
         input: codex_extension_api::ToolCompletionInput<'a>,
@@ -4101,9 +4230,33 @@ impl TurnLifecycleContributor for PythonContributor {
                             .is_some_and(|entry| entry.name == qualified_name)
                 })
                 .map(|(key, invocation)| (key.clone(), *invocation));
-            let Some((key, invocation)) = receipt else {
-                return Ok(None);
+            let held = input
+                .turn_store
+                .get::<codex_extension_api::HeldToolCompletionResults>();
+            let is_held = || {
+                held.as_ref().is_some_and(|held| {
+                    held.outputs
+                        .lock()
+                        .expect("held terminal outputs poisoned")
+                        .iter()
+                        .any(|(item, _)| item.item == *input.output)
+                })
             };
+            let guard_only = receipt.is_none();
+            if guard_only && !is_held() {
+                return Ok(None);
+            }
+            let slot = receipt
+                .as_ref()
+                .map(|(key, _)| key.reply.slot)
+                .or_else(|| {
+                    step.generation
+                        .entries
+                        .iter()
+                        .position(|entry| entry.finish_turn && entry.name == qualified_name)
+                })
+                .ok_or("Held terminal source is not currently declared")?;
+            let invocation = receipt.as_ref().map(|(_, invocation)| *invocation);
             let verify = || -> Result<()> {
                 ensure!(
                     tools.admits_generation(&step.generation),
@@ -4112,26 +4265,32 @@ impl TurnLifecycleContributor for PythonContributor {
                 let entry = step
                     .generation
                     .entries
-                    .get(key.reply.slot)
+                    .get(slot)
                     .context("Invalid terminal tool slot")?;
                 ensure!(
-                    entry.finish_turn
-                        && entry.name == qualified_name
-                        && key.reply.thread == input.thread_store.level_id()
-                        && key.turn == input.turn_id
-                        && key.call == *call_id
-                        && key.reply.generation == step.generation.id
-                        && key.reply.instance == tools.instance,
-                    "Invalid terminal tool receipt identity"
+                    entry.finish_turn && entry.name == qualified_name,
+                    "Invalid terminal tool identity"
                 );
-                ensure!(
-                    step.accepted
-                        .lock()
-                        .expect("Terminal receipts poisoned")
-                        .get(&key)
-                        .is_some_and(|current_invocation| *current_invocation == invocation),
-                    "Expired terminal tool receipt"
-                );
+                if let Some((key, invocation)) = &receipt {
+                    ensure!(
+                        key.reply.thread == input.thread_store.level_id()
+                            && key.turn == input.turn_id
+                            && key.call == *call_id
+                            && key.reply.generation == step.generation.id
+                            && key.reply.instance == tools.instance,
+                        "Invalid terminal tool receipt identity"
+                    );
+                    ensure!(
+                        step.accepted
+                            .lock()
+                            .expect("Terminal receipts poisoned")
+                            .get(key)
+                            .is_some_and(|current| current == invocation),
+                        "Expired terminal tool receipt"
+                    );
+                } else {
+                    ensure!(is_held(), "Expired held terminal candidate");
+                }
                 Ok(())
             };
             verify().map_err(|e| e.to_string())?;
@@ -4173,7 +4332,7 @@ impl TurnLifecycleContributor for PythonContributor {
                             "thread":input.thread_store.level_id(),"instance":tools.instance,
                             "step_id":id,"model":input.model,"text":text,"call_id":call_id,
                             "name":name,"namespace":namespace,"generation":step.generation.id,
-                            "slot":key.reply.slot, "invocation":invocation,
+                            "slot":slot, "invocation":invocation, "guard_only":guard_only,
                         }});
                         request["msg"]
                             .as_object_mut()
@@ -4188,6 +4347,10 @@ impl TurnLifecycleContributor for PythonContributor {
                 .await
                 .map_err(|e| e.to_string())?;
             verify().map_err(|e| e.to_string())?;
+            if guard_only && matches!(decision, ToolCompletionReply::Accept { .. }) {
+                // Checked ordinary-history admission, never finish-turn authority.
+                return Ok(None);
+            }
             Ok(Some(match decision {
                 ToolCompletionReply::Accept { final_output } => {
                     owner
@@ -4223,6 +4386,12 @@ impl TurnLifecycleContributor for PythonContributor {
                 hold.release.acquire().await.expect("start hold").forget();
             }
             if let Some(tools) = input.thread_store.get::<PythonTools>() {
+                if tools.instance.is_some() && tools.selecting_steps.load(Ordering::Acquire) {
+                    input
+                        .turn_store
+                        .get_or_init(codex_extension_api::InitialTurnInput::default);
+                }
+
                 // This is presentation, not a grant. Resolve the actual native
                 // model; the SDK must never hide selected tools from a model
                 // which cannot request Core's search surface.
@@ -4258,6 +4427,9 @@ impl TurnLifecycleContributor for PythonContributor {
                     prepared_operation: tools.prepared_operation(),
                     state: watch::channel(AdmissionState::Pending).0,
                     completed_calls: Mutex::default(),
+                    held_tool_outputs: input
+                        .turn_store
+                        .get_or_init(codex_extension_api::HeldToolCompletionResults::default),
                     graceful_requested: AtomicBool::new(false),
                     sampling_stop: input.turn_store.get_or_init(TurnSamplingStop::default),
                     graph_fenced: graph.fenced,
@@ -5269,6 +5441,11 @@ impl ToolContributor for PythonContributor {
                     "step_id": id, "generation": generation.id,
                     "native_step": step.level_id(), "candidates": candidates, "defaults": defaults, "mcp_names": mcp_names}
             });
+            if let Some(initial) = turn.get::<codex_extension_api::InitialTurnInput>() {
+                if let Some(records) = &initial.0 {
+                    request["msg"]["initial_input"] = json!(records);
+                }
+            }
             if let Some(profile) = profile {
                 request["msg"]["profile_id"] = json!(profile.profile_id);
                 request["msg"]["profile_epoch"] = json!(profile.epoch);

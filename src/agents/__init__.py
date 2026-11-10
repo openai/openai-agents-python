@@ -53,6 +53,13 @@ if TYPE_CHECKING:
         LocalStorageMount as LocalStorageMount,
         NetworkPolicy as NetworkPolicy,
     )
+    from .guardrails import (
+        GuardrailRecord as GuardrailRecord,
+        GuardrailResult as GuardrailResult,
+        GuardrailTripwire as GuardrailTripwire,
+        InputGuardrail as InputGuardrail,
+        OutputGuardrail as OutputGuardrail,
+    )
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
@@ -228,6 +235,11 @@ _MODULES = {
     "DecisionResponse": ".decisions",
     "OpenAIDecisions": ".decisions",
     "CompactionContext": ".compaction",
+    "GuardrailRecord": ".guardrails",
+    "GuardrailResult": ".guardrails",
+    "GuardrailTripwire": ".guardrails",
+    "InputGuardrail": ".guardrails",
+    "OutputGuardrail": ".guardrails",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",
     "ModelContextSnapshot": ".model_context",

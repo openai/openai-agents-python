@@ -58,6 +58,7 @@ from ._trace_context import TraceContext as TraceContext, _trace_context as _tra
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
+from .guardrails import InputGuardrail, OutputGuardrail
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
@@ -801,6 +802,8 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
+    input_guardrails: tuple[InputGuardrail[ContextT], ...]
+    output_guardrails: tuple[OutputGuardrail[ContextT], ...]
     decisions: DecisionProvider | None
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -828,6 +831,8 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+            output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -842,6 +847,8 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+            output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
             **kwargs: Any,
         ) -> TypedAgentT: ...
 
@@ -872,6 +879,8 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+        output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
     ) -> None: ...
 
     @overload
@@ -892,6 +901,8 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+        output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
     ) -> None: ...
 
     def __init__(
@@ -911,6 +922,8 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
+        output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")
@@ -950,6 +963,14 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
+        for name, checks, kind in (
+            ("input_guardrails", input_guardrails, InputGuardrail),
+            ("output_guardrails", output_guardrails, OutputGuardrail),
+        ):
+            captured_checks = tuple(checks)
+            if any(not isinstance(check, kind) for check in captured_checks):
+                raise TypeError(f"{name} contains an invalid guardrail")
+            object.__setattr__(self, name, captured_checks)
 
     @overload
     async def decide(
@@ -1094,6 +1115,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
@@ -1120,6 +1143,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
@@ -1146,6 +1171,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
@@ -1172,6 +1199,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
@@ -1318,6 +1347,8 @@ class Agent(Generic[ContextT, OutputT]):
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                input_guardrails=input_guardrails,
+                output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
             ) as session:
                 from .session import Session
@@ -1349,6 +1380,8 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
@@ -1384,6 +1417,8 @@ class Agent(Generic[ContextT, OutputT]):
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                input_guardrails=input_guardrails,
+                output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
@@ -1448,6 +1483,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1473,6 +1510,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1498,6 +1537,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -1527,6 +1568,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -1700,6 +1743,10 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
+            if input_guardrails:
+                options["input_guardrails"] = input_guardrails
+            if output_guardrails:
+                options["output_guardrails"] = output_guardrails
             if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                 options["observation_retention"] = observation_retention
             if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
@@ -1719,6 +1766,8 @@ class Agent(Generic[ContextT, OutputT]):
                 and prepare_request is None
                 and on_interaction is None
                 and budget is None
+                and not input_guardrails
+                and not output_guardrails
             ):
                 # Only the built-in one-shot opening may defer its initial
                 # instruction receipt to the first ordinary submission.
@@ -1914,6 +1963,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1939,6 +1990,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1964,6 +2017,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1993,6 +2048,8 @@ class Agent(Generic[ContextT, OutputT]):
         budget: RunBudget | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -2031,6 +2088,10 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
+                if input_guardrails:
+                    options["input_guardrails"] = input_guardrails
+                if output_guardrails:
+                    options["output_guardrails"] = output_guardrails
                 if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                     options["observation_retention"] = observation_retention
                 if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
@@ -2079,6 +2140,8 @@ def _completed_run_eligible(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and not agent.output_guardrails
+        and not agent.input_guardrails
         and not return_state
         and not agent.tools
         and not agent.handoffs

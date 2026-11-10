@@ -117,6 +117,13 @@ from .executor import (
     _path_uri as _path_uri,
     _writable_roots as _writable_roots,
 )
+from .guardrails import (
+    GuardrailRecord,
+    GuardrailResult,
+    GuardrailTripwire,
+    InputGuardrail,
+    OutputGuardrail,
+)
 from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
@@ -884,6 +891,7 @@ class Completed(Generic[OutputT, TurnT]):
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
 
 
 def _future() -> asyncio.Future[Any]:
@@ -939,6 +947,10 @@ class _Submission:
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     completion_continuations: int = 0
+    guardrail_results: list[GuardrailRecord] = field(default_factory=list)
+    guardrail_input: UserInput | None = field(default=None, repr=False)
+    input_guardrails_started: bool = False
+    input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
     mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
@@ -1020,6 +1032,11 @@ class _ChildCallbacks:
     function_admission: asyncio.Semaphore | None = None
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     completion_continuations: int = 0
+    guardrail_results: list[GuardrailRecord] = field(default_factory=list)
+    guardrail_input: tuple[dict[str, Any], ...] | None = field(default=None, repr=False)
+    input_guardrails_started: bool = False
+    input_guardrails_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
     calls: set[str] = field(default_factory=set)
     mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
     mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
@@ -2158,6 +2175,8 @@ def _capture_profile_runtimes(
     root_catalog: _ToolCatalog,
     root_instructions: str,
     context: Any,
+    output_guardrails: Sequence[OutputGuardrail[Any]] = (),
+    input_guardrails: Sequence[InputGuardrail[Any]] = (),
 ) -> tuple[dict[str, _ProfileRuntime], list[dict[str, Any]]]:
     captured: dict[str, _ProfileRuntime] = {}
     roster: list[dict[str, Any]] = []
@@ -2197,8 +2216,17 @@ def _capture_profile_runtimes(
                 "handoffs": dict(profile.handoffs),
                 "transform_context": declaration.transform_context is not None,
                 "before_compact": declaration.before_compact is not None,
-                "before_complete": declaration.before_complete is not None,
-                "selecting_steps": False,
+                "before_complete": declaration.before_complete is not None
+                or bool(
+                    declaration.output_guardrails
+                    or output_guardrails
+                    or declaration.input_guardrails
+                    or input_guardrails
+                ),
+                "selecting_steps": any(
+                    check.child_callback is not None
+                    for check in (*declaration.input_guardrails, *input_guardrails)
+                ),
                 "output_fingerprint": output.fingerprint,
                 # Fingerprinting uses admitted MCP identities, not credentials.
                 # Connection configs are completed only after environment entry.
@@ -2905,6 +2933,8 @@ def _capture_opening_agent(
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
         before_complete=agent.before_complete,
+        input_guardrails=agent.input_guardrails,
+        output_guardrails=agent.output_guardrails,
     )
 
 
@@ -2921,6 +2951,8 @@ def _supports_atomic_first_turn(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and not agent.output_guardrails
+        and not agent.input_guardrails
         and all(
             isinstance(tool, FunctionTool)
             and tool._bind is not None
@@ -2960,6 +2992,8 @@ class Session(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         discover_agents_md: bool = False,
+        input_guardrails: Sequence[InputGuardrail[Any]] = (),
+        output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
@@ -2977,6 +3011,12 @@ class Session(Generic[ContextT, OutputT]):
         native_environment: dict[str, Any] | None = None
         session = None
         with opening:
+            input_guardrails = tuple(input_guardrails)
+            output_guardrails = tuple(output_guardrails)
+            if any(not isinstance(check, InputGuardrail) for check in input_guardrails):
+                raise TypeError("input_guardrails contains an invalid guardrail")
+            if any(not isinstance(check, OutputGuardrail) for check in output_guardrails):
+                raise TypeError("output_guardrails contains an invalid guardrail")
             retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
             if retention_omitted:
                 observation_retention = "bounded"
@@ -3156,7 +3196,12 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
             profile_runtimes, profile_roster = _capture_profile_runtimes(
-                profiles, catalog, instructions, context
+                profiles,
+                catalog,
+                instructions,
+                context,
+                output_guardrails,
+                (*input_guardrails, *agent.input_guardrails),
             )
             restored_profile, operation_profile, operation_source = _restore_profile_sources(
                 native,
@@ -3239,6 +3284,8 @@ class Session(Generic[ContextT, OutputT]):
                 and storage is None
                 and resume is None
                 and opening.environment is None
+                and not input_guardrails
+                and not output_guardrails
                 and not instruction_files
                 and agent.provider is not None
                 and codex_login is None
@@ -3517,7 +3564,13 @@ class Session(Generic[ContextT, OutputT]):
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
-                    "_before_complete": agent.before_complete is not None,
+                    "_before_complete": agent.before_complete is not None
+                    or bool(
+                        agent.output_guardrails
+                        or output_guardrails
+                        or agent.input_guardrails
+                        or input_guardrails
+                    ),
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -3805,6 +3858,8 @@ class Session(Generic[ContextT, OutputT]):
                     max_function_concurrency=max_function_concurrency,
                     observation_retention=observation_retention,
                 )
+                session._input_guardrails = input_guardrails
+                session._output_guardrails = output_guardrails
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
@@ -3963,7 +4018,11 @@ class Session(Generic[ContextT, OutputT]):
                         _native_tool_refs(restored_operation_refs)
                         if restored_operation_refs is not None
                         else None,
-                        native_agents is not None and native_agents.before_step is not None,
+                        native_agents is not None
+                        and (
+                            native_agents.before_step is not None
+                            or session._has_child_input_guardrails()
+                        ),
                     )
                     # The native reader can receive restored requests during preparation.
                     active.tracing = _capture(fallback=_tracing_context)
@@ -4248,6 +4307,8 @@ class Session(Generic[ContextT, OutputT]):
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
         self._interception: _NativeInterception | None = None
+        self._input_guardrails: tuple[InputGuardrail[Any], ...] = ()
+        self._output_guardrails: tuple[OutputGuardrail[Any], ...] = ()
         self._context = context
         self._default_output = output
         self._instructions = instructions
@@ -5521,6 +5582,7 @@ class Session(Generic[ContextT, OutputT]):
                 parts,
                 output,
                 output_override=output_type is not None,
+                guardrail_input=deepcopy(input),
                 tools=tools,
                 before_step=before_step,
                 enqueue=if_busy != "reject",
@@ -7251,6 +7313,7 @@ class Session(Generic[ContextT, OutputT]):
         budget: _RunBudget | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
+        guardrail_input: UserInput | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -7362,6 +7425,7 @@ class Session(Generic[ContextT, OutputT]):
                     slots = tuple(indices)
             state = _Submission(
                 output,
+                guardrail_input=guardrail_input,
                 observation_after=self._observations.sequence,
                 before_step=before_step,
                 prepare_request=prepare_request,
@@ -7384,7 +7448,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             if input is not None:
                 # A queued root has no observation window until its own dispatch.
-                issued = _root_turn(self, None, uuid4().hex, state.completion, -1)
+                issued = _root_turn(
+                    self, None, uuid4().hex, state.completion, -1, state.guardrail_results
+                )
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
@@ -8044,6 +8110,7 @@ class Session(Generic[ContextT, OutputT]):
                     cast(_TurnT, output),
                     _token_usage_info(json.loads(usage)),
                     tool_call=tool_call,
+                    guardrail_results=submission.guardrail_results,
                 ),
             )
         if self._owned_submission(submission) is not None or any(
@@ -8658,7 +8725,9 @@ class Session(Generic[ContextT, OutputT]):
         submission_id: str,
     ) -> _Submission:
         state = _Submission(self._default_output)
-        state.issued = _root_turn(self, None, submission_id, state.completion)
+        state.issued = _root_turn(
+            self, None, submission_id, state.completion, guardrail_results=state.guardrail_results
+        )
         self._register_request_observation(state, state.issued)
         self._active = state
         receipt = info.get("receipt")
@@ -8745,6 +8814,7 @@ class Session(Generic[ContextT, OutputT]):
         if input is not None and state.continued_from is None:
             self._last_turn = handle
         state.handle = handle
+        object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
         self._observations.append(
             TurnStarted(
@@ -8860,6 +8930,9 @@ class Session(Generic[ContextT, OutputT]):
                         input is not None
                         and (
                             bool(self._profiles)
+                            or bool(
+                                self._input_guardrails or self._effective_agent().input_guardrails
+                            )
                             or state.budget is not None
                             or state.before_step is not None
                             or bool(self._mcp_tools)
@@ -8869,7 +8942,10 @@ class Session(Generic[ContextT, OutputT]):
                         if state.operation_refs is not None
                         else None,
                         self._native_agents is not None
-                        and self._native_agents.before_step is not None,
+                        and (
+                            self._native_agents.before_step is not None
+                            or self._has_child_input_guardrails()
+                        ),
                     )
                     if input is None:
                         tracing_args = {}
@@ -8973,6 +9049,9 @@ class Session(Generic[ContextT, OutputT]):
                     if proposal is None or not proposal.matches(tool_payload):
                         raise NativeError("Terminal tool completion has no matching live proposal")
                     output = proposal.value
+                elif state.accepted_output is not None and not state.output.max_retries:
+                    (output,) = state.accepted_output
+                    state.accepted_output = None
                 elif not state.unsampled_steering and not state.output.max_retries:
                     output = self._validate_traced_output(state, text)
                 assert usage_request is not None
@@ -9019,6 +9098,7 @@ class Session(Generic[ContextT, OutputT]):
                         tool_call=proposal.call
                         if tool_payload is not None and proposal is not None
                         else None,
+                        guardrail_results=tuple(state.guardrail_results),
                         repair_attempts=tuple(
                             deepcopy(t)
                             for t in self._repair_turns
@@ -10282,6 +10362,158 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _check_output_guardrails(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        active: Callable[[], bool],
+        request: CompletionContext[Any],
+    ) -> None:
+        agent = self._agent_for_message(message)
+        checks = (*self._output_guardrails, *agent.output_guardrails)
+        if not checks:
+            return
+
+        async def check(guardrail: OutputGuardrail[Any]) -> GuardrailRecord:
+            result = await self._call_decision_callback(
+                state,
+                message,
+                guardrail.callback,
+                active,
+                replace(request, final_output=deepcopy(request.final_output)),
+                agent,
+            )
+            if not active():
+                raise asyncio.CancelledError()
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Guardrail callback must return GuardrailResult")
+            record = GuardrailRecord(
+                kind="output",
+                name=guardrail.name,
+                result=result,
+                agent=agent,
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                subagent_id=request.subagent_id,
+                tool_call=request.tool_call,
+            )
+            state.guardrail_results.append(record)
+            return record
+
+        tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
+        tripped = None
+        try:
+            for done in asyncio.as_completed(tasks):
+                record = await done
+                if record.result.tripwire_triggered:
+                    tripped = record
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if tripped is not None:
+            raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+
+    def _has_child_input_guardrails(self) -> bool:
+        checks = [*self._input_guardrails, *self._effective_agent().input_guardrails]
+        if self._profiles:
+            for runtime in self._profiles.values():
+                checks.extend(runtime.profile.declaration.input_guardrails)
+        return any(check.child_callback is not None for check in checks)
+
+    async def _await_input_guardrails(self, state: _CallbackState) -> None:
+        if state.input_guardrails_task is not None:
+            await state.input_guardrails_task
+        if state.failure.done():
+            raise state.failure.result()
+
+    async def _run_input_guardrails(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        agent: Agent[Any, Any],
+        checks: Sequence[InputGuardrail[Any]],
+    ) -> None:
+        if not checks:
+            return
+        assert (
+            state.handle is not None
+            and state.handle.turn_id is not None
+            and state.guardrail_input is not None
+        )
+
+        handle = state.handle
+        turn_id = handle.turn_id
+        assert turn_id is not None
+
+        def active() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and (
+                    self._active is state
+                    if isinstance(state, _Submission)
+                    else not state.completion.done()
+                )
+            )
+
+        async def check(guardrail: InputGuardrail[Any]) -> GuardrailRecord:
+            if isinstance(state, _ChildCallbacks):
+                assert guardrail.child_callback is not None
+                result = await self._call_decision_callback(
+                    state,
+                    message,
+                    guardrail.child_callback,
+                    active,
+                    ChildStepContext(
+                        context=self._context, child=state.handle, step_index=state.step_index
+                    ),
+                    agent,
+                    deepcopy(state.guardrail_input),
+                )
+            else:
+                result = await self._call_decision_callback(
+                    state,
+                    message,
+                    guardrail.callback,
+                    active,
+                    handle,
+                    self._context,
+                    agent,
+                    deepcopy(state.guardrail_input),
+                )
+            if not isinstance(result, GuardrailResult):
+                raise TypeError("Guardrail callback must return GuardrailResult")
+            record = GuardrailRecord(
+                kind="input",
+                name=guardrail.name,
+                result=result,
+                agent=agent,
+                session_id=self.id,
+                turn_id=turn_id,
+                subagent_id=state.handle.child_id if isinstance(state, _ChildCallbacks) else None,
+            )
+            state.guardrail_results.append(record)
+            return record
+
+        tasks = [asyncio.create_task(check(guardrail)) for guardrail in checks]
+        tripped = None
+        try:
+            for done in asyncio.as_completed(tasks):
+                record = await done
+                if record.result.tripwire_triggered:
+                    tripped = record
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if tripped is not None:
+            raise GuardrailTripwire(tripped, tuple(state.guardrail_results))
+
     async def _call_completion_callback(
         self,
         state: _CallbackState,
@@ -10290,6 +10522,7 @@ class Session(Generic[ContextT, OutputT]):
         active: Callable[[], bool],
         request: CompletionContext[ContextT],
     ) -> Any:
+        await self._await_input_guardrails(state)
         if (
             isinstance(state, _Submission)
             and self._profiles
@@ -10298,9 +10531,18 @@ class Session(Generic[ContextT, OutputT]):
         ):
             self._agent_for_message(message)
             state.output = self._profiles[message["profile_id"]].output
+        has_guards = bool(
+            self._output_guardrails or self._agent_for_message(message).output_guardrails
+        )
+        if not isinstance(state, _Submission):
+            decision = await self._call_decision_callback(state, message, callback, active, request)
+            if decision is None and has_guards:
+                await self._check_output_guardrails(
+                    state, message, active, replace(request, final_output=request.text or "")
+                )
+            return decision
         if (
-            not isinstance(state, _Submission)
-            or not state.output.max_retries
+            not (state.output.max_retries or has_guards)
             or state.unsampled_steering
             or state.realtime_tool is not None
         ):
@@ -10328,6 +10570,9 @@ class Session(Generic[ContextT, OutputT]):
                 invalid = True
                 issues = error.issues
             if not invalid:
+                await self._check_output_guardrails(
+                    state, message, active, replace(request, final_output=output)
+                )
                 state.accepted_output = (output,)
                 return None
             if state.graceful_requested:
@@ -10362,6 +10607,7 @@ class Session(Generic[ContextT, OutputT]):
 
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal
+            await self._await_input_guardrails(state)
             catalog = self._catalog_for_message(message, message["generation"])
             source_agent = self._agent_for_message(message)
             entry = catalog.tools[message["slot"]]
@@ -10441,6 +10687,22 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         raise ValueError("ContinueTurn instructions must be a nonempty string")
                     return {"action": "continue", "feedback": decision.instructions}
+            await self._check_output_guardrails(
+                state,
+                message,
+                admitted,
+                CompletionContext(
+                    context=self._context,
+                    text=None,
+                    session_id=self.id,
+                    turn_id=message["turn_id"],
+                    subagent_id=call.child_id,
+                    model=message["model"],
+                    continuation_count=state.completion_continuations,
+                    tool_call=call,
+                    final_output=value,
+                ),
+            )
             proposal = _ToolCompletionProposal(message["step_id"], call, wire, value)
             return {"action": "accept", "final_output": wire}
 
@@ -10463,7 +10725,7 @@ class Session(Generic[ContextT, OutputT]):
                 message["instance"],
             )
             if decision["action"] == "accept":
-                state.tool_completion = proposal
+                state.tool_completion = None if message.get("guard_only") else proposal
             else:
                 state.completion_continuations += 1
 
@@ -10493,7 +10755,17 @@ class Session(Generic[ContextT, OutputT]):
         def prepare() -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
             callback = self._agent_for_message(message).before_complete
             if callback is None:
-                raise NativeError("Completion callback has no application owner")
+                if not (
+                    self._output_guardrails
+                    or self._agent_for_message(message).output_guardrails
+                    or self._input_guardrails
+                    or state.input_guardrails_started
+                ):
+                    raise NativeError("Completion callback has no application owner")
+
+                def callback(request: Any) -> None:
+                    return None
+
             return callback, CompletionContext(
                 context=cast(ContextT, self._context),
                 text=message["text"],
@@ -10561,6 +10833,46 @@ class Session(Generic[ContextT, OutputT]):
             assert state.handle is not None
             self._catalog_for_message(message, message["generation"])
             source_agent = self._agent_for_message(message)
+            checks = (*self._input_guardrails, *source_agent.input_guardrails)
+            if isinstance(state, _ChildCallbacks):
+                checks = tuple(check for check in checks if check.child_callback is not None)
+                if checks and not state.input_guardrails_started:
+                    initial = message.get("initial_input")
+                    if not isinstance(initial, list) or not all(
+                        isinstance(item, dict) for item in initial
+                    ):
+                        raise NativeError("Child guardrail lacks admitted initial input")
+                    state.guardrail_input = tuple(deepcopy(initial))
+            if state.input_guardrails_started:
+                await self._await_input_guardrails(state)
+            elif state.guardrail_input is not None:
+                state.input_guardrails_started = True
+                await self._run_input_guardrails(
+                    state,
+                    message,
+                    source_agent,
+                    tuple(check for check in checks if not check.run_in_parallel),
+                )
+                parallel = tuple(check for check in checks if check.run_in_parallel)
+                if parallel:
+
+                    async def run_parallel() -> None:
+                        scope = _Invocation(self)
+                        token = _invocation.set(scope)
+                        try:
+                            await self._run_input_guardrails(state, message, source_agent, parallel)
+                        except BaseException as error:
+                            if not state.stopping and not state.failure.done():
+                                state.failure.set_result(error)
+                            elif not isinstance(error, asyncio.CancelledError):
+                                state.retain_cleanup_error(error)
+                        finally:
+                            scope.active = False
+                            _invocation.reset(token)
+
+                    state.input_guardrails_task = self._start_native_callback(
+                        state, run_parallel(), None
+                    )
             if (
                 self._profiles
                 and isinstance(state, _Submission)

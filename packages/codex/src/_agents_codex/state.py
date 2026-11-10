@@ -176,6 +176,7 @@ class _ToolOutcomes(BaseModel):
     response_observation_id: str = Field(min_length=1)
     call_ids: list[str]
     outcomes: list[tuple[str, bool]]
+    held_call_ids: list[str] = Field(default_factory=list)
 
 
 class _ManualContinuation(BaseModel):
