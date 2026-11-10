@@ -173,9 +173,13 @@ async def test_input_policy_rechecks_and_exposes_detached_effective_arguments(
         await request.approve()
         assert (await turn.get_result()).final_output == "done"
     assert calls == (
-        [("before", 1), ("predicate", 2), ("before", 2), ("body", 3)]
+        [("before", 1), ("predicate", 2), ("before", 2)]
         if run_before
-        else [("predicate", 1), ("before", 1), ("body", 2)]
+        else [("predicate", 1), ("before", 1)]
+    )
+    assert (
+        tool_output(responses.requests[1], "increment-A")
+        == "Tool input policy changed approved arguments"
     )
 
 
@@ -358,9 +362,7 @@ async def test_fresh_process_restore_keeps_required_decision_and_accepted_siblin
         assert result["effects"] == (["accepted", "risky"] if approve else ["accepted"])
         assert tool_output(responses.requests[1], "accepted-sibling") == "sibling-A"
         assert tool_output(responses.requests[1], "pending-approval") == (
-            ("accepted-B-pre-post" if guarded else "accepted-B")
-            if approve
-            else "restored rejection"
+            ("accepted-B-pre" if guarded else "accepted-B") if approve else "restored rejection"
         )
         assert len(responses.requests) == 2
 

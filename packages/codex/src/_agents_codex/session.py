@@ -2009,6 +2009,47 @@ def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
 
 
+@dataclass
+class _ApprovalArguments:
+    value: Any
+    approved: bool = False
+
+
+def _same_approval_arguments(
+    left: Any, right: Any, seen: set[tuple[int, int]] | None = None
+) -> bool:
+    if left is right:
+        return True
+    seen = set() if seen is None else seen
+    pair = (id(left), id(right))
+    if pair in seen:
+        return True
+    seen.add(pair)
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        return {(type(key), key) for key in left} == {(type(key), key) for key in right} and all(
+            _same_approval_arguments(left[key], right[key], seen) for key in left
+        )
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(
+            _same_approval_arguments(a, b, seen) for a, b in zip(left, right, strict=True)
+        )
+    if isinstance(left, BaseModel):
+        return all(
+            _same_approval_arguments(a, b, seen)
+            for a, b in (
+                (left.__dict__, right.__dict__),
+                (left.__pydantic_extra__, right.__pydantic_extra__),
+                (left.__pydantic_private__, right.__pydantic_private__),
+                (left.__pydantic_fields_set__, right.__pydantic_fields_set__),
+            )
+        )
+    if hasattr(left, "__dict__"):
+        return _same_approval_arguments(vars(left), vars(right), seen)
+    return bool(left == right)
+
+
 def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
     # deepcopy cannot copy mappingproxy, which a validated Mapping can produce.
     # Prepare only those copies; deepcopy still owns copying all other values.
@@ -3960,7 +4001,7 @@ class Session(Generic[ContextT, OutputT]):
         self._catalog = catalog
         self._approval_decisions: dict[tuple[str | None, str, int, int], tuple[bool, str]] = {}
         self._approval_preparations: set[int] = set()
-        self._approval_ready: dict[int, Any] = {}
+        self._approval_ready: dict[int, _ApprovalArguments] = {}
         self._max_function_concurrency = max_function_concurrency
         # MCP publication keeps this exact captured tuple; rebinding an idle
         # Python catalog creates another. No second set of bindings is made.
@@ -5396,7 +5437,10 @@ class Session(Generic[ContextT, OutputT]):
             seen.intersection_update(live_invocations)
             self._approval_preparations.intersection_update(live_invocations)
             for invocation in tuple(self._approval_ready):
-                if invocation not in live_invocations:
+                if (
+                    invocation not in live_invocations
+                    and not self._approval_ready[invocation].approved
+                ):
                     del self._approval_ready[invocation]
             for owner in [self._active, *self._child_callbacks.values()]:
                 if owner is not None:
@@ -5405,6 +5449,9 @@ class Session(Generic[ContextT, OutputT]):
                             del owner.manual_inputs[invocation]
             for invocation, grant, raw in pending:
                 if invocation in seen:
+                    continue
+                prepared = self._approval_ready.get(invocation)
+                if prepared is not None and prepared.approved:
                     continue
                 message = json.loads(raw)["msg"]
                 if _call_id is not None and message["callId"] != _call_id:
@@ -5529,7 +5576,11 @@ class Session(Generic[ContextT, OutputT]):
                     object.__setattr__(
                         request,
                         "_effective_arguments",
-                        deepcopy(self._approval_ready.get(invocation, arguments)),
+                        deepcopy(
+                            self._approval_ready[invocation].value
+                            if invocation in self._approval_ready
+                            else arguments
+                        ),
                     )
                     if invocation not in self._approval_ready:
                         if invocation not in self._approval_preparations:
@@ -5763,6 +5814,8 @@ class Session(Generic[ContextT, OutputT]):
                     if isinstance(policy, bool)
                     else await self._call_decision_callback(state, message, policy, admit, context)
                 )
+                if not admit():
+                    return
                 if not isinstance(required, bool):
                     raise TypeError("needs_approval must return a bool")
             if not admit():
@@ -5778,7 +5831,9 @@ class Session(Generic[ContextT, OutputT]):
                     )
                 )
                 return
-            self._approval_ready[request._invocation] = request.effective_arguments
+            self._approval_ready[request._invocation] = _ApprovalArguments(
+                request.effective_arguments
+            )
             self._dispatch_interaction(request, state)
         except BaseException as error:
             if not state.stopping and not state.failure.done():
@@ -5822,11 +5877,21 @@ class Session(Generic[ContextT, OutputT]):
             id(request._declaration),
         )
         if approve:
-            if not await self._native._approve_manual_tool(request._grant):
-                raise InteractionExpiredError("Managed approval is expired or already decided")
+            approved = self._approval_ready.get(request._invocation)
+            if approved is None:
+                approved = _ApprovalArguments(request.effective_arguments)
+                self._approval_ready[request._invocation] = approved
+            approved.approved = True
+            try:
+                if not await self._native._approve_manual_tool(request._grant):
+                    raise InteractionExpiredError("Managed approval is expired or already decided")
+            except BaseException:
+                self._approval_ready.pop(request._invocation, None)
+                raise
             self._observations.notify()
         else:
             await self._respond(request, reason, _approval_rejection=True)
+            self._approval_ready.pop(request._invocation, None)
         if always:
             self._approval_decisions[key] = (approve, reason)
 
@@ -10350,6 +10415,8 @@ class Session(Generic[ContextT, OutputT]):
             except BaseException as error:
                 state.retain_cleanup_error(error)
             finally:
+                if owner.receipt.get("kind") == "tool":
+                    self._approval_ready.pop(int(owner.receipt["invocation"]), None)
                 guard.active = False
                 if _task in state.callbacks:
                     state.callbacks[_task] = None
@@ -11392,6 +11459,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool request belongs to a different thread")
             catalog = self._catalog_for_message(message, marker["generation"])
             entry = catalog.tools[marker["slot"]]
+            managed_approval = isinstance(entry, _CapturedApproval)
             if isinstance(entry, _CapturedApproval):
                 entry = entry.function
             if not isinstance(entry, _CapturedFunction):
@@ -11422,10 +11490,22 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
+            approved = None
+            if managed_approval:
+                approved = self._approval_ready.pop(
+                    int(message["_sdk_callback"]["invocation"]), None
+                )
+                if approved is None or not approved.approved:
+                    raise NativeError("Managed approval arguments are no longer available")
             parsed = entry._parse_arguments(
                 message.get("_sdk_effective_arguments", message["arguments"])
             )
+            if approved is not None:
+                parsed = deepcopy(approved.value)
             kwargs = entry._arguments(parsed)
+            approved_kwargs = (
+                _snapshot_function_arguments(kwargs, ref) if approved is not None else None
+            )
             raw_arguments = message["arguments"]
             if isinstance(raw_arguments, str):
                 raw_arguments = json.loads(raw_arguments)
@@ -11467,6 +11547,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     ),
                 )
+            arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
                 decision = await self._call_decision_callback(
@@ -11486,6 +11567,7 @@ class Session(Generic[ContextT, OutputT]):
                             status = "failed"
                     return
                 if isinstance(decision, ReplaceArguments):
+                    arguments_replaced = True
                     parsed = entry._parse_arguments(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
@@ -11496,6 +11578,24 @@ class Session(Generic[ContextT, OutputT]):
                 # A returned decision may alias SDK-owned input. Do not retain it
                 # across output validation.
                 del decision
+            if (
+                approved_kwargs is not None
+                and arguments_replaced
+                and not _same_approval_arguments(dict(approved_kwargs), kwargs)
+            ):
+                denial = ToolOutput.error("Tool input policy changed approved arguments")
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if self._admit_tool(state, request):
+                    if await self._respond_tool(state, reply):
+                        status = "failed"
+                return
+            if approved is not None:
+                parsed = deepcopy(approved.value)
+                kwargs = entry._arguments(parsed)
+                if context is not None:
+                    context = replace(
+                        context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
+                    )
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:
@@ -11744,6 +11844,8 @@ class Session(Generic[ContextT, OutputT]):
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
         finally:
+            approved = None
+            approved_kwargs = None
             if tracing is not None:
                 tracing.set_outcome(
                     status="ok"
@@ -12494,6 +12596,7 @@ class Session(Generic[ContextT, OutputT]):
         self._profile_catalogs.clear()
         self._catalog_bindings.clear()
         self._parent_trace = None
+        self._approval_ready.clear()
         self._closed = True
 
     async def _close_session(self) -> None:

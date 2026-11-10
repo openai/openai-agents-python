@@ -5,10 +5,10 @@ from pathlib import Path
 
 from agents import (
     Agent,
+    Allow,
     ApprovalRequested,
     InteractionExpiredError,
     NativeProvider,
-    ReplaceArguments,
     function_tool,
 )
 from agents.state import SessionState
@@ -23,7 +23,7 @@ async def main():
 
     def before(context):
         guards.append(context.effective_arguments["value"])
-        return ReplaceArguments({"value": context.effective_arguments["value"] + "-post"})
+        return Allow()
 
     def policy(context):
         predicates.append(context.call_id)
