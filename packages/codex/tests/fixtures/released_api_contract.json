@@ -2179,8 +2179,8 @@
       },
       "_agents_shared.codex_cli.thread": {
         "declarations": [
-          "class TextInput(TypedDict):\n    type: Literal['text']\n    text: str",
-          "class LocalImageInput(TypedDict):\n    type: Literal['local_image']\n    path: str",
+          "TextInput = TypedDict('TextInput', {'type': Literal['text'], 'text': str})",
+          "LocalImageInput = TypedDict('LocalImageInput', {'type': Literal['local_image'], 'path': str})",
           "UserInput: TypeAlias = TextInput | LocalImageInput",
           "Input: TypeAlias = str | list[UserInput]",
           "@dataclass(frozen=True)\nclass Turn:\n    items: list[ThreadItem]\n    final_response: str\n    usage: Usage | None",

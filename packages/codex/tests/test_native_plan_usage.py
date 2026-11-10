@@ -6,7 +6,8 @@ import asyncio
 import importlib
 import json
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from time import get_clock_info
 
 import pytest
 import pytest_asyncio
@@ -135,7 +136,9 @@ async def test_read_codex_plan_usage_before_dispatch(plan_endpoint, monkeypatch,
         assert isinstance(usage, CodexPlanUsage)
         assert usage.account_id == ACCOUNT
         assert usage.identity_verified
-        assert start <= usage.observed_at <= datetime.now(timezone.utc)
+        # Python's wall clock can lag the native clock on Windows.
+        clock_tick = timedelta(seconds=get_clock_info("time").resolution)
+        assert start <= usage.observed_at <= datetime.now(timezone.utc) + clock_tick
         assert usage.observed_at.utcoffset() == timezone.utc.utcoffset(None)
         assert usage.plan_type == "team"
         assert usage.ordinary_usage_allowed is True

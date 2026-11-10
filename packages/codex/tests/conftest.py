@@ -12,6 +12,12 @@ from aiohttp import ClientConnectorError, ClientSession, ClientTimeout
 
 from tests._asyncio import timeout
 
+if sys.platform == "win32":
+    # Optional providers can select a subprocess-incompatible policy at import.
+    # Native fixtures need the standard Windows Proactor subprocess support.
+    def pytest_asyncio_loop_factories(config, item):
+        return {"proactor": asyncio.ProactorEventLoop}
+
 
 @pytest.fixture
 def native_executor_environment(tmp_path):

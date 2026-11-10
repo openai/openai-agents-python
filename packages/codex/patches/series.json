@@ -465,6 +465,14 @@
       "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
     },
     {
+      "path": "sdk-linux-protected-metadata-mount-race.patch",
+      "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-bootstrap.patch",
+      "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
+    },
+    {
       "path": "sdk-realtime-voice-policies.patch",
       "sha256": "cb01a081dc7553b210549fe77dfcf6f5dc724447e7a8c2e912c59b370ac87b8f"
     },
@@ -494,8 +502,8 @@
     },
     {
       "path": "sdk-terminal-candidate-admission.patch",
-      "sha256": "d6209dee5cd2b26507a6f0ac9a024367dd688b8dd70b7f7ceb7a3ca313601047"
+      "sha256": "daf499723d9331eb1c9cf93a78084eea6a4c0f5217b9b4d38f34836b9654edfe"
     }
   ],
-  "result_tree": "c8cace12767762f932756b3b9104e25b3e721c8a"
+  "result_tree": "13df50154d8733b676959bdd8d6ffe9780a7c20c"
 }
