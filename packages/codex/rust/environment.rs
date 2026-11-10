@@ -149,6 +149,12 @@ fn deserialize_env<'de, D: Deserializer<'de>>(
                 "CARGO_BIN_EXE_bwrap",
                 "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
                 "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
             ]
             .iter()
             .any(|reserved| name.eq_ignore_ascii_case(reserved))
@@ -790,7 +796,7 @@ impl EnvironmentOptions {
         } else {
             permissions.shell_environment_policy.clone()
         };
-        shell_environment_policy.r#set.extend(self.env.clone());
+        shell_environment_policy.set_sdk_environment_overrides(self.env.clone());
         let selection = TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
@@ -1992,6 +1998,12 @@ mod tests {
                 "CARGO_BIN_EXE_bwrap",
                 "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
                 "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
                 "CODEX_SANDBOX_COMMAND_ENV_JSON_0",
                 "CODEX_SANDBOX_COMMAND_ENV_JSON_é",
             ])

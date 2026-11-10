@@ -43,10 +43,10 @@ index 7e4cd19c696282b05b5eecd31527b2b28bccf0ba..5d5ba4636d4ae653e207a5386ecc3824
              replacement_history: Some(history.annotated_items().to_vec()),
              guardian_history: history.guardian_history_checkpoint(),
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2ca1c7f6d 100644
+index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a307bbc24 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -273,21 +273,68 @@ impl Session {
+@@ -273,21 +273,73 @@ impl Session {
      pub(crate) async fn sdk_history_snapshot(
          &self,
          limit: Option<usize>,
@@ -68,7 +68,15 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
 +        use codex_protocol::error::CodexErr;
 +        let unavailable =
 +            || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
-+        let total = self.state.lock().await.sdk_originals.len();
++        let (total, fallback_policy) = {
++            let state = self.state.lock().await;
++            (
++                state.sdk_originals.len(),
++                state.sdk_originals_replay_policy.unwrap_or(
++                    codex_utils_output_truncation::TruncationPolicy::Bytes(usize::MAX),
++                ),
++            )
++        };
 +        if total == 0 {
 +            return Ok(Default::default());
 +        }
@@ -80,11 +88,8 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
 +            &persisted.items,
 +            |row| {
 +                let mut projected = crate::context_manager::ContextManager::new();
-+                // Current records carry their admitted output truncation policy in metadata.
-+                projected.replay_annotated_item(
-+                    row,
-+                    codex_utils_output_truncation::TruncationPolicy::Bytes(usize::MAX),
-+                );
++                // Captured per-record limits take precedence over the scalar legacy restore policy.
++                projected.replay_annotated_item(row, fallback_policy);
 +                projected.annotated_items().last().cloned()
 +            },
 +            |items, turns| {
@@ -122,7 +127,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
      }
  
      /// The SDK owns exclusive native ingress and the mutation permit throughout.
-@@ -305,14 +352,24 @@ impl Session {
+@@ -305,14 +357,24 @@ impl Session {
          if active.is_some() {
              return Err(invalid("history transaction requires an idle thread"));
          }
@@ -149,7 +154,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
          for original in appended {
              let projection = input_projection(&original)
                  .map_err(|_| invalid("Invalid canonical history item"))?
-@@ -325,8 +382,7 @@ impl Session {
+@@ -325,8 +387,7 @@ impl Session {
                  projection,
              });
          }
@@ -159,7 +164,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
              .retained_projection(state.history.annotated_items(), keep)
              .map_err(invalid)?;
          envelopes.extend(
-@@ -378,7 +434,8 @@ impl Session {
+@@ -378,7 +439,8 @@ impl Session {
              .await
              .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
          state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
@@ -170,7 +175,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..62b57342b9453b2040c0008b586095c2
      }
  }
 diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
-index d83e4311808ccf2f9e92d5395d5477f746b8b580..a7580d3a214a3124ab38f6a02e22bdbb01249d7d 100644
+index d83e4311808ccf2f9e92d5395d5477f746b8b580..5ac92758b52367ee65b771666e9f8ddac504c27f 100644
 --- a/codex-rs/core/src/session/inject_tests.rs
 +++ b/codex-rs/core/src/session/inject_tests.rs
 @@ -65,7 +65,8 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
@@ -305,7 +310,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..a7580d3a214a3124ab38f6a02e22bdbb
      let retained_model = session.clone_history().await.into_annotated_items();
      assert_eq!(retained_model.len(), 2);
      assert_eq!(
-@@ -218,3 +246,50 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -218,3 +246,89 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
          "first"
      );
  }
@@ -356,11 +361,50 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..a7580d3a214a3124ab38f6a02e22bdbb
 +        originals
 +    );
 +}
++
++#[tokio::test]
++async fn sdk_cold_legacy_projection_reuses_the_captured_restore_policy() {
++    use serde_json::json;
++    let (mut session, _, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(&mut session).await;
++    let raw = vec![
++        json!({"type":"message","id":"legacy-user","role":"user","content":[{"type":"input_text","text":"first"}]}),
++        json!({"type":"function_call","id":"legacy-call","name":"lookup","call_id":"legacy-output","arguments":"{}"}),
++        json!({"type":"function_call_output","id":"legacy-result","call_id":"legacy-output","output":"legacy untruncated output ".repeat(100_000)}),
++        json!({"type":"message","id":"legacy-next","role":"user","content":[{"type":"input_text","text":"second"}]}),
++    ];
++    let rows = raw
++        .into_iter()
++        .map(|item| {
++            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
++                serde_json::from_value(item).unwrap(),
++            ))
++        })
++        .collect();
++    session
++        .record_initial_history(codex_history::InitialHistory::Forked(rows))
++        .await;
++    let before = session.clone_history().await.into_annotated_items();
++    let projected = session.sdk_history_projection(None).await.unwrap();
++    assert_eq!(
++        serde_json::to_value(&projected[2]).unwrap()["output"],
++        serde_json::to_value(&before[2].item).unwrap()["output"]
++    );
++    let revision = session.sdk_history_snapshot(Some(0)).await.unwrap().0;
++    session
++        .sdk_replace_history(&revision, 3, Vec::new())
++        .await
++        .unwrap();
++    assert_eq!(
++        session.clone_history().await.into_annotated_items(),
++        before[..3]
++    );
++}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..a89155449cd4696ee1cc1f028160243405d0fe70 100644
+index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..ef3272dd3aa46df107dd35220b186d723d36b463 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1861,22 +1861,24 @@ impl Session {
+@@ -1861,22 +1861,26 @@ impl Session {
          let reviewer_compaction_hash = reviewer.comp_hash.clone();
          {
              let mut state = self.state.lock().await;
@@ -380,6 +424,8 @@ index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..a89155449cd4696ee1cc1f0281602434
 -                    history.drop_last_n_user_turns(turns);
 -                    history.annotated_items().to_vec()
 -                },
++            state.sdk_originals_replay_policy =
++                Some(turn_context.model_info().truncation_policy.into());
 +            state.sdk_originals = codex_history::sdk_originals::SdkOriginalHistoryCache::from(
 +                &codex_history::sdk_originals::SdkOriginalHistory::replay(
 +                    rollout_items,
@@ -402,19 +448,20 @@ index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..a89155449cd4696ee1cc1f0281602434
              state.replace_annotated_history(
                  history,
 diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
-index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..e9fb1a6b954eda85e227a95cf4a20f519da9cb7f 100644
+index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..ea7e6f5a03d1970ac5c77f0b33b377f4be6a355f 100644
 --- a/codex-rs/core/src/state/session.rs
 +++ b/codex-rs/core/src/state/session.rs
-@@ -70,7 +70,7 @@ pub(crate) struct SessionState {
+@@ -70,7 +70,8 @@ pub(crate) struct SessionState {
      /// Persisted origin of the session base instructions, when known.
      pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
      pub(crate) history: ContextManager,
 -    pub(crate) sdk_originals: codex_history::sdk_originals::SdkOriginalHistory,
 +    pub(crate) sdk_originals: codex_history::sdk_originals::SdkOriginalHistoryCache,
++    pub(crate) sdk_originals_replay_policy: Option<codex_utils_output_truncation::TruncationPolicy>,
      /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
      pub(crate) history_reset: CancellationToken,
      pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
-@@ -117,11 +117,10 @@ impl SessionState {
+@@ -117,11 +118,10 @@ impl SessionState {
          auto_compact_window_ids: AutoCompactWindowIds,
          history: ContextManager,
      ) -> Self {
@@ -429,7 +476,20 @@ index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..e9fb1a6b954eda85e227a95cf4a20f51
          }
          Self {
              active_disabled_plugin_ids: Vec::new(),
-@@ -159,18 +158,9 @@ impl SessionState {
+@@ -129,6 +129,7 @@ impl SessionState {
+             base_instructions_provenance: None,
+             history,
+             sdk_originals,
++            sdk_originals_replay_policy: None,
+             history_reset: CancellationToken::new(),
+             latest_rate_limits: None,
+             latest_token_usage_record: None,
+@@ -155,22 +156,14 @@ impl SessionState {
+         items: &mut [ResponseItemEnvelope],
+         policy: codex_utils_output_truncation::TruncationPolicy,
+     ) {
++        self.sdk_originals_replay_policy.get_or_insert(policy);
+         for envelope in items {
              self.history
                  .record_annotated_items(std::slice::from_mut(envelope), policy);
              if crate::context_manager::is_api_message(&envelope.item, envelope.metadata.as_ref()) {
