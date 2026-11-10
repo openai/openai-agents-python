@@ -32,7 +32,7 @@ def _handoff_name(agent: Agent[Any, Any]) -> str:
 
 
 def _check_handoff_tool_names(refs: Iterable[ToolRef], handoffs: Mapping[str, str]) -> None:
-    if any(ref.namespace is None and ref.name in handoffs for ref in refs):
+    if any(ref.namespace in (None, "functions") and ref.name in handoffs for ref in refs):
         raise ValueError("A native handoff name collides with an ordinary function tool")
 
 

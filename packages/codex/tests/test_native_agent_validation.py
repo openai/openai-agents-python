@@ -117,22 +117,45 @@ def test_validate_rejects_invalid_handoff_declarations(target_problem):
 
 
 @pytest.mark.parametrize("target_collision", [False, True])
-def test_validate_rejects_function_handoff_name_collision(target_collision):
+@pytest.mark.parametrize("namespace", [None, "functions", "custom"])
+async def test_validate_matches_opening_handoff_function_namespaces(
+    responses, target_collision, namespace
+):
+    @function_tool(
+        name="transfer_to_c" if target_collision else "transfer_to_b",
+        namespace=namespace,
+    )
+    def collision(text: str) -> str:
+        """Return synthetic input."""
+        return text
+
     leaf = Agent(name="C", instructions="Leaf.")
     target = Agent(
         name="B",
         instructions="Target.",
-        tools=[manual("transfer_to_c")] if target_collision else [],
+        tools=[collision] if target_collision else [],
         handoffs=[leaf],
     )
     source = Agent(
         name="A",
         instructions="Root.",
         handoffs=[target],
-        tools=[] if target_collision else [manual("transfer_to_b")],
+        tools=[] if target_collision else [collision],
     )
-    with pytest.raises(ValueError, match="handoff name collides"):
-        source.validate()
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-handoff-validation"
+    ) as provider:
+        if namespace == "custom":
+            source.validate()
+            async with source.session(provider=provider):
+                pass
+        else:
+            with pytest.raises(ValueError, match="handoff name collides"):
+                source.validate()
+            with pytest.raises(ValueError, match="handoff name collides"):
+                async with source.session(provider=provider):
+                    pytest.fail("Opening admitted a handoff/function collision.")
+    assert not responses.requests
 
 
 def test_validate_resolves_cyclic_graph_once_without_binding_context_or_resources(monkeypatch):

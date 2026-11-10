@@ -2589,3 +2589,68 @@ async def test_native_reordering_retains_invalid_embedded_image_and_moves_only_t
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+@pytest.mark.parametrize("change", ["arrival", "content", "unchanged"])
+async def test_native_history_expected_snapshot_checks_before_mutation(
+    realtime_peer: RealtimePeer, change: str
+) -> None:
+    peer = realtime_peer
+    first = {
+        "id": "snapshot-first",
+        "type": "message",
+        "role": "user",
+        "status": "completed",
+        "content": [{"type": "input_text", "text": "Synthetic snapshot"}],
+    }
+    second = {**first, "id": "snapshot-second"}
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-expected-history-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Check history snapshots.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, first)
+        cursor = len(peer.frames)
+        retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+        request = await peer.frame(
+            lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+        )
+        assert request["item_id"] == first["id"]
+        assert peer.socket is not None
+        await peer.socket.send_json({"type": "conversation.item.retrieved", "item": first})
+        snapshot = await retrieving
+        assert snapshot == [first]
+        if change == "arrival":
+            await observe_item(peer, events, second, previous_item_id=first["id"])
+        cursor = len(peer.frames)
+        updating = asyncio.create_task(voice.update_history(snapshot, expected_items=snapshot))
+        if change != "arrival":
+            request = await peer.frame(
+                lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+            )
+            assert request["item_id"] == first["id"]
+            observed = (
+                first
+                if change == "unchanged"
+                else {
+                    **first,
+                    "content": [{"type": "input_text", "text": "Changed after retrieval"}],
+                }
+            )
+            await peer.socket.send_json({"type": "conversation.item.retrieved", "item": observed})
+        if change == "unchanged":
+            await updating
+        else:
+            with pytest.raises(RuntimeError, match="history changed after the updater snapshot"):
+                await updating
+        assert not [
+            frame
+            for frame in peer.frames[cursor:]
+            if frame["type"] in ("conversation.item.delete", "conversation.item.create")
+        ]
