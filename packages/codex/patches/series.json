@@ -417,6 +417,10 @@
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     },
     {
+      "path": "0152-siwc-http-errors.patch",
+      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
+    },
+    {
       "path": "0153-sdk-saved-login-durable-refresh.patch",
       "sha256": "3256e6ede7e0d7357bd6cf3c9a3f2fec8fec97aae4cffde957f5c575cf017231"
     },
@@ -485,9 +489,9 @@
       "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     },
     {
-      "path": "sdk-private-macos-deny-paths.patch",
-      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
+      "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
     }
   ],
-  "result_tree": "3bd92ea80aa7df0cdd05c48a1aeacfa786aff60f"
+  "result_tree": "24cff6c5ac1c76899c40e1906b39cb3d07f2c929"
 }
