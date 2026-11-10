@@ -110,11 +110,14 @@ if TYPE_CHECKING:
         ModelRequestContext as ModelRequestContext,
     )
     from .models import (
+        AnyLLMModel as AnyLLMModel,
         ChatCompletionsModel as ChatCompletionsModel,
+        LitellmModel as LitellmModel,
         ModelProvider as ModelProvider,
         ModelRequest as ModelRequest,
         ModelResponse as ModelResponse,
         NativeModel as NativeModel,
+        ResponsesModel as ResponsesModel,
     )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
@@ -210,6 +213,9 @@ if TYPE_CHECKING:
 
 _MODULES = {
     "ChatCompletionsModel": ".models",
+    "ResponsesModel": ".models",
+    "LitellmModel": ".models",
+    "AnyLLMModel": ".models",
     "ModelProvider": ".models",
     "ModelRequest": ".models",
     "ModelResponse": ".models",

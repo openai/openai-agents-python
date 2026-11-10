@@ -374,6 +374,8 @@ class RealtimeResponse:
     status: Literal["created", "done", "cancelled"]
     response_id: str | None
     usage: RealtimeUsage | None = None
+    # Detached connection total at this event, including this accepted response.
+    cumulative_usage: RealtimeUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -1332,8 +1334,12 @@ class RealtimeSession:
                 RealtimeSession._BUFFER_BYTES_LIMIT,
             )
         usage_bytes = (
-            4 * len(json.dumps(vars(event.usage)))
-            if isinstance(event, RealtimeResponse) and event.usage is not None
+            sum(
+                4 * len(json.dumps(vars(usage)))
+                for usage in (event.usage, event.cumulative_usage)
+                if usage is not None
+            )
+            if isinstance(event, RealtimeResponse)
             else 0
         )
         values = list(vars(event).values())
@@ -2633,7 +2639,9 @@ class RealtimeSession:
                     self._finish(error)
                     return
                 self._usage_totals = totals
-            self._emit(RealtimeResponse(status, value.get("response_id"), reported_usage))
+            self._emit(
+                RealtimeResponse(status, value.get("response_id"), reported_usage, self.usage)
+            )
             if name == "ResponseDone":
                 self._start_function_batch(value)
         elif name in {

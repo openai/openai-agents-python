@@ -81,11 +81,13 @@ def input_prompt(identity, length):
     return marker + " " + "x" * max(0, length - len(marker) - 1)
 
 
-def stats_at(base_url, *, summary=False):
+def stats_at(base_url, *, summary=False, retired=False):
     parts = urlsplit(base_url)
     connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=10)
     try:
-        connection.request("GET", "/stats?summary=1" if summary else "/stats")
+        connection.request(
+            "GET", "/stats?summary=1" if summary else ("/stats?retired=1" if retired else "/stats")
+        )
         response = connection.getresponse()
         if response.status != 200:
             raise RuntimeError(f"Stats endpoint returned {response.status}")
@@ -103,11 +105,20 @@ def quantile(values, fraction):
 
 
 async def exercise(
-    Adapter, workload, base_url, cold_start_ns, initial_stats, *, response_mode="streaming"
+    Adapter,
+    workload,
+    base_url,
+    cold_start_ns,
+    initial_stats,
+    *,
+    response_mode="streaming",
+    native_transport="http",
 ):
     owner_cpu_before = time.process_time_ns()
     owner_before = time.perf_counter_ns()
     adapter_options = {"response_mode": "buffered"} if response_mode == "buffered" else {}
+    if native_transport == "websocket":
+        adapter_options["transport"] = "websocket"
     construction_start = time.perf_counter_ns()
     adapter = Adapter(
         base_url,
@@ -298,7 +309,7 @@ def validate_receipts(workload, result, stats):
                 raise AssertionError(f"Incorrect tool-output history for {operation['id']}")
 
 
-def validate_transport(workload, stats, *, engine, response_mode):
+def validate_transport(workload, stats, *, engine, response_mode, native_transport="http"):
     """Validate actual provider work, independent of public observation granularity."""
     expected_stream = workload.stream if engine == "v0" else response_mode == "streaming"
     expected_requests = (
@@ -312,7 +323,15 @@ def validate_transport(workload, stats, *, engine, response_mode):
         or stats.get("receipts_dropped") != 0
     ):
         raise ValueError("Incomplete provider transport receipts")
+    websocket = engine == "v1" and native_transport == "websocket"
+    if websocket and (
+        stats.get("websocket_connections") != expected_requests
+        or stats.get("websocket_open_connections") != 0
+    ):
+        raise ValueError("Fresh WebSocket connections have not been retiring")
     for receipt in receipts:
+        if (receipt.get("wire_transport") == "websocket") != websocket:
+            raise ValueError("Provider transport differs from the scheduled transport")
         if type(receipt.get("stream")) is not bool or receipt["stream"] != expected_stream:
             raise ValueError("Provider transport differs from the scheduled response mode")
         expected_chunks = (
@@ -340,6 +359,7 @@ def main():
     signal.signal(signal.SIGTERM, stop_requested)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=["v0", "v1"], required=True)
+    parser.add_argument("--native-transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--response-mode", choices=["streaming", "buffered"], default="streaming")
     parser.add_argument("--case", choices=WORKLOADS, default="oneshot_text")
     parser.add_argument("--iterations", type=int)
@@ -364,6 +384,13 @@ def main():
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
     os.environ["no_proxy"] = "127.0.0.1,localhost"
     workload = get_workload(args.case, iterations=args.iterations)
+    if args.native_transport == "websocket" and (
+        args.engine != "v1"
+        or args.case != "oneshot_text"
+        or args.import_only
+        or args.response_mode != "streaming"
+    ):
+        parser.error("WebSocket reproduction requires native oneshot_text in streaming mode")
     if args.response_mode == "buffered" and not args.import_only:
         if args.engine != "v1" or workload.stream:
             parser.error("Buffered mode requires a native final-result workload")
@@ -371,8 +398,11 @@ def main():
         "response_mode": args.response_mode
         if args.engine == "v1" and not args.import_only
         else None,
+        "native_transport": args.native_transport if args.engine == "v1" else None,
         "wire_transport": None
         if args.import_only
+        else "websocket"
+        if args.native_transport == "websocket"
         else (
             "sse"
             if (workload.stream if args.engine == "v0" else args.response_mode == "streaming")
@@ -434,17 +464,22 @@ def main():
                         start,
                         initial_stats,
                         response_mode=args.response_mode,
+                        native_transport=args.native_transport,
                     )
                 )
             )
             if profiler:
                 profiler.disable()
                 profiler.dump_stats(str(args.profile))
-            stats = stats_at(base_url)
+            stats = stats_at(base_url, retired=args.native_transport == "websocket")
             result["server"] = stats
             validate_receipts(workload, result, stats)
             validate_transport(
-                workload, stats, engine=args.engine, response_mode=args.response_mode
+                workload,
+                stats,
+                engine=args.engine,
+                response_mode=args.response_mode,
+                native_transport=args.native_transport,
             )
         result["versions"] = {
             name: importlib.metadata.version(name)
