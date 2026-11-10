@@ -1,0 +1,196 @@
+name: Stock macOS bootstrap message filter diagnostic
+
+on:
+  push:
+    branches: [diag/python-macos-bootstrap-filter-5688]
+
+permissions: {}
+
+jobs:
+  stock-seatbelt:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Compare the host and stock deny-all bootstrap filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'source %s\n' "$GITHUB_SHA"
+          /usr/bin/sw_vers
+          /usr/bin/uname -m
+
+          scratch=$(/usr/bin/mktemp -d "$RUNNER_TEMP/bootstrap-filter.XXXXXXXX")
+          scratch=$(cd "$scratch" && pwd -P)
+          work="$scratch/work"
+          outside="$scratch/outside"
+          mkdir "$work" "$outside"
+          owned_service=
+          cleanup() {
+            if [[ -n "$owned_service" ]] && /bin/launchctl print "$owned_service" >/dev/null 2>&1; then
+              /bin/launchctl bootout "$owned_service" || true
+              if /bin/launchctl print "$owned_service" >/dev/null 2>&1; then
+                printf 'disposable service cleanup failed\n' >&2
+                return 1
+              fi
+            fi
+            /bin/rm -rf "$scratch"
+          }
+          trap cleanup EXIT
+
+          clean=(/usr/bin/env -i PATH=/usr/bin:/bin "HOME=$work" "TMPDIR=$work")
+          ssh=(/usr/bin/ssh -G -F /dev/null -o CanonicalizeHostname=no 127.0.0.1)
+          record() {
+            local name=$1 status=0
+            shift
+            "$@" >"$scratch/$name.out" 2>"$scratch/$name.err" &
+            probe_pid=$!
+            wait "$probe_pid" || status=$?
+            printf '%s exit %d pid %d\n' "$name" "$status" "$probe_pid"
+            if [[ -s "$scratch/$name.err" ]]; then
+              /usr/bin/head -n 8 "$scratch/$name.err"
+            fi
+            return "$status"
+          }
+
+          record host-id "${clean[@]}" /usr/bin/id -F
+          record host-ssh "${clean[@]}" "${ssh[@]}"
+          [[ -s "$scratch/host-id.out" ]]
+          /usr/bin/grep -q '^hostname 127\.0\.0\.1$' "$scratch/host-ssh.out"
+
+          cat >"$scratch/base.sb" <<'SBPL'
+          (version 1)
+          (deny default)
+          (allow file-read-metadata)
+          (allow file-read* file-map-executable
+              (subpath "/System")
+              (subpath "/usr/lib")
+              (subpath "/usr/share")
+              (subpath "/usr/bin")
+              (subpath "/bin")
+              (literal "/dev/null")
+              (literal "/private/etc/passwd")
+              (literal "/private/etc/group")
+              (subpath (param "WORK")))
+          (allow process-exec process-fork)
+          (allow sysctl-read)
+          (allow file-write* (subpath (param "WORK")))
+          SBPL
+          probe() {
+            local name=$1 profile=$2
+            shift 2
+            record "$name" "${clean[@]}" /usr/bin/sandbox-exec -D "WORK=$work" -f "$scratch/$profile.sb" "$@"
+          }
+          probe base base /usr/bin/true
+
+          cp "$scratch/base.sb" "$scratch/predicate.sb"
+          cat >>"$scratch/predicate.sb" <<'SBPL'
+          (if have_message_filtering?
+              (deny file-write* (literal (string-append (param "WORK") "/feature-off")))
+              (deny file-write* (literal (string-append (param "WORK") "/feature-on"))))
+          SBPL
+          if probe predicate predicate /usr/bin/true; then
+            probe predicate-on predicate /bin/sh -c 'printf on > "$1"' sh "$work/feature-on" || true
+            probe predicate-off predicate /bin/sh -c 'printf off > "$1"' sh "$work/feature-off" || true
+            if [[ -f "$work/feature-on" && ! -e "$work/feature-off" ]]; then
+              printf 'have_message_filtering? true\n'
+            elif [[ -f "$work/feature-off" && ! -e "$work/feature-on" ]]; then
+              printf 'have_message_filtering? false\n'
+            else
+              printf 'have_message_filtering? indeterminate\n'
+            fi
+          fi
+
+          cp "$scratch/base.sb" "$scratch/bootstrap-operation.sb"
+          printf '(deny mach-bootstrap)\n' >>"$scratch/bootstrap-operation.sb"
+          probe bootstrap-operation bootstrap-operation /usr/bin/true || true
+
+          cp "$scratch/base.sb" "$scratch/service-message-filter.sb"
+          cat >>"$scratch/service-message-filter.sb" <<'SBPL'
+          (allow mach-lookup
+              (global-name "com.apple.system.opendirectoryd.libinfo")
+              (apply-message-filter (deny mach-message-send)))
+          SBPL
+          probe service-message-filter service-message-filter /usr/bin/true || true
+
+          cp "$scratch/base.sb" "$scratch/deny-all.sb"
+          cat >>"$scratch/deny-all.sb" <<'SBPL'
+          (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+          (allow mach-bootstrap (apply-message-filter (deny mach-message-send)))
+          SBPL
+          if ! probe bootstrap-deny-all deny-all /bin/sh -c 'printf "payload entered\n"'; then
+            printf 'result bootstrap filter rejected during compile or activation\n'
+            exit 0
+          fi
+          /usr/bin/grep -Fxq 'payload entered' "$scratch/bootstrap-deny-all.out"
+
+          record host-outside-write "${clean[@]}" /bin/sh -c 'printf allowed > "$1"' sh "$outside/write"
+          [[ -f "$outside/write" ]]
+          /bin/rm "$outside/write"
+          probe inside-write deny-all /bin/sh -c 'printf allowed > "$1"' sh "$work/write"
+          [[ -f "$work/write" ]]
+          if probe outside-write deny-all /bin/sh -c 'printf denied > "$1"' sh "$outside/write"; then
+            printf 'outside write unexpectedly succeeded\n' >&2
+            exit 1
+          fi
+          [[ ! -e "$outside/write" ]]
+
+          id_status=0
+          ssh_status=0
+          probe filtered-id deny-all /usr/bin/id -F || id_status=$?
+          id_pid=$probe_pid
+          probe filtered-ssh deny-all "${ssh[@]}" || ssh_status=$?
+          ssh_pid=$probe_pid
+
+          uid=$(/usr/bin/id -u)
+          domain="gui/$uid"
+          session_type=
+          if ! /bin/launchctl print "$domain" >/dev/null 2>&1; then
+            domain="user/$uid"
+            session_type='<key>LimitLoadToSessionType</key><string>Background</string>'
+          fi
+          /bin/launchctl print "$domain" >/dev/null
+          label="org.openai.agents.sdk-test.$(/usr/bin/uuidgen)"
+          service="$domain/$label"
+          plist="$work/$label.plist"
+          cat >"$plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>$label</string>
+            <key>ProgramArguments</key><array><string>/usr/bin/true</string></array>
+            <key>RunAtLoad</key><false/>
+            <key>KeepAlive</key><false/>
+            $session_type
+          </dict>
+          </plist>
+          PLIST
+          /usr/bin/plutil -lint "$plist"
+          if /bin/launchctl print "$service" >/dev/null 2>&1; then
+            printf 'disposable launchd label already present\n' >&2
+            exit 1
+          fi
+          owned_service=$service
+          record host-bootstrap /bin/launchctl bootstrap "$domain" "$plist"
+          /bin/launchctl print "$service" >/dev/null
+          record host-bootout /bin/launchctl bootout "$service"
+          if probe filtered-bootstrap deny-all /bin/launchctl bootstrap "$domain" "$plist"; then
+            printf 'filtered job registration unexpectedly succeeded\n' >&2
+            exit 1
+          fi
+          if /bin/launchctl print "$service" >/dev/null 2>&1; then
+            printf 'filtered job appeared despite registration error\n' >&2
+            exit 1
+          fi
+          job_pid=$probe_pid
+          audit_predicate="eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"mach-message-send\" OR eventMessage CONTAINS \"mach-bootstrap\") AND (eventMessage CONTAINS \"id($id_pid)\" OR eventMessage CONTAINS \"ssh($ssh_pid)\" OR eventMessage CONTAINS \"launchctl($job_pid)\")"
+          if /usr/bin/log show --last 2m --style compact --predicate "$audit_predicate" >"$scratch/audit.out" 2>"$scratch/audit.err"; then
+            if /usr/bin/grep -E 'mach-message-send|mach-bootstrap' "$scratch/audit.out" >"$scratch/audit-matches"; then
+              /usr/bin/head -n 8 "$scratch/audit-matches"
+            else
+              printf 'no matching bootstrap message denial in the visible audit log\n'
+            fi
+          else
+            printf 'sandbox audit log unavailable\n'
+          fi
+          printf 'result filter loaded, filtered id %d, filtered ssh %d, outside-write and job registration denied\n' "$id_status" "$ssh_status"
