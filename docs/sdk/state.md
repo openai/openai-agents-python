@@ -346,16 +346,21 @@ async def main() -> None:
                 "content": [{"type": "input_text", "text": "Use the label atlas."}],
             }
             await session.transact_history(
-                expected_revision=before.revision, keep=0, items=[message],
+                expected_revision=before.revision,
+                keep=0,
+                items=[message],
             )
             current = await session.history_snapshot(limit=0)
             note = {"type": "application_note", "value": "Reviewed by the application"}
             revision = await session.transact_history(
-                expected_revision=current.revision, keep=current.total, items=[note],
+                expected_revision=current.revision,
+                keep=current.total,
+                items=[note],
             )
             try:
                 await session.transact_history(
-                    expected_revision=current.revision, keep=0,
+                    expected_revision=current.revision,
+                    keep=0,
                 )
             except RuntimeError:
                 assert (await session.history_snapshot(limit=0)).revision == revision
