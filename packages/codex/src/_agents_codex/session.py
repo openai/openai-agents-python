@@ -3815,19 +3815,36 @@ class Session(Generic[ContextT, OutputT]):
         supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
         if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
             raise ValueError("Reconciliation must cover every unresolved call once")
-        confirmed_turns = {(thread, turn) for thread, turn, _ in missing}
+        recovery_turns = {(thread, turn) for thread, turn, _ in missing}
+        recovery_lineage: dict[str, str] = {}
+        for thread, _, _ in supplied:
+            while thread in children and thread not in recovery_lineage:
+                parent = children[thread]["parent_agent_id"]
+                recovery_lineage[thread] = parent
+                thread = parent
+        # The crashed owner's spawning turn can still be open when its child
+        # records an effect. Use the completed spawn to identify that exact turn.
+        if recovery_lineage:
+            for item in recorded_items:
+                if (
+                    item["type"] == "create_subagent_call"
+                    and item["status"] == "completed"
+                    and (spawned := item["subagent_id"]) is not None
+                    and recovery_lineage.get(spawned) == item["agent_id"]
+                ):
+                    recovery_turns.add((item["agent_id"], item["turn_id"]))
         for child in descendants:
             child_id = child["id"]
             # An open edge can outlive settled native work. Parent
             # turns inherited at fork do not prove child completion.
             own_turns = recorded[child_id]
             unfinished = [turn["id"] for turn in own_turns if turn["status"] == "in_progress"]
-            confirmed = [turn for turn in unfinished if (child_id, turn) in confirmed_turns]
-            if child["status"] != "closed" and (not own_turns or unfinished != confirmed):
+            interrupted = [turn for turn in unfinished if (child_id, turn) in recovery_turns]
+            if child["status"] != "closed" and (not own_turns or unfinished != interrupted):
                 raise RuntimeError(
                     "Native local history has an active descendant; its runtime cannot be restored"
                 )
-            histories[child_id]["interrupted"] = confirmed
+            histories[child_id]["interrupted"] = interrupted
         if isinstance(self._storage, LocalStorage):
             await self._publish_startup(
                 self._native._reconcile_local_calls(

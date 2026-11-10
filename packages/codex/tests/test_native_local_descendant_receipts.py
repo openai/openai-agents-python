@@ -467,6 +467,22 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
     no_children,
 ):
     peer = LocalFamilyPeer(depth, fork_turns="all" if depth == 2 else "none")
+    hold_parent = depth == 2 and not known and no_children
+    release_parent = asyncio.Event()
+    if hold_parent:
+        parent_waiting = asyncio.Event()
+
+        async def hold_spawning_turn(event):
+            item = event.get("item", {})
+            if item.get("content") == [{"type": "output_text", "text": "/root/alpha finished"}]:
+                parent_waiting.set()
+                await release_parent.wait()
+            elif item.get("call_id") == "source-effect":
+                # The spawning turn has durably recorded the grandchild and
+                # is waiting on its next model response when the effect runs.
+                await parent_waiting.wait()
+
+        peer.before_event = hold_spawning_turn
     app = web.Application()
     app.router.add_post("/v1/responses", peer.handle)
     app.router.add_get("/v1/responses", peer.websocket)
@@ -502,7 +518,10 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             assert first.stdin is not None
             first.stdin.write(b"stop\n")
             await first.stdin.drain()
-        code, rest, err = await _collect(first)
+        try:
+            code, rest, err = await _collect(first)
+        finally:
+            release_parent.set()
         rows += rest
         assert code == (0 if known else 67), (rows, err)
         assert len(rows) == 2 and rows[0].get("opened"), (rows, err)
@@ -575,6 +594,13 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             assert call["name"] == "lookup" and call["arguments"] == {"key": origin}
             (original_turn,) = [turn for turn in new[0]["turns"] if turn["id"] == call["turn_id"]]
             assert original_turn["subagent_id"] == call["thread_id"]
+            parent_turn_id = None
+            if hold_parent:
+                (parent_turn,) = [
+                    turn for turn in new[0]["turns"] if turn["subagent_id"] == direct_child
+                ]
+                assert parent_turn["status"] == "in_progress"
+                parent_turn_id = parent_turn["id"]
             assert len(peer.requests) == original_count
             assert (tmp_path / "effects").read_text() == old_effect
             receipt = ReconciledCall(
@@ -609,7 +635,8 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 )
                 code, refused, err = await _collect(wrong_policy)
                 assert code != 0 and "recorded executor" in refused[0]["message"], (refused, err)
-            for confirmations in ((receipt,), (), (receipt,)):
+
+            async def inspect(confirmations=()):
                 retry = await start(
                     peer,
                     executor,
@@ -620,7 +647,26 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                     no_children=no_children,
                     receipts=confirmations,
                 )
-                code, recovered, err = await _collect(retry)
+                return await _collect(retry)
+
+            if parent_turn_id is not None:
+                (rollout,) = (tmp_path / "profile").rglob(f"*{call['thread_id']}.jsonl")
+                staging = rollout.with_name(f".sdk-recovery-{call['thread_id']}")
+                staging.mkdir()
+                try:
+                    code, failed, err = await inspect((receipt,))
+                    assert code != 0 and len(failed) == 1 and "error" in failed[0], (failed, err)
+                finally:
+                    staging.rmdir()
+                code, pending, err = await inspect()
+                assert code != 0 and pending[0].get("uncertain") == [call], (pending, err)
+                (aborted_parent,) = [
+                    turn for turn in pending[0]["turns"] if turn["id"] == parent_turn_id
+                ]
+                assert aborted_parent["status"] == "cancelled"
+
+            for confirmations in ((receipt,), (), (receipt,)):
+                code, recovered, err = await inspect(confirmations)
                 assert code == 0 and recovered[0]["opened"] == rows[0]["opened"], (recovered, err)
                 (leaf,) = [row for row in recovered[1:] if row["id"] == call["thread_id"]]
                 (invocation,) = [
@@ -640,6 +686,20 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 (turn,) = [turn for turn in leaf["turns"] if turn["id"] == call["turn_id"]]
                 assert turn["status"] == "cancelled"
                 assert not leaf["is_live"]
+                if parent_turn_id is not None:
+                    (parent,) = [row for row in recovered[1:] if row["id"] == direct_child]
+                    (parent_turn,) = [
+                        turn for turn in parent["turns"] if turn["id"] == parent_turn_id
+                    ]
+                    assert parent_turn["status"] == "cancelled" and not parent["is_live"]
+                    (spawn,) = [
+                        item for item in parent["items"] if item["type"] == "create_subagent_call"
+                    ]
+                    assert (spawn["turn_id"], spawn["subagent_id"], spawn["status"]) == (
+                        parent_turn_id,
+                        call["thread_id"],
+                        "completed",
+                    )
             conflict = await start(
                 peer,
                 executor,

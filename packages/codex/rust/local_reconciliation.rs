@@ -390,6 +390,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .get::<crate::recovery_guard::Guard>()
         .context("Reconciliation requires the SDK replay guard")?;
 
+    let has_receipts = !request.receipts.is_empty();
     let mut receipts_by_thread = HashMap::<_, Vec<_>>::new();
     for receipt in &request.receipts {
         ensure!(
@@ -424,13 +425,14 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         if !protected.is_empty() {
             protected_children.insert(id.to_string(), protected);
         }
-        if !outputs.is_empty() {
+        let writes_receipts = !outputs.is_empty();
+        if writes_receipts || !expected.interrupted.is_empty() {
+            ensure!(
+                has_receipts,
+                "An interrupted descendant turn requires a confirmed call"
+            );
             let mut items = Vec::new();
             for turn in &expected.interrupted {
-                ensure!(
-                    receipts.iter().any(|receipt| &receipt.turn_id == turn),
-                    "An interrupted descendant turn requires a confirmed call"
-                );
                 items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
                     TurnAbortedEvent {
                         turn_id: Some(turn.clone()),
@@ -447,11 +449,14 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
                     .into_iter()
                     .map(|item| RolloutItem::ResponseItem(ResponseItemEnvelope::new(item))),
             );
-            child_appends.push((id, path, items, receipts));
+            child_appends.push((writes_receipts, id, path, items, receipts));
         }
     }
     // Validate every supplied result before recording any part of the batch.
-    for (id, path, items, receipts) in child_appends {
+    // Publish interrupted ancestors before receipts that could clear the last
+    // unresolved call and allow the next open without confirmations.
+    child_appends.sort_by_key(|(writes_receipts, ..)| *writes_receipts);
+    for (_, id, path, items, receipts) in child_appends {
         confirm_durable(
             &store.append_reconciliation(id, &path, items).await?,
             &receipts,
