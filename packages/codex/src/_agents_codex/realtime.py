@@ -1057,7 +1057,7 @@ class RealtimeSession:
                     finally:
                         del snapshot
 
-                return await _join(asyncio.create_task(send(captured)))
+                return cast(dict[str, Any] | None, await _join(asyncio.create_task(send(captured))))
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
