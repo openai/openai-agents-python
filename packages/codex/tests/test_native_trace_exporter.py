@@ -670,20 +670,29 @@ async def test_failed_batch_accounts_for_later_completions(rejected_child):
 @pytest.mark.parametrize("delivery_status", [200, 503])
 async def test_mixed_loss_batch_delivers_only_admitted_records(delivery_status):
     secret = "synthetic-private-mixed-batch"
-    old = {**completed_event(), "lifecycle": "start", "name": "old-root"}
+    old = {**completed_event(), "lifecycle": "start", "name": "old-root", "sequence": 1}
     fresh = {
         **old,
         "trace_id": "e" * 32,
+        "sequence": 3,
         "name": "fresh-root",
         "attributes": {"sdk.metadata.private": secret},
     }
-    stale = {**old, "lifecycle": "end", "parent_span_id": "c" * 16, "name": "stale-child"}
+    stale = {
+        **old,
+        "lifecycle": "end",
+        "parent_span_id": "c" * 16,
+        "name": "stale-child",
+        "sequence": 2,
+    }
     with collector([200, delivery_status, 200]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
         await exporter.on_trace_event(old)
-        exporter._on_native_trace_loss()
+        exporter._on_native_trace_loss(1)
         with pytest.raises(RuntimeError, match="record admission failed") as failure:
-            await exporter.on_trace_events([stale, fresh, {**fresh, "lifecycle": "end"}])
+            await exporter.on_trace_events(
+                [stale, fresh, {**fresh, "lifecycle": "end", "sequence": 4}]
+            )
         assert ("delivery failed" in str(failure.value)) is (delivery_status == 503)
         assert_sanitized_failure(failure.value, secret)
         records = received[-1]["payload"]["data"]

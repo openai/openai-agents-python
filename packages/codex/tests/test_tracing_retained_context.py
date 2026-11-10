@@ -135,7 +135,8 @@ async def retained_context_case(large=False):
                 with telemetry.span("retained-after-loss", options={"parent": parent}):
                     pass
                 rejected = await telemetry.force_flush(timeout_ms=15000)
-                assert exporter._requires_root_start
+                assert exporter._recovery_sequence is not None
+                assert exporter._recovery_sequence > 0
                 stale = [event for event in observed if event["name"] == "retained-after-loss"]
                 assert len(stale) == 2
                 assert all(event.get("root_descriptor") for event in stale)
