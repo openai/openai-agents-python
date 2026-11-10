@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import _agents_codex.session as native_session
 from agents import Agent, Environment
 from agents.observation import TurnStarted
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -31,15 +32,24 @@ async def test_project_guidance_requires_an_executor(responses) -> None:
     else pytest.mark.requires_native_macos_sandbox
 )
 async def test_project_guidance_reads_workspace_image_without_command_grants(
-    tmp_path: Path, responses
+    tmp_path: Path, responses, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    capture_project_guidance = native_session._capture_project_guidance
+
+    def capture_trusted_guidance(enabled: bool):
+        config, options, tools = capture_project_guidance(enabled)
+        projects = {str(tmp_path.resolve()): {"trust_level": "trusted"}}
+        return {**config, "projects": projects}, options, tools
+
+    monkeypatch.setattr(native_session, "_capture_project_guidance", capture_trusted_guidance)
+
     image = tmp_path / "pixel.png"
     image.write_bytes(
         base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
         )
     )
-    rules = tmp_path / ".claude" / "rules"
+    rules = tmp_path / ".agents" / "rules"
     rules.mkdir(parents=True)
     (rules / "general.md").write_text("SYNTHETIC_WORKSPACE_GUIDANCE")
     responses.replies.extend(
