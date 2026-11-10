@@ -1,0 +1,38 @@
+diff --git a/codex-rs/protocol/src/model_request_controls.rs b/codex-rs/protocol/src/model_request_controls.rs
+index 85222ee91492f6ab92f07bea774e08110e11dc30..149c53051b06144786faa1409214b3ca9596ba94 100644
+--- a/codex-rs/protocol/src/model_request_controls.rs
++++ b/codex-rs/protocol/src/model_request_controls.rs
+@@ -307,7 +307,11 @@ impl ModelRequestControls {
+                 .context_management
+                 .as_ref()
+                 .is_some_and(Option::is_some)
+-            || self.extra_body.as_ref().is_some_and(Option::is_some)
++            || self
++                .extra_body
++                .as_ref()
++                .and_then(Option::as_ref)
++                .is_some_and(|body| !body.is_empty())
+             || self.max_output_tokens.as_ref().is_some_and(Option::is_some)
+             || self.temperature.as_ref().is_some_and(Option::is_some)
+             || self.top_p.as_ref().is_some_and(Option::is_some)
+@@ -359,6 +363,20 @@ mod sdk_extension_tests {
+         );
+     }
+ 
++    #[test]
++    fn empty_extra_body_is_a_patch_without_wire_values() {
++        for body in [json!({}), serde_json::Value::Null] {
++            let controls: ModelRequestControls =
++                serde_json::from_value(json!({"extra_body": body})).unwrap();
++            controls.validate_shape().unwrap();
++            assert!(!controls.is_empty());
++            assert!(!controls.has_wire_values());
++        }
++        let controls: ModelRequestControls =
++            serde_json::from_value(json!({"extra_body": {"provider_feature": null}})).unwrap();
++        assert!(controls.has_wire_values());
++    }
++
+     #[test]
+     fn body_extensions_cannot_replace_native_history_or_tools() {
+         for key in [

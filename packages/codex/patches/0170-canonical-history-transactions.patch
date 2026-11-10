@@ -1,0 +1,162 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index fe4eb5e8c742696428d3d0786c31d33107d5c637..191732b6725ce85f1479afc2fdb5c2a8c47c6175 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1072,6 +1072,27 @@ impl CodexThread {
+         Ok(prepared)
+     }
+ 
++    #[doc(hidden)]
++    pub async fn sdk_history_snapshot(
++        &self,
++        limit: Option<usize>,
++    ) -> (String, usize, Vec<ResponseItem>) {
++        self.session.sdk_history_snapshot(limit).await
++    }
++
++    /// Replace a canonical history suffix under the SDK's exclusive idle permit.
++    #[doc(hidden)]
++    pub async fn sdk_replace_history(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        items: Vec<ResponseItem>,
++    ) -> CodexResult<String> {
++        self.session
++            .sdk_replace_history(expected_revision, keep, items)
++            .await
++    }
++
+     pub fn rollout_path(&self) -> Option<PathBuf> {
+         self.rollout_path.clone()
+     }
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index d3b2369f567add514a70cc5427fd8736d47dbdd3..b90892458fd53b52398116905247e0205b410874 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -268,3 +268,125 @@ impl Session {
+ #[cfg(test)]
+ #[path = "inject_tests.rs"]
+ mod tests;
++
++/// Stable content identity for a canonical response-item snapshot.
++pub(crate) fn sdk_history_revision(items: &[ResponseItem]) -> String {
++    use sha2::{Digest, Sha256};
++    format!(
++        "{:x}",
++        Sha256::digest(serde_json::to_vec(items).expect("response items serialize"))
++    )
++}
++
++impl Session {
++    pub(crate) async fn sdk_history_snapshot(
++        &self,
++        limit: Option<usize>,
++    ) -> (String, usize, Vec<ResponseItem>) {
++        let state = self.state.lock().await;
++        let all: Vec<_> = state
++            .history
++            .annotated_items()
++            .iter()
++            .map(|row| row.item.clone())
++            .collect();
++        let revision = sdk_history_revision(&all);
++        let total = all.len();
++        let start = total.saturating_sub(limit.unwrap_or(total));
++        (revision, total, all[start..].to_vec())
++    }
++
++    /// The SDK owns exclusive native ingress and the mutation permit throughout.
++    pub(crate) async fn sdk_replace_history(
++        &self,
++        expected_revision: &str,
++        keep: usize,
++        mut appended: Vec<ResponseItem>,
++    ) -> codex_protocol::error::Result<String> {
++        use crate::context_manager::HistoryReplacement;
++        use codex_protocol::error::CodexErr;
++        let invalid = |message: &str| CodexErr::InvalidRequest(message.into());
++        let active = self.active_turn.lock().await;
++        if active.is_some() {
++            return Err(invalid("history transaction requires an idle thread"));
++        }
++        let mut state = self.state.lock().await;
++        let originals: Vec<_> = state
++            .history
++            .annotated_items()
++            .iter()
++            .map(|row| row.item.clone())
++            .collect();
++        if sdk_history_revision(&originals) != expected_revision {
++            return Err(invalid("canonical history revision conflict"));
++        }
++        if keep > originals.len() {
++            return Err(invalid("history keep exceeds snapshot length"));
++        }
++        for item in &mut appended {
++            if matches!(
++                item,
++                ResponseItem::Other
++                    | ResponseItem::ConfigurationUpdate { .. }
++                    | ResponseItem::CompactionTrigger { .. }
++            ) {
++                return Err(invalid("unsupported canonical response item"));
++            }
++            Self::assign_missing_response_item_id(item);
++        }
++        let mut items: Vec<_> = originals[..keep].iter().cloned().collect();
++        items.extend(appended);
++        let mut ids = std::collections::HashSet::new();
++        if items
++            .iter()
++            .filter_map(ResponseItem::id)
++            .any(|id| !ids.insert(id.to_string()))
++        {
++            return Err(invalid("canonical history item IDs must be unique"));
++        }
++        let revision = sdk_history_revision(&items);
++        let mut envelopes = state.history.annotated_items()[..keep].to_vec();
++        envelopes.extend(
++            items
++                .into_iter()
++                .skip(keep)
++                .map(|item| self.annotate_client_response_item(item)),
++        );
++        let checkpoint = codex_history::CompactedItem {
++            message: String::new(),
++            replacement_history: Some(envelopes.clone()),
++            guardian_history: None,
++            retained_context: Some(Default::default()),
++            mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
++            window_number: Some(state.auto_compact_window_number()),
++            first_window_id: Some(state.auto_compact_window_ids().first_window_id.to_string()),
++            previous_window_id: state
++                .auto_compact_window_ids()
++                .previous_window_id
++                .map(|id| id.to_string()),
++            window_id: Some(state.auto_compact_window_ids().window_id.to_string()),
++            compaction_response_id: None,
++            latest_token_usage_record: state.latest_token_usage_record.clone(),
++            resume_metadata: Some(codex_history::CompactionResumeMetadata {
++                multi_agent_version: self.multi_agent_version(),
++                last_started_turn_id: state.last_started_turn_id.clone(),
++                previous_turn_settings: state.previous_turn_settings(),
++            }),
++        };
++        // Keep live state unchanged until the canonical checkpoint is durable.
++        // SDK ingress and active-turn admission remain excluded during the fence.
++        if !self
++            .persist_rollout_items(&[codex_history::RolloutItem::Compacted(checkpoint)])
++            .await
++        {
++            return Err(CodexErr::Fatal(
++                "Canonical history commit outcome is uncertain".into(),
++            ));
++        }
++        self.flush_rollout()
++            .await
++            .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
++        state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
++        Ok(revision)
++    }
++}

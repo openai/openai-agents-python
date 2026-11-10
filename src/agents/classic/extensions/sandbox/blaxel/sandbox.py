@@ -1092,6 +1092,14 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         self._dependencies = dependencies
         self._token = token or os.environ.get("BL_API_KEY")
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: BlaxelSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, BlaxelSandboxSessionState):
+            raise TypeError("BlaxelSandboxClient requires Blaxel sandbox state")
+        if options.exposed_port_public is False and state.exposed_port_public is not False:
+            raise ValueError("Current Blaxel port exposure requires a fresh sandbox session")
+
     @redact_mount_error_data
     async def create(
         self,

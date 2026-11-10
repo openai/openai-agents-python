@@ -1,7 +1,12 @@
+#[path = "model_producer.rs"]
+mod model_producer;
+pub(crate) use model_producer::Contributor as ModelProducerContributor;
+
 #[path = "prepared_requests.rs"]
 mod prepared_requests;
 pub(crate) use prepared_requests::Contributor as PreparedRequestContributor;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
@@ -198,6 +203,7 @@ pub struct PythonTools {
     admission: Mutex<Option<Arc<TurnAdmission>>>,
     // A live native thread owns both. Keep no family-to-thread ownership cycle.
     interception: OnceLock<Weak<crate::native_interception::Control>>,
+    model_producer: Mutex<model_producer::State>,
     prepared_requests: Mutex<prepared_requests::State>,
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
@@ -655,6 +661,8 @@ pub(crate) struct NativeMediaContext {
 }
 
 struct PendingCall {
+    // Captured by native enqueue, never reconstructed from a host reply.
+    computer_arguments: Option<String>,
     callback: Option<Arc<CallbackRelease>>,
     // Captured at enqueue; never borrow a successor turn during admission.
     deadline: Option<Arc<codex_extension_api::ModelInvocationDeadlineState>>,
@@ -663,6 +671,7 @@ struct PendingCall {
     invocation: u64,
     retired: bool,
     manual_request: Option<Value>,
+    approval_request: Option<Value>,
     sender: oneshot::Sender<ToolReply>,
     phase: Phase,
     // Imported approvals have no live Core turn. Only their current binding
@@ -696,14 +705,20 @@ pub(crate) enum Reply {
 
 fn functions(
     specs: &[DynamicToolSpec],
-) -> Vec<(Option<&DynamicToolNamespaceSpec>, &DynamicToolFunctionSpec)> {
+) -> Vec<(
+    Option<&DynamicToolNamespaceSpec>,
+    Cow<'_, DynamicToolFunctionSpec>,
+)> {
     let mut functions = Vec::new();
     for spec in specs {
         match spec {
-            DynamicToolSpec::Function(tool) => functions.push((None, tool)),
+            DynamicToolSpec::Function(tool) => functions.push((None, Cow::Borrowed(tool))),
+            DynamicToolSpec::Computer(tool) => {
+                functions.push((None, Cow::Owned(tool.callback_spec())))
+            }
             DynamicToolSpec::Namespace(namespace) => {
                 for DynamicToolNamespaceTool::Function(tool) in &namespace.tools {
-                    functions.push((Some(namespace), tool));
+                    functions.push((Some(namespace), Cow::Borrowed(tool)));
                 }
             }
         }
@@ -714,7 +729,7 @@ fn functions(
 fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
     ensure!(
         specs.iter().all(|spec| match spec {
-            DynamicToolSpec::Function(_) => true,
+            DynamicToolSpec::Function(_) | DynamicToolSpec::Computer(_) => true,
             DynamicToolSpec::Namespace(ns) => ns.tools.len() == 1,
         }),
         "invalid Python tool slot projection"
@@ -726,6 +741,11 @@ fn validate_slots(specs: &[DynamicToolSpec]) -> Result<()> {
 // thread's authority, including on every replacement.
 pub fn validate_declarations(specs: &[DynamicToolSpec]) -> Result<()> {
     validate_slots(specs)?;
+    for declaration in specs {
+        if let DynamicToolSpec::Computer(computer) = declaration {
+            codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?;
+        }
+    }
     let mut seen = HashSet::new();
     for (namespace, tool) in functions(specs) {
         let key = ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone())
@@ -760,7 +780,7 @@ pub fn model_parameters(specs: Vec<DynamicToolSpec>) -> Result<Value> {
     validate_slots(&specs)?;
     let parameters = functions(&specs)
         .into_iter()
-        .map(|(_, tool)| dynamic_tool_to_responses_api_tool(tool).map(|tool| tool.parameters))
+        .map(|(_, tool)| dynamic_tool_to_responses_api_tool(&tool).map(|tool| tool.parameters))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::to_value(parameters)?)
 }
@@ -788,7 +808,7 @@ pub fn checkpoint_specs(specs: &[DynamicToolSpec]) -> Result<Value> {
                     .entry("deferLoading")
                     .or_insert(Value::Bool(false));
             }
-        } else {
+        } else if spec.get("type").and_then(Value::as_str) == Some("function") {
             spec.as_object_mut()
                 .expect("serialized tool")
                 .entry("deferLoading")
@@ -839,7 +859,15 @@ impl PythonTools {
                 true
             }
             "cancelled" => callback.cancelled.load(Ordering::Acquire),
-            "release" => callback.release(),
+            "release" => {
+                let released = callback.release();
+                // Restored approval waiters have no live PendingReply drop guard.
+                // The accepted receipt is recorded before physical callback release.
+                if call.reentry && call.approval_request.is_some() && call.sender.is_closed() {
+                    pending.remove(&key);
+                }
+                released
+            }
             _ => false,
         }
     }
@@ -1874,6 +1902,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
@@ -2009,6 +2038,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(
                 parent.selecting_steps.load(Ordering::Acquire)
@@ -2035,10 +2065,45 @@ impl PythonTools {
         })
     }
 
+    pub(crate) fn response_receipt(
+        &self,
+        key: &PendingKey,
+        response: DynamicToolResponse,
+    ) -> Result<Option<ResponseItem>> {
+        let arguments = {
+            let pending = self.pending.lock().expect("tool replies poisoned");
+            let Some(call) = pending.get(key) else {
+                return Ok(None);
+            };
+            call.computer_arguments.clone()
+        };
+        let Some(arguments) = arguments else {
+            return Ok(Some(PythonOutput(response).receipt(key)));
+        };
+        let output = codex_tools::ComputerToolOutput::from_dynamic_response(&arguments, response)
+            .map_err(|_| anyhow::anyhow!("Invalid native computer response"))?;
+        let mut item: ResponseItem = output
+            .to_response_item(&key.call, &ToolPayload::Computer { arguments })
+            .into();
+        if let ResponseItem::ComputerCallOutput {
+            internal_chat_message_metadata_passthrough,
+            ..
+        } = &mut item
+        {
+            *internal_chat_message_metadata_passthrough = Some(
+                codex_protocol::models::InternalChatMessageMetadataPassthrough {
+                    turn_id: Some(key.turn.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(Some(item))
+    }
+
     fn prepare(&self, id: u64, specs: Vec<DynamicToolSpec>) -> Result<Generation> {
         validate_declarations(&specs)?;
         let mut entries = Vec::new();
-        for (namespace, tool) in functions(&specs) {
+        for (declaration, (namespace, tool)) in specs.iter().zip(functions(&specs)) {
             let name = ToolName::new(namespace.map(|ns| ns.name.clone()), tool.name.clone());
             let key = name.clone().with_default_namespace();
             ensure!(
@@ -2049,26 +2114,32 @@ impl PythonTools {
                 self.policy.allows(&key),
                 "Python tool is excluded by ToolPolicy: {key}"
             );
-            let mut function = dynamic_tool_to_responses_api_tool(tool)?;
+            let mut function = dynamic_tool_to_responses_api_tool(&tool)?;
             function.defer_loading = None;
-            let spec = match namespace.filter(|_| !key.is_default_namespace()) {
-                None => ToolSpec::Function(function),
-                Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
-                    name: ns.name.clone(),
-                    description: if ns.description.trim().is_empty() {
-                        default_namespace_description(&ns.name)
-                    } else {
-                        ns.description.clone()
-                    },
-                    tools: vec![ResponsesApiNamespaceTool::Function(function)],
-                }),
+            let spec = if let DynamicToolSpec::Computer(computer) = declaration {
+                codex_tools::computer_tool_spec(computer).map_err(anyhow::Error::msg)?
+            } else {
+                match namespace.filter(|_| !key.is_default_namespace()) {
+                    None => ToolSpec::Function(function),
+                    Some(ns) => ToolSpec::Namespace(ResponsesApiNamespace {
+                        name: ns.name.clone(),
+                        description: if ns.description.trim().is_empty() {
+                            default_namespace_description(&ns.name)
+                        } else {
+                            ns.description.clone()
+                        },
+                        tools: vec![ResponsesApiNamespaceTool::Function(function)],
+                    }),
+                }
             };
             entries.push(Entry {
                 manual: false,
                 finish_turn: false,
                 name,
                 spec,
-                exposure: if tool.defer_loading {
+                exposure: if matches!(declaration, DynamicToolSpec::Computer(_)) {
+                    ToolExposure::DirectModelOnly
+                } else if tool.defer_loading {
                     ToolExposure::Deferred
                 } else {
                     ToolExposure::Direct
@@ -2371,6 +2442,7 @@ impl PythonTools {
     }
 
     pub(crate) fn retire_steps(&self) {
+        self.retire_model_producer();
         self.retire_prepared_requests();
         let mut replies = self
             .preparation_replies
@@ -2716,7 +2788,11 @@ impl PythonTools {
         if !call.reentry {
             return Ok(None);
         }
-        match &call.manual_request {
+        match call
+            .manual_request
+            .as_ref()
+            .or(call.approval_request.as_ref())
+        {
             Some(request) => Ok(Some(
                 request["msg"]["_sdk_model"]
                     .as_str()
@@ -3061,6 +3137,142 @@ impl PythonTools {
             }
         }
         accepted
+    }
+
+    /// Capture the decision requirement before exposing an approval interaction.
+    pub(crate) fn require_approval(
+        self: &Arc<Self>,
+        owner: &str,
+        grant: &ManualToolGrant,
+        arguments: Option<Value>,
+    ) -> bool {
+        if !self.check_manual(owner, grant) {
+            return false;
+        }
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        let Some(call) = pending.get_mut(&grant.key) else {
+            return false;
+        };
+        let Some(request) = call.manual_request.as_mut() else {
+            return false;
+        };
+        request["msg"]["_sdk_approval_required"] = Value::Bool(true);
+        if let Some(arguments) = arguments {
+            request["msg"]["_sdk_effective_arguments"] = arguments;
+        }
+        true
+    }
+
+    pub(crate) fn manual_approval_state(&self, key: &PendingKey) -> Result<(bool, Option<Value>)> {
+        let pending = self.pending.lock().expect("Python replies poisoned");
+        let request = pending
+            .get(key)
+            .and_then(|call| call.manual_request.as_ref())
+            .context("Manual approval call is no longer pending")?;
+        Ok((
+            request["msg"]["_sdk_approval_required"] == true,
+            request["msg"].get("_sdk_effective_arguments").cloned(),
+        ))
+    }
+
+    pub(crate) fn restore_approval_requirement(
+        &self,
+        call_id: &str,
+        required: bool,
+        arguments: Option<Value>,
+    ) {
+        let mut pending = self.pending.lock().expect("Python replies poisoned");
+        for (key, call) in pending.iter_mut().filter(|(key, _)| key.call == call_id) {
+            let _ = key;
+            if let Some(request) = call.manual_request.as_mut() {
+                request["msg"]["_sdk_restored_approval"] = Value::Bool(true);
+                request["msg"]["_sdk_approval_required"] = Value::Bool(required);
+                if let Some(arguments) = &arguments {
+                    request["msg"]["_sdk_effective_arguments"] = arguments.clone();
+                }
+            }
+        }
+    }
+
+    /// Claim the exact native waiter once, then use the ordinary callback inbox.
+    pub(crate) fn approve_manual(
+        self: &Arc<Self>,
+        owner: &str,
+        grant: &ManualToolGrant,
+    ) -> Result<bool> {
+        if !self.check_manual(owner, grant) {
+            return Ok(false);
+        }
+        let request = {
+            let mut pending = self.pending.lock().expect("Python replies poisoned");
+            let Some(call) = pending.get_mut(&grant.key) else {
+                return Ok(false);
+            };
+            let Some(original) = call.manual_request.as_ref() else {
+                return Ok(false);
+            };
+            ensure!(
+                original["msg"]["_sdk_approval_required"] == true,
+                "Tool has no captured approval requirement"
+            );
+            ensure!(
+                original["msg"]["_sdk_code_origin"].is_null(),
+                "Managed approvals require a direct function call"
+            );
+            if call
+                .deadline
+                .as_ref()
+                .is_some_and(|deadline| !deadline.admit(|| true).unwrap_or(false))
+            {
+                return Ok(false);
+            }
+            let mut request = original.clone();
+            let callback = CallbackRelease::new(
+                json!({"kind":"tool","request":grant.key,"invocation":grant.invocation.to_string()}),
+            );
+            request["msg"]["_sdk_manual"] = Value::Bool(false);
+            request["msg"]["_sdk_callback"] = callback.receipt.clone();
+            call.approval_request = call.manual_request.take();
+            call.callback = Some(callback);
+            request
+        };
+        self.family
+            .requests
+            .send(QueuedRequest::Call(
+                Arc::downgrade(self),
+                grant.key.clone(),
+                grant.invocation,
+                request,
+            ))
+            .map_err(|_| anyhow::anyhow!("Managed approval owner closed"))?;
+        Ok(true)
+    }
+
+    pub(crate) fn record_approved_result(&self, key: &PendingKey, response: &DynamicToolResponse) {
+        let Some(generation) = self.resolve_generation(key.reply.generation) else {
+            return;
+        };
+        let invocation = self
+            .pending
+            .lock()
+            .expect("Python replies poisoned")
+            .get(key)
+            .filter(|call| call.approval_request.is_some())
+            .map(|call| call.invocation);
+        let Some(invocation) = invocation else {
+            return;
+        };
+        if let Some(owner) = self
+            .manual_restore
+            .lock()
+            .expect("Manual restore poisoned")
+            .as_ref()
+            .and_then(|owner| owner.upgrade())
+        {
+            if let Some(frame) = owner.lock().expect("Manual continuation poisoned").as_mut() {
+                frame.record(key, invocation, generation, response);
+            }
+        }
     }
 
     pub(crate) fn bind_manual_restore(&self, owner: crate::manual_checkpoint::WeakOwner) {
@@ -3465,12 +3677,18 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    computer_arguments: matches!(
+                        entry.spec,
+                        ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
+                    )
+                    .then(|| request["msg"]["arguments"].to_string()),
                     callback,
                     deadline,
                     media,
                     _tracing: tracing,
                     invocation,
                     retired: false,
+                    approval_request: None,
                     manual_request: entry.manual.then(|| {
                         let mut manual = request.clone();
                         // Trace metadata belongs to automatic ToolContext callbacks,
@@ -4481,6 +4699,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     receipt.terminal.store(true, Ordering::Release);
                     receipt.state.send_replace(AdmissionState::Closed);
                 }
+                tools.retire_model_producer();
                 tools.retire_prepared_requests();
                 tools.family.graph_changed.send_replace(());
                 // A callback may still retain its issuer after Core tears it
@@ -5158,7 +5377,13 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                 key: key.clone(),
             };
             let response = receiver.await.map_err(|_| {
-                FunctionCallError::RespondToModel("Python tool call cancelled before reply".into())
+                if matches!(call.payload, ToolPayload::Computer { .. }) {
+                    FunctionCallError::Fatal("Computer call cancelled before reply".into())
+                } else {
+                    FunctionCallError::RespondToModel(
+                        "Python tool call cancelled before reply".into(),
+                    )
+                }
             })?;
             _reply.completed = true;
             #[cfg(test)]
@@ -5182,6 +5407,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         .expect("Terminal receipts poisoned")
                         .insert(key, invocation);
                 }
+            }
+            if let ToolPayload::Computer { arguments } = &call.payload {
+                return Ok(
+                    Box::new(codex_tools::ComputerToolOutput::from_dynamic_response(
+                        arguments,
+                        response.response,
+                    )?) as Box<dyn ToolOutput>,
+                );
             }
             Ok(Box::new(ReplyOutput {
                 output: PythonOutput(response.response),
@@ -7569,6 +7802,7 @@ pub(crate) mod managed_tests {
             suspended: AtomicBool::new(false),
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            model_producer: Mutex::default(),
             prepared_requests: Mutex::default(),
             manual_restore: Mutex::new(None),
             manual_progress: watch::channel(0).0,

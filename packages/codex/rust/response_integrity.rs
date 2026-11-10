@@ -74,6 +74,7 @@ impl Stream for Generation {
                             call_id: Some(_),
                             ..
                         } | ResponseItem::CustomToolCallOutput { .. }
+                            | ResponseItem::ComputerCallOutput { .. }
                     ) || matches!(
                         item,
                         ResponseItem::ToolSearchOutput {
@@ -121,6 +122,7 @@ impl Stream for Generation {
                         // WebSearch turn item. A later empty placeholder must
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
+                        | ResponseItem::ComputerCall { .. }
                         | ResponseItem::CustomToolCall { .. }
                         | ResponseItem::WebSearchCall { .. }
                         | ResponseItem::FileSearchCall { .. }
@@ -171,5 +173,62 @@ impl Stream for Generation {
             }
         }
         next
+    }
+}
+
+#[cfg(test)]
+mod computer_guard_tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn computer_progress_completes_but_provider_computer_receipts_never_grant_authority() {
+        for receipt in [false, true] {
+            let value = if receipt {
+                json!({"type":"computer_call_output","call_id":"computer-only","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,private-image"},"acknowledged_safety_checks":[]})
+            } else {
+                json!({"type":"computer_call","call_id":"computer-only","actions":[{"type":"wait"}]})
+            };
+            for added in [false, true] {
+                let item = serde_json::from_value(value.clone()).unwrap();
+                let mut generation = Generation {
+                    stream: Box::pin(futures_util::stream::iter(vec![
+                        Ok(if added {
+                            ResponseEvent::OutputItemAdded(item)
+                        } else {
+                            ResponseEvent::OutputItemDone(item)
+                        }),
+                        Ok(ResponseEvent::Completed {
+                            response_id: "computer".into(),
+                            token_usage: None,
+                            usage_metadata: None,
+                            end_turn: None,
+                        }),
+                    ])),
+                    owner: Interceptor {
+                        thread: "computer-guard".into(),
+                        admission: None,
+                    },
+                    pending_assistant: false,
+                    last_assistant_has_text: false,
+                    completed_native_item: false,
+                    rejected: false,
+                };
+                let first = generation.next().await.unwrap();
+                if receipt {
+                    assert!(matches!(
+                        first,
+                        Err(ModelResponseError::ResponseIntegrity {
+                            reason: ResponseIntegrityReason::ProviderOwnedToolReceipt
+                        })
+                    ));
+                    assert!(generation.next().await.is_none());
+                } else if !added {
+                    assert!(first.is_ok());
+                    assert!(generation.next().await.unwrap().is_ok());
+                }
+            }
+        }
     }
 }

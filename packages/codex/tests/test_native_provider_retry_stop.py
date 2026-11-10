@@ -82,3 +82,38 @@ async def test_http_retry_checks_stop_before_a_fresh_attempt(cancel: bool) -> No
             assert attempts == 1
             with pytest.raises(TurnStoppedError):
                 await turn.get_result()
+
+
+@pytest.mark.parametrize("budget", [0, 1])
+async def test_provider_request_retry_budget_controls_actual_attempts(budget: int) -> None:
+    from agents import NativeError
+
+    attempts = 0
+    peer = ResponsesFixture()
+    peer.respond(assistant_output("retry recovered"))
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await request.read()
+            return web.json_response({"error": {"message": "retryable failure"}}, status=503)
+        return await peer.handle(request)
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", handle)
+    async with timeout(15), TestServer(app) as server:
+        async with NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-key",
+            supports_websockets=False,
+            request_max_retries=budget,
+            stream_max_retries=0,
+        ) as provider:
+            agent = Agent(model="gpt-5.5", instructions="Answer.", provider=provider)
+            if budget:
+                assert (await agent.run("Reply.")).final_output == "retry recovered"
+            else:
+                with pytest.raises(NativeError):
+                    await agent.run("Reply.")
+    assert attempts == budget + 1

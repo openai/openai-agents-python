@@ -13,7 +13,9 @@ from _agents_codex.manual import (
     Address as Address,
     Annotated as Annotated,
     Any as Any,
+    ApprovalDecision as ApprovalDecision,
     ApprovalRequest as ApprovalRequest,
+    ApprovalRequested as ApprovalRequested,
     BaseModel as BaseModel,
     ElicitationRequest as ElicitationRequest,
     Field as Field,
@@ -62,6 +64,8 @@ from _agents_codex.manual import (
 __all__ = [
     "ActionReply",
     "ActionRequested",
+    "ApprovalRequested",
+    "ApprovalDecision",
     "ApprovalRequest",
     "FormRequest",
     "UrlRequest",
