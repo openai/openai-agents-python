@@ -282,14 +282,26 @@ def _assert_responses_frame_released(error: BaseException) -> None:
     frames = []
     trace = error.__traceback__
     while trace is not None:
-        if trace.tb_frame.f_code is ResponsesModel.complete.__code__:
+        if trace.tb_frame.f_code.co_filename == ResponsesModel.complete.__code__.co_filename:
             frames.append(trace.tb_frame.f_locals)
         trace = trace.tb_next
     assert frames
     # Application/client frames retain their own values. SDK adapter frames must
     # release the request and provider payloads before exposing their failure.
-    payload_names = {"request", "body", "response", "value", "output", "raw_usage", "usage"}
+    payload_names = {
+        "request",
+        "body",
+        "response",
+        "value",
+        "output",
+        "raw_usage",
+        "usage",
+        "item",
+        "part",
+        ".0",
+    }
     assert all(not payload_names.intersection(frame) for frame in frames)
+    assert all("synthetic-private-output" not in repr(frame) for frame in frames)
 
 
 @pytest.mark.parametrize("status", ["incomplete", "failed"])
@@ -326,4 +338,19 @@ async def test_responses_client_failure_keeps_original_exception():
     with pytest.raises(LookupError) as caught:
         await model.complete(ModelRequest({"model": "fixture", "input": "prompt"}, None, "s", "t"))
     assert caught.value is failure
+    _assert_responses_frame_released(caught.value)
+
+
+async def test_responses_malformed_output_traceback_releases_all_sdk_frames():
+    async def create(**options):
+        return {
+            "status": "completed",
+            "output": [
+                {"type": "message", "content": [None], "private": "synthetic-private-output"}
+            ],
+        }
+
+    model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    with pytest.raises(AttributeError) as caught:
+        await model.complete(ModelRequest({"model": "fixture", "input": "prompt"}, None, "s", "t"))
     _assert_responses_frame_released(caught.value)

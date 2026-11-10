@@ -394,6 +394,8 @@ class ResponsesModel:
         output: list[dict[str, Any]] = []
         raw_usage: Any = None
         usage: dict[str, int] | None = None
+        item: Any = None
+        part: Any = None
         try:
             create = self.client.responses.create
             if not inspect.iscoroutinefunction(inspect.unwrap(create)):
@@ -406,12 +408,16 @@ class ResponsesModel:
             response = await create(stream=False, extra_body=body)
             value = response.model_dump() if hasattr(response, "model_dump") else response
             output = value.get("output") or []
-            refusal = any(
-                part.get("type") == "refusal"
-                for item in output
-                if item.get("type") == "message"
-                for part in item.get("content", [])
-            )
+            refusal = False
+            for item in output:
+                if item.get("type") != "message":
+                    continue
+                for part in item.get("content", []):
+                    if part.get("type") == "refusal":
+                        refusal = True
+                        break
+                if refusal:
+                    break
             if value.get("status") != "completed" and not refusal:
                 raise ValueError("ResponsesModel requires a completed response")
             raw_usage = value.get("usage")
@@ -434,7 +440,7 @@ class ResponsesModel:
 
         finally:
             # Traceback-local logging must not retain SDK-owned request/response payloads.
-            del request, body, response, value, output, raw_usage, usage
+            del request, body, response, value, output, raw_usage, usage, item, part
 
 
 _preserve_module_identity(globals(), "agents.models")
