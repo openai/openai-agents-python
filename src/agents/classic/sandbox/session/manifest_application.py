@@ -5,6 +5,8 @@ from pathlib import Path
 
 from ...run_config import DEFAULT_MAX_MANIFEST_ENTRY_CONCURRENCY
 from ..entries import BaseEntry, Dir, Mount, resolve_workspace_path
+from ..entries.artifacts import _validate_git_repo_entry_hosts
+from ..errors import _redact_git_host_error_data
 from ..manifest import Manifest
 from ..materialization import MaterializationResult, MaterializedFile, gather_in_order
 from ..types import ExecResult, User
@@ -27,6 +29,7 @@ class ManifestApplier:
         self._apply_entry = apply_entry
         self._max_entry_concurrency = max_entry_concurrency
 
+    @_redact_git_host_error_data
     async def apply_manifest(
         self,
         manifest: Manifest,
@@ -35,6 +38,7 @@ class ManifestApplier:
         provision_accounts: bool = True,
         base_dir: Path | None = None,
     ) -> MaterializationResult:
+        manifest._validate_git_repo_hosts()
         base_dir = posix_path_as_path(coerce_posix_path("/")) if base_dir is None else base_dir
         root = posix_path_as_path(coerce_posix_path(manifest.root))
 
@@ -132,12 +136,14 @@ class ManifestApplier:
     def _paths_overlap(left: Path, right: Path) -> bool:
         return left == right or left in right.parents or right in left.parents
 
+    @_redact_git_host_error_data
     async def _apply_entry_batch(
         self,
         entries: Sequence[tuple[Path, BaseEntry]],
         *,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        _validate_git_repo_entry_hosts(artifact for _, artifact in entries)
         files: list[MaterializedFile] = []
         parallel_batch: list[tuple[Path, BaseEntry]] = []
 

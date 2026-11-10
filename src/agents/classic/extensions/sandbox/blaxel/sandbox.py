@@ -1192,7 +1192,7 @@ class BlaxelSandboxClient(BaseSandboxClient["BlaxelSandboxClientOptions"]):
         """
         if not isinstance(state, BlaxelSandboxSessionState):
             raise TypeError("BlaxelSandboxClient.resume expects a BlaxelSandboxSessionState")
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         SandboxInstance = _import_blaxel_sdk()
         blaxel_sandbox = None
         reconnected = False

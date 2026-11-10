@@ -131,6 +131,7 @@ async def public_command(url, token, workspace, command, requests):
     import pytest
     from aiohttp import web
     from aiohttp.test_utils import TestServer
+    from tests._asyncio import timeout
     from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 
     from agents import (
@@ -190,14 +191,9 @@ async def public_command(url, token, workspace, command, requests):
                 url=url,
                 write_policy="legacy",
                 cwd=str(workspace),
-                tools=["exec_command"],
+                tools=["exec_command", "write_stdin"],
                 headers={"Authorization": "Bearer " + token},
             )
-            call = uuid4().hex
-            replies.respond(
-                function_call("exec_command", {"cmd": command, "yield_time_ms": 30000}, call)
-            )
-            replies.respond(assistant_output("complete"))
             agent = Agent(instructions="Use the job.", provider=provider)
             for policy in (
                 NetworkPolicy(),
@@ -214,10 +210,42 @@ async def public_command(url, token, workspace, command, requests):
             # Observe the native request as well as the public Turn's pending approval.
             with patch.object(_native.NativeThread, "_next_session_event", observe_event):
                 async with agent.session(environment=selected) as session:
-                    result = await (await session.submit("Run the job command.")).get_result()
-                    assert result.final_output == "complete"
-                    output = tool_output(replies.requests[-1], call)
-                    print(output, flush=True)
+                    output_chunks = []
+                    process_id = None
+                    name = "exec_command"
+                    arguments = {"cmd": command, "yield_time_ms": 30000}
+                    # A running reply has been leaving the job active in this Session.
+                    # Polling has been awaiting exit without starting another process.
+                    async with timeout(60):
+                        while True:
+                            call = uuid4().hex
+                            replies.respond(function_call(name, arguments, call))
+                            replies.respond(assistant_output("complete"))
+                            result = await (
+                                await session.submit("Run or wait for the same job command.")
+                            ).get_result()
+                            assert result.final_output == "complete"
+                            chunk = tool_output(replies.requests[-1], call)
+                            print(chunk, flush=True)
+                            output_chunks.append(chunk)
+                            running = re.search(
+                                r"^Process running with session ID ([0-9]+)$", chunk, re.MULTILINE
+                            )
+                            if running is None:
+                                assert re.search(
+                                    r"^Process exited with code 0$", chunk, re.MULTILINE
+                                ), chunk
+                                break
+                            yielded_id = int(running[1])
+                            assert process_id is None or process_id == yielded_id, chunk
+                            process_id = yielded_id
+                            name = "write_stdin"
+                            arguments = {
+                                "session_id": process_id,
+                                "chars": "",
+                                "yield_time_ms": 5000,
+                            }
+                    output = "\n".join(output_chunks)
                     blocked = uuid4().hex
                     replies.respond(
                         function_call(
