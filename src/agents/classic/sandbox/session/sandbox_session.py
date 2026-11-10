@@ -572,6 +572,21 @@ class SandboxSession(BaseSandboxSession):
     ) -> ExecResult:
         return await self._inner.exec(*command, timeout=timeout, shell=shell, user=user)
 
+    @instrumented_op(
+        "exec",
+        data=lambda session, script, *arguments: _exec_start_data(
+            session, "sh", "-c", script, "sandbox-git-copy", *arguments, shell=False
+        ),
+        finish_data=_exec_finish_data,
+        ok=lambda result: cast(ExecResult, result).ok(),
+        outputs=lambda result: (
+            cast(ExecResult, result).stdout,
+            cast(ExecResult, result).stderr,
+        ),
+    )
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        return await self._inner._exec_git_copy(script, *arguments)
+
     async def _exec_internal(
         self,
         *command: str | Path,

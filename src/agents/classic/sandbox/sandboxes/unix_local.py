@@ -383,6 +383,41 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
         env, cwd = await self._resolved_exec_context()
+        return await self._exec_in_context(*command, env=env, cwd=cwd, timeout=timeout)
+
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        cwd = await self._exec_workspace()
+        path = await run_blocking_workspace_io(lambda: self._git_copy_path(cwd))
+        shell = shutil.which("sh", path=path) if path else None
+        if shell is None:
+            return ExecResult(
+                stdout=b"", stderr=b"Unable to locate the provider's sh", exit_code=127
+            )
+        return await self._exec_in_context(
+            shell, "-c", script, "sandbox-git-copy", *arguments, env={"PATH": path}, cwd=cwd
+        )
+
+    def _git_copy_path(self, cwd: str) -> str:
+        configured_path = os.defpath
+        if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
+            configured_path = f"{os.environ.get('PATH', os.defpath)}{os.pathsep}{os.defpath}"
+        workspace = Path(os.path.realpath(cwd))
+        directories = (
+            Path(os.path.realpath(entry or ".")) for entry in configured_path.split(os.pathsep)
+        )
+        return os.pathsep.join(
+            str(directory)
+            for directory in directories
+            if not directory.is_relative_to(workspace) and os.pathsep not in str(directory)
+        )
+
+    async def _exec_in_context(
+        self,
+        *command: str | Path,
+        env: dict[str, str],
+        cwd: str,
+        timeout: float | None = None,
+    ) -> ExecResult:
         workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -595,12 +630,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             }
         env.update(await self.state.manifest.environment.resolve())
 
+        cwd = await self._exec_workspace()
+        env["HOME"] = cwd
+        return env, cwd
+
+    async def _exec_workspace(self) -> str:
         workspace = Path(self.state.manifest.root)
         if not await asyncio.to_thread(workspace.exists):
             raise WorkspaceRootNotFoundError(path=workspace)
-
-        env["HOME"] = str(workspace)
-        return env, str(workspace)
+        return str(workspace)
 
     async def _pump_process_stream(
         self,

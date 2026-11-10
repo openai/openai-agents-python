@@ -662,6 +662,10 @@ class BaseSandboxSession(abc.ABC):
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         return await self._exec_internal(*sanitized_command, timeout=timeout)
 
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        """Run a GitRepo copy in the backend's configured execution environment."""
+        return await self.exec("sh", "-c", script, "sandbox-git-copy", *arguments, shell=False)
+
     @redact_mount_error_data
     async def resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         self._assert_exposed_port_configured(port)

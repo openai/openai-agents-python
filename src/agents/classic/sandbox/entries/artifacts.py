@@ -34,49 +34,6 @@ _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
-# Capture the sandbox's executable search path before the checkout exists. Anchor relative
-# entries to the original working directory for both tool discovery and helper lookup.
-_GIT_TOOL_CHECK = r"""command -v git >/dev/null 2>&1 || exit 1
-CDPATH=
-cd -P . || exit 0
-set -f
-IFS=:
-tool_path="${PATH-}:/usr/bin:/bin"
-copy_path=
-for directory in $tool_path; do
-    case "$directory" in
-        /*) ;;
-        *) directory="${PWD%/}/${directory:-.}" ;;
-    esac
-    # A colon in the original working directory cannot be encoded in PATH.
-    case "$directory" in *:*) continue ;; esac
-    [ -d "$directory" ] || continue
-    copy_path="${copy_path:+$copy_path:}$directory"
-done
-# Start the clean environment with an installed system tool. The configured PATH
-# can include workspace directories populated by other manifest entries.
-env_program=
-for directory in /usr/bin /bin; do
-    if [ -f "$directory/env" ] && [ -x "$directory/env" ]; then
-        env_program="$directory/env"
-        break
-    fi
-done
-printf '%s\000' "$env_program"
-for tool in sh cp; do
-    executable=
-    for directory in $copy_path; do
-        candidate="${directory%/}/$tool"
-        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-            executable=$candidate
-            break
-        fi
-    done
-    printf '%s\000' "$executable"
-done
-printf '%s\000' "$copy_path"
-"""
-
 _GIT_COPY_SOURCE_BOUNDARY = """case "$source_root" in
     "$repo_root"|"$repo_root"/*) ;;
     *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
@@ -87,6 +44,27 @@ _GIT_COPY = (
     """set -eu
 CDPATH=
 cd -P .
+# Resolve relative PATH entries from the provider's original working directory.
+# Changing to the checkout must not change where copy tools look for helpers.
+remaining_path=${PATH-/usr/bin:/bin}
+copy_path=
+while :; do
+    directory=${remaining_path%%:*}
+    case "$directory" in
+        /*) ;;
+        *) directory="${PWD%/}/${directory:-.}" ;;
+    esac
+    case "$directory" in
+        *:*) ;;
+        *) copy_path="${copy_path:+$copy_path:}$directory" ;;
+    esac
+    case "$remaining_path" in
+        *:*) remaining_path=${remaining_path#*:} ;;
+        *) break ;;
+    esac
+done
+PATH="${copy_path:-/usr/bin:/bin}"
+export PATH
 destination=$3
 case "$destination" in
     /*) ;;
@@ -104,7 +82,7 @@ cd -P "./$2"
 source_root=$PWD
 """
     + _GIT_COPY_SOURCE_BOUNDARY
-    + """exec "$COPY_PROGRAM" -R -P -- . "$destination/"
+    + """exec cp -R -P -- . "$destination/"
 """
 )
 
@@ -830,8 +808,8 @@ class GitRepo(BaseEntry):
     ) -> list[MaterializedFile]:
         git_subpath = self._validate_subpath()
 
-        # Check Git and discover the copy tools in the configured sandbox environment.
-        git_check = await session.exec(_GIT_TOOL_CHECK, shell=["sh", "-c"])
+        # Check Git in the same environment that will be used to clone.
+        git_check = await session.exec("command -v git >/dev/null 2>&1")
         if not git_check.ok():
             context: dict[str, object] = {"repo": self.repo, "ref": self.ref}
             image = getattr(session.state, "image", None)
@@ -841,19 +819,6 @@ class GitRepo(BaseEntry):
 
         tmp_dir = f"/tmp/sandbox-git-{session.state.session_id.hex}-{uuid.uuid4().hex}"
         git_src_root = self._git_src_root(tmp_dir, git_subpath)
-        copy_tools = git_check.stdout.split(b"\0")
-        if (
-            len(copy_tools) != 5
-            or copy_tools[-1]
-            or not all(path.startswith(b"/") for path in copy_tools[:-1])
-        ):
-            raise GitCopyError(
-                src_root=git_src_root,
-                dest=dest,
-                stderr="Unable to locate executable env, sh, and cp tools in the sandbox",
-                context={"repo": self.repo, "ref": self.ref, "subpath": self.subpath},
-            )
-        env_program, shell_program, copy_program, copy_path = map(os.fsdecode, copy_tools[:-1])
         url = f"https://{self.host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
@@ -879,21 +844,11 @@ class GitRepo(BaseEntry):
 
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
-            # Clear the environment before starting the copy shell. Pass the executable as
-            # an assignment so sandbox backends preserve the absolute path across chdir.
-            copy = await session.exec(
-                env_program,
-                "-i",
-                f"PATH={copy_path}",
-                f"COPY_PROGRAM={copy_program}",
-                shell_program,
-                "-c",
+            copy = await session._exec_git_copy(
                 _GIT_COPY,
-                "sandbox-git-copy",
                 tmp_dir,
                 git_subpath.as_posix() if git_subpath is not None else ".",
                 sandbox_path_str(dest),
-                shell=False,
             )
             if not copy.ok():
                 raise GitCopyError(

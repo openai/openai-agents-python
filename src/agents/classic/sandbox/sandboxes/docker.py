@@ -618,6 +618,7 @@ class DockerSandboxSession(BaseSandboxSession):
         timeout: float | None,
         command_for_errors: tuple[str | Path, ...],
         kill_on_timeout: bool,
+        environment: list[str] | None = None,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
@@ -627,6 +628,7 @@ class DockerSandboxSession(BaseSandboxSession):
                 demux=True,
                 workdir=workdir,
                 user=user or "",
+                environment=environment,
             ),
         )
         try:
@@ -724,11 +726,64 @@ class DockerSandboxSession(BaseSandboxSession):
     ) -> ExecResult:
         return await self._exec_internal_for_user(*command, timeout=timeout, user=None)
 
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        environment = await run_blocking_workspace_io(self._git_copy_environment)
+        if environment is None:
+            return ExecResult(
+                stdout=b"",
+                stderr=b"Unable to locate the provider's Git copy tools",
+                exit_code=127,
+            )
+        return await self._exec_internal_for_user(
+            "sh", "-c", script, "sandbox-git-copy", *arguments, user=None, environment=environment
+        )
+
+    def _git_copy_environment(self) -> list[str] | None:
+        image = self._container.image
+        if image is None:
+            return None
+        image_config = image.attrs.get("Config") or {}
+        image_environment: dict[str, str] = {}
+        for entry in image_config.get("Env") or ():
+            name, separator, value = entry.partition("=")
+            if separator:
+                image_environment[name] = value
+
+        # Use the immutable image's PATH. The container configuration already
+        # includes the manifest overlay and is only used to remove its extra keys.
+        image_path = image_environment.get(
+            "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        image_workdir = image_config.get("WorkingDir") or "/"
+        workspace = PurePosixPath(posixpath.normpath(self.state.manifest.root))
+        directories = (
+            PurePosixPath(posixpath.normpath(posixpath.join(image_workdir, entry)))
+            for entry in f"{image_path}:/usr/bin:/bin".split(":")
+        )
+        path = ":".join(
+            str(directory)
+            for directory in directories
+            if directory.is_absolute()
+            and ":" not in str(directory)
+            and not directory.is_relative_to(workspace)
+        )
+        if not path:
+            return None
+        image_environment["PATH"] = path
+
+        container_config = self._container.attrs.get("Config") or {}
+        container_keys = [entry.partition("=")[0] for entry in container_config.get("Env") or ()]
+        return [
+            *(f"{name}={value}" for name, value in image_environment.items()),
+            *(name for name in container_keys if name not in image_environment),
+        ]
+
     async def _exec_internal_for_user(
         self,
         *command: str | Path,
         timeout: float | None = None,
         user: str | None = None,
+        environment: list[str] | None = None,
     ) -> ExecResult:
         # `docker-py` is synchronous and can block indefinitely (e.g. hung
         # process, daemon issues). Run in a worker thread so we can enforce a
@@ -747,6 +802,7 @@ class DockerSandboxSession(BaseSandboxSession):
             timeout=timeout,
             command_for_errors=command,
             kill_on_timeout=True,
+            environment=environment,
         )
 
     async def _stream_into_exec(
