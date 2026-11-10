@@ -1,0 +1,49 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -26,6 +26,7 @@
+ #[derive(Default)]
+ pub(crate) struct RootDescriptor {
+     pub snapshot: OnceLock<Value>,
++    pub metadata: OnceLock<Value>,
+     pub ended: AtomicBool,
+ }
+ impl std::fmt::Debug for RootDescriptor {
+@@ -287,13 +288,14 @@
+     credential_ref: Option<String>,
+ }
+ #[derive(Serialize)]
+-struct Readback {
++struct Readback<'a> {
+     handle: String,
+     trace_id: String,
+     span_id: String,
+     parent_span_id: Option<String>,
+     disabled: bool,
+     include_sensitive_data: bool,
++    root_metadata: Option<&'a Value>,
+ }
+ fn readback(key: &str, handle: &Handle) -> Result<String, String> {
+     let span = handle.context.span();
+@@ -306,6 +308,7 @@
+         parent_span_id: handle.parent_span_id.clone(),
+         disabled: policy.disabled,
+         include_sensitive_data: policy.include_sensitive_data,
++        root_metadata: policy.root_descriptor.metadata.get(),
+     })
+     .map_err(|_| "Native tracing context could not serialize".into())
+ }
+@@ -425,6 +428,13 @@
+     let metadata = metadata
+         .as_object()
+         .ok_or("Tracing metadata must be an object")?;
++    if options.detached || inherited.is_none() {
++        // Original JSON on the existing root owner, without lossy attribute conversion.
++        let _ = policy
++            .root_descriptor
++            .metadata
++            .set(Value::Object(metadata.clone()));
++    }
+     let mut attributes = Vec::new();
+     attributes.push(KeyValue::new("sdk.span.kind", options.kind));
+     if let Some(group) = options.group_id {

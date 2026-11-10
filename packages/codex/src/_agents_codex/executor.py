@@ -325,6 +325,8 @@ class Environment(Generic[ContextT_contra]):
     cwd: str
     tools: Sequence[ExecutorToolName] = ()
     headers: Mapping[str, str] = field(default_factory=dict, repr=False)
+    # Captured command overrides; current declarations only, excluded from saved state.
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     connect_timeout: float | None = None
     capability_directories: Sequence[str] | None = None
     approval: (
@@ -352,6 +354,7 @@ class Environment(Generic[ContextT_contra]):
         *,
         cwd: str | PathLike[str],
         tools: Sequence[ExecutorToolName] = (),
+        env: Mapping[str, str] | None = None,
         writable_roots: Sequence[str | PathLike[str]] = (),
         network: NetworkPolicy | RuntimeNetworkPolicy | None = None,
         capability_directories: Sequence[str] | None = None,
@@ -397,6 +400,7 @@ class Environment(Generic[ContextT_contra]):
             url=_path_uri(path),
             cwd=path,
             tools=tools,
+            env=env,
             writable_roots=writable_roots,
             network=network,
             capability_directories=capability_directories,
@@ -555,6 +559,27 @@ class Environment(Generic[ContextT_contra]):
                 raise ValueError("Invalid executor header value")
             headers[key] = value
         object.__setattr__(self, "headers", MappingProxyType(headers))
+        if self.env is not None:
+            if not isinstance(self.env, Mapping):
+                raise TypeError("Executor environment must be a string mapping")
+            values = dict(self.env)
+            for name, value in values.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or "\0" in name
+                    or "=" in name
+                    or name in {"CODEX_SDK_BWRAP_SEARCH_PATH", "CARGO_BIN_EXE_bwrap"}
+                ):
+                    raise ValueError("Invalid executor environment variable name")
+                if not isinstance(value, str) or "\0" in value:
+                    raise ValueError("Invalid executor environment variable value")
+                try:
+                    name.encode("utf-8")
+                    value.encode("utf-8")
+                except UnicodeError:
+                    raise ValueError("Executor environment must contain valid Unicode") from None
+            object.__setattr__(self, "env", MappingProxyType(values))
         object.__setattr__(self, "tools", selected)
         if self.capability_directories is not None:
             if isinstance(self.capability_directories, str):
@@ -607,6 +632,8 @@ class Environment(Generic[ContextT_contra]):
             "headers": dict(self.headers),
             "connect_timeout": self.connect_timeout,
         }
+        if self.env is not None:
+            result["env"] = dict(self.env)
         if self.read_only:
             result["read_only"] = True
         if self._is_local:

@@ -379,11 +379,11 @@ Configures a local SDK executor or an application-owned WSS executor. Pass it to
 These calls accept an `EnvironmentSource`: either a borrowed `Environment` descriptor or an async context manager that yields one. See [managed executor lifetimes](execution.md#manage-the-executor-lifetime) for acquisition, cleanup and restore rules.
 
 ```text
-Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
+Environment(*, url: str, cwd: str, tools=(), headers={}, env=None, connect_timeout=None,
             capability_directories=None, approval=None, transform_arguments=None,
             transform_result=None, policy_timeout=30, network=None, writable_roots=None,
             mounts=(), write_policy="strict")
-Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
+Environment.local(*, cwd, tools=(), env=None, writable_roots=(), network=None,
                   capability_directories=None, approval=None, transform_arguments=None,
                   transform_result=None, policy_timeout=30, mounts=(),
                   write_policy="strict") -> Environment
@@ -393,6 +393,7 @@ Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
 
 Environment options have these limits:
 
+- Source builds: `env` as an immutable captured string map for command launches; [defaults, validation, and restore behavior](execution.md#command-environment).
 - `tools` selects any combination of `exec_command`, `write_stdin`, `apply_patch`, `project_glob` and `project_grep`, defaulting to none. `write_stdin` requires `exec_command`.
 - See [executor tool selection](execution.md#select-executor-tools) for project search and its runtime constraints.
 - `approval` returns bool or `StopTurn`, without a transform deadline. It sees original arguments. Denial skips `transform_arguments`. `policy_timeout` bounds only transforms.
