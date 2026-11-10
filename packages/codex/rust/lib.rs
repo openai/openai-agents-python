@@ -1396,6 +1396,117 @@ impl NativeThread {
         })
     }
 
+    fn _call_mcp_app_tool<'py>(
+        &self,
+        py: Python<'py>,
+        server: String,
+        tool: String,
+        arguments_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let arguments: Value = serde_json::from_str(arguments_json).map_err(py_error)?;
+        if !arguments.is_object() {
+            return Err(PyValueError::new_err("MCP app arguments must be an object"));
+        }
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let tools = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .ok_or_else(|| py_error("MCP apps require a managed Session"))?;
+            tools.check_idle(&inner.thread).await.map_err(py_error)?;
+            let config = inner.thread.config().await;
+            config
+                .mcp_servers
+                .get()
+                .get(&server)
+                .filter(|selected| {
+                    selected.enabled
+                        && selected.is_local_environment()
+                        && !mcp_roster::enterprise(selected)
+                        && selected
+                            .enabled_tools
+                            .as_ref()
+                            .is_some_and(|names| names.contains(&tool))
+                        && !selected
+                            .disabled_tools
+                            .as_ref()
+                            .is_some_and(|names| names.contains(&tool))
+                        && selected
+                            .tools
+                            .get(&tool)
+                            .and_then(|tool| tool.approval_mode)
+                            == Some(codex_config::AppToolApproval::Approve)
+                })
+                .ok_or_else(|| py_error("MCP app tool is not selected and preapproved"))?;
+            let result = inner
+                .thread
+                .call_mcp_tool(&server, &tool, Some(arguments), None)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&result).map_err(py_error)
+        })
+    }
+
+    fn _mcp_app_tool_metadata<'py>(
+        &self,
+        py: Python<'py>,
+        server: String,
+        tool: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let tools = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .ok_or_else(|| py_error("MCP apps require a managed Session"))?;
+            tools.check_idle(&inner.thread).await.map_err(py_error)?;
+            let config = inner.thread.config().await;
+            config
+                .mcp_servers
+                .get()
+                .get(&server)
+                .filter(|selected| {
+                    selected.enabled
+                        && selected.is_local_environment()
+                        && !mcp_roster::enterprise(selected)
+                        && selected
+                            .enabled_tools
+                            .as_ref()
+                            .is_some_and(|names| names.contains(&tool))
+                        && !selected
+                            .disabled_tools
+                            .as_ref()
+                            .is_some_and(|names| names.contains(&tool))
+                        && selected
+                            .tools
+                            .get(&tool)
+                            .and_then(|tool| tool.approval_mode)
+                            == Some(codex_config::AppToolApproval::Approve)
+                })
+                .ok_or_else(|| py_error("MCP app tool is not selected and preapproved"))?;
+            let (_, snapshot) = inner
+                .thread
+                .mcp_server_status_snapshot(&server, codex_mcp::McpSnapshotDetail::ToolsAndAuthOnly)
+                .await
+                .map_err(|_| py_error("MCP app tool metadata is unavailable"))?;
+            if snapshot.tools_errors.contains_key(&server) {
+                return Err(py_error("MCP app tool metadata is unavailable"));
+            }
+            let selected = snapshot
+                .tools_by_server
+                .get(&server)
+                .and_then(|tools| tools.get(&tool))
+                .ok_or_else(|| py_error("MCP app originating tool is unavailable"))?;
+            serde_json::to_string(&selected.meta).map_err(py_error)
+        })
+    }
+
     fn _request_sampling_stop(&self, expected_turn_id: &str) -> PyResult<()> {
         if let Some(inner) = self.live()?
             && let Some(tools) = inner

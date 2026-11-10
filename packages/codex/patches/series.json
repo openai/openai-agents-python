@@ -361,9 +361,13 @@
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
     },
     {
+      "path": "sdk-realtime-raw-events-and-history.patch",
+      "sha256": "4675d414b2e5ff22f463581e1e72ec6b1b44fca1bcf226d7eaf3fb18559f7406"
+    },
+    {
       "path": "0152-siwc-http-errors.patch",
       "sha256": "218d0a4e56d530c8d21d30510803f0ebc9b9cc2a753e0f35c4e4f4bd7fb3ed9a"
     }
   ],
-  "result_tree": "dea30ceb99122b8499449de9f5996c09a9899871"
+  "result_tree": "b19de214e5b9489b998b5ff9fbf7399798e61764"
 }

@@ -2611,6 +2611,10 @@ async def _opening_provider_config(
     provider_id = "native_agent"
     base_url = provider.base_url or "https://api.openai.com/v1"
     routing: dict[str, Any] = provider._routing_config()
+    for name in ("request_max_retries", "stream_max_retries"):
+        value = getattr(provider, name)
+        if value is not None:
+            routing[name] = value
     if isinstance(auth, CodexLogin):
         provider_id = "native_agent_codex_login"
         base_url = _CODEX_RESPONSES_BASE_URL

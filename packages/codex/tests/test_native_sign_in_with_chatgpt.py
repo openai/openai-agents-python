@@ -98,6 +98,10 @@ def test_public_auth_and_conflicting_provider_options():
     ):
         with pytest.raises(ValueError):
             NativeProvider(auth=auth, **options)
+    for name in ("request_max_retries", "stream_max_retries"):
+        with pytest.raises(ValueError, match="requires application-managed retries"):
+            NativeProvider(auth=auth, **{name: 1})
+    assert NativeProvider(auth=auth, request_max_retries=0, stream_max_retries=0).auth is auth
 
 
 async def test_explicit_plan_auth_runs_streaming_tool_turn(plan_endpoint: ResponsesFixture):
