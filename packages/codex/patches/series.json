@@ -459,7 +459,11 @@
     {
       "path": "0174-sdk-command-environment-overrides.patch",
       "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "native-model-input-modalities.patch",
+      "sha256": "5bece16f3599d550006f178f1e903f6b9bfaab18395daad81235ea0fd5587946"
     }
   ],
-  "result_tree": "bc921ba2b838c6a85bba6e053835ce46b2ec507e"
+  "result_tree": "9b1f2648eede51cacd9ec04036d527eb9424deb8"
 }
