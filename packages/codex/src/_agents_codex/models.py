@@ -388,42 +388,53 @@ class ResponsesModel:
             raise TypeError("prompt_cache_key must be a string or None")
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        create = self.client.responses.create
-        if not inspect.iscoroutinefunction(inspect.unwrap(create)):
-            raise TypeError("ResponsesModel requires an asynchronous client")
-        body = dict(request.body)
-        body["model"] = self.model or body["model"]
-        if self.prompt_cache_key is not None:
-            body["prompt_cache_key"] = self.prompt_cache_key
-        body.pop("stream", None)
-        response = await create(stream=False, extra_body=body)
-        value = response.model_dump() if hasattr(response, "model_dump") else response
-        output = value.get("output") or []
-        refusal = any(
-            part.get("type") == "refusal"
-            for item in output
-            if item.get("type") == "message"
-            for part in item.get("content", [])
-        )
-        if value.get("status") != "completed" and not refusal:
-            raise ValueError("ResponsesModel requires a completed response")
-        raw_usage = value.get("usage")
-        usage = (
-            None
-            if raw_usage is None
-            else {
-                "input_tokens": raw_usage.get("input_tokens", 0),
-                "output_tokens": raw_usage.get("output_tokens", 0),
-                "total_tokens": raw_usage.get("total_tokens", 0),
-                "cached_input_tokens": (raw_usage.get("input_tokens_details") or {}).get(
-                    "cached_tokens", 0
-                ),
-                "reasoning_output_tokens": (raw_usage.get("output_tokens_details") or {}).get(
-                    "reasoning_tokens", 0
-                ),
-            }
-        )
-        return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+        body: dict[str, Any] = {}
+        response: Any = None
+        value: Any = None
+        output: list[dict[str, Any]] = []
+        raw_usage: Any = None
+        usage: dict[str, int] | None = None
+        try:
+            create = self.client.responses.create
+            if not inspect.iscoroutinefunction(inspect.unwrap(create)):
+                raise TypeError("ResponsesModel requires an asynchronous client")
+            body = dict(request.body)
+            body["model"] = self.model or body["model"]
+            if self.prompt_cache_key is not None:
+                body["prompt_cache_key"] = self.prompt_cache_key
+            body.pop("stream", None)
+            response = await create(stream=False, extra_body=body)
+            value = response.model_dump() if hasattr(response, "model_dump") else response
+            output = value.get("output") or []
+            refusal = any(
+                part.get("type") == "refusal"
+                for item in output
+                if item.get("type") == "message"
+                for part in item.get("content", [])
+            )
+            if value.get("status") != "completed" and not refusal:
+                raise ValueError("ResponsesModel requires a completed response")
+            raw_usage = value.get("usage")
+            usage = (
+                None
+                if raw_usage is None
+                else {
+                    "input_tokens": raw_usage.get("input_tokens", 0),
+                    "output_tokens": raw_usage.get("output_tokens", 0),
+                    "total_tokens": raw_usage.get("total_tokens", 0),
+                    "cached_input_tokens": (raw_usage.get("input_tokens_details") or {}).get(
+                        "cached_tokens", 0
+                    ),
+                    "reasoning_output_tokens": (raw_usage.get("output_tokens_details") or {}).get(
+                        "reasoning_tokens", 0
+                    ),
+                }
+            )
+            return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+
+        finally:
+            # Traceback-local logging must not retain SDK-owned request/response payloads.
+            del request, body, response, value, output, raw_usage, usage
 
 
 _preserve_module_identity(globals(), "agents.models")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -14,6 +15,7 @@ from agents import (
     AnyLLMModel,
     ChatCompletionsModel,
     LitellmModel,
+    ModelRequest,
     NativeError,
     NativeProvider,
     ResponsesModel,
@@ -214,8 +216,10 @@ async def _exercise_borrowed_provider(
                         with pytest.raises(
                             ValueError,
                             match="completed response|finish_reason=length",
-                        ):
+                        ) as caught:
                             await turn.get_result()
+                        if adapter == "responses":
+                            _assert_responses_frame_released(caught.value)
                     elif outcome == "refusal":
                         with pytest.raises(NativeError) as caught:
                             await turn.get_result()
@@ -272,3 +276,54 @@ async def test_native_chat_penalties_reach_borrowed_clients(adapter, monkeypatch
 
 async def test_responses_reasoning_replays_through_native_tool_continuation(monkeypatch):
     await _exercise_borrowed_provider("responses", "complete", monkeypatch, reasoning=True)
+
+
+def _assert_responses_frame_released(error: BaseException) -> None:
+    frames = []
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code is ResponsesModel.complete.__code__:
+            frames.append(trace.tb_frame.f_locals)
+        trace = trace.tb_next
+    assert frames
+    # Application/client frames retain their own values. SDK adapter frames must
+    # release the request and provider payloads before exposing their failure.
+    payload_names = {"request", "body", "response", "value", "output", "raw_usage", "usage"}
+    assert all(not payload_names.intersection(frame) for frame in frames)
+
+
+@pytest.mark.parametrize("status", ["incomplete", "failed"])
+async def test_responses_failure_traceback_releases_sdk_payloads(status):
+    async def create(**options):
+        return {
+            "status": status,
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "synthetic-private-output"}],
+                }
+            ],
+        }
+
+    model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    with pytest.raises(ValueError, match="requires a completed response") as caught:
+        await model.complete(
+            ModelRequest(
+                {"model": "fixture", "input": "synthetic-private-prompt"}, None, "session", "turn"
+            )
+        )
+    _assert_responses_frame_released(caught.value)
+    assert "synthetic-private" not in str(caught.value)
+
+
+async def test_responses_client_failure_keeps_original_exception():
+    failure = LookupError("synthetic-client-error")
+
+    async def create(**options):
+        raise failure
+
+    model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    with pytest.raises(LookupError) as caught:
+        await model.complete(ModelRequest({"model": "fixture", "input": "prompt"}, None, "s", "t"))
+    assert caught.value is failure
+    _assert_responses_frame_released(caught.value)
