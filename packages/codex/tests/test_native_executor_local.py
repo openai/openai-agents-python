@@ -11,11 +11,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -38,6 +40,7 @@ from agents import (
 )
 from agents.state import SessionState
 from tests._asyncio import timeout
+from tests.native_executor_fixtures import test_certificate as create_certificate
 from tests.native_fixtures import (
     ResponsesFixture,
     assistant_output,
@@ -87,6 +90,31 @@ def test_local_declaration_has_no_transport_and_normalizes_additional_roots() ->
     assert host._config(local)["env_vars"] == env_vars
 
 
+def test_trusted_workspace_write_is_linux_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(ValueError, match="requires Environment.local on Linux"):
+        Environment.local(cwd="/job/worktree", write_policy="trusted_workspace_write")
+    assert Environment.local(cwd="/job/worktree").write_policy == "strict"
+
+
+def test_trusted_workspace_write_requires_a_local_opt_in() -> None:
+    invalid_policy: Any = "unknown"
+    with pytest.raises(ValueError, match="write_policy must be strict or trusted_workspace_write"):
+        Environment.local(cwd="/job/worktree", write_policy=invalid_policy)
+    with pytest.raises(ValueError, match="requires Environment.local"):
+        Environment(
+            url="wss://executor.example.invalid",
+            cwd="/job/worktree",
+            write_policy="trusted_workspace_write",
+        )
+    with pytest.raises(ValueError, match="requires trusted workspace-write"):
+        Environment.local(cwd="/job/worktree", temp_dir="/job/temp")
+    with pytest.raises(ValueError, match="Read-only execution requires strict"):
+        Environment.local(
+            cwd="/job/worktree", write_policy="trusted_workspace_write", read_only=True
+        )
+
+
 @pytest.mark.parametrize(
     "path", ["relative", "/", "/work/../cache", "file:///work/%2e%2e/cache", "file:///work/%00"]
 )
@@ -114,8 +142,19 @@ async def test_missing_local_root_refuses_session_before_model(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize(
+    "trusted",
+    [
+        pytest.param(False, id="strict"),
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
+            id="trusted",
+        ),
+    ],
+)
 async def test_local_write_roots_cannot_include_the_native_helper_installation(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture, tmp_path: Path, trusted: bool
 ) -> None:
     installation = Path(agents.__file__).resolve().parent
     alias = tmp_path / "helper-installation"
@@ -126,7 +165,11 @@ async def test_local_write_roots_cannot_include_the_native_helper_installation(
     )
     with pytest.raises(RuntimeError, match="writable roots must stay outside the native helper"):
         async with agent.session(
-            environment=Environment.local(cwd=tmp_path, writable_roots=[alias])
+            environment=Environment.local(
+                cwd=tmp_path,
+                writable_roots=[alias],
+                write_policy="trusted_workspace_write" if trusted else "strict",
+            )
         ):
             pytest.fail("A writable native helper installation opened a Session")
     assert responses.requests == []
@@ -563,6 +606,13 @@ def undeclared_scratch() -> Iterator[Path]:
         yield Path(directory)
 
 
+@pytest.fixture
+def isolated_github_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh"))
+
+
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @(
     pytest.mark.requires_native_linux_sandbox
@@ -687,21 +737,272 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.usefixtures("isolated_github_cli")
+async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_writes(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    undeclared_scratch: Path,
+) -> None:
+    home, bin_dir, origin, linked, sibling, job_temp, capabilities = (
+        tmp_path / name
+        for name in ("home", "bin", "origin", "linked", "sibling", "job-temp", "capabilities")
+    )
+    for path in (home, bin_dir, origin, job_temp, capabilities / "skills"):
+        path.mkdir(parents=True)
+    (home / ".gitconfig").write_text("[credential]\n    helper = store\n")
+    (home / ".git-credentials").write_text(
+        "https://fixture:synthetic-git-password@credential.example.invalid\n"
+    )
+    tool = bin_dir / "fixture-tool"
+    tool.write_text("#!/bin/sh\nprintf 'fixture tool\\n'\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
+    monkeypatch.setenv("GH_TOKEN", "synthetic-gh-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+    monkeypatch.setenv("CODEX_API_KEY", "synthetic-codex-key")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+
+    def git(cwd: Path, *args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(cwd), *args], text=True).strip()
+
+    git(origin, "init", "-q")
+    git(
+        origin,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "initial",
+    )
+    git(origin, "worktree", "add", "-q", "-b", "linked", str(linked))
+    git(origin, "worktree", "add", "-q", "-b", "sibling", str(sibling))
+    gitdir = Path(git(linked, "rev-parse", "--absolute-git-dir"))
+    for path in (sibling / "marker", undeclared_scratch / "marker"):
+        path.write_text("readable")
+    (linked / ".agents").mkdir()
+    (linked / ".agents" / "marker").write_text("protected")
+
+    shared_skill = tmp_path / "shared" / "selected-skill"
+    other_skill = tmp_path / "unselected" / "skills" / "hidden-skill"
+    for path in (shared_skill, other_skill):
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text(
+            f"---\nname: {path.name}\ndescription: Fixture for {path.name}.\n---\nRead me.\n"
+        )
+    (capabilities / "skills" / shared_skill.name).symlink_to(shared_skill, target_is_directory=True)
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path / "library-path"))
+    monkeypatch.setenv("SDK_ORDINARY", "inherited")
+    monkeypatch.setenv("SDK_INHERITED_ONLY", "ambient")
+
+    selected = Environment.local(
+        cwd=linked,
+        writable_roots=[gitdir, origin / ".git", job_temp],
+        tools=["exec_command", "write_stdin"],
+        capability_directories=[str(capabilities)],
+        write_policy="trusted_workspace_write",
+        temp_dir=job_temp,
+        env={
+            "SDK_ORDINARY": "explicit",
+            "TMPDIR": str(sibling),
+            "openai_api_key": "synthetic-explicit-openai-key",
+            "CODEX_API_KEY": "synthetic-explicit-codex-key",
+            "ld_synthetic_marker": "synthetic-explicit-loader-value",
+            "DYLD_SYNTHETIC_MARKER": "synthetic-explicit-loader-value",
+        },
+    )
+    command = (
+        'set -eu; test "$(fixture-tool)" = "fixture tool"; '
+        f'test "$HOME" = {shlex.quote(str(home))}; '
+        'test "$GH_TOKEN" = synthetic-gh-token; '
+        'test "$SDK_ORDINARY" = explicit; test "$SDK_INHERITED_ONLY" = ambient; '
+        f'test "$TMPDIR" = {shlex.quote(str(job_temp))}; '
+        'test -z "${OPENAI_API_KEY+x}${openai_api_key+x}${CODEX_API_KEY+x}${LD_LIBRARY_PATH+x}"; '
+        'test -z "${ld_synthetic_marker+x}${DYLD_SYNTHETIC_MARKER+x}"; '
+        "ssh_config=$(ssh -G -T -F /dev/null credential.example.invalid); "
+        'printf "%s\\n" "$ssh_config" | grep -q "^user "; '
+        "printf 'protocol=https\\nhost=credential.example.invalid\\n\\n' "
+        "| git credential fill | grep -qx password=synthetic-git-password; "
+        'scratch=$(mktemp -d "$TMPDIR/sdk-job.XXXXXX"); printf job > "$scratch/result"; '
+        "if (printf denied > .agents/marker) 2>/dev/null; then exit 12; fi; "
+        "if (printf denied >> .git) 2>/dev/null; then exit 13; fi; "
+    )
+    if shutil.which("gh") is not None:
+        command += 'test "$(gh auth token --hostname github.com)" = synthetic-gh-token; '
+    for path in (sibling / "marker", undeclared_scratch / "marker"):
+        quoted = shlex.quote(str(path))
+        command += (
+            f'test "$(cat {quoted})" = readable; '
+            f"if (printf denied > {quoted}) 2>/dev/null; then exit 14; fi; "
+        )
+    command += (
+        "printf artifact > result.txt; git add result.txt; "
+        "git -c user.name=Fixture -c user.email=fixture@example.invalid -c gc.auto=0 "
+        "commit -qm local-change"
+    )
+    responses.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "trusted"
+        )
+    )
+    command_outputs: list[str] = []
+    completion_id = "trusted"
+
+    class UntilCommandDone(deque[list[dict[str, Any]]]):
+        def __bool__(self) -> bool:
+            return True
+
+        def popleft(self) -> list[dict[str, Any]]:
+            nonlocal completion_id
+            if len(self):
+                return super().popleft()
+            output = tool_output(responses.requests[-1], completion_id)
+            command_outputs.append(output)
+            running = re.search(r"(?m)^Process running with session ID (-?\d+)\r?$", output)
+            if running:
+                completion_id = f"trusted-poll-{len(command_outputs)}"
+                return [
+                    function_call(
+                        "write_stdin",
+                        {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
+                        completion_id,
+                    )
+                ]
+            return [assistant_output("done")]
+
+    responses.replies = UntilCommandDone(responses.replies)
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    async with timeout(40), agent.session(environment=selected) as session:
+        turn = await session.submit("Create and commit the artifact.")
+        assert (await turn.get_result()).final_output == "done"
+    output = "\n".join(command_outputs)
+    assert "Process exited with code 0" in output, output
+    advertised = json.dumps(responses.requests[0])
+    assert "Fixture for selected-skill" in advertised
+    assert "Fixture for hidden-skill" not in advertised
+    assert git(linked, "show", "HEAD:result.txt") == "artifact"
+    assert not (sibling / "result.txt").exists()
+    assert (sibling / "marker").read_text() == "readable"
+    assert (undeclared_scratch / "marker").read_text() == "readable"
+    assert (linked / ".agents" / "marker").read_text() == "protected"
+    (job_result,) = job_temp.glob("sdk-job.*/result")
+    assert job_result.read_text() == "job"
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.usefixtures("isolated_github_cli")
+@pytest.mark.parametrize("explicit_network", [False, True], ids=["default-deny", "explicit-allow"])
+async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_network: bool,
+) -> None:
+    ca_dir, workspace = tmp_path / "certificates", tmp_path / "workspace"
+    ca_dir.mkdir()
+    workspace.mkdir()
+    ca, context = await create_certificate(ca_dir, "IP:127.0.0.1")
+    monkeypatch.setenv("CURL_CA_BUNDLE", str(ca))
+    app = web.Application()
+    request_count = 0
+
+    async def peer(request: web.Request) -> web.Response:
+        nonlocal request_count
+        assert request.secure
+        request_count += 1
+        return web.Response(text="verified local TLS")
+
+    app.router.add_get("/", peer)
+    server = TestServer(app, host="127.0.0.1")
+    await server.start_server(ssl=context)
+    selected = Environment.local(
+        cwd=workspace,
+        tools=["exec_command"],
+        write_policy="trusted_workspace_write",
+        network=NetworkPolicy(
+            allowed_domains=["127.0.0.1"],
+            allow_all_unix_sockets=True,
+            allow_local_binding=True,
+        )
+        if explicit_network
+        else None,
+    )
+    proxy_args = (
+        "--proxy \"$HTTPS_PROXY\" --noproxy ''" if explicit_network else "--proxy '' --noproxy '*'"
+    )
+    command = (
+        f"curl -q --fail --silent --show-error --max-time 10 {proxy_args} "
+        f"{shlex.quote(str(server.make_url('/')))}"
+    )
+    responses.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 20_000}, "tls"
+        )
+    )
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    async with server, timeout(40), agent.session(environment=selected) as session:
+        turn = await session.submit("Read the local TLS peer.")
+        assert (await turn.get_result()).final_output == "done"
+    output = tool_output(responses.requests[-1], "tls")
+    if explicit_network:
+        assert "Process exited with code 0" in output, output
+        assert "verified local TLS" in output
+        assert request_count == 1
+    else:
+        assert re.search(r"Process exited with code (?:7|28)\b", output), output
+        assert request_count == 0
+
+
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @(
     pytest.mark.requires_native_linux_sandbox
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
+@pytest.mark.parametrize(
+    "trusted",
+    [
+        pytest.param(False, id="strict"),
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
+            id="trusted",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("isolated_github_cli")
 async def test_local_write_root_replacement_survives_portable_resume(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool
 ) -> None:
     cwd, cache, sibling = (tmp_path / name for name in ("cwd", "cache", "sibling"))
     for directory in (cwd, cache, sibling):
         directory.mkdir()
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     agent = Agent(instructions="Use the selected tools.", provider=provider)
-    selected = Environment.local(cwd=cwd, writable_roots=[cache], tools=["exec_command"])
+    monkeypatch.setenv("SDK_TEST_AMBIENT", "synthetic-ambient")
+    selected = Environment.local(
+        cwd=cwd,
+        writable_roots=[cache],
+        tools=["exec_command"],
+        write_policy="trusted_workspace_write" if trusted else "strict",
+        temp_dir=cache if trusted else None,
+        env={"SDK_TEST_DECLARED": "synthetic-opening-sdk-override"},
+    )
     (cache / "marker").write_text("initial")
     cache_file = shlex.quote(str(cache / "marker"))
     sibling_file = shlex.quote(str(sibling / "marker"))
@@ -709,8 +1010,28 @@ async def test_local_write_root_replacement_survives_portable_resume(
         f"if (printf denied > {cache_file}) 2>/dev/null; then exit 11; fi; "
         f"printf expanded >> {sibling_file}"
     )
+    if trusted:
+        revised = (
+            f'test "$TMPDIR" = {shlex.quote(str(cache))} || exit 12; '
+            f'test "$(cat {cache_file})" = initial || exit 13; '
+            'if mktemp -d "$TMPDIR/sdk-job.XXXXXX" 2>/dev/null; then exit 14; fi; ' + revised
+        )
+    ambient = (
+        'test "$SDK_TEST_AMBIENT" = synthetic-ambient'
+        if trusted
+        else ('test -z "${SDK_TEST_AMBIENT+x}"')
+    )
     responses.respond(assistant_output("replace"))
-    responses.respond(function_call("exec_command", {"cmd": revised, "login": False}, "resume"))
+    responses.respond(
+        function_call(
+            "exec_command",
+            {
+                "cmd": f'set -eu; {ambient}; test "$SDK_TEST_DECLARED" = current; {revised}',
+                "login": False,
+            },
+            "resume",
+        )
+    )
     responses.respond(assistant_output("resume"))
 
     async with timeout(40), provider:
@@ -723,9 +1044,21 @@ async def test_local_write_root_replacement_survives_portable_resume(
         with pytest.raises(ValueError, match="agree on the applied executor policy"):
             async with agent.session(environment=selected, state=saved):
                 pytest.fail("Portable resume accepted superseded grants")
+        if trusted:
+            with pytest.raises(ValueError, match="agree on the applied executor policy"):
+                async with agent.session(
+                    environment=replace(
+                        selected, write_policy="strict", temp_dir=None, writable_roots=[sibling]
+                    ),
+                    state=saved,
+                ):
+                    pytest.fail("Portable resume accepted a different local write policy")
         assert len(responses.requests) == 1
+        assert "synthetic-opening-sdk-override" not in saved.to_json()
         async with agent.session(
-            environment=replace(selected, writable_roots=[sibling]),
+            environment=replace(
+                selected, writable_roots=[sibling], env={"SDK_TEST_DECLARED": "current"}
+            ),
             state=saved,
         ) as resumed:
             turn = await resumed.submit("Append to the new artifact.")
