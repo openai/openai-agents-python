@@ -2,6 +2,7 @@ import asyncio
 import errno
 import hashlib
 import io
+import json
 import logging
 import os
 import posixpath
@@ -12,11 +13,13 @@ import tempfile
 import threading
 import time
 import uuid
+from base64 import b64decode
 from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Final, Literal, cast
 
@@ -84,6 +87,8 @@ from ..util.retry import (
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
 from ..workspace_paths import (
+    _git_copy_tool_path,
+    _resolve_git_copy_path,
     coerce_posix_path,
     posix_path_as_path,
     posix_path_for_error,
@@ -98,6 +103,9 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 )
 
 logger = logging.getLogger(__name__)
+
+# Docker reports the Go os.FileMode symlink bit in its archive path stat header.
+_DOCKER_PATH_SYMLINK = 1 << 27
 
 
 # Non-seekable payloads are spooled to measure their length; keep small ones in
@@ -755,21 +763,20 @@ class DockerSandboxSession(BaseSandboxSession):
             "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
         image_workdir = image_config.get("WorkingDir") or "/"
-        workspace = PurePosixPath(posixpath.normpath(self.state.manifest.root))
+        read_link = cache(self._git_copy_link_target)
+        if read_link(PurePosixPath("/")) is None:
+            return None
+        workspace = _resolve_git_copy_path(PurePosixPath(self.state.manifest.root), read_link)
+        if workspace is None:
+            return None
         directories = (
-            PurePosixPath(posixpath.normpath(posixpath.join(image_workdir, entry)))
+            PurePosixPath(posixpath.join(image_workdir, entry))
             for entry in f"{image_path}:/usr/bin:/bin".split(":")
         )
-        path = ":".join(
-            str(directory)
-            for directory in directories
-            if directory.is_absolute()
-            and ":" not in str(directory)
-            and not directory.is_relative_to(workspace)
-        )
-        if not path:
+        copy_path = _git_copy_tool_path(directories, workspace, read_link)
+        if not copy_path:
             return None
-        image_environment["PATH"] = path
+        image_environment["PATH"] = copy_path
 
         container_config = self._container.attrs.get("Config") or {}
         container_keys = [entry.partition("=")[0] for entry in container_config.get("Env") or ()]
@@ -777,6 +784,38 @@ class DockerSandboxSession(BaseSandboxSession):
             *(f"{name}={value}" for name, value in image_environment.items()),
             *(name for name in container_keys if name not in image_environment),
         ]
+
+    def _git_copy_link_target(self, path: PurePosixPath) -> str | None:
+        api = self._docker_client.api
+        url = api._url("/containers/{0}/archive", self._container.id)
+        with api.head(url, params={"path": str(path)}, timeout=api.timeout) as response:
+            if response.status_code == 404:
+                return None
+            api._raise_for_status(response)
+            encoded = response.headers.get("X-Docker-Container-Path-Stat")
+            if encoded is None:
+                raise ValueError("Docker path stat response did not contain metadata")
+            mode = json.loads(b64decode(encoded)).get("mode")
+        if not isinstance(mode, int):
+            raise ValueError("Docker path stat response did not contain a file mode")
+        if not mode & _DOCKER_PATH_SYMLINK:
+            return ""
+        # HEAD reports the terminal target. The archive entry preserves the link's raw
+        # target, so the resolver can check intermediate paths too.
+        with api.get(
+            url,
+            params={"path": str(path)},
+            headers={"Accept-Encoding": "identity"},
+            stream=True,
+            timeout=api.timeout,
+        ) as response:
+            api._raise_for_status(response)
+            header = response.raw.read(tarfile.RECORDSIZE)
+        with tarfile.open(fileobj=io.BytesIO(header), mode="r|") as archive:
+            member = archive.next()
+            if member is None or not member.issym():
+                raise ValueError("Docker archive entry did not match the inspected symlink")
+            return member.linkname
 
     async def _exec_internal_for_user(
         self,

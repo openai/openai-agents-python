@@ -663,8 +663,20 @@ class BaseSandboxSession(abc.ABC):
         return await self._exec_internal(*sanitized_command, timeout=timeout)
 
     async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
-        """Run a GitRepo copy in the backend's configured execution environment."""
-        return await self.exec("sh", "-c", script, "sandbox-git-copy", *arguments, shell=False)
+        """Run a GitRepo copy with the backend's system tools and a clean environment."""
+        # Start env in the workspace so it clears the manifest environment before
+        # the copy shell enters the checkout.
+        return await self.exec(
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "sh",
+            "-c",
+            script,
+            "sandbox-git-copy",
+            *arguments,
+            shell=False,
+        )
 
     @redact_mount_error_data
     async def resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:

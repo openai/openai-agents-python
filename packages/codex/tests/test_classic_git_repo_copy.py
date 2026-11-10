@@ -6,7 +6,7 @@ import shlex
 import shutil
 import subprocess
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import cast
 
@@ -16,9 +16,9 @@ from agents.classic.sandbox.entries import GitRepo
 from agents.classic.sandbox.entries.artifacts import _GIT_COPY_SOURCE_BOUNDARY
 from agents.classic.sandbox.errors import GitCopyError
 from agents.classic.sandbox.manifest import Environment, Manifest
-from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.types import ExecResult
+from agents.classic.sandbox.workspace_paths import _resolve_git_copy_path
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="requires a POSIX shell and filesystem")
 
@@ -189,6 +189,8 @@ async def test_git_repo_anchors_relative_copy_tools(
 async def test_unix_local_git_copy_uses_application_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
     system_copy = shutil.which("cp")
     assert system_copy is not None
     tool_bin = tmp_path / "custom tools"
@@ -234,6 +236,49 @@ async def test_unix_local_git_copy_uses_application_tools(
 
     assert destination.read_text(encoding="utf-8") == "fixture"
     assert copy_marker.read_text(encoding="utf-8") == "custom copy"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/image/tools/sh", "/image/tools/multicall"),
+        ("/image/relative-tools/cp", "/toolbox/cp"),
+        ("/image/workspace-tools", None),
+        ("/image/workspace-alias", None),
+        ("/image/tools/cp", None),
+        ("/image/loop", None),
+    ],
+)
+def test_git_copy_tool_paths_stay_outside_workspace(path: str, expected: str | None) -> None:
+    links = {
+        "/image/tools/sh": "multicall",
+        "/image/relative-tools": "../toolbox",
+        "/image/workspace-tools": "/workspace/tools",
+        "/image/workspace-alias": "/workspace/tool-alias",
+        "/workspace/tool-alias": "/toolbox",
+        "/image/tools/cp": "/workspace/cp",
+        "/image/loop": "loop",
+    }
+    result = _resolve_git_copy_path(
+        PurePosixPath(path),
+        lambda part: links.get(str(part), ""),
+        workspace=PurePosixPath("/workspace"),
+    )
+    assert result == (PurePosixPath(expected) if expected is not None else None)
+
+
+async def test_default_git_copy_uses_a_clean_child_environment(
+    tmp_path: Path, git_fixture: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SDK_COPY_TEST_VALUE", "workspace-only")
+    session = cast(BaseSandboxSession, FixtureGitSession(git_fixture, tmp_path))
+    result = await BaseSandboxSession._exec_git_copy(
+        session,
+        'test -z "${SDK_COPY_TEST_VALUE+x}" && printf "%s" "$1"',
+        "selected directory",
+    )
+    assert result.ok()
+    assert result.stdout == b"selected directory"
 
 
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])

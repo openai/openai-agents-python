@@ -28,7 +28,7 @@ from collections import deque
 from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import partial
+from functools import cache, partial
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
@@ -73,7 +73,7 @@ from ..util.tar_utils import (
     should_skip_tar_member,
     validate_tarfile,
 )
-from ..workspace_paths import _raise_if_filesystem_root
+from ..workspace_paths import _git_copy_tool_path, _raise_if_filesystem_root
 from . import _unix_local_file_ops
 from ._unix_local_files import _UnixLocalFiles
 
@@ -401,15 +401,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         configured_path = os.defpath
         if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
             configured_path = f"{os.environ.get('PATH', os.defpath)}{os.pathsep}{os.defpath}"
-        workspace = Path(os.path.realpath(cwd))
-        directories = (
-            Path(os.path.realpath(entry or ".")) for entry in configured_path.split(os.pathsep)
-        )
-        return os.pathsep.join(
-            str(directory)
-            for directory in directories
-            if not directory.is_relative_to(workspace) and os.pathsep not in str(directory)
-        )
+
+        @cache
+        def read_link(path: PurePosixPath) -> str | None:
+            try:
+                return os.readlink(path)
+            except OSError as error:
+                if error.errno == errno.EINVAL:
+                    return ""
+                return None
+
+        workspace = PurePosixPath(os.path.realpath(cwd))
+        root = PurePosixPath(os.getcwd())
+        directories = (root / (entry or ".") for entry in configured_path.split(os.pathsep))
+        return _git_copy_tool_path(directories, workspace, read_link)
 
     async def _exec_in_context(
         self,
