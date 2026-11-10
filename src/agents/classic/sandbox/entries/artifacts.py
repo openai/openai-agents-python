@@ -36,11 +36,8 @@ _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
 # Start the copy shell with a clean environment before it changes directories.
 _GIT_COPY_LAUNCHER = """set -eu
-system_env=$(command -p -v env)
-system_shell=$(command -p -v sh)
-case "$system_env" in /*) ;; *) exit 1 ;; esac
-case "$system_shell" in /*) ;; *) exit 1 ;; esac
-exec "$system_env" -i "$system_shell" -c "$@"
+export PATH=/usr/bin:/bin
+exec env -i PATH="$PATH" sh -c "$@"
 """
 
 
@@ -810,11 +807,14 @@ class GitRepo(BaseEntry):
                 _GIT_COPY_LAUNCHER,
                 "sandbox-git-copy-launcher",
                 """set -eu
-copy_program=$(command -p -v cp)
-case "$copy_program" in
-    /*) ;;
-    *) echo 'System copy utility is unavailable' >&2; exit 1 ;;
-esac
+if [ -x /usr/bin/cp ]; then
+    copy_program=/usr/bin/cp
+elif [ -x /bin/cp ]; then
+    copy_program=/bin/cp
+else
+    echo 'System copy utility is unavailable' >&2
+    exit 1
+fi
 CDPATH=
 cd -P .
 destination=$3
