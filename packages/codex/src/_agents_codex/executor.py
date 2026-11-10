@@ -53,6 +53,25 @@ ExecutorToolName = Literal[
     "exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep"
 ]
 
+# Core's NON_INHERITABLE_ENV_VARS and the SDK's executor bootstrap controls.
+_RESERVED_ENVIRONMENT_NAMES = frozenset(
+    {
+        "CODEX_SDK_BWRAP_SEARCH_PATH",
+        "CARGO_BIN_EXE_BWRAP",
+        "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+        "CODEX_SANDBOX_COMMAND_ENV_JSON",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "NODE_REPL_AUTH_TOKEN",
+        "CODEX_GUARDIAN_DECISIONS_API_KEY",
+        "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    }
+)
+_RESERVED_ENVIRONMENT_PREFIX = re.compile(
+    r"CODEX_SANDBOX_COMMAND_ENV_JSON_", re.IGNORECASE | re.ASCII
+)
+
 
 def _domain_pattern(value: str) -> str:
     if value == "*":
@@ -569,12 +588,8 @@ class Environment(Generic[ContextT_contra]):
                     or not name
                     or "\0" in name
                     or "=" in name
-                    or name
-                    in {
-                        "CODEX_SDK_BWRAP_SEARCH_PATH",
-                        "CARGO_BIN_EXE_bwrap",
-                        "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
-                    }
+                    or (name.isascii() and name.upper() in _RESERVED_ENVIRONMENT_NAMES)
+                    or _RESERVED_ENVIRONMENT_PREFIX.match(name) is not None
                 ):
                     raise ValueError("Invalid executor environment variable name")
                 if not isinstance(value, str) or "\0" in value:
