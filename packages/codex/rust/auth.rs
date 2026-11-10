@@ -30,18 +30,30 @@ pub(crate) struct CodexAccount {
     pub binding: String,
     pub auth_file: PathBuf,
     pub credential_directory: Option<PathBuf>,
+    pub auth_home_alias: Option<PathBuf>,
 }
 
 impl SavedCodexLogin {
     pub fn open(self, config: &Config) -> Result<(Arc<AuthManager>, CodexAccount)> {
+        // Preserve the configured spelling for admission checks before Core resolves it.
+        let declared_home = self.codex_home.clone().or_else(|| {
+            std::env::var("CODEX_HOME")
+                .ok()
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from)
+        });
         let codex_home = match self.codex_home {
             Some(path) => path,
             None => codex_core::config::find_codex_home()
                 .context("Cannot locate the Codex login directory")?
                 .to_path_buf(),
-        }
-        .canonicalize()
-        .context("Cannot open the Codex login directory")?;
+        };
+        let declared_home = std::path::absolute(declared_home.as_deref().unwrap_or(&codex_home))
+            .context("Cannot open the Codex login directory")?;
+        let codex_home = codex_home
+            .canonicalize()
+            .context("Cannot open the Codex login directory")?;
+        let auth_home_alias = (declared_home != codex_home).then_some(declared_home);
         let auth_file = codex_home.join("auth.json");
         let credential_directory = self
             .credential_directory
@@ -112,6 +124,7 @@ impl SavedCodexLogin {
                 binding,
                 auth_file,
                 credential_directory,
+                auth_home_alias,
             },
         ))
     }
