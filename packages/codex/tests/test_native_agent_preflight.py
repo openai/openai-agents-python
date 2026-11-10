@@ -18,18 +18,18 @@ from tests.test_native_agent import function_declarations
 from tests.test_native_manual_tools import LookupArgs
 
 
-@pytest.mark.parametrize("manual", [False, True])
-async def test_run_restores_target_default_selection_with_current_bindings(responses, manual):
+@pytest.mark.parametrize("kind", ["automatic", "manual", "managed"])
+async def test_run_restores_target_default_selection_with_current_bindings(responses, kind):
     calls = []
 
-    @function_tool(name="lookup")
+    @function_tool(name="lookup", needs_approval=kind == "managed")
     def automatic(key: str) -> str:
         calls.append(key)
         return "current reply"
 
     lookup = (
         FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
-        if manual
+        if kind == "manual"
         else automatic
     )
     async with NativeProvider(
@@ -44,20 +44,47 @@ async def test_run_restores_target_default_selection_with_current_bindings(respo
         responses.respond(function_call("lookup", {"key": "B"}, "lookup-B"))
         responses.respond(assistant_output("B completed"))
         async with timeout(20):
-            if manual:
+            if kind != "automatic":
                 with pytest.raises(InteractionRequired) as pending:
                     await source.run("Read B.", state=saved)
                 assert pending.value.state is not None
+                assert calls == []
                 result = await source.run(
                     None,
                     state=pending.value.state,
-                    on_interaction=lambda request: request.reply("current reply"),
+                    on_interaction=lambda request: request.reply(
+                        "allow_once" if kind == "managed" else "current reply"
+                    ),
                 )
             else:
                 result = await source.run("Read B.", state=saved)
         assert result.final_output == "B completed"
-        assert calls == ([] if manual else ["B"])
+        assert calls == ([] if kind == "manual" else ["B"])
         assert len(responses.requests) == 2
+
+
+async def test_budgeted_restore_rejects_captured_active_profile_managed_approval(responses):
+    calls = []
+
+    @function_tool(name="lookup", needs_approval=True)
+    def managed(key: str) -> str:
+        calls.append(key)
+        return "current reply"
+
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-restored-managed-budget"
+    ) as provider:
+        target = Agent(name="B", instructions="Read B.", tools=[managed])
+        source = Agent(name="A", instructions="Route to B.", handoffs=[target], provider=provider)
+        async with source.session() as session:
+            await session.update(agent=target)
+            await session.update(tools=[managed.ref])
+            saved = await session.save_state()
+        async with timeout(20):
+            with pytest.raises(CapabilityError, match="cannot be captured"):
+                await source.run("Read B.", state=saved, budget=RunBudget(max_requests=5))
+        assert responses.requests == []
+        assert calls == []
 
 
 async def test_restored_target_can_checkpoint_original_root_after_handoff(responses):
