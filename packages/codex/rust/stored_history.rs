@@ -20,6 +20,31 @@ enum CloseOperation {
     Delete,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForkRequest {
+    before_turn_id: Option<String>,
+    through_turn_id: Option<String>,
+}
+
+/// Decode only a boundary; the current native Session supplies the source ID.
+pub(crate) fn fork_boundary(encoded: &str) -> Result<codex_thread_store::ForkBoundary> {
+    let request: ForkRequest = serde_json::from_str(encoded)?;
+    ensure!(
+        request.before_turn_id.is_none() || request.through_turn_id.is_none(),
+        "choose either before_turn_id or through_turn_id"
+    );
+    if let Some(id) = request.before_turn_id {
+        ensure!(!id.is_empty(), "before_turn_id must not be empty");
+        return Ok(codex_thread_store::ForkBoundary::BeforeTurn(id));
+    }
+    if let Some(id) = request.through_turn_id {
+        ensure!(!id.is_empty(), "through_turn_id must not be empty");
+        return Ok(codex_thread_store::ForkBoundary::ThroughTurn(id));
+    }
+    Ok(codex_thread_store::ForkBoundary::Latest)
+}
+
 /// One Session close action, after its writer joins and before database teardown.
 pub struct CloseAction {
     store: Arc<dyn ThreadStore>,

@@ -4429,6 +4429,8 @@ class Session(Generic[ContextT, OutputT]):
         self._mutation: asyncio.Task[Any] | None = None
         self._mutation_cancellable = False
         self._checkpoint_task: asyncio.Future[None] | None = None
+        self._stored_fork: Any = None
+        self._stored_fork_receipt: asyncio.Future[None] | None = None
         self._sealed_checkpoint: str | None = None
         self._manual_source_digest: str | None = None
         self._sealing = False
@@ -12997,6 +12999,82 @@ class Session(Generic[ContextT, OutputT]):
                     # Cleanup and the native reply ACK are already settled.
                     permit.release()
 
+    async def fork_stored(
+        self, *, before_turn_id: str | None = None, through_turn_id: str | None = None
+    ) -> str:
+        """Stored history branch, with the source Session remaining usable.
+
+        Idle LocalStorage root; fresh immutable ID at latest/before/through-turn.
+        History only: no descendant or native VM cloning. Subsequent opening
+        through the same LocalStorage and current Agent; no portable conversion.
+        """
+        self._check_callback_operation("fork stored history of its own Session")
+        self._check_idle_update()
+        if self._realtime is not None:
+            raise CapabilityError("Close native Realtime before a stored fork")
+        if not isinstance(self._storage, LocalStorage):
+            raise CapabilityError("Stored forks require native LocalStorage")
+        request = {}
+        for name, value in (
+            ("before_turn_id", before_turn_id),
+            ("through_turn_id", through_turn_id),
+        ):
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value:
+                raise ValueError("Stored fork turn IDs must be nonempty strings")
+            request[name] = value
+        if len(request) > 1:
+            raise ValueError("Choose either before_turn_id or through_turn_id")
+        self._check_checkpoint_admission(None)
+        gate: asyncio.Future[None] = self._loop.create_future()
+        self._checkpoint_task = gate
+        self._stored_fork_receipt = gate
+
+        async def prepare() -> None:
+            self._stored_fork = await self._native._fork_stored(json.dumps(request))
+            await self._stored_fork._retire_stored_fork()
+
+        try:
+            with _private_task(prepare()) as (pending, outcome):
+                try:
+                    await _join(pending, outcome=outcome)
+                    # Publication belongs to this public waiter, after cancellation
+                    # observation and every awaited write/retirement. No later await.
+                    candidate = self._stored_fork
+                    if candidate is None:
+                        raise NativeError("Native stored fork omitted its publication receipt")
+                    result = cast(str, candidate._publish_stored_fork())
+                    self._stored_fork = None
+                    self._stored_fork_receipt = None
+                    return result
+                except BaseException as error:
+                    await _close_after_error(error, self._discard_stored_fork)
+                    if self._broken:
+                        cast(Any, error).cleanup = self
+                    raise
+        finally:
+            self._checkpoint_task = None
+            if not gate.done():
+                gate.set_result(None)
+
+    async def _discard_stored_fork(self) -> None:
+        candidate = self._stored_fork
+        if candidate is None and self._stored_fork_receipt is None:
+            return
+        try:
+            if candidate is not None:
+                await candidate.close(discard_checkpoint_import=True)
+                if self._stored_fork is candidate:
+                    self._stored_fork = None
+            # Native startup may fail before returning a Python wrapper. Its
+            # exact raw receipt stays in the existing Engine registration.
+            await self._native._discard_stored_fork()
+            self._stored_fork_receipt = None
+        except BaseException:
+            self._broken = True
+            raise
+
     async def revert_stored(self, *, before_turn_id: str) -> None:
         """Core has been closing this Session before reverting its stored conversation.
 
@@ -13858,6 +13936,12 @@ class Session(Generic[ContextT, OutputT]):
         self._closed = True
 
     async def _close_session(self) -> None:
+        # An unpublished fork retains the existing native imported-ID receipt.
+        # Join its public publication/rollback decision before database teardown.
+        # A failed delete leaves this close retryable with the same owner/store.
+        if self._stored_fork_receipt is not None:
+            await asyncio.gather(self._stored_fork_receipt, return_exceptions=True)
+        await self._discard_stored_fork()
         # Retire voice admission first. This Session owns the graph stop;
         # joining voice workflows now would cancel against a closing Session.
         if self._realtime is not None:

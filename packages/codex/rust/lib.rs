@@ -925,10 +925,16 @@ impl NativeThread {
     }
 
     #[pyo3(signature = (limit=None))]
-    fn _canonical_history<'py>(&self, py: Python<'py>, limit: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+    fn _canonical_history<'py>(
+        &self,
+        py: Python<'py>,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
+            let value = canonical_history::snapshot(&inner, limit)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
@@ -948,6 +954,85 @@ impl NativeThread {
         })
     }
 
+    fn _fork_stored<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let source = self.current()?;
+        let boundary = stored_history::fork_boundary(request_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let _operation = source.engine.operation(false).map_err(py_error)?;
+            source
+                .engine
+                .fork_stored(&source, boundary)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _discard_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let Some(inner) = self.live()? else {
+            return async_bridge::future_into_py(py, async { Ok(()) });
+        };
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            let _lifecycle = inner.engine.lifecycle.lock().await;
+            inner
+                .engine
+                .discard_stored_forks(Some(inner.id))
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _retire_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        if inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error("This thread is not an owned stored fork"));
+        }
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            // Preserve the imported-ID/live-slot cleanup receipt until the
+            // outer public waiter chooses publication or joined rollback.
+            inner.close().await.map_err(py_error)
+        })
+    }
+
+    fn _publish_stored_fork(&self) -> PyResult<String> {
+        let mut owner = self.inner.lock().map_err(py_error)?;
+        let inner = owner
+            .live
+            .as_ref()
+            .ok_or_else(|| py_error("No unpublished stored fork"))?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        if !inner.is_closed()
+            || inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error(
+                "Stored fork publication requires its joined native writer",
+            ));
+        }
+        if let Some(store) = &inner.engine.local_checklist_store {
+            store.check_durability().map_err(py_error)?;
+        }
+        // No await after this handoff. Later discard cannot delete publication.
+        if !inner.engine.finish_stored_fork(inner.id) {
+            return Err(py_error("Unpublished stored fork receipt expired"));
+        }
+        owner.release();
+        Ok(self.id.clone())
+    }
+
     fn _stored_history_close_action(&self, action_json: &str) -> PyResult<StoredHistoryClose> {
         let inner = self.current()?;
         Ok(StoredHistoryClose {
@@ -958,12 +1043,20 @@ impl NativeThread {
         })
     }
 
-    fn _transact_history<'py>(&self, py: Python<'py>, expected_revision: String, keep: usize, items_json: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn _transact_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        keep: usize,
+        items_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let items = serde_json::from_str(items_json)
             .map_err(|_| py_error("Invalid canonical history items"))?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::replace(&inner, expected_revision, keep, items).await.map_err(py_error)?;
+            let value = canonical_history::replace(&inner, expected_revision, keep, items)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
