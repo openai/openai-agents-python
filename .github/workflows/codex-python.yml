@@ -125,19 +125,22 @@ jobs:
               printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
             done
           } >> "$GITHUB_ENV"
-      - name: Use a faster Rust profile for cold Windows harness PR builds
+      - name: Use a faster Rust profile for cold Windows and macOS harness PR builds
         # Trusted pushes and builds with a qualified donor keep the release profile.
         if: >-
-          runner.os == 'Windows' && github.repository == 'openai/openai-agents-python' &&
+          (runner.os == 'Windows' || runner.os == 'macOS') &&
+          github.repository == 'openai/openai-agents-python' &&
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
           (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
           inputs.native_source_run == '' && inputs.native_dependency_run == ''
+        env:
+          COLD_PR_RUST_OPT_LEVEL: ${{ runner.os == 'macOS' && 's' || '1' }}
         run: |
           {
             echo "CARGO_PROFILE_RELEASE_LTO=off"
             echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
-            echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=1"
+            echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
           } >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
