@@ -473,9 +473,9 @@
       "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
     },
     {
-      "path": "sdk-local-project-read-cwd.patch",
-      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
+      "path": "sdk-linux-private-credential-file-mask.patch",
+      "sha256": "280414d1ef9f7fea874d460629f4ca24732d4f3b09daf47488947cc24c9e7a3e"
     }
   ],
-  "result_tree": "2eada2c6e72588dccf890bc784166f08630faf77"
+  "result_tree": "04772d64155d93d020a1634bc4ad207a4a5e2a23"
 }
