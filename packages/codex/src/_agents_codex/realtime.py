@@ -165,7 +165,7 @@ async def _prepare_realtime_params(
             settings,
             function_tools,
             selection_id,
-        ) = await _resolve_realtime_configuration(session, config, settings, tools)
+        ) = await _resolve_realtime_configuration(session, config.instructions, settings, tools)
         params: dict[str, Any] = {
             "settings": settings,
             "function_tools": function_tools,
@@ -674,6 +674,13 @@ def _observation_snapshot(event: RealtimeEvent) -> RealtimeEvent:
     # Keep the bounded shared payload private when observers mutate raw JSON.
     if isinstance(event, RealtimeRawProviderEvent):
         return RealtimeRawProviderEvent(deepcopy(event.event))
+    if isinstance(event, RealtimeHostedMcpToolsListed):
+        return replace(
+            event,
+            tools=tuple(
+                replace(tool, input_schema=deepcopy(tool.input_schema)) for tool in event.tools
+            ),
+        )
     return event
 
 
@@ -809,13 +816,12 @@ class RealtimeSession:
         sources = tuple(
             runtime.profile.declaration for runtime in getattr(session, "_profiles", {}).values()
         ) or (getattr(session, "_opening_agent", None),)
+        defaults = tuple(getattr(source, "realtime", None) for source in sources)
         self._has_agent_guardrails = any(
-            getattr(source, "realtime", None) is not None and source.realtime.output_guardrails
-            for source in sources
+            source is not None and source.output_guardrails for source in defaults
         )
         self._has_agent_prompt = any(
-            getattr(source, "realtime", None) is not None and source.realtime.prompt is not None
-            for source in sources
+            source is not None and source.prompt is not None for source in defaults
         )
         if any(not isinstance(check, RealtimeOutputGuardrail) for check in self._guardrails):
             raise TypeError("output_guardrails must contain RealtimeOutputGuardrail objects")
@@ -847,6 +853,9 @@ class RealtimeSession:
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
+        self._prompt_settings = (
+            {"prompt": deepcopy(self._settings["prompt"])} if "prompt" in self._settings else {}
+        )
         if config.adapter is not None:
             if not callable(getattr(config.adapter, "connect", None)):
                 raise TypeError("adapter must provide an async connect method")
@@ -1227,7 +1236,9 @@ class RealtimeSession:
                         if snapshot.get("type") == "session.update" and "prompt" in snapshot.get(
                             "session", {}
                         ):
-                            self._settings["prompt"] = snapshot["session"]["prompt"]
+                            self._prompt_settings = {
+                                "prompt": deepcopy(snapshot["session"]["prompt"])
+                            }
                         if snapshot.get("type") == "response.cancel":
                             try:
                                 await self._apply_interrupt_receipt(
@@ -1380,7 +1391,7 @@ class RealtimeSession:
             async def publish(captured: dict[str, Any]) -> None:
                 await self._call("update", update=captured)
                 if "prompt" in captured:
-                    self._settings["prompt"] = captured["prompt"]
+                    self._prompt_settings = {"prompt": deepcopy(captured["prompt"])}
 
             await _join(asyncio.create_task(publish(payload)))
         except BaseException as error:
@@ -2210,9 +2221,12 @@ class RealtimeSession:
             *self._guardrails,
         )
         seen: set[int] = set()
-        checks = tuple(
-            check for check in candidates if id(check) not in seen and not seen.add(id(check))
-        )
+        unique_checks: list[RealtimeOutputGuardrail] = []
+        for check in candidates:
+            if id(check) not in seen:
+                seen.add(id(check))
+                unique_checks.append(check)
+        checks = tuple(unique_checks)
         if not checks:
             return
         response_id, item_id = value.get("response_id"), value.get("item_id")
@@ -2583,8 +2597,8 @@ class RealtimeSession:
             )
         instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
             self._session,
-            self._config,
-            {"prompt": self._settings["prompt"]} if "prompt" in self._settings else {},
+            self._config.instructions,
+            self._prompt_settings,
             self._direct_tools,
             target=target,
             allow_missing=True,
@@ -2612,7 +2626,7 @@ class RealtimeSession:
         )
         if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
             return
-        if source_profile is not None:
+        if source_profile is not None and target is not None:
             self._voice_target = dict(target)
 
     def _start_function_batch(self, value: dict[str, Any]) -> None:

@@ -4484,6 +4484,8 @@ class Session(Generic[ContextT, OutputT]):
             return [], snapshot["selection_id"] if snapshot is not None else None
         if snapshot is None:
             snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+        if not isinstance(snapshot, Mapping):
+            raise NativeError("Invalid Realtime source selection snapshot")
         receipt = snapshot["profile_receipt"]
         source_agent = self._agent_for_profile(receipt)
         generation = snapshot["catalog_generation"]
@@ -11793,6 +11795,8 @@ class Session(Generic[ContextT, OutputT]):
                         if message.get("profile_id") is not None
                         else self._agent
                     )
+                    if original is None:
+                        raise NativeError("Realtime tool has no source Agent")
                     enabled = await self._call_decision_callback(
                         state,
                         message,

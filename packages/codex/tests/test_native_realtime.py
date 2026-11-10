@@ -132,14 +132,17 @@ class RealtimePeer:
         response_done: bool = True,
     ) -> None:
         assert self.socket is not None
-        if response_id is not None:
-            await self.socket.send_json(
-                {"type": "response.created", "response": {"id": response_id}}
-            )
+        response_id = response_id or f"response-{call_id}"
+        await self.socket.send_json(
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "conversation_id": "fixture-conversation"},
+            }
+        )
         await self.socket.send_json(
             {
                 "type": "conversation.item.done",
-                **({"response_id": response_id} if response_id is not None else {}),
+                "response_id": response_id,
                 "item": {
                     "id": f"item-{call_id}",
                     "type": "function_call",
@@ -149,7 +152,7 @@ class RealtimePeer:
                 },
             }
         )
-        if response_id is not None and response_done:
+        if response_done:
             await self.socket.send_json({"type": "response.done", "response": {"id": response_id}})
 
     async def function(self, name: str, arguments: dict[str, Any], call_id: str) -> None:

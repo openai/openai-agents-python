@@ -376,6 +376,33 @@ async def test_early_speech_yields_before_completion_and_does_not_repeat_final(r
         assert "First answer." in str(responses.requests[1]["input"])
 
 
+async def test_early_speech_ignores_observation_gap_from_prior_turn(responses):
+    from agents.observation import EventGap
+
+    responses.respond(*text_response("prior-answer", *(["prior "] * 300)))
+    responses.respond(*text_response("current-answer", "Current ", "answer."))
+    agent = Agent(
+        instructions="Answer the question.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-voice-key"),
+    )
+    async with timeout(10), agent.session() as session:
+        prior = await session.submit("prior question")
+        assert (await prior.get_result()).final_output == "prior " * 300
+        async with aclosing(session.events()) as retained:
+            assert isinstance(await anext(retained), EventGap)
+        responses.delta_gate = asyncio.Event()
+        workflow = NativeSessionVoiceWorkflow(session, early_speech=True)
+        async with aclosing(workflow.run("current question")) as stream:
+            first = asyncio.create_task(anext(stream))
+            try:
+                assert await asyncio.wait_for(asyncio.shield(first), 1) == "Current "
+                assert not responses.delta_gate.is_set()
+            finally:
+                responses.delta_gate.set()
+                await asyncio.gather(first, return_exceptions=True)
+            assert [chunk async for chunk in stream] == ["answer."]
+
+
 async def test_early_speech_retains_identical_final_only_answer_after_tool_preamble(responses):
     @function_tool
     async def lookup() -> str:
@@ -419,9 +446,9 @@ async def test_early_speech_stops_provisional_output_after_observation_gap(respo
 
     original_events = Turn.events
 
-    async def events_with_gap(turn):
+    async def events_with_gap(turn, **kwargs):
         inserted = False
-        async with aclosing(original_events(turn)) as events:
+        async with aclosing(original_events(turn, **kwargs)) as events:
             async for event in events:
                 yield event
                 if isinstance(event, OutputTextDelta) and not inserted:

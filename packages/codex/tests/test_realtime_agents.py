@@ -16,6 +16,30 @@ from agents import Agent, function_tool
 from agents.realtime import RealtimeAgentConfig, RealtimeConfig, realtime_handoff
 
 
+@pytest.mark.parametrize("prompt", [{"id": "explicit-connection-prompt"}, None])
+async def test_profile_update_keeps_explicit_prompt_after_startup_settings_cleanup(prompt):
+    from _agents_codex.realtime import RealtimeSession
+
+    agent = Agent(
+        instructions="Backend", realtime=RealtimeAgentConfig(prompt={"id": "agent-default"})
+    )
+    session = source_session(agent, [])
+    owner = RealtimeSession(session, config=RealtimeConfig(settings={"prompt": prompt}))
+    owner._settings.clear()
+    owner._config = RealtimeConfig()
+    owner._live = True
+    updates = []
+
+    async def update(operation, **payload):
+        assert operation == "update"
+        updates.append(payload["update"])
+
+    owner._call = update
+    await owner._apply_profile(None, None)
+    assert updates[0]["prompt"] == prompt
+    assert owner._settings == {}
+
+
 async def test_superseded_handoff_configuration_preserves_new_acknowledged_source(monkeypatch):
     from _agents_codex import realtime
 
@@ -43,7 +67,7 @@ async def test_superseded_handoff_configuration_preserves_new_acknowledged_sourc
         ),
         _generation="voice",
         _config=RealtimeConfig(),
-        _settings={},
+        _prompt_settings={},
         _direct_tools=None,
         _has_agent_prompt=False,
         _live=True,
@@ -142,7 +166,13 @@ def source_session(agent, definitions, *, context=None, profile=None):
                 "selection_id": "exact-source",
                 "catalog_generation": 0,
                 "function_tools": [
-                    {**definition, "parameters": definition.get("inputSchema", {})}
+                    {
+                        "name": definition["name"],
+                        "parameters": definition.get("inputSchema", {}),
+                        "native_ref": definition.get(
+                            "native_ref", {"name": definition["name"], "namespace": None}
+                        ),
+                    }
                     for definition in definitions
                 ],
             }
@@ -181,12 +211,21 @@ async def test_contextual_instructions_and_predicates_bind_exact_source(asynchro
         realtime=RealtimeAgentConfig(
             instructions=async_resolve if asynchronous else resolve,
             prompt={"id": "voice-prompt"},
-            tool_enabled=lambda context, tool: tool.name != "hidden",
+            tool_enabled=lambda context, tool: (
+                tool.name == "visible" or (tool.name, tool.namespace) == ("read", "mcp__records")
+            ),
         ),
     )
-    offered = [{"name": "visible"}, {"name": "hidden"}, {"name": "mcp__records__read"}]
+    offered = [
+        {"name": "visible"},
+        {"name": "hidden"},
+        {
+            "name": "mcp__records__read",
+            "native_ref": {"name": "read", "namespace": "mcp__records"},
+        },
+    ]
     result = await _resolve_realtime_configuration(
-        source_session(agent, offered, context=application), RealtimeConfig(), {}, None
+        source_session(agent, offered, context=application), None, {}, None
     )
     assert result == (
         "Speak French",
@@ -214,7 +253,7 @@ async def test_explicit_connection_overrides_keep_tool_ceiling():
     assert agent.realtime.prompt["variables"]["language"] == "French"
     result = await _resolve_realtime_configuration(
         source_session(agent, [{"name": "one"}, {"name": "two"}]),
-        RealtimeConfig(instructions="Explicit"),
+        "Explicit",
         {"prompt": None},
         (object(),),
     )
@@ -227,22 +266,20 @@ async def test_callback_failure_and_invalid_result_prevent_configuration():
 
     agent = Agent(instructions="Backend", realtime=RealtimeAgentConfig(instructions=fail))
     with pytest.raises(ValueError, match="synthetic resolver failure"):
-        await _resolve_realtime_configuration(source_session(agent, []), RealtimeConfig(), {}, None)
+        await _resolve_realtime_configuration(source_session(agent, []), None, {}, None)
     for value in (None, 123):
         agent = Agent(
             instructions="Backend",
             realtime=RealtimeAgentConfig(instructions=lambda _, result=value: result),
         )
         with pytest.raises(TypeError, match="must return a string"):
-            await _resolve_realtime_configuration(
-                source_session(agent, []), RealtimeConfig(), {}, None
-            )
+            await _resolve_realtime_configuration(source_session(agent, []), None, {}, None)
     agent = Agent(
         instructions="Backend", realtime=RealtimeAgentConfig(tool_enabled=lambda *_: "yes")
     )
     with pytest.raises(TypeError, match="must return a bool"):
         await _resolve_realtime_configuration(
-            source_session(agent, [{"name": "one"}]), RealtimeConfig(), {}, None
+            source_session(agent, [{"name": "one"}]), None, {}, None
         )
 
 
@@ -304,7 +341,7 @@ async def test_disabled_handoff_is_not_advertised():
     session = source_session(
         source, [{"name": "transfer"}], context={"allowed": False}, profile=profile
     )
-    result = await _resolve_realtime_configuration(session, RealtimeConfig(), {}, None)
+    result = await _resolve_realtime_configuration(session, None, {}, None)
     assert result[2:] == ([], "exact-source")
     captured = profile.declaration.tools[0]._capture(session._context)
     assert type(await captured.before(None)).__name__ == "Deny"

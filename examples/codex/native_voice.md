@@ -328,12 +328,16 @@ async def main():
                 instructions=instructions,
                 tool_enabled=lambda context, tool: context.context["allow_tools"],
             ),
-            handoffs=[realtime_handoff(
-                specialist, name="transfer_specialist",
-                description="Transfer a specialist question with its reason.",
-                input_type=Transfer, on_handoff=record_transfer,
-                is_enabled=lambda context: context.context["allow_tools"],
-            )],
+            handoffs=[
+                realtime_handoff(
+                    specialist,
+                    name="transfer_specialist",
+                    description="Transfer a specialist question with its reason.",
+                    input_type=Transfer,
+                    on_handoff=record_transfer,
+                    is_enabled=lambda context: context.context["allow_tools"],
+                )
+            ],
         )
         async with agent.session(context=application) as session:
             async with session.realtime(config=RealtimeConfig()) as voice:

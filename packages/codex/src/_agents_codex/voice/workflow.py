@@ -137,7 +137,7 @@ class NativeSessionVoiceWorkflow:
                     raise asyncio.CancelledError
             spoken: dict[str, list[str]] = {}
             if self._early_speech:
-                events = turn.events()
+                events = turn.events(after=turn._observation_after)
                 interrupted_stream = False
                 try:
                     async for event in events:

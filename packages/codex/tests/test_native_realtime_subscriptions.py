@@ -271,3 +271,47 @@ async def test_raw_provider_observations_are_detached_at_each_delivery():
         await primary.aclose()
         await first.aclose()
         await second.aclose()
+
+
+async def test_hosted_tool_schemas_are_detached_without_cloning_issued_approvals():
+    from types import SimpleNamespace
+
+    from _agents_codex.realtime import (
+        RealtimeHostedMcpApprovalRequested,
+        RealtimeHostedMcpTool,
+        RealtimeHostedMcpToolsListed,
+        RealtimeSession,
+    )
+
+    owner = RealtimeSession(SimpleNamespace(_opening_agent=None), config=RealtimeConfig())
+    owner._live = True
+    owner._ready.set_result(None)
+    primary = owner.events()
+    first, second = owner.subscribe(), owner.subscribe()
+    schema = {"type": "object", "properties": {"record": {"enum": ["original"]}}}
+    owner._emit(
+        RealtimeHostedMcpToolsListed(
+            "catalog", "records", (RealtimeHostedMcpTool("lookup", schema),)
+        )
+    )
+    try:
+        delivered = await anext(primary)
+        delivered.tools[0].input_schema["properties"]["record"]["enum"].append("primary")
+        observed = await anext(first)
+        assert observed.tools[0].input_schema == schema
+        observed.tools[0].input_schema["properties"]["record"]["enum"].append("first")
+        remaining = await anext(second)
+        assert remaining.tools[0].input_schema["properties"]["record"]["enum"] == ["original"]
+        assert schema["properties"]["record"]["enum"] == ["original"]
+
+        approval = RealtimeHostedMcpApprovalRequested(
+            "request", "records", "lookup", "{}", "response"
+        )
+        owner._emit(approval)
+        assert await anext(primary) is approval
+        assert await anext(first) is approval
+        assert await anext(second) is approval
+    finally:
+        await primary.aclose()
+        await first.aclose()
+        await second.aclose()

@@ -245,7 +245,7 @@ def _configuration_callback_scope(session: Any) -> Any:
 
 async def _resolve_realtime_configuration(
     session: Any,
-    config: Any,
+    instructions: str | None,
     settings: dict[str, Any],
     tools: Any,
     *,
@@ -270,14 +270,14 @@ async def _resolve_realtime_configuration(
     elif getattr(session, "_profile_current", None) is not None:
         profile = profiles[session._profile_current[0]].profile
     handoffs = profile.handoff_options if profile is not None else {}
-    settings = dict(settings)
-    if reset_prompt and (defaults is None or defaults.prompt is None):
-        settings.setdefault("prompt", None)
     if defaults is None and not handoffs and source_snapshot is None:
         definitions, selection = await session._realtime_function_tools(
             tools, **({"allow_missing": True} if allow_missing else {})
         )
-        return config.instructions, settings, definitions, selection
+        resolved_settings = dict(settings)
+        if reset_prompt:
+            resolved_settings.setdefault("prompt", None)
+        return instructions, resolved_settings, definitions, selection
 
     snapshot = (
         source_snapshot
@@ -292,20 +292,18 @@ async def _resolve_realtime_configuration(
         # Declarations retain their identity in the Session's immutable registry.
         raise RuntimeError("Realtime configuration belongs to another captured Agent")
     original = profile.agent if profile is not None else getattr(session, "_agent", source)
+    if original is None:
+        raise RuntimeError("Realtime configuration has no source Agent")
     context = RealtimeAgentContext(session._context, original)
-    instructions = config.instructions
-    resolved_settings = dict(settings)
-    if defaults is not None:
-        if instructions is None:
-            with _configuration_callback_scope(session):
-                instructions = await _resolve_instructions(defaults, context)
-        if "prompt" not in resolved_settings and defaults.prompt is not None:
-            resolved_settings["prompt"] = deepcopy(defaults.prompt)
+    if defaults is not None and instructions is None:
+        with _configuration_callback_scope(session):
+            instructions = await _resolve_instructions(defaults, context)
     definitions, selection = await session._realtime_function_tools(
         tools, snapshot=snapshot, **({"allow_missing": True} if allow_missing else {})
     )
     if selection is not None and selection != snapshot["selection_id"]:
         raise RuntimeError("Realtime catalog changed while resolving Agent callbacks")
+    wire_tools = snapshot["function_tools"]
     if definitions is None:
         definitions = [
             {
@@ -313,16 +311,15 @@ async def _resolve_realtime_configuration(
                 "description": definition.get("description") or "",
                 "inputSchema": definition["parameters"],
             }
-            for definition in snapshot["function_tools"]
+            for definition in wire_tools
         ]
+    refs = {definition["name"]: definition["native_ref"] for definition in wire_tools}
     selected = []
     for definition in definitions:
         name = definition["name"]
-        if defaults is not None:
+        if defaults is not None and defaults.tool_enabled is not None:
             with _configuration_callback_scope(session):
-                enabled_tool = await _enabled(
-                    defaults, context, ToolRef(name, definition.get("namespace"))
-                )
+                enabled_tool = await _enabled(defaults, context, ToolRef(**refs[name]))
             if not enabled_tool:
                 continue
         handoff = handoffs.get(name)
@@ -336,6 +333,12 @@ async def _resolve_realtime_configuration(
             if not result:
                 continue
         selected.append(definition)
+    resolved_settings = dict(settings)
+    if "prompt" not in resolved_settings:
+        if defaults is not None and defaults.prompt is not None:
+            resolved_settings["prompt"] = deepcopy(defaults.prompt)
+        elif reset_prompt:
+            resolved_settings["prompt"] = None
     return instructions, resolved_settings, selected, snapshot["selection_id"]
 
 

@@ -466,8 +466,8 @@
     },
     {
       "path": "sdk-realtime-provider-events-and-scopes.patch",
-      "sha256": "912c23fed5cdfd5a9ee9ed7ddebaba55774d87db2cd459d0652e92600dc80996"
+      "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
     }
   ],
-  "result_tree": "217137e0342a0043d42c7edac6271f5b7f826a01"
+  "result_tree": "8b94daf19ae842d7c487252536a659445e60be41"
 }
