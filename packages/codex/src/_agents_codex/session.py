@@ -11967,8 +11967,16 @@ class Session(Generic[ContextT, OutputT]):
             self._observations.append(started)
             realtime_tool = isinstance(state, _Submission) and state.realtime_tool is not None
 
-            async def admit_source_tool() -> bool:
+            async def respond_tool_denial(reason: str) -> None:
                 nonlocal status
+                denial = ToolOutput.error(reason)
+                denial._validate()
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if self._admit_tool(state, request) and await self._respond_tool(state, reply):
+                    # A late send does not undo an already committed receipt.
+                    status = "failed"
+
+            async def admit_source_tool() -> bool:
                 enabled = await self._realtime_tool_enabled(
                     message, entry.context, ref, lambda: self._admit_tool(state, request)
                 )
@@ -11976,10 +11984,7 @@ class Session(Generic[ContextT, OutputT]):
                     return False
                 if enabled:
                     return True
-                denial = ToolOutput.error("Tool disabled by its source Agent")
-                reply = json.dumps({"request": message, "response": denial.to_native()})
-                if await self._respond_tool(state, reply):
-                    status = "failed"
+                await respond_tool_denial("Tool disabled by its source Agent")
                 return False
 
             if realtime_tool and not await admit_source_tool():
@@ -12053,14 +12058,7 @@ class Session(Generic[ContextT, OutputT]):
                     return
                 if isinstance(decision, Deny):
                     # A local denial never invokes the body or the after hook.
-                    denial = ToolOutput.error(decision.reason)
-                    denial._validate()
-                    reply = json.dumps({"request": message, "response": denial.to_native()})
-                    if self._admit_tool(state, request):
-                        accepted = await self._respond_tool(state, reply)
-                        # A late send does not undo an already committed receipt.
-                        if accepted:
-                            status = "failed"
+                    await respond_tool_denial(decision.reason)
                     return
                 if isinstance(decision, ReplaceArguments):
                     arguments_replaced = True
@@ -12098,8 +12096,26 @@ class Session(Generic[ContextT, OutputT]):
                 assert context is not None
                 args = (context,)
             # The before hook may have yielded while the source grant changed.
-            if realtime_tool and entry.before is not None and not await admit_source_tool():
-                return
+            if realtime_tool and entry.before is not None:
+                if not await admit_source_tool():
+                    return
+                from .realtime_agents import _CapturedHandoff
+
+                if isinstance(entry, _CapturedHandoff):
+                    source = self._agent_for_message(message).realtime
+                    if source is not None and source.tool_enabled is not None:
+                        # The source grant can suspend after the initial handoff check.
+                        assert context is not None
+                        handoff_decision = await self._call_decision_callback(
+                            state,
+                            message,
+                            entry.before,
+                            lambda: self._admit_tool(state, request),
+                            context,
+                        )
+                        if isinstance(handoff_decision, Deny):
+                            await respond_tool_denial(handoff_decision.reason)
+                            return
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None

@@ -163,6 +163,76 @@ async def test_native_voice_rechecks_source_predicate_after_dispatch_hook(realti
             assert effects == ["handoff" if handoff else "function"]
 
 
+async def test_native_voice_rechecks_handoff_grant_after_awaited_source_policy(realtime_peer):
+    peer = realtime_peer
+    handoff_checked, source_waiting, release = (asyncio.Event() for _ in range(3))
+    application = {"handoff_enabled": True}
+    effects = []
+    armed = False
+
+    def handoff_enabled(context):
+        if armed:
+            handoff_checked.set()
+        return context.context["handoff_enabled"]
+
+    async def source_enabled(_context, _tool):
+        if handoff_checked.is_set():
+            source_waiting.set()
+            await release.wait()
+        return True
+
+    def on_handoff(_):
+        effects.append("handoff")
+
+    target = Agent(name="Destination", instructions="Destination instructions")
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-realtime-handoff-grant-key",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        source = Agent(
+            name="Source",
+            instructions="Source instructions",
+            provider=provider,
+            handoffs=[
+                realtime_handoff(
+                    target,
+                    name="transfer",
+                    is_enabled=handoff_enabled,
+                    on_handoff=on_handoff,
+                )
+            ],
+            realtime=RealtimeAgentConfig(tool_enabled=source_enabled),
+        )
+        async with (
+            source.session(context=application) as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")),
+        ):
+            initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+            assert "transfer" in {tool["name"] for tool in initial["session"]["tools"]}
+            armed = True
+            await peer.function("transfer", {}, "revoked-handoff")
+            await source_waiting.wait()
+            application["handoff_enabled"] = False
+            release.set()
+            denied = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "revoked-handoff"
+            )
+            assert effects == []
+            assert "This handoff is disabled." in denied["item"]["output"]
+            assert await session.get_active_agent() is source
+
+            application["handoff_enabled"] = True
+            await peer.function("transfer", {}, "allowed-handoff")
+            await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "allowed-handoff"
+            )
+            assert effects == ["handoff"]
+
+
 @pytest.mark.parametrize("dataclass_input", [False, True])
 async def test_native_custom_handoff_waits_for_callback_and_configuration_ack(
     realtime_peer, dataclass_input
