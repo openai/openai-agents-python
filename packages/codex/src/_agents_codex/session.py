@@ -5878,6 +5878,8 @@ class Session(Generic[ContextT, OutputT]):
         )
         if approve:
             approved = self._approval_ready.get(request._invocation)
+            if approved is not None and approved.approved:
+                raise InteractionExpiredError("Managed approval is expired or already decided")
             if approved is None:
                 approved = _ApprovalArguments(request.effective_arguments)
                 self._approval_ready[request._invocation] = approved
