@@ -1,6 +1,7 @@
 {
   "include": [
     "src/agents",
+    "src/_agents_shared",
     "packages/codex/src/_agents_codex",
     "packages/codex/tests/test_native_agent_typing.py",
     "packages/codex/tests/test_native_agent_checkpoint_typing.py",

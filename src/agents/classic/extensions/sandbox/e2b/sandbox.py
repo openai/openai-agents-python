@@ -1689,6 +1689,16 @@ class E2BSandboxClient(BaseSandboxClient[E2BSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: E2BSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, E2BSandboxSessionState):
+            raise TypeError("E2BSandboxClient requires E2B sandbox state")
+        if (
+            options.allow_internet_access is False and state.allow_internet_access is not False
+        ) or set(options.exposed_ports) != set(state.exposed_ports):
+            raise ValueError("Current E2B networking options require a fresh sandbox session")
+
     @redact_mount_error_data
     async def create(
         self,

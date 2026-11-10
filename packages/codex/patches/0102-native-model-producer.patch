@@ -1,0 +1,80 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 1c010b7961f4633c82d04b0f1012027e49ee3b4f..7872ca09a69d0d5c60be087655b340353bfe0a16 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2126,7 +2126,12 @@ impl ModelClientSession {
+                     },
+                 )
+             };
+-            let stream_result = if prompt.prefer_buffered_response {
++            let produced = crate::model_request::produce_response(
++                &interceptors, &request,
++            ).await.map_err(CodexErr::Fatal)?;
++            let stream_result = if let Some(events) = produced {
++                Ok((None, None, events, None, None))
++            } else if prompt.prefer_buffered_response {
+                 client
+                     .json_request(request, options)
+                     .await
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 9b4ff7cf17dcaa9dafd67c26961988350c0d5ad0..c5381f073e52f0bd1214cb8df3971bed8c817767 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -87,6 +87,15 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn produces_response(&self) -> bool { self.inner.produces_response() }
++    fn produce_response<'a>(
++        &'a self,
++        request: serde_json::Value,
++        _: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> Option<futures::future::BoxFuture<'a, Result<ModelResponseStream, String>>> {
++        self.inner.produce_response(request, self.admission.clone())
++    }
++
+     fn admit_request(&self) -> Result<(), String> {
+         self.inner.admit_request()
+     }
+@@ -185,3 +194,17 @@ pub(crate) fn intercept_stream(
+ #[cfg(test)]
+ #[path = "model_request_tests.rs"]
+ mod tests;
++
++/// Resolve exactly one producer after native request admission. No provider
++/// transport may run when a selected producer fails or is cancelled.
++pub(crate) async fn produce_response(
++    interceptors: &[Box<dyn ModelResponseInterceptor>],
++    request: &impl serde::Serialize,
++) -> Result<Option<ModelResponseStream>, String> {
++    let mut producers = interceptors.iter().filter(|interceptor| interceptor.produces_response());
++    let Some(selected) = producers.next() else { return Ok(None); };
++    if producers.next().is_some() { return Err("Multiple native model producers selected".into()); }
++    let request = serde_json::to_value(request).map_err(|_| "Native model request serialization failed")?;
++    let producer = selected.produce_response(request, None).ok_or("Selected native model producer is unavailable")?;
++    producer.await.map(Some)
++}
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 0b5542070b2f660c1efa84acea02349c7c4a53ea..f85f82799791a7d439786be4422916737d4cdda9 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -186,6 +186,19 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Select a model producer before materializing the detached request JSON.
++    fn produces_response(&self) -> bool { false }
++    /// Optional native model producer. Core retains canonical history, tools, and
++    /// response processing. A producer must join its application work on cancellation.
++    /// Returning None retains ordinary provider transport.
++    fn produce_response<'a>(
++        &'a self,
++        _request: Value,
++        _admission: Option<Arc<dyn ModelToolAdmission>>,
++    ) -> Option<BoxFuture<'a, Result<ModelResponseStream, String>>> {
++        None
++    }
++
+     /// Admit this captured request immediately before provider transport starts.
+     /// Hosts may revoke its original owner without affecting a later request.
+     fn admit_request(&self) -> Result<(), String> {

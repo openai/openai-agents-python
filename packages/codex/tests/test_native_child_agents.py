@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import pickle
 from collections import deque
@@ -330,11 +331,12 @@ async def test_child_missing_usage_remains_none(
         assert (await (child).get_result()).thread_usage is None
 
 
-def assert_catalog(request: dict[str, Any]) -> None:
+def assert_catalog(request: dict[str, Any], *, project_guidance: bool = False) -> None:
     assert {tool.get("name") for tool in request["tools"]} == {
         "exec_command",
         "write_stdin",
         "apply_patch",
+        *(["view_image"] if project_guidance else []),
     }
     assert all(tool["type"] in {"function", "custom"} for tool in request["tools"])
     assert request.get("text", {}).get("format", {}).get("type") != "json_schema"
@@ -433,9 +435,10 @@ async def test_two_genuine_children_keep_exact_turn_results(
         assert bool(peer.frames) is websocket
 
 
+@pytest.mark.parametrize("project_guidance", [False, True])
 @pytest.mark.parametrize("bad", ["extra-key", "null-workdir", "unselected"])
 async def test_child_first_call_admission_precedes_remote_effects(
-    bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_guidance: bool
 ) -> None:
     async with (
         timeout(30),
@@ -443,7 +446,14 @@ async def test_child_first_call_admission_precedes_remote_effects(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
-        async with agent_for(peer, executor).session(environment=declaration(executor)) as session:
+        (executor.root / "missing.png").write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+            )
+        )
+        async with agent_for(peer, executor).session(
+            environment=declaration(executor), project_guidance=project_guidance
+        ) as session:
             await (await session.submit("Use one child")).get_result()
             handle = (await handles(session, 1))[0]
             if bad == "unselected":
@@ -458,12 +468,15 @@ async def test_child_first_call_admission_precedes_remote_effects(
                     and item.get("call_id") == "shared-call-id"
                 ]
                 assert len(rejected) == 1
-                assert rejected[0]["output"] == "unsupported call: view_image"
+                if project_guidance:
+                    assert "data:image/png;base64," in json.dumps(peer.child_requests["alpha"][-1])
+                else:
+                    assert rejected[0]["output"] == "unsupported call: view_image"
             else:
                 with pytest.raises(NativeError):
                     await child_output(session, handle)
             for request in peer.child_requests["alpha"]:
-                assert_catalog(request)
+                assert_catalog(request, project_guidance=project_guidance)
             assert not (executor.root / "alpha.txt").exists()
             assert not any(
                 request.get("method") in {"process/start", "fs/writeFile"}

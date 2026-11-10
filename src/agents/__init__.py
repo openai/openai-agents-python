@@ -22,12 +22,22 @@ if TYPE_CHECKING:
     )
     from .canonical_storage import (
         CustomStorage as CustomStorage,
+        EncryptedSessionStore as EncryptedSessionStore,
+        MongoDBSessionStore as MongoDBSessionStore,
+        RedisSessionStore as RedisSessionStore,
         SessionStore as SessionStore,
         SessionStoreCleanup as SessionStoreCleanup,
+        SQLAlchemySessionStore as SQLAlchemySessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
     from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .computer import (
+        Computer as Computer,
+        ComputerProvider as ComputerProvider,
+        ComputerSafetyError as ComputerSafetyError,
+        computer_tool as computer_tool,
+    )
     from .decisions import (
         DecisionError as DecisionError,
         DecisionInput as DecisionInput,
@@ -57,7 +67,9 @@ if TYPE_CHECKING:
     from .manual import (
         ActionReply as ActionReply,
         ActionRequested as ActionRequested,
+        ApprovalDecision as ApprovalDecision,
         ApprovalRequest as ApprovalRequest,
+        ApprovalRequested as ApprovalRequested,
         ElicitationRequest as ElicitationRequest,
         FormRequest as FormRequest,
         Interaction as Interaction,
@@ -94,6 +106,13 @@ if TYPE_CHECKING:
     from .model_context import (
         ModelContextSnapshot as ModelContextSnapshot,
         ModelRequestContext as ModelRequestContext,
+    )
+    from .models import (
+        ChatCompletionsModel as ChatCompletionsModel,
+        ModelProvider as ModelProvider,
+        ModelRequest as ModelRequest,
+        ModelResponse as ModelResponse,
+        NativeModel as NativeModel,
     )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
@@ -188,6 +207,11 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "ChatCompletionsModel": ".models",
+    "ModelProvider": ".models",
+    "ModelRequest": ".models",
+    "ModelResponse": ".models",
+    "NativeModel": ".models",
     "DecisionError": ".decisions",
     "DecisionInput": ".decisions",
     "DecisionProvider": ".decisions",
@@ -229,6 +253,8 @@ _MODULES = {
     "ChecklistStep": ".state",
     "ActionReply": ".manual",
     "ActionRequested": ".manual",
+    "ApprovalRequested": ".manual",
+    "ApprovalDecision": ".manual",
     "ApprovalRequest": ".manual",
     "FormRequest": ".manual",
     "UrlRequest": ".manual",
@@ -249,9 +275,13 @@ _MODULES = {
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
+    "EncryptedSessionStore": ".canonical_storage",
+    "MongoDBSessionStore": ".canonical_storage",
+    "RedisSessionStore": ".canonical_storage",
     "SessionStore": ".canonical_storage",
     "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",
+    "SQLAlchemySessionStore": ".canonical_storage",
     "LocalRecoveryRequired": ".recovery",
     "ReconciledCall": ".recovery",
     "UncertainCall": ".recovery",
@@ -293,6 +323,10 @@ _MODULES = {
     "HttpMCP": ".mcp",
     "HostedVerificationMCP": ".mcp",
     "ChatGPTAppsMCP": ".mcp",
+    "Computer": ".computer",
+    "ComputerProvider": ".computer",
+    "ComputerSafetyError": ".computer",
+    "computer_tool": ".computer",
     "FunctionTool": "._function_tools",
     "Tool": "._function_tools",
     "ToolRef": ".tools",

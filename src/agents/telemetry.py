@@ -9,6 +9,7 @@ from __future__ import annotations
 from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
+    ConsoleTraceProcessor as ConsoleTraceProcessor,
     ContextVar as ContextVar,
     Coroutine as Coroutine,
     Event as Event,
@@ -19,6 +20,7 @@ from _agents_codex.telemetry import (
     Literal as Literal,
     Lock as Lock,
     Mapping as Mapping,
+    OpenAITraceExporter as OpenAITraceExporter,
     OtelTlsConfig as OtelTlsConfig,
     OtlpGrpc as OtlpGrpc,
     OtlpHttp as OtlpHttp,
@@ -94,13 +96,17 @@ from _agents_codex.telemetry import (
     json as json,
     monotonic as monotonic,
     replace as replace,
+    set_sensitive_data_logging_enabled as set_sensitive_data_logging_enabled,
     set_trace_processors as set_trace_processors,
+    set_tracing_disabled as set_tracing_disabled,
     shutdown as shutdown,
     span as span,
     trace as trace,
 )
 
 __all__ = [
+    "OpenAITraceExporter",
+    "ConsoleTraceProcessor",
     "TraceContext",
     "OtelTlsConfig",
     "OtlpGrpc",
@@ -123,5 +129,7 @@ __all__ += [
     "current_context",
     "add_trace_processor",
     "set_trace_processors",
+    "set_tracing_disabled",
+    "set_sensitive_data_logging_enabled",
     "force_flush",
 ]

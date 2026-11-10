@@ -1237,6 +1237,14 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: DaytonaSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, DaytonaSandboxSessionState):
+            raise TypeError("DaytonaSandboxClient requires Daytona sandbox state")
+        if set(options.exposed_ports) != set(state.exposed_ports):
+            raise ValueError("Current Daytona port exposure requires a fresh sandbox session")
+
     async def _build_create_params(
         self,
         *,

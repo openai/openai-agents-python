@@ -35,6 +35,7 @@ These programs use the current SDK and model credentials:
 | Task | Example | What to inspect |
 | --- | --- | --- |
 | Call a Python function | [basic.py](basic.py) | One answer through `Agent` and `function_tool`. |
+| Approve a managed callback | [Managed function approvals](managed_approvals/README.md) | Synthetic native approval, callback execution, and portable pending state. |
 | Search the web | [hosted_web_search.py](hosted_web_search.py) | Domain filters, approximate location, and source URLs on a compatible Responses model. |
 | Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
 | Make typed decisions (source preview) | [Decisions guide](decisions-guide.md) | Replaceable providers, typed output, and decisions bound to Agent callbacks; requires a build with Decisions support. |

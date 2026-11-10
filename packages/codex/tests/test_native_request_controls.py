@@ -389,6 +389,10 @@ async def test_controls_reach_existing_websocket_frames():
                     "max_output_tokens": 29,
                     "temperature": 0.25,
                     "metadata": {"wire": "websocket"},
+                    "truncation": "disabled",
+                    "include": ["message.output_text.logprobs"],
+                    "extra_body": {"provider_feature": {"websocket": True}},
+                    "context_management": [{"type": "compaction", "compact_threshold": 1024}],
                     "prompt_cache_ttl": "12h",
                     "prompt_cache_retention": "in_memory",
                 },
@@ -398,8 +402,38 @@ async def test_controls_reach_existing_websocket_frames():
         assert frames and all(frame["max_output_tokens"] == 29 for frame in frames)
         assert frames[-1]["temperature"] == 0.25
         assert frames[-1]["metadata"] == {"wire": "websocket"}
+        assert frames[-1]["type"] == "response.create"
+        assert frames[-1]["truncation"] == "disabled"
+        assert frames[-1]["provider_feature"] == {"websocket": True}
+        assert frames[-1]["context_management"] == [
+            {"type": "compaction", "compact_threshold": 1024}
+        ]
+        assert "message.output_text.logprobs" in frames[-1]["include"]
         assert frames[-1]["prompt_cache_options"] == {"ttl": "12h"}
         assert frames[-1]["prompt_cache_retention"] == "in_memory"
+
+
+async def test_empty_extra_body_remains_a_no_wire_patch_on_lite(responses):
+    responses.respond(assistant_output("empty body accepted"))
+    responses.respond(assistant_output("empty patch accepted"))
+    async with timeout(30), provider_for(responses) as provider:
+        async with Agent(
+            model="gpt-5.6-sol",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"extra_body": {}},
+        ).session() as session:
+            result = await (await session.submit("empty body")).get_result()
+            assert result.final_output == "empty body accepted"
+            await session.update(model_settings={"extra_body": {}})
+            with pytest.raises(
+                (ValueError, RuntimeError), match="standard Responses|Responses Lite"
+            ):
+                await session.update(model_settings={"extra_body": {"provider_feature": None}})
+            result = await (await session.submit("empty patch")).get_result()
+            assert result.final_output == "empty patch accepted"
+    assert len(responses.requests) == 2
+    assert all("provider_feature" not in request for request in responses.requests)
 
 
 async def test_known_lite_rejection_does_not_publish_a_model_or_controls_change(responses):
@@ -456,3 +490,114 @@ async def test_provider_rejection_of_unknown_model_control_is_not_dropped_or_ret
                     model_settings={"temperature": 0.4},
                 ).run("unsupported")
     assert len(requests) == 1 and requests[0]["temperature"] == 0.4
+
+
+async def test_extended_request_fields_capture_clear_and_restore(
+    responses: ResponsesFixture,
+) -> None:
+    for _ in range(3):
+        responses.respond(assistant_output("finished"))
+    extra = {"provider_feature": {"mode": "captured"}}
+    include = ["message.output_text.logprobs"]
+    context = [{"type": "compaction", "compact_threshold": 1024}]
+    async with timeout(40), provider_for(responses) as provider:
+        agent = Agent(
+            model=MODEL,
+            instructions="Answer.",
+            provider=provider,
+            model_settings={
+                "truncation": "auto",
+                "include": include,
+                "context_management": context,
+                "extra_body": extra,
+            },
+        )
+        extra["provider_feature"]["mode"] = "mutated"
+        include.append("mutated")
+        context[0]["compact_threshold"] = 999
+        async with agent.session() as session:
+            await (await session.submit("first")).get_result()
+            saved = await session.save_state()
+            await session.update(
+                model_settings={
+                    "truncation": None,
+                    "include": None,
+                    "context_management": None,
+                    "extra_body": None,
+                }
+            )
+            await (await session.submit("clear")).get_result()
+        async with agent.session(state=saved) as restored:
+            await (await restored.submit("restore")).get_result()
+    for index in (0, 2):
+        request = responses.requests[index]
+        assert request["truncation"] == "auto"
+        assert request["provider_feature"] == {"mode": "captured"}
+        assert request["context_management"] == [{"type": "compaction", "compact_threshold": 1024}]
+        assert "message.output_text.logprobs" in request["include"]
+        assert "reasoning.encrypted_content" in request["include"]
+        assert "mutated" not in request["include"]
+    assert (
+        not {"truncation", "provider_feature", "context_management"} & responses.requests[1].keys()
+    )
+    assert "message.output_text.logprobs" not in responses.requests[1]["include"]
+
+
+@pytest.mark.parametrize("key", ["type", "generate", "input", "tools", "previous_response_id"])
+def test_extra_body_rejects_native_envelope_fields_before_opening(key: str) -> None:
+    with pytest.raises(ValueError, match="extra_body cannot replace"):
+        Agent(instructions="Answer.", model_settings={"extra_body": {key: False}})
+
+
+async def test_empty_include_is_a_sparse_no_wire_patch_on_lite(responses):
+    for text in ["opened", "cleared", "restored"]:
+        responses.respond(assistant_output(text))
+    async with timeout(30), provider_for(responses) as provider:
+        agent = Agent(
+            model="gpt-5.6-sol",
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"include": []},
+        )
+        async with agent.session() as session:
+            assert (await (await session.submit("open")).get_result()).final_output == "opened"
+            await session.update(model_settings={"include": []})
+            saved = await session.save_state()
+            with pytest.raises(
+                (ValueError, RuntimeError), match="standard Responses|Responses Lite"
+            ):
+                await session.update(model_settings={"include": ["message.output_text.logprobs"]})
+            await session.update(model_settings={"include": None})
+            assert (await (await session.submit("clear")).get_result()).final_output == "cleared"
+        async with agent.session(state=saved) as restored:
+            assert (
+                await (await restored.submit("restore")).get_result()
+            ).final_output == "restored"
+    assert len(responses.requests) == 3
+    assert all(
+        "message.output_text.logprobs" not in request.get("include", [])
+        for request in responses.requests
+    )
+
+
+async def test_empty_include_clears_additions_and_preserves_native_required_includes(responses):
+    for text in ["before", "empty", "restored"]:
+        responses.respond(assistant_output(text))
+    async with timeout(30), provider_for(responses) as provider:
+        agent = Agent(
+            model=MODEL,
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"include": ["message.output_text.logprobs"]},
+        )
+        async with agent.session() as session:
+            await (await session.submit("before")).get_result()
+            await session.update(model_settings={"include": []})
+            await (await session.submit("empty")).get_result()
+            saved = await session.save_state()
+        async with agent.session(state=saved) as restored:
+            await (await restored.submit("restore")).get_result()
+    assert "message.output_text.logprobs" in responses.requests[0]["include"]
+    for request in responses.requests[1:]:
+        assert "message.output_text.logprobs" not in request["include"]
+        assert "reasoning.encrypted_content" in request["include"]
