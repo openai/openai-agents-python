@@ -44,6 +44,8 @@ The call options follow these rules:
 
 Restore uses the checkpoint's model and settings. Any non-`None` opening `model` or `model_settings`, including `{}`, raises `ValueError`. Idle updates can change them after restore, except with `NativeAgents`. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
+Matching development builds have also been supporting `Agent.handoffs`, `await session.get_active_agent()` and idle `await session.update(agent=target)`. The [Agent handoff guide](sessions.md#hand-off-the-conversation-to-another-agent) has been explaining captured targets, operation tool limits and restore through the original graph root.
+
 ## Sessions and turns
 
 ### Session
