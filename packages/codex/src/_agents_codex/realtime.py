@@ -1086,6 +1086,7 @@ class RealtimeSession:
         if self._entered or self._terminal.done():
             raise RuntimeError("RealtimeSession cannot be entered again")
         self._session._check_callback_operation("realtime")
+        self._session._check_realtime_provider()
         previous = self._session._realtime
         if previous is not None and previous._startup_failed:
             await previous.aclose()

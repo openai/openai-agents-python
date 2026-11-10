@@ -8,7 +8,9 @@ use anyhow::{Context, Result, ensure};
 use codex_core_api::Config;
 use codex_login::{
     AuthManager, CodexAuth, ExternalAuth, ExternalAuthFuture, ExternalAuthRefreshContext,
+    RefreshTokenError,
 };
+use codex_protocol::auth::{RefreshTokenFailedError, RefreshTokenFailedReason};
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -28,18 +30,30 @@ pub(crate) struct CodexAccount {
     pub binding: String,
     pub auth_file: PathBuf,
     pub credential_directory: Option<PathBuf>,
+    pub auth_home_alias: Option<PathBuf>,
 }
 
 impl SavedCodexLogin {
     pub fn open(self, config: &Config) -> Result<(Arc<AuthManager>, CodexAccount)> {
+        // Preserve the configured spelling for admission checks before Core resolves it.
+        let declared_home = self.codex_home.clone().or_else(|| {
+            std::env::var("CODEX_HOME")
+                .ok()
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from)
+        });
         let codex_home = match self.codex_home {
             Some(path) => path,
             None => codex_core::config::find_codex_home()
                 .context("Cannot locate the Codex login directory")?
                 .to_path_buf(),
-        }
-        .canonicalize()
-        .context("Cannot open the Codex login directory")?;
+        };
+        let declared_home = std::path::absolute(declared_home.as_deref().unwrap_or(&codex_home))
+            .context("Cannot open the Codex login directory")?;
+        let codex_home = codex_home
+            .canonicalize()
+            .context("Cannot open the Codex login directory")?;
+        let auth_home_alias = (declared_home != codex_home).then_some(declared_home);
         let auth_file = codex_home.join("auth.json");
         let credential_directory = self
             .credential_directory
@@ -110,6 +124,7 @@ impl SavedCodexLogin {
                 binding,
                 auth_file,
                 credential_directory,
+                auth_home_alias,
             },
         ))
     }
@@ -117,6 +132,7 @@ impl SavedCodexLogin {
 
 struct ApiKey {
     auth: CodexAuth,
+    app_managed_oauth: bool,
 }
 
 impl ExternalAuth for ApiKey {
@@ -124,17 +140,49 @@ impl ExternalAuth for ApiKey {
         Box::pin(async { Ok(self.auth.clone()) })
     }
 
+    fn can_refresh(&self) -> bool {
+        !self.app_managed_oauth
+    }
+
+    fn terminal_auto_compaction_limit_errors(&self) -> bool {
+        self.app_managed_oauth
+    }
+
     fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        if self.app_managed_oauth {
+            return Box::pin(async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Sign in with ChatGPT access was rejected; check the selected registration",
+                ))
+            });
+        }
         self.resolve()
+    }
+
+    fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
+        if self.app_managed_oauth {
+            RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                RefreshTokenFailedReason::Other,
+                error.to_string(),
+            ))
+        } else {
+            RefreshTokenError::Transient(error)
+        }
     }
 }
 
-pub async fn manager(config: &Config, api_key: Option<String>) -> Result<Arc<AuthManager>> {
+pub async fn manager(
+    config: &Config,
+    api_key: Option<String>,
+    app_managed_oauth: bool,
+) -> Result<Arc<AuthManager>> {
     let api_key = match api_key {
         Some(key) => {
             ensure!(!key.trim().is_empty(), "api_key must not be empty");
             Some(key.trim().to_owned())
         }
+        None if app_managed_oauth => anyhow::bail!("Sign in with ChatGPT requires an access token"),
         None => codex_login::read_openai_api_key_from_env(),
     };
     ensure!(
@@ -156,6 +204,7 @@ pub async fn manager(config: &Config, api_key: Option<String>) -> Result<Arc<Aut
             manager
                 .set_external_auth(Arc::new(ApiKey {
                     auth: CodexAuth::from_api_key(&key),
+                    app_managed_oauth,
                 }))
                 .await?;
         }

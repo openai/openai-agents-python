@@ -1,0 +1,59 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index bb9e814f0fe4c88a410ecc85d04b375a8667d544..ea0447a75ff180ab7994ab35f70969ff59ae50ed 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -135,6 +135,7 @@ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::subagent_header_value;
+ use crate::util::emit_feedback_auth_recovery_tags;
++use codex_analytics::CompactionImplementation;
+ use codex_analytics::CompactionPhase;
+ use codex_analytics::CompactionTrigger;
+ use codex_feedback::FeedbackRequestTags;
+@@ -1673,7 +1674,16 @@ impl ModelClientSession {
+             }
+             _ => false,
+         };
+-        turn_owned && self.saved_login_limits_need_attention()
++        turn_owned
++            && (self.saved_login_limits_need_attention()
++                || matches!(
++                    request_kind,
++                    Some(CodexResponsesRequestKind::Compaction(metadata))
++                        if matches!(metadata.implementation(), CompactionImplementation::Responses)
++                ) && self
++                    .client
++                    .auth_manager()
++                    .is_some_and(|manager| manager.terminal_auto_compaction_limit_errors()))
+     }
+ 
+     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index e0bfd65ccc28ceb695ac7a72de23086713ff48f4..dc337c72099d5e1ce537b7e7fe5ab2879ba21128 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -284,6 +284,11 @@ pub trait ExternalAuth: Send + Sync {
+         true
+     }
+ 
++    /// Whether turn-owned automatic Responses compaction should surface limit errors immediately.
++    fn terminal_auto_compaction_limit_errors(&self) -> bool {
++        false
++    }
++
+     /// Refreshes auth and makes the returned value current for future `resolve()` calls.
+     fn refresh(&self, context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth>;
+ 
+@@ -3241,6 +3246,12 @@ impl AuthManager {
+         self.saved_chatgpt.is_some()
+     }
+ 
++    /// Returns the external provider's policy for turn-owned automatic Responses compaction limits.
++    pub fn terminal_auto_compaction_limit_errors(&self) -> bool {
++        self.external_auth_provider()
++            .is_some_and(|auth| auth.terminal_auto_compaction_limit_errors())
++    }
++
+     /// Returns the precise kind of credentials backing the current authentication.
+     pub fn get_api_auth_mode(&self) -> Option<AuthMode> {
+         self.auth_cached().as_ref().map(CodexAuth::api_auth_mode)

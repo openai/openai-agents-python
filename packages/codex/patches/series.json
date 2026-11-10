@@ -417,6 +417,10 @@
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     },
     {
+      "path": "0152-siwc-http-errors.patch",
+      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
+    },
+    {
       "path": "0153-sdk-saved-login-durable-refresh.patch",
       "sha256": "3256e6ede7e0d7357bd6cf3c9a3f2fec8fec97aae4cffde957f5c575cf017231"
     },
@@ -485,6 +489,18 @@
       "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     },
     {
+      "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
+    },
+    {
+      "path": "0156-sdk-commit-completed-compaction-summary.patch",
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
+    },
+    {
+      "path": "0157-sdk-registered-http-429-diagnostics.patch",
+      "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
+    },
+    {
       "path": "sdk-realtime-voice-policies.patch",
       "sha256": "cb01a081dc7553b210549fe77dfcf6f5dc724447e7a8c2e912c59b370ac87b8f"
     },
@@ -533,5 +549,5 @@
       "sha256": "a3ea35cfd3f2eaeed66dc6ad6b06e7f651a7126ebfc66032636dc5bfe9ae31d9"
     }
   ],
-  "result_tree": "b6cd35d81afd006ef7c3cdbf1c57a0c8cfa5fff6"
+  "result_tree": "b4a1fc455f8b3a2a5cdae5ed129a409e223f7865"
 }

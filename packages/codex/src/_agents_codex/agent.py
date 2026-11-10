@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio as asyncio
+import base64
+import hashlib
 import importlib as importlib
 import json as json
 import math as math
@@ -10,6 +12,8 @@ import os as os
 import re as re
 from collections.abc import (
     AsyncIterator as AsyncIterator,
+    Awaitable as Awaitable,
+    Callable as Callable,
     Callable as _Callable,
     Mapping as Mapping,
     Sequence as Sequence,
@@ -27,6 +31,7 @@ from dataclasses import (
 )
 from pathlib import Path as Path
 from threading import RLock as RLock
+from time import time as _time
 from types import (
     MappingProxyType as MappingProxyType,
     MethodType as MethodType,
@@ -334,6 +339,108 @@ class CodexAccount:
     plan_type: str
 
 
+_SIWC_ISSUER = "https://auth.openai.com"
+_SIWC_RESOURCE = "https://api.openai.com/v1"
+_SIWC_PROVIDER_PREFIX = "native_agent_siwc_"
+_SIWC_VERIFIED_PROVIDER_PREFIX = _SIWC_PROVIDER_PREFIX + "verified_"
+
+
+def _valid_siwc_bearer(token: str, client_id: str) -> bool:
+    """Check the declared route and lifetime of the record's access token."""
+    if not isinstance(token, str) or not re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", token, re.ASCII):
+        return False
+    payload = token.split(".")[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(claims, dict):
+        return False
+    scope = claims.get("scope")
+    expires = claims.get("exp")
+    return (
+        claims.get("iss") == _SIWC_ISSUER
+        and claims.get("aud") == _SIWC_RESOURCE
+        and claims.get("client_id") == client_id
+        and isinstance(scope, str)
+        and {"resource.invoke", "chatgpt.tokens.use.direct"}.issubset(scope.split())
+        and type(expires) is int
+        and expires > _time()
+    )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True, repr=False)
+class SignInWithChatGPTCredentials:
+    """The verified identity and its current bearer from one protected app record.
+
+    Set issuer, client_id, and subject from the application's verified sign-in
+    identity and issued registration. Set access_token from the same credential
+    record. On refresh, preserve the verified identity and replace the bearer
+    with the token issued for that record.
+    """
+
+    issuer: str
+    client_id: str
+    subject: str
+    access_token: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class SignInWithChatGPT:
+    """Use a registered integration's ChatGPT plan for native Responses.
+
+    After authenticating the current application user, supply an async callback
+    that returns one snapshot from that user's protected OAuth credential record.
+    At sign-in, the application verifies the ID token and associates its identity
+    with the credentials from the same exchange. Authorize the user's access to
+    a saved conversation before asking the SDK to restore it. Return None when
+    no authenticated credential record is available.
+
+    The SDK binds the Session to the verified identity and captures its bearer
+    for Responses. To use a renewed bearer, open a new Session with the same
+    verified identity and restore the conversation.
+
+    See https://developers.openai.com/siwc/token-sharing-open-source for
+    eligibility, registration, and supported Responses capabilities.
+    """
+
+    get_credentials: Callable[[], Awaitable[SignInWithChatGPTCredentials | None]] = field(
+        repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if not callable(self.get_credentials):
+            raise TypeError("get_credentials must be an async credential callback")
+
+    async def _resolve(self) -> tuple[str, str]:
+        failure: BaseException
+        try:
+            credentials = await self.get_credentials()
+        except asyncio.CancelledError:
+            failure = asyncio.CancelledError()
+        except Exception:
+            failure = RuntimeError("Could not obtain Sign in with ChatGPT credentials")
+        else:
+            if (
+                isinstance(credentials, SignInWithChatGPTCredentials)
+                and credentials.issuer == _SIWC_ISSUER
+                and isinstance(credentials.client_id, str)
+                and credentials.client_id.strip()
+                and isinstance(credentials.subject, str)
+                and credentials.subject.strip()
+                and _valid_siwc_bearer(credentials.access_token, credentials.client_id)
+            ):
+                identity = (credentials.issuer, credentials.client_id, credentials.subject)
+                binding = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+                return credentials.access_token, _SIWC_VERIFIED_PROVIDER_PREFIX + binding
+            del credentials
+            failure = ValueError(
+                "Provide verified Sign in with ChatGPT credentials with an active access token"
+            )
+        # A credential source can include secrets in its exception or cause.
+        raise failure
+
+
 class _ProviderStrings(dict[str, str]):
     """Frozen captured strings that preserve dataclass asdict/copy/pickle support."""
 
@@ -375,11 +482,18 @@ class NativeProvider:
     Provider failures deliver no partial output; validated response metadata
     remains available in the turn record. This mode uses HTTP with
     API-key authentication and cannot be combined with
-    ``supports_websockets=True`` or ``CodexLogin``. The default is ``"streaming"``.
+    ``supports_websockets=True`` or plan authentication. The default is ``"streaming"``.
     Native child agents are not supported in buffered mode.
 
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
+
+    Set ``auth=SignInWithChatGPT(get_credentials=...)`` for a registered
+    integration with ChatGPT plan usage permission. The SDK uses HTTP streaming
+    on OpenAI Responses and keeps the Session bound to the registration.
+    Omit ``api_key``, ``base_url``, and custom routing. Leave both retry limits
+    unset or set them to zero so the application owns retry timing. The SDK
+    reports credential and entitlement failures without switching billing modes.
 
     Retry budgets and phase timeouts are native provider settings. Omission keeps
     Core defaults. Zero disables retries or sets an immediate phase deadline.
@@ -413,7 +527,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
-    auth: CodexLogin | None = field(default=None, repr=False)
+    auth: CodexLogin | SignInWithChatGPT | None = field(default=None, repr=False)
     response_mode: Literal["streaming", "buffered"] = "streaming"
     query_params: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
@@ -449,12 +563,19 @@ class NativeProvider:
         if self.response_mode == "buffered" and self.supports_websockets is True:
             raise ValueError("Buffered Responses cannot use WebSockets")
         if self.auth is not None:
-            if not isinstance(self.auth, CodexLogin):
-                raise TypeError("auth must be CodexLogin or None")
+            if not isinstance(self.auth, (CodexLogin, SignInWithChatGPT)):
+                raise TypeError("auth must be CodexLogin, SignInWithChatGPT or None")
             if self.response_mode == "buffered":
                 raise ValueError("Buffered Responses require API-key authentication")
+            if isinstance(self.auth, SignInWithChatGPT) and (
+                self.request_max_retries not in (None, 0)
+                or self.stream_max_retries not in (None, 0)
+            ):
+                raise ValueError("SignInWithChatGPT requires application-managed retries")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
-                raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
+                raise ValueError(
+                    f"{type(self.auth).__name__} requires HTTP and its own endpoint and credentials"
+                )
         if self.model_backend is not None:
             if not any(
                 callable(getattr(self.model_backend, name, None))
@@ -464,7 +585,7 @@ class NativeProvider:
                     "model_backend must implement complete(request) or get_model(model_name)"
                 )
             if self.supports_websockets is True or self.auth is not None:
-                raise ValueError("model_backend requires HTTP mode without CodexLogin")
+                raise ValueError("model_backend requires HTTP mode without plan authentication")
         self._capture_routing()
 
     def _capture_routing(self) -> None:
