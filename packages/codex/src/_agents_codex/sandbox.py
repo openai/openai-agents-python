@@ -64,7 +64,7 @@ from _agents_shared.token_truncation import TruncationPolicy, truncate_text
 from _agents_shared.snapshot_defaults import (
     cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots,
     default_local_snapshot_base_dir as default_local_snapshot_base_dir,
-    resolve_default_local_snapshot_spec,
+    resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec,
 )
 from agents.classic.sandbox.remote_mount_policy import build_remote_mount_policy_instructions
 
@@ -269,6 +269,7 @@ def sandbox_environment(
                 if managed_source is not None and authorized_resume_state is not None:
                     previous_snapshot = selected.state.snapshot
                     # Restore first; subsequent publication must preserve the saved pair.
+                    publication: LocalSnapshotSpec | RemoteSnapshotSpec
                     if isinstance(previous_snapshot, LocalSnapshot):
                         publication = LocalSnapshotSpec(base_path=previous_snapshot.base_path)
                     elif isinstance(previous_snapshot, RemoteSnapshot):

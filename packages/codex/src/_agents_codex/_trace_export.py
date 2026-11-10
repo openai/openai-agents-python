@@ -260,6 +260,7 @@ class OpenAITraceExporter:
         cancelled: asyncio.CancelledError | None = None
         failed = False
         admission_error = None
+        groups: dict[str, tuple[dict[str, str], list[Mapping[str, Any]]]] | None
         event_routes = groups = states = admitted = route = event = None
         group_headers = group_events = identity = trace_ids = pending = records = payload = None
         trace_id = state = descriptor = delivery = None
