@@ -720,3 +720,309 @@ def test_empty_manifest_mapping_is_not_a_trusted_manifest(helper: str) -> None:
         else:
             sandbox_environment(client, manifest=payload, options=Options(), connect=connect)
     assert client.events == []
+
+
+async def test_live_session_is_borrowed_and_never_deleted() -> None:
+    events: list[str] = []
+    client = Client(events)
+    session = await client.create(manifest=Manifest(), options=Options())
+    # The scripted session uses its own synthetic backend identifier.
+    client.backend_id = session.state.type
+    events.clear()
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is session
+        events.append("connect")
+        try:
+            yield Environment(url="wss://executor.invalid", cwd="/workspace")
+        finally:
+            events.append("gateway")
+
+    async with sandbox_environment(
+        client, manifest=Manifest(), options=Options(), session=session, connect=connect
+    ):
+        events.append("body")
+    assert events == ["connect", "body", "gateway"]
+
+
+async def test_authorized_resume_uses_current_manifest_and_owns_cleanup() -> None:
+    events: list[str] = []
+    client = Client(events)
+    original = await client.create(manifest=Manifest(root="/current"), options=Options())
+    client.backend_id = original.state.type
+    events.clear()
+    saved = original.state
+    seen = []
+
+    async def resume(state):
+        seen.append(state)
+        events.append("resume")
+        original._inner.state = state
+        return original
+
+    client.resume = resume
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is original
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/current")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(root="/current"),
+        options=Options(),
+        authorized_resume_state=saved,
+        connect=connect,
+    ):
+        pass
+    assert seen[0].manifest.root == "/current"
+    assert saved.manifest.root == "/current"
+    assert seen[0].manifest is not saved.manifest
+    assert events == ["resume", "start", "connect", "close", "delete"]
+
+
+def test_resume_rejects_mapping_backend_mismatch_and_conflicting_lifecycle() -> None:
+    client = Client([])
+
+    def connect(session):
+        return None
+
+    with pytest.raises(TypeError, match="application-authorized"):
+        sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            connect=connect,
+            authorized_resume_state={"type": "docker"},
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            connect=connect,
+            snapshot=object(),
+            authorized_resume_state=object(),
+        )
+
+
+async def test_creation_forwards_snapshot_and_budgets_before_start() -> None:
+    from agents.classic.sandbox.snapshot import NoopSnapshot
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    events: list[str] = []
+    client = Client(events)
+    create = client.create
+    snapshot = NoopSnapshot(id="synthetic-snapshot")
+    limits = SandboxArchiveLimits(max_members=8)
+    concurrency = SandboxConcurrencyLimits(manifest_entries=3)
+
+    async def create_with_snapshot(*, manifest, options, snapshot):
+        assert snapshot is not None
+        selected = await create(manifest=manifest, options=options)
+        start = selected.start
+
+        async def start_with_budgets():
+            assert selected._archive_limits == limits
+            await start()
+
+        selected.start = start_with_budgets
+        return selected
+
+    client.create = create_with_snapshot
+
+    @asynccontextmanager
+    async def connect(selected):
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=Options(),
+        connect=connect,
+        snapshot=snapshot,
+        archive_limits=limits,
+        concurrency_limits=concurrency,
+    ):
+        pass
+    assert events == ["create", "start", "close", "delete"]
+
+
+async def test_native_sandbox_pure_utilities_preserve_behavior() -> None:
+    from agents.sandbox import (
+        BackoffStrategy,
+        TruncationPolicy,
+        apply_diff,
+        retry_async,
+        truncate_text,
+    )
+
+    assert apply_diff("before\n", "@@\n-before\n+after\n") == "after\n"
+    assert truncate_text("short", TruncationPolicy.bytes(10)) == "short"
+    attempts = 0
+
+    @retry_async(interval=0, max_attempt=2, backoff=BackoffStrategy.FIXED, retry_if=lambda _: True)
+    async def transient():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("synthetic")
+        return "done"
+
+    assert await transient() == "done"
+    assert attempts == 2
+
+
+@pytest.mark.parametrize("mode", ["borrowed", "resume"])
+@pytest.mark.parametrize("mismatch", ["root", "topology", "credentials", "environment"])
+async def test_live_mount_authority_must_match_before_gateway_or_resume(mode, mismatch) -> None:
+    events: list[str] = []
+    client = Client(events)
+    original = Manifest(
+        entries={
+            "data": declaration(access_key_id="old-principal", secret_access_key="synthetic-secret")
+        }
+    )
+    live = await client.create(manifest=original, options=Options())
+    live.state.type = "docker"
+    current = original.model_copy(deep=True)
+    if mismatch == "root":
+        current.root = "/other"
+    elif mismatch == "topology":
+        current.entries.clear()
+    elif mismatch == "credentials":
+        current.entries["data"].access_key_id = "new-principal"
+    else:
+        current.environment.value["AWS_ACCESS_KEY_ID"] = "new-principal"
+    events.clear()
+
+    @asynccontextmanager
+    async def connect(selected):
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    with pytest.raises((MountConfigError, ValueError, RuntimeError)):
+        async with sandbox_environment(
+            client,
+            manifest=current,
+            options=Options(),
+            connect=connect,
+            **(
+                {"session": live} if mode == "borrowed" else {"authorized_resume_state": live.state}
+            ),
+        ):
+            pytest.fail("Mismatched authority opened the gateway")
+    assert events == []
+
+
+async def test_borrowed_vercel_uses_current_provider_manifest_defaults() -> None:
+    from agents.classic.extensions.sandbox.vercel.sandbox import (
+        VercelSandboxClient,
+        VercelSandboxClientOptions,
+        VercelSandboxSessionState,
+        _resolve_manifest_root,
+    )
+    from agents.classic.sandbox.session.sandbox_client import BaseSandboxClient
+
+    client = VercelSandboxClient()
+    inner = scripted_sandbox_session()
+    inner.state = VercelSandboxSessionState(
+        sandbox_id="synthetic-vercel",
+        snapshot=inner.state.snapshot,
+        manifest=_resolve_manifest_root(Manifest()),
+    )
+    # The provider-free resource uses the real provider's state/default resolver.
+    live = BaseSandboxClient._wrap_session(client, inner)
+    connected = []
+
+    @asynccontextmanager
+    async def connect(selected):
+        connected.append(selected)
+        yield Environment(url="wss://fixture.invalid", cwd=selected.state.manifest.root)
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=VercelSandboxClientOptions(),
+        session=live,
+        connect=connect,
+    ):
+        pass
+    assert connected == [live]
+    connected.clear()
+    with pytest.raises(MountConfigError):
+        async with sandbox_environment(
+            client,
+            manifest=Manifest(root="/different-authority"),
+            options=VercelSandboxClientOptions(),
+            session=live,
+            connect=connect,
+        ):
+            pass
+    assert connected == []
+
+
+@pytest.mark.parametrize("change", ["unchanged", "removed", "source", "read_only"])
+async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, change: str) -> None:
+    from agents.classic.sandbox.sandboxes.docker import (
+        DockerSandboxSession,
+        DockerSandboxSessionState,
+    )
+
+    host = tmp_path / "host"
+    host.mkdir()
+    original = {"path": "/mnt/trusted", "host_path": str(host), "read_only": False}
+    manifest = Manifest(extra_path_grants=[original])
+    events: list[str] = []
+
+    class Container:
+        attrs = {
+            "Mounts": [
+                {"Type": "bind", "Source": str(host), "Destination": "/mnt/trusted", "RW": True}
+            ]
+        }
+
+        def reload(self) -> None:
+            events.append("inspect")
+
+    live = SandboxSession(
+        DockerSandboxSession(
+            docker_client=None,
+            container=Container(),
+            state=DockerSandboxSessionState(
+                snapshot=scripted_sandbox_session(manifest=manifest).state.snapshot,
+                manifest=manifest,
+                image="synthetic",
+                container_id="synthetic-container",
+            ),
+        )
+    )
+    changed = dict(original)
+    if change == "source":
+        changed["host_path"] = str(tmp_path / "other")
+    if change == "read_only":
+        changed["read_only"] = True
+    current = Manifest(extra_path_grants=[] if change == "removed" else [changed])
+    client = Client(events)
+    client.backend_id = "docker"
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is live
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    source = sandbox_environment(
+        client, manifest=current, options=Options(), session=live, connect=connect
+    )
+    if change == "unchanged":
+        async with source:
+            pass
+        assert events.count("connect") == 1
+    else:
+        with pytest.raises(ValueError, match="bind mounts|path grant mount"):
+            async with source:
+                pytest.fail("Changed host authority must fail before gateway connection")
+        assert "connect" not in events and not {"close", "delete"}.intersection(events)

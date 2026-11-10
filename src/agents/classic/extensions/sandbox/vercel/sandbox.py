@@ -1573,6 +1573,13 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    def resolve_trusted_manifest_for_resume(
+        self, manifest: Manifest, options: VercelSandboxClientOptions
+    ) -> Manifest:
+        return _with_released_vercel_s3_credential_exposure_compatibility(
+            _resolve_manifest_root(manifest), options.allow_s3_credential_exposure
+        )
+
     def _wrap_session(
         self,
         inner: BaseSandboxSession,

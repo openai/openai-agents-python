@@ -890,6 +890,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -914,6 +915,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -938,6 +940,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -962,6 +965,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -1021,6 +1025,10 @@ class Agent(Generic[ContextT, OutputT]):
         submission inherits its disabled/content restrictions, including when
         another ambient scope or explicit parent changes the trace linkage.
         Tracing context and export credentials never enter SessionState.
+
+        project_guidance loads native workspace instructions and enables native
+        workspace image viewing. It requires an Environment and uses only that
+        executor's granted paths. It does not grant command or write access.
 
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
@@ -1082,6 +1090,7 @@ class Agent(Generic[ContextT, OutputT]):
                 environment=environment,
                 tools=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
@@ -1120,6 +1129,7 @@ class Agent(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
@@ -1147,6 +1157,7 @@ class Agent(Generic[ContextT, OutputT]):
                 model_settings=model_settings,
                 tool_selection=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,

@@ -1616,11 +1616,16 @@ async def _call_callback_body(
     return value
 
 
+_PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
+
+
 def _fixed_tool_refs(
     tools: Sequence[Tool[Any]],
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
     native_agents: NativeAgents[Any] | None,
+    *,
+    project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
     from .native_agents import _COLLABORATION_TOOLS
@@ -1645,6 +1650,8 @@ def _fixed_tool_refs(
         fixed.update((ToolRef("exec", "functions"), ToolRef("wait", "functions")))
     if environment is not None:
         fixed.update(ToolRef(name, "functions") for name in environment.tools)
+    if project_guidance:
+        fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
         fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
     return fixed
@@ -1704,6 +1711,7 @@ def _split_tools(
     ceiling: Sequence[Tool[ContextT]] | None = None,
     rebind: bool = False,
     handoffs: Mapping[str, str] | None = None,
+    project_guidance: bool = False,
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
 ]:
@@ -1719,6 +1727,7 @@ def _split_tools(
             programmatic_tool_calling,
             environment,
             native_agents,
+            project_guidance=project_guidance,
         )
         fixed.update(ToolRef(name) for name in handoffs or ())
         for declaration in opening:
@@ -1763,6 +1772,7 @@ def _split_tools(
                 False,
                 tool if isinstance(tool, Environment) else None,
                 tool if isinstance(tool, NativeAgents) else None,
+                project_guidance=project_guidance and isinstance(tool, Environment),
             )
             if retained.intersection(refs):
                 raise CapabilityError("Operation tools must select distinct fixed capabilities")
@@ -1940,6 +1950,7 @@ def _selected_tool_refs(
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
     native_agents: NativeAgents[Any] | None,
+    project_guidance: bool = False,
 ) -> tuple[ToolRef, ...]:
     """Normalize admitted declarations through the same identities as dispatch."""
     refs = {tool.ref for tool in python}
@@ -1956,6 +1967,7 @@ def _selected_tool_refs(
             False,
             environment if any(item is environment for item in selection) else None,
             native_agents if any(item is native_agents for item in selection) else None,
+            project_guidance=project_guidance and any(item is environment for item in selection),
         )
     )
     # Execution helpers remain an implementation detail of an admitted nonempty
@@ -2202,6 +2214,7 @@ def _restore_operation_tools(
     environment: Environment[Any] | None,
     native_agents: NativeAgents | None,
     handoffs: Mapping[str, str] | None,
+    project_guidance: bool = False,
 ) -> tuple[
     tuple[int, ...],
     tuple[ToolRef, ...],
@@ -2217,6 +2230,7 @@ def _restore_operation_tools(
         environment=environment,
         native_agents=native_agents,
         handoffs=handoffs,
+        project_guidance=project_guidance,
     )
     refs = _selected_tool_refs(
         saved.operation_tools,
@@ -2225,6 +2239,7 @@ def _restore_operation_tools(
         programmatic_tool_calling=programmatic_tool_calling,
         environment=environment,
         native_agents=native_agents,
+        project_guidance=project_guidance,
     )
     if set(refs) != set(saved.operation_tools):
         raise ValueError("Saved operation does not describe a canonical tool subset")
@@ -2348,13 +2363,14 @@ def _check_namespaced_tool_collisions(
     available: Sequence[Tool[Any]],
     *,
     native_agents: NativeAgents[Any] | None = None,
+    project_guidance: bool = False,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
     namespaced = {ref for ref in python_refs if ref.namespace is not None}
     if not namespaced:
         return
     other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
-        available, False, None, native_agents
+        available, False, None, native_agents, project_guidance=project_guidance
     )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
@@ -2555,6 +2571,18 @@ def _validate_storage_opening(
     return reconciliation
 
 
+def _capture_project_guidance(
+    enabled: bool,
+) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
+    if not enabled:
+        return {}, {}, []
+    return (
+        {"features.view_image": True},
+        {"_canonical_rules": True},
+        [{"name": name, "namespace": "functions"} for name in _PROJECT_GUIDANCE_TOOL_NAMES],
+    )
+
+
 def _configure_project_search(
     runtime: dict[str, Any], environment: Environment[Any], cwd: str
 ) -> None:
@@ -2650,10 +2678,16 @@ class Session(Generic[ContextT, OutputT]):
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
         if retention_omitted:
             observation_retention = "bounded"
+        if not isinstance(project_guidance, bool):
+            raise TypeError("project_guidance must be a bool")
+        guidance_config, guidance_options, guidance_tools = _capture_project_guidance(
+            project_guidance
+        )
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
             max_function_concurrency = None
@@ -2844,6 +2878,7 @@ class Session(Generic[ContextT, OutputT]):
             mcp_names,
             available,
             native_agents=native_agents,
+            project_guidance=project_guidance,
         )
         model = agent.model
         catalog = _capture_tools(0, tools, context)
@@ -2962,6 +2997,8 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if project_guidance and executor is None:
+                raise ValueError("project_guidance requires an Environment")
             if executor is not None:
                 for tool in allowed_tools:
                     if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
@@ -2995,6 +3032,7 @@ class Session(Generic[ContextT, OutputT]):
                     handoffs=restored_handoffs,
                     environment=executor,
                     native_agents=native_agents,
+                    project_guidance=project_guidance,
                 )
             if manual_restore and saved.operation_tools is not None:
                 (
@@ -3011,6 +3049,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=executor,
                     native_agents=native_agents,
                     handoffs=operation_handoffs,
+                    project_guidance=project_guidance,
                 )
             # Capture bindings at opening; acquire only a promoted operation's
             # selected servers. A manual restore already owns admitted work.
@@ -3129,6 +3168,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     "agents.enabled": False,
                     "features.goals": goals,
+                    **guidance_config,
                     "tools.update_plan.enabled": checklist,
                     "mcp_servers": {},
                     "features.non_prefixed_mcp_tool_names": False,
@@ -3183,7 +3223,7 @@ class Session(Generic[ContextT, OutputT]):
                                     else {}
                                 ),
                             },
-                            "features.view_image": False,
+                            "features.view_image": project_guidance,
                             "features.image_generation": False,
                             "features.current_time_reminder": False,
                             "features.sleep_tool": False,
@@ -3219,6 +3259,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **guidance_options,
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
@@ -3302,6 +3343,7 @@ class Session(Generic[ContextT, OutputT]):
                             else []
                         )
                         + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
+                        + guidance_tools
                         + (
                             [
                                 {"name": name, "namespace": "functions"}
@@ -3521,6 +3563,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._bindings = agent.tools
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
                 session._executor = executor
+                session._project_guidance = project_guidance
                 if executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._native_agents = native_agents
@@ -3554,7 +3597,11 @@ class Session(Generic[ContextT, OutputT]):
                     # Other current opening declarations remain explicitly selectable.
                     restored_fixed_refs: list[ToolRef] = sorted(
                         _fixed_tool_refs(
-                            restored_available, programmatic_tool_calling, executor, native_agents
+                            restored_available,
+                            programmatic_tool_calling,
+                            executor,
+                            native_agents,
+                            project_guidance=project_guidance,
                         ),
                         key=lambda ref: (ref.namespace or "", ref.name),
                     )
@@ -3863,6 +3910,7 @@ class Session(Generic[ContextT, OutputT]):
             | None
         ) = None
         self._executor: Environment[Any] | None = None
+        self._project_guidance = False
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
@@ -4063,6 +4111,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
+            project_guidance=self._project_guidance,
         )
         if mcp == self._mcp_tools:
             return
@@ -4288,7 +4337,11 @@ class Session(Generic[ContextT, OutputT]):
             return None
         declared = state.operation_declarations or ()
         allowed = _fixed_tool_refs(
-            source.tools, source.programmatic_tool_calling, self._executor, self._native_agents
+            source.tools,
+            source.programmatic_tool_calling,
+            self._executor,
+            self._native_agents,
+            project_guidance=self._project_guidance,
         )
         if state.operation_agent is source:
             allowed.update(ToolRef(name) for name in handoffs or ())
@@ -5735,6 +5788,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
+            project_guidance=self._project_guidance,
         )
         selected_server = next(
             (
@@ -6422,6 +6476,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=None if tools is None else self._native_agents,
                     handoffs=self._effective_handoffs(),
+                    project_guidance=self._project_guidance,
                 )
                 if tools is not None:
                     operation_refs = _selected_tool_refs(
@@ -6431,6 +6486,7 @@ class Session(Generic[ContextT, OutputT]):
                         programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                         environment=self._executor,
                         native_agents=self._native_agents,
+                        project_guidance=self._project_guidance,
                     )
                 if tools is not None:
                     chosen = {tool.ref for tool in python}
@@ -6719,6 +6775,7 @@ class Session(Generic[ContextT, OutputT]):
                     if any(tool is self._native_agents for tool in selection)
                     else self._native_agents
                 ),
+                project_guidance=self._project_guidance,
             )
             selected_refs = {tool for tool in selection if isinstance(tool, ToolRef)}
             missing_refs: list[ToolRef] = sorted(
@@ -6734,6 +6791,7 @@ class Session(Generic[ContextT, OutputT]):
                 handoffs=self._effective_handoffs(),
                 environment=self._executor,
                 native_agents=self._native_agents,
+                project_guidance=self._project_guidance,
             )
             for tool in python:
                 tool._check_context(self._context)
@@ -7892,6 +7950,7 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
+                            project_guidance=self._project_guidance,
                         )
             if admitted:
                 handle = state.handle
@@ -9466,6 +9525,7 @@ class Session(Generic[ContextT, OutputT]):
                     source_agent.programmatic_tool_calling,
                     self._executor,
                     self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 # Idle subsets narrow only the current root profile's defaults.
                 if (
@@ -9483,6 +9543,7 @@ class Session(Generic[ContextT, OutputT]):
                             programmatic_tool_calling=source_agent.programmatic_tool_calling,
                             environment=self._executor,
                             native_agents=self._native_agents,
+                            project_guidance=self._project_guidance,
                         )
                     )
                 defaults.update(fixed)
@@ -9497,6 +9558,7 @@ class Session(Generic[ContextT, OutputT]):
                     handoffs=source_handoffs,
                     environment=self._executor,
                     native_agents=self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 refs = set(
                     _selected_tool_refs(
@@ -9506,6 +9568,7 @@ class Session(Generic[ContextT, OutputT]):
                         programmatic_tool_calling=source_agent.programmatic_tool_calling,
                         environment=self._executor,
                         native_agents=self._native_agents,
+                        project_guidance=self._project_guidance,
                     )
                 )
                 refs = {ToolRef(ref.name, ref.namespace or "functions") for ref in refs}
@@ -11355,9 +11418,13 @@ class Session(Generic[ContextT, OutputT]):
     ) -> str:
         active_uses_executor = active is not None and (
             active.operation_refs is None
-            or not _fixed_tool_refs((), False, self._executor, self._native_agents).isdisjoint(
-                active.operation_refs
-            )
+            or not _fixed_tool_refs(
+                (),
+                False,
+                self._executor,
+                self._native_agents,
+                project_guidance=self._project_guidance,
+            ).isdisjoint(active.operation_refs)
             or any(
                 isinstance(server, StdioMCP) and server.location == "environment"
                 for server in active.operation_mcp or ()
@@ -11401,6 +11468,7 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
+                            project_guidance=self._project_guidance,
                         )
                         bound = {tool._ref: tool for tool in self._bound_tools}
                         selected = tuple(bound[tool.ref] for tool in python)
@@ -11512,6 +11580,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=self._native_agents,
                     handoffs=self._effective_handoffs(),
+                    project_guidance=self._project_guidance,
                 )
                 default_refs = _selected_tool_refs(
                     self._default_tools,
@@ -11520,6 +11589,7 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                     environment=self._executor,
                     native_agents=self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 payload["agent_options"]["_sdk_default_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in default_refs

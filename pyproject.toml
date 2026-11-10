@@ -202,6 +202,7 @@ exclude = [
 skip-excluded-dirs = true
 only-include = [
     "src/agents",
+    "src/_agents_shared",
     "packages/codex/src/_agents_codex",
     "CLASSIC.md",
     "packages/codex/README.md",
@@ -216,7 +217,7 @@ only-include = [
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agents", "packages/codex/src/_agents_codex"]
+packages = ["src/agents", "src/_agents_shared", "packages/codex/src/_agents_codex"]
 dev-mode-dirs = ["src", "packages/codex/src"]
 # The qualified native overlay owns these files, including in an extracted sdist.
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
@@ -306,7 +307,7 @@ module = ["vercel", "vercel.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["src/agents", "packages/codex/src/_agents_codex"]
+source = ["src/agents", "src/_agents_shared", "packages/codex/src/_agents_codex"]
 omit = ["packages/codex/tests/*"]
 
 [tool.coverage.report]

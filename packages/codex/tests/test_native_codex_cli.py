@@ -1,0 +1,419 @@
+"""Native declarations and real subprocess delegation with a synthetic CLI."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from agents import Agent, FunctionTool, ToolContext, function_tool
+from agents.codex import CodexOptions, TurnOptions, codex_tool
+from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.test_native_agent import provider
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="Synthetic executable uses a Unix shebang")
+
+
+def cli(tmp_path: Path) -> Path:
+    path = tmp_path / "synthetic-codex"
+    events = [
+        {"type": "thread.started", "thread_id": "synthetic-thread"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item-1",
+                "type": "agent_message",
+                "text": "CLI completed",
+            },
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 3,
+                "cached_input_tokens": 1,
+                "output_tokens": 2,
+            },
+        },
+    ]
+    path.write_text(
+        f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
+        f"open({str(tmp_path / 'arguments.jsonl')!r}, 'a').write("
+        "json.dumps(sys.argv[1:]) + '\\n')\n"
+        f"events = {events!r}\n"
+        "for event in events: print(json.dumps(event), flush=True)\n"
+    )
+    path.chmod(0o700)
+    return path
+
+
+@pytest.mark.parametrize("thread_id", [None, "selected-thread"])
+async def test_cli_tool_uses_native_binding_and_real_cli_stream(
+    tmp_path: Path,
+    thread_id: str | None,
+) -> None:
+    events = []
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))),
+        turn_options=TurnOptions(idle_timeout_seconds=5),
+        on_event=events.append,
+    )
+    assert isinstance(declaration, FunctionTool)
+    binding = declaration._bind(None, None, declaration)
+    result = await binding.callback(None, prompt="Do the task", thread_id=thread_id)
+    assert result == {
+        "thread_id": "synthetic-thread",
+        "response": "CLI completed",
+        "usage": {"input_tokens": 3, "cached_input_tokens": 1, "output_tokens": 2},
+    }
+    assert [event.type for event in events] == [
+        "thread.started",
+        "item.completed",
+        "turn.completed",
+    ]
+    arguments = json.loads((tmp_path / "arguments.jsonl").read_text())
+    if thread_id is None:
+        assert "resume" not in arguments
+    else:
+        assert "resume" in arguments
+        assert thread_id in arguments
+
+
+@pytest.mark.parametrize("name", ["codex", "engineer"])
+async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses, name: str) -> None:
+    responses.replies.extend(
+        [
+            [function_call(name, {"prompt": "Do the task", "thread_id": None}, "cli-1")],
+            [assistant_output("done")],
+        ]
+    )
+    declaration = codex_tool(
+        name=name, codex_options=CodexOptions(codex_path_override=str(cli(tmp_path)))
+    )
+    async with Agent(
+        instructions="Use codex.", provider=provider(responses), tools=[declaration]
+    ).session() as session:
+        result = await (await session.submit("Do the task")).get_result()
+        assert result.final_output == "done"
+    assert "CLI completed" in json.dumps(responses.requests[1])
+
+
+async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path) -> None:
+    path = tmp_path / "idle-codex"
+    pid_path = tmp_path / "pid"
+    path.write_text(
+        f"#!{sys.executable}\nimport os, time\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    path.chmod(0o700)
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(path)},
+        turn_options={"idle_timeout_seconds": 0.1},
+    )
+    binding = declaration._bind(None, None, declaration)
+    with pytest.raises(RuntimeError, match="idle"):
+        await binding.callback(None, prompt="Do the task", thread_id=None)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+
+
+async def test_cli_callback_cancellation_joins_the_subprocess(tmp_path: Path) -> None:
+    path = tmp_path / "blocking-codex"
+    pid_path = tmp_path / "pid"
+    path.write_text(
+        f"#!{sys.executable}\nimport json, os, time\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "print(json.dumps({'type': 'thread.started', 'thread_id': 'blocking'}), flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    path.chmod(0o700)
+    started = asyncio.Event()
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        on_event=lambda event: started.set(),
+    )
+    binding = declaration._bind(None, None, declaration)
+    task = asyncio.create_task(binding.callback(None, prompt="Do the task", thread_id=None))
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)
+
+
+async def test_persisted_cli_threads_are_scoped_to_the_invoking_native_session(
+    tmp_path: Path,
+    responses,
+) -> None:
+    calls = tmp_path / "calls.jsonl"
+    path = cli(tmp_path)
+    source = path.read_text()
+    source = source.replace(
+        "sys.stdin.read()\n",
+        f"sys.stdin.read()\nopen({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n",
+    )
+    path.write_text(source)
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        persist_session=True,
+    )
+    responses.replies.extend(
+        [
+            [function_call("codex", {"prompt": "A first", "thread_id": None}, "cli-a1")],
+            [assistant_output("A first done")],
+            [function_call("codex", {"prompt": "B first", "thread_id": None}, "cli-b1")],
+            [assistant_output("B first done")],
+            [function_call("codex", {"prompt": "A next", "thread_id": None}, "cli-a2")],
+            [assistant_output("A next done")],
+        ]
+    )
+    agent = Agent(instructions="Use codex.", provider=provider(responses), tools=[declaration])
+    async with agent.session() as first, agent.session() as second:
+        assert (await (await first.submit("A first")).get_result()).final_output == "A first done"
+        assert (await (await second.submit("B first")).get_result()).final_output == "B first done"
+        assert (await (await first.submit("A next")).get_result()).final_output == "A next done"
+    arguments = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(arguments) == 3
+    assert "resume" not in arguments[0]
+    assert "resume" not in arguments[1]
+    assert "resume" in arguments[2]
+    assert "synthetic-thread" in arguments[2]
+
+
+@pytest.mark.parametrize("mode", ["throw", "reject"])
+async def test_observer_failures_preserve_native_success_and_thread_reuse(
+    tmp_path: Path, responses, mode
+) -> None:
+    calls = tmp_path / "calls.jsonl"
+    path = cli(tmp_path)
+    path.write_text(
+        path.read_text().replace(
+            "sys.stdin.read()\n",
+            f"sys.stdin.read()\nopen({str(calls)!r}, 'a').write("
+            "json.dumps(sys.argv[1:]) + '\\n')\n",
+        )
+    )
+    observed = []
+
+    async def rejected():
+        raise RuntimeError("observer failure")
+
+    def observer(event):
+        observed.append(event.type)
+        if mode == "throw":
+            raise RuntimeError("observer failure")
+        return rejected()
+
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        persist_session=True,
+        on_event=observer,
+    )
+    responses.replies.extend(
+        [
+            [function_call("codex", {"prompt": "First", "thread_id": None}, "observer-1")],
+            [assistant_output("first done")],
+            [function_call("codex", {"prompt": "Next", "thread_id": None}, "observer-2")],
+            [assistant_output("next done")],
+        ]
+    )
+    agent = Agent(instructions="Use codex.", provider=provider(responses), tools=[declaration])
+    async with agent.session() as session:
+        assert (await (await session.submit("First")).get_result()).final_output == "first done"
+        assert (await (await session.submit("Next")).get_result()).final_output == "next done"
+    argv = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert "resume" not in argv[0]
+    assert "resume" in argv[1]
+    assert len(observed) == 6
+
+
+async def test_configured_signal_cancels_queued_call_without_releasing_active_owner(
+    tmp_path: Path, responses
+) -> None:
+    import asyncio
+
+    signal = asyncio.Event()
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    failures: list[BaseException] = []
+    observed = False
+
+    async def observe(event) -> None:
+        nonlocal observed
+        if event.type == "thread.started" and not observed:
+            observed = True
+            entered.set()
+            await finish.wait()
+
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))),
+        turn_options=TurnOptions(signal=signal),
+        persist_session=True,
+        on_event=observe,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    @function_tool
+    async def batch(context: ToolContext[object]) -> str:
+        tasks = []
+        try:
+            first = asyncio.create_task(binding.callback(context, prompt="First", thread_id=None))
+            tasks.append(first)
+            await asyncio.wait_for(entered.wait(), 5)
+            second = asyncio.create_task(binding.callback(context, prompt="Queued", thread_id=None))
+            tasks.append(second)
+            await asyncio.sleep(0)
+            signal.set()
+            with pytest.raises(RuntimeError, match="cancelled before execution"):
+                await asyncio.wait_for(asyncio.shield(second), 1)
+            assert not first.done()
+            assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 1
+            signal.clear()
+            third = asyncio.create_task(binding.callback(context, prompt="Third", thread_id=None))
+            tasks.append(third)
+            await asyncio.sleep(0)
+            assert not third.done()
+            assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 1
+            finish.set()
+            await asyncio.gather(first, return_exceptions=True)
+            assert (await third)["response"] == "CLI completed"
+            return "batch complete"
+        except BaseException as error:
+            failures.append(error)
+            raise
+        finally:
+            signal.clear()
+            finish.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    responses.replies.extend(
+        [
+            [function_call("batch", {}, "configured-signal")],
+            [assistant_output("done")],
+        ]
+    )
+    async with Agent(
+        instructions="Run batch.", provider=provider(responses), tools=[batch]
+    ).session() as session:
+        await (await session.submit("Run.")).get_result()
+    assert not failures
+    assert len((tmp_path / "arguments.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("cause", ["configured", "task"])
+async def test_cancelled_queue_admission_does_not_release_another_owner(cause: str) -> None:
+    import asyncio
+
+    from _agents_codex.codex import _session_slot
+
+    lock = asyncio.Lock()
+    await lock.acquire()
+    signal = asyncio.Event()
+    entered = False
+
+    async def use() -> None:
+        nonlocal entered
+        async with _session_slot(lock, signal):
+            entered = True
+
+    queued = asyncio.create_task(use())
+    await asyncio.sleep(0)
+    if cause == "configured":
+        signal.set()
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await queued
+    else:
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+    assert not entered
+    assert lock.locked()
+    lock.release()
+    signal.clear()
+    async with _session_slot(lock, signal):
+        assert lock.locked()
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize("cause", ["configured", "task"])
+async def test_cancelled_admission_releases_its_simultaneously_acquired_lock(cause: str) -> None:
+    import asyncio
+
+    from _agents_codex.codex import _session_slot
+
+    lock = asyncio.Lock()
+    signal = asyncio.Event()
+    entered = False
+
+    async def use() -> None:
+        nonlocal entered
+        async with _session_slot(lock, signal):
+            entered = True
+
+    admission = asyncio.create_task(use())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert lock.locked()
+    if cause == "configured":
+        signal.set()
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await admission
+    else:
+        admission.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await admission
+    assert not entered
+    assert not lock.locked()
+
+
+async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(tmp_path: Path) -> None:
+    pid_path = tmp_path / "pid"
+    path = tmp_path / "blocked-stdin-codex"
+    path.write_text(
+        f"#!{sys.executable}\nimport os, time\n"
+        f"open({str(pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    path.chmod(0o700)
+    declaration = codex_tool(
+        codex_options=CodexOptions(codex_path_override=str(path)),
+        turn_options=TurnOptions(signal=asyncio.Event()),
+    )
+    binding = declaration._bind(None, None, declaration)
+    previous_tasks = asyncio.all_tasks()
+    task = asyncio.create_task(binding.callback(None, prompt="x" * (512 * 1024), thread_id=None))
+    pid = None
+    try:
+
+        async def started() -> None:
+            while not pid_path.exists() or not pid_path.read_text().strip():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(started(), 5)
+        pid = int(pid_path.read_text())
+        # The child never reads stdin, so this prompt cannot pass the pipe's drain.
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert not (asyncio.all_tasks() - previous_tasks)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+        # Also contain the failed pre-fix regression's orphaned stderr reader.
+        remaining = asyncio.all_tasks() - previous_tasks
+        if remaining:
+            await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), 5)

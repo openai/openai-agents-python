@@ -101,7 +101,11 @@ _ChildBeforeStep: TypeAlias = Callable[["ChildStepContext[ContextT]"], _ChildSte
 
 @dataclass(frozen=True, kw_only=True)
 class NativeAgents(Generic[ContextT]):
-    """Enable native V2 children with the Session's three executor tools.
+    """Enable native V2 children sharing the Session's granted tools.
+
+    The Environment must grant all three executor tools. With
+    project_guidance=True at Session opening, children also share workspace
+    image viewing under the same executor path grants.
 
     Include this declaration in Agent tools. Supply the Environment at session opening.
     NativeAgents reserves the collaboration namespace for native tools. Custom
