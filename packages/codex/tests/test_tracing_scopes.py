@@ -91,7 +91,7 @@ class NativeTracing:
             batch = self.batches.get_nowait()
         except asyncio.QueueEmpty:
             batch = {"events": [], "through_sequence": 0}
-        return json.dumps(batch)
+        return json.dumps({"dropped_records": 0, **batch})
 
     def ack_trace_events(self, sequence: int, failures: int) -> None:
         self.acks.append((sequence, failures))
@@ -442,8 +442,9 @@ async def test_processor_invocation_suppresses_detached_scopes_and_bare_operatio
             operation.close()
             assert runtime_telemetry._processor_task is None
 
-    route = runtime_telemetry._ProcessorRoute(Processor())
-    await route._invoke({})  # type: ignore[typeddict-item]
+    processor = Processor()
+    route = runtime_telemetry._ProcessorRoute(processor)
+    await route._invoke(processor.on_trace_event, {})
     with telemetry.trace("application") as scope:
         assert not scope.context.disabled
 
@@ -1670,7 +1671,7 @@ async def test_cancelled_drain_accounts_result_before_restart_without_new_events
             seen.append(event["sequence"])
 
     async def drain(count: int) -> str:
-        raw = json.dumps(await native.batches.get())
+        raw = json.dumps({"dropped_records": 0, **(await native.batches.get())})
         entered.set()
         if completed_before_resume:
             assert runtime_telemetry._processor_task is not None
@@ -1917,6 +1918,7 @@ async def test_shutdown_joins_cancelled_drain_and_accounts_undelivered_records(
         await release.wait()
         return json.dumps(
             {
+                "dropped_records": 0,
                 "events": [{"sequence": 7, "processor_ids": [identifier]}],
                 "through_sequence": 7,
             }
@@ -2604,7 +2606,11 @@ async def test_foreign_pump_waits_for_native_route_publication(
             while not staged.is_set():
                 await asyncio.sleep(0)
             return json.dumps(
-                {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
+                {
+                    "dropped_records": 0,
+                    "events": [{"sequence": 1, "processor_ids": ["python-0"]}],
+                    "through_sequence": 1,
+                }
             )
         return await original_drain(count)
 
@@ -3573,3 +3579,37 @@ async def test_interception_reader_skips_only_revoked_contexts(
     else:
         assert retentions == ([] if expiry == "before_ingress" else [original_token])
     assert all(token in native.released for token in set(native.leases) - before)
+
+
+def test_process_capture_policy_applies_at_scope_and_operation_admission(native):
+    try:
+        telemetry.set_tracing_disabled(True)
+        with telemetry.trace("disabled", options={"disabled": False}) as disabled:
+            assert disabled.context.disabled
+        captured = runtime_telemetry._capture()
+        assert native.starts[-1]["disabled"] is True
+        captured.close()
+        telemetry.set_tracing_disabled(False)
+        with telemetry.trace("enabled"):
+            assert native.starts[-1]["disabled"] is None
+        telemetry.set_sensitive_data_logging_enabled(False)
+        with telemetry.trace("private", options={"include_sensitive_data": True}):
+            assert native.starts[-1]["include_sensitive_data"] is False
+        captured = runtime_telemetry._capture()
+        assert native.starts[-1]["include_sensitive_data"] is False
+        captured.close()
+    finally:
+        telemetry.set_tracing_disabled(False)
+        telemetry.set_sensitive_data_logging_enabled(True)
+
+
+def test_completion_payload_is_captured_before_caller_mutation(native):
+    value = {"result": ["original"]}
+    with telemetry.span("work") as active:
+        active.set_outcome(status="error", category="synthetic_error", data=value)
+        value["result"].append("later mutation")
+    assert native.ends[-1][1] == {
+        "status": "error",
+        "category": "synthetic_error",
+        "data": {"result": ["original"]},
+    }

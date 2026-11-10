@@ -46,6 +46,7 @@ from _agents_codex.testing import (
     dataclass as dataclass,
     deepcopy as deepcopy,
     deque as deque,
+    event as event,
     json as json,
     partial as partial,
     socket as socket,
@@ -62,4 +63,5 @@ __all__ = [
     "RealtimeConnectCall",
     "RealtimeStep",
     "ScriptedRealtimeAdapter",
+    "event",
 ]

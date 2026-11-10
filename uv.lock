@@ -3786,6 +3786,10 @@ classic-voice = [
     { name = "websockets" },
 ]
 
+tracing = [
+    { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
 voice = [
     { name = "certifi" },
     { name = "griffelib" },
@@ -3865,6 +3869,7 @@ requires-dist = [
     { name = "h2", marker = "extra == 'classic-e2b'", specifier = ">=4.4.1" },
     { name = "h2", marker = "extra == 'classic-modal'", specifier = ">=4.4.1" },
     { name = "httpx2", marker = "extra == 'classic'", specifier = ">=2.12.0" },
+    { name = "httpx2", marker = "extra == 'tracing'", specifier = ">=2.12.0" },
     { name = "jsonschema", specifier = ">=4.25.1,<5" },
     { name = "litellm", marker = "extra == 'classic-litellm'", specifier = ">=1.83.0" },
     { name = "mcp", marker = "python_full_version >= '3.10' and extra == 'classic'", specifier = ">=1.30.0,!=2.0.*,!=2.1.*,<3" },
@@ -3922,7 +3927,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'classic-voice'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["a2a", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
+provides-extras = ["tracing", "a2a", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
 
 [package.metadata.requires-dev]
 dev = [

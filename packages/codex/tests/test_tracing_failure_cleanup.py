@@ -130,9 +130,12 @@ async def test_processor_callback_rejects_flush_without_blocking_delivery(
                 await telemetry.force_flush()
             delivered.append(event["sequence"])
 
-    route = runtime_telemetry._ProcessorRoute(Processor())
+    processor = Processor()
+    route = runtime_telemetry._ProcessorRoute(processor)
     for sequence in (1, 2):
-        await route._invoke(cast(telemetry.TraceLifecycleEvent, {"sequence": sequence}))
+        await route._invoke(
+            processor.on_trace_event, cast(telemetry.TraceLifecycleEvent, {"sequence": sequence})
+        )
     assert delivered == [1, 2]
     assert native.flushes == []
     result = await telemetry.force_flush(timeout_ms=100)

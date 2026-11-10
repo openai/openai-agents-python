@@ -387,7 +387,11 @@
     {
       "path": "0104-native-model-response-fidelity.patch",
       "sha256": "6cf79cbb142fef7b1d995f3f3556b40c1d0c6be3f7ba48298ad962e72a112549"
+    },
+    {
+      "path": "0098-retained-trace-root-descriptors.patch",
+      "sha256": "f6d9722ba0406441820dbc17106f124ce954157a7b28195eb872f23f838c8ed0"
     }
   ],
-  "result_tree": "f18d85b49633a67c2e337558540f49f04abd50f3"
+  "result_tree": "34b61e58ba179c4a24c900044ad78471d52b9e59"
 }

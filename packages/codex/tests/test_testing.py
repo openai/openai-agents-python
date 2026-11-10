@@ -164,6 +164,7 @@ async def test_http_response_order_and_request_snapshots(capsys):
         "RealtimeConnectCall",
         "RealtimeStep",
         "ScriptedRealtimeAdapter",
+        "event",
     ]
     arguments = {"key": "synthetic-record"}
     call = tool_call("lookup", arguments, call_id="http-call")
@@ -646,3 +647,93 @@ async def test_scripted_usage_and_headers_drive_native_budget_and_rate_observati
             assert limits[0].snapshot.requests.reset_after_seconds == 1
             assert effects == ["lookup"]
             assert len(peer.requests) == 1
+
+
+async def test_dynamic_script_queue_and_raw_events_drive_native_turns():
+    seen = []
+    peer = ScriptedResponses([text("discard")])
+    peer.clear()
+
+    def respond(body):
+        seen.append(body)
+        peer.append(
+            ScriptedResponse(
+                [
+                    testing.event(
+                        {
+                            "type": "response.output_item.done",
+                            "item": {
+                                "type": "message",
+                                "role": "assistant",
+                                "id": "msg_raw_fixture",
+                                "content": [{"type": "output_text", "text": "raw answer"}],
+                            },
+                        }
+                    )
+                ],
+                response_id="resp_raw_fixture",
+            )
+        )
+        return ScriptedResponse(
+            [text("dynamic answer", item_id="msg_dynamic_fixture")],
+            response_id="resp_dynamic_fixture",
+        )
+
+    peer.append(respond)
+    async with peer:
+        agent = Agent(instructions="Respond.", model="gpt-5.5", provider=peer.provider)
+        assert (await agent.run("first synthetic input")).final_output == "dynamic answer"
+        assert (await agent.run("second synthetic input")).final_output == "raw answer"
+        assert len(peer.requests) == 2
+        assert len(seen) == 1
+        assert "first synthetic input" in json.dumps(seen)
+        peer.assert_exhausted()
+
+
+async def test_scripted_http_error_and_identifiers_are_served_without_native_mocks():
+    async with ScriptedResponses(
+        ScriptedResponse(
+            [],
+            status=400,
+            error_body={
+                "error": {"type": "invalid_request_error", "message": "synthetic rejection"}
+            },
+        )
+    ) as peer:
+        status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+        assert status == 400
+        assert json.loads(body)["error"]["message"] == "synthetic rejection"
+
+
+@pytest.mark.parametrize("error_type", [ValueError, asyncio.CancelledError])
+async def test_dynamic_callback_failure_remains_an_exhaustion_failure(error_type):
+    failure = error_type("synthetic-private-callback-error")
+    later_calls = []
+
+    def respond(_body):
+        raise failure
+
+    def later(_body):
+        later_calls.append(_body)
+        return [text("must not be consumed")]
+
+    peer = ScriptedResponses(respond)
+    peer.append(later)
+    with pytest.raises(error_type, match="synthetic-private-callback-error") as raised:
+        async with peer:
+            status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+            assert status == 400
+            assert "synthetic-private-callback-error" not in body
+            status, _, _ = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+            assert status == 400
+            assert later_calls == []
+            with pytest.raises(error_type, match="synthetic-private-callback-error"):
+                peer.assert_exhausted()
+    assert raised.value is failure
+
+
+async def test_explicit_empty_scripted_error_body_is_not_defaulted():
+    async with ScriptedResponses(ScriptedResponse([], status=400, error_body={})) as peer:
+        status, _, body = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+        assert status == 400
+        assert json.loads(body) == {}

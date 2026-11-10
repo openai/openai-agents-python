@@ -1227,8 +1227,10 @@
           "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceOptions:\n    parent: SpanContext | None = None\n    detached: bool = False\n    trace_id: str | None = None\n    group_id: str | None = None\n    metadata: Mapping[str, Any] = field(default_factory=dict)\n    disabled: bool | None = None\n    include_sensitive_data: bool | None = None\n    export_credentials: TraceExportCredentials | None = field(default=None, repr=False)",
+          "def set_tracing_disabled(disabled: bool) -> None:\n    pass",
+          "def set_sensitive_data_logging_enabled(enabled: bool) -> None:\n    pass",
           "def current_context() -> SpanContext | None:\n    pass",
-          "class TraceScope:\n\n    def __init__(self, name: str, kind: str, options: TraceOptions | Mapping[str, Any] | None, *, _restrictions: tuple[str, ...]=()):\n        pass\n\n    @property\n    def context(self) -> SpanContext:\n        pass\n\n    def start(self) -> TraceScope:\n        pass\n\n    def end(self) -> None:\n        pass\n\n    def __enter__(self) -> TraceScope:\n        pass\n\n    def set_outcome(self, *, status: str, category: str | None=None) -> None:\n        pass\n\n    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass",
+          "class TraceScope:\n\n    def __init__(self, name: str, kind: str, options: TraceOptions | Mapping[str, Any] | None, *, _restrictions: tuple[str, ...]=()):\n        pass\n\n    @property\n    def context(self) -> SpanContext:\n        pass\n\n    def start(self) -> TraceScope:\n        pass\n\n    def end(self) -> None:\n        pass\n\n    def __enter__(self) -> TraceScope:\n        pass\n\n    def set_outcome(self, *, status: str, category: str | None=None, data: Mapping[str, Any] | None=None) -> None:\n        pass\n\n    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass",
           "def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
           "def span(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
           "class TraceLifecycleEvent(TypedDict):\n    sequence: ReadOnly[int]\n    processor_ids: ReadOnly[Sequence[str]]\n    lifecycle: ReadOnly[Literal['start', 'end']]\n    trace_id: ReadOnly[str]\n    span_id: ReadOnly[str]\n    parent_span_id: ReadOnly[str | None]\n    name: ReadOnly[str]\n    kind: ReadOnly[str]\n    start_time_unix_nanos: ReadOnly[str]\n    end_time_unix_nanos: ReadOnly[str | None]\n    attributes: ReadOnly[Mapping[str, Any]]\n    dropped_attributes_count: ReadOnly[int]\n    outcome: ReadOnly[Literal['ok', 'error', 'unset']]",
@@ -1239,8 +1241,10 @@
           "async def force_flush(*, timeout_ms: int=10000) -> FlushResult:\n    pass"
         ],
         "exports": {
+          "ConsoleTraceProcessor": "agents.telemetry.ConsoleTraceProcessor",
           "Exporter": "Exporter",
           "FlushResult": "agents.telemetry.FlushResult",
+          "OpenAITraceExporter": "agents.telemetry.OpenAITraceExporter",
           "OtelTlsConfig": "agents.telemetry.OtelTlsConfig",
           "OtlpGrpc": "agents.telemetry.OtlpGrpc",
           "OtlpHttp": "agents.telemetry.OtlpHttp",
@@ -1255,7 +1259,9 @@
           "configure": "agents.telemetry.configure",
           "current_context": "agents.telemetry.current_context",
           "force_flush": "agents.telemetry.force_flush",
+          "set_sensitive_data_logging_enabled": "agents.telemetry.set_sensitive_data_logging_enabled",
           "set_trace_processors": "agents.telemetry.set_trace_processors",
+          "set_tracing_disabled": "agents.telemetry.set_tracing_disabled",
           "shutdown": "agents.telemetry.shutdown",
           "span": "agents.telemetry.span",
           "trace": "agents.telemetry.trace"
@@ -1266,19 +1272,25 @@
           "from pathlib import Path as Path",
           "from typing import Any as Any, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias",
           "from typing_extensions import ReadOnly as ReadOnly, TypedDict as TypedDict",
-          "from ._trace_context import TraceContext as TraceContext"
+          "from ._trace_context import TraceContext as TraceContext",
+          "from ._trace_export import ConsoleTraceProcessor as ConsoleTraceProcessor, OpenAITraceExporter as OpenAITraceExporter"
         ],
         "references": {
+          "ConsoleTraceProcessor": "_agents_codex._trace_export.ConsoleTraceProcessor",
+          "OpenAITraceExporter": "_agents_codex._trace_export.OpenAITraceExporter",
           "TraceContext": "agents._trace_context.TraceContext"
         }
       },
       "agents.testing": {
         "declarations": [
           "@dataclass(frozen=True)\nclass _ScriptItem:\n    encoded: str",
-          "def text(value: str) -> _ScriptItem:\n    pass",
+          "def event(value: Mapping[str, JsonValue]) -> _ScriptItem:\n    pass",
+          "def text(value: str, *, item_id: str | None=None) -> _ScriptItem:\n    pass",
           "def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str, namespace: str | None=None) -> _ScriptItem:\n    pass",
-          "@dataclass(frozen=True)\nclass ScriptedResponse:\n    items: Sequence[_ScriptItem]\n    usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)\n    headers: Mapping[str, str] | None = field(default=None, kw_only=True)",
-          "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Sequence[_ScriptItem] | ScriptedResponse) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
+          "@dataclass(frozen=True)\nclass ScriptedResponse:\n    items: Sequence[_ScriptItem]\n    usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)\n    headers: Mapping[str, str] | None = field(default=None, kw_only=True)\n    response_id: str | None = field(default=None, kw_only=True)\n    status: int = field(default=200, kw_only=True)\n    error_body: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)",
+          "ScriptResult = Sequence[_ScriptItem] | ScriptedResponse",
+          "Script = ScriptResult | Callable[[Mapping[str, JsonValue]], ScriptResult]",
+          "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Script) -> None:\n        pass\n\n    def append(self, *responses: Script) -> None:\n        pass\n\n    def clear(self) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
         ],
         "exports": {
           "RealtimeConnectCall": "agents.testing.RealtimeConnectCall",
@@ -1286,11 +1298,12 @@
           "ScriptedRealtimeAdapter": "agents.testing.ScriptedRealtimeAdapter",
           "ScriptedResponse": "agents.testing.ScriptedResponse",
           "ScriptedResponses": "agents.testing.ScriptedResponses",
+          "event": "agents.testing.event",
           "text": "agents.testing.text",
           "tool_call": "agents.testing.tool_call"
         },
         "imports": [
-          "from collections.abc import Mapping as Mapping, Sequence as Sequence",
+          "from collections.abc import Callable as Callable, Mapping as Mapping, Sequence as Sequence",
           "from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager",
           "from dataclasses import dataclass as dataclass, field as field",
           "from types import TracebackType as TracebackType",
@@ -1640,6 +1653,18 @@
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
           "_ObservationBuffer": "agents.observation._ObservationBuffer"
         }
+      },
+      "_agents_codex._trace_export": {
+        "declarations": [
+          "class OpenAITraceExporter:\n\n    def __init__(self, *, api_key: str, endpoint: str='https://api.openai.com/v1/traces/ingest', organization: str | None=None, project: str | None=None, timeout_ms: int=750, max_retries: int=0) -> None:\n        pass\n\n    def set_api_key(self, api_key: str) -> None:\n        pass\n\n    async def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass\n\n    async def on_trace_events(self, events: Sequence[Mapping[str, Any]]) -> None:\n        pass",
+          "class ConsoleTraceProcessor:\n\n    def __init__(self, *, stream: TextIO | None=None) -> None:\n        pass\n\n    def on_trace_event(self, event: Mapping[str, Any]) -> None:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Mapping, Sequence",
+          "from typing import Any, TextIO"
+        ],
+        "references": {}
       },
       "_agents_codex.canonical_storage_encrypt": {
         "declarations": [
