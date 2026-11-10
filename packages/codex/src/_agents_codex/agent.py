@@ -845,8 +845,8 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
-            input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
-            output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+            input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
+            output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -861,8 +861,8 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
-            input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
-            output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+            input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
+            output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
         ) -> TypedAgentT: ...
 

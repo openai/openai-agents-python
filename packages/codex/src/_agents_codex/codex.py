@@ -537,6 +537,7 @@ def codex_tool(
     input_model = parameters
 
     def bind(context, policy_context, declaration):
+        assert original._bind is not None
         captured = original._bind(
             context, policy_context, replace(declaration, input_type=original.input_type)
         )

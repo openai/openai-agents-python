@@ -2195,6 +2195,89 @@ class _ProfileRuntime:
     instructions: str
 
 
+def _native_session_config(
+    *,
+    executor: Environment[Any] | None,
+    provider_id: str,
+    uses_codex_login: bool,
+    provider: NativeProvider,
+    native_agents: NativeAgents[Any] | None,
+    deferred_schemas: bool,
+    allowed_tools: Sequence[FunctionTool[Any, Any, Any]],
+    web_search: WebSearch | None,
+    web_search_config: dict[str, Any],
+    guidance_config: dict[str, Any],
+    checklist: bool,
+    goals: bool,
+    programmatic_tool_calling: bool,
+) -> dict[str, Any]:
+    return {
+        "include_permissions_instructions": executor is not None,
+        "include_environment_context": executor is not None,
+        "model_provider": provider_id,
+        f"model_providers.{provider_id}": {
+            "name": "OpenAI" if uses_codex_login else "Native agent provider",
+            "base_url": (
+                _CODEX_RESPONSES_BASE_URL
+                if uses_codex_login
+                else provider.base_url or "https://api.openai.com/v1"
+            ),
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": provider._websockets_enabled,
+            **provider._routing_config(),
+            **{
+                name: getattr(provider, name)
+                for name in (
+                    "request_max_retries",
+                    "stream_max_retries",
+                    "stream_idle_timeout_ms",
+                    "websocket_connect_timeout_ms",
+                )
+                if getattr(provider, name) is not None
+            },
+            # Both native web protocols require a compatible Responses
+            # provider. The declaration admits that provider capability.
+            "supports_standalone_web_search": (
+                web_search is not None and web_search.route == "standalone"
+            ),
+        },
+        "agents.enabled": False,
+        "features.goals": goals,
+        **guidance_config,
+        "tools.update_plan.enabled": checklist,
+        "mcp_servers": {},
+        "features.non_prefixed_mcp_tool_names": False,
+        "features.code_mode": {
+            "enabled": programmatic_tool_calling,
+            "direct_only_tool_namespaces": (
+                ["collaboration"]
+                if programmatic_tool_calling
+                else _direct_tool_namespaces(
+                    allowed_tools,
+                    native_agents is not None or deferred_schemas,
+                )
+            ),
+        },
+        "features.code_mode_interrupt": programmatic_tool_calling,
+        "web_search": web_search.mode if web_search is not None else "disabled",
+        "features.standalone_web_search": (
+            web_search is not None and web_search.route == "standalone"
+        ),
+        **web_search_config,
+    }
+
+
+def _needs_before_complete(
+    agent: Agent[Any, Any],
+    input_guardrails: Sequence[InputGuardrail[Any]],
+    output_guardrails: Sequence[OutputGuardrail[Any]],
+) -> bool:
+    return agent.before_complete is not None or bool(
+        agent.output_guardrails or output_guardrails or agent.input_guardrails or input_guardrails
+    )
+
+
 def _capture_profile_runtimes(
     profiles: tuple[_AgentProfile, ...],
     root_catalog: _ToolCatalog,
@@ -2241,12 +2324,8 @@ def _capture_profile_runtimes(
                 "handoffs": dict(profile.handoffs),
                 "transform_context": declaration.transform_context is not None,
                 "before_compact": declaration.before_compact is not None,
-                "before_complete": declaration.before_complete is not None
-                or bool(
-                    declaration.output_guardrails
-                    or output_guardrails
-                    or declaration.input_guardrails
-                    or input_guardrails
+                "before_complete": _needs_before_complete(
+                    declaration, input_guardrails, output_guardrails
                 ),
                 "selecting_steps": any(
                     check.child_callback is not None
@@ -3491,61 +3570,21 @@ class Session(Generic[ContextT, OutputT]):
                 provider_id = (
                     "native_agent_codex_login" if codex_login is not None else "native_agent"
                 )
-                config = {
-                    "include_permissions_instructions": executor is not None,
-                    "include_environment_context": executor is not None,
-                    "model_provider": provider_id,
-                    f"model_providers.{provider_id}": {
-                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
-                        "base_url": (
-                            _CODEX_RESPONSES_BASE_URL
-                            if codex_login is not None
-                            else provider.base_url or "https://api.openai.com/v1"
-                        ),
-                        "wire_api": "responses",
-                        "requires_openai_auth": True,
-                        "supports_websockets": provider._websockets_enabled,
-                        **provider._routing_config(),
-                        **{
-                            name: getattr(provider, name)
-                            for name in (
-                                "request_max_retries",
-                                "stream_max_retries",
-                                "stream_idle_timeout_ms",
-                                "websocket_connect_timeout_ms",
-                            )
-                            if getattr(provider, name) is not None
-                        },
-                        # Both native web protocols require a compatible Responses
-                        # provider. The declaration admits that provider capability.
-                        "supports_standalone_web_search": (
-                            web_search is not None and web_search.route == "standalone"
-                        ),
-                    },
-                    "agents.enabled": False,
-                    "features.goals": goals,
-                    **guidance_config,
-                    "tools.update_plan.enabled": checklist,
-                    "mcp_servers": {},
-                    "features.non_prefixed_mcp_tool_names": False,
-                    "features.code_mode": {
-                        "enabled": programmatic_tool_calling,
-                        "direct_only_tool_namespaces": (
-                            ["collaboration"]
-                            if programmatic_tool_calling
-                            else _direct_tool_namespaces(
-                                allowed_tools,
-                                native_agents is not None or deferred_schemas,
-                            )
-                        ),
-                    },
-                    "features.code_mode_interrupt": programmatic_tool_calling,
-                    "web_search": web_search.mode if web_search is not None else "disabled",
-                    "features.standalone_web_search": (
-                        web_search is not None and web_search.route == "standalone"
-                    ),
-                    **web_search_config,
-                }
+                config = _native_session_config(
+                    executor=executor,
+                    provider_id=provider_id,
+                    uses_codex_login=codex_login is not None,
+                    provider=provider,
+                    native_agents=native_agents,
+                    deferred_schemas=deferred_schemas,
+                    allowed_tools=allowed_tools,
+                    web_search=web_search,
+                    web_search_config=web_search_config,
+                    guidance_config=guidance_config,
+                    checklist=checklist,
+                    goals=goals,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                )
                 from . import telemetry
 
                 if telemetry._engine_options is not None:
@@ -3594,12 +3633,8 @@ class Session(Generic[ContextT, OutputT]):
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
-                    "_before_complete": agent.before_complete is not None
-                    or bool(
-                        agent.output_guardrails
-                        or output_guardrails
-                        or agent.input_guardrails
-                        or input_guardrails
+                    "_before_complete": _needs_before_complete(
+                        agent, input_guardrails, output_guardrails
                     ),
                     **(
                         {"parent_trace": parent_trace.to_headers()}
@@ -9741,7 +9776,7 @@ class Session(Generic[ContextT, OutputT]):
                 if not isinstance(raw, dict) or raw.get("type") not in kinds:
                     parts = None
                     break
-                part = dict(raw)
+                part: dict[str, Any] = dict(raw)
                 kind = part.pop("type")
                 if kind in {"input_image", "input_audio"}:
                     fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
@@ -10926,13 +10961,16 @@ class Session(Generic[ContextT, OutputT]):
                 if not (
                     self._output_guardrails
                     or self._agent_for_message(message).output_guardrails
+                    or self._agent_for_message(message).input_guardrails
                     or self._input_guardrails
                     or state.input_guardrails_started
                 ):
                     raise NativeError("Completion callback has no application owner")
 
-                def callback(request: Any) -> None:
+                def default_completion(request: Any) -> None:
                     return None
+
+                callback = default_completion
 
             return callback, CompletionContext(
                 context=cast(ContextT, self._context),

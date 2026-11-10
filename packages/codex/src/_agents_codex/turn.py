@@ -11,6 +11,7 @@ from typing import (
     Generic as Generic,
     Literal as Literal,
     Protocol as Protocol,
+    cast as cast,
     overload as overload,
 )
 
@@ -99,8 +100,14 @@ class Turn(Generic[OutputT]):
     def run_usage(self) -> RunUsage:
         """Detached measured usage for this logical run, excluding unrelated children."""
         if self.child_id is not None and hasattr(self._session, "_child_callbacks"):
-            state = self._session._child_callbacks.get(
-                (self.child_id, self._native.incarnation, self.turn_id)
+            session = cast("Session[Any, Any]", self._session)
+            turn_id = self.turn_id
+            state = (
+                None
+                if turn_id is None
+                else session._child_callbacks.get(
+                    (self.child_id, self._native.incarnation, turn_id)
+                )
             )
             if state is not None:
                 object.__setattr__(self, "_run_usage", state.run_usage)

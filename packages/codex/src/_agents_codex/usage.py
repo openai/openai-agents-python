@@ -62,7 +62,11 @@ class _UsageCollector:
         counts = tuple(0 if usage is None else getattr(usage, name) for name in names)
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("usage counters must be nonnegative integers")
-        return RunUsage(*counts, requests, requests if usage is None else 0)
+        return RunUsage(
+            **dict(zip(names, counts, strict=True)),
+            requests=requests,
+            missing_usage_requests=requests if usage is None else 0,
+        )
 
     def add(self, delta: RunUsage) -> None:
         with self.lock:

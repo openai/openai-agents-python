@@ -16,6 +16,7 @@ from typing_extensions import TypedDict
 
 from agents.config import JsonValue
 
+from ._compat import cancellation_requested
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -106,10 +107,10 @@ async def _request_options_for(
     task = asyncio.current_task()
 
     def admit(owner: asyncio.Task[Any] | None = task) -> bool:
-        return owner is not None and not owner.cancelling()
+        return owner is not None and not cancellation_requested(owner)
 
     try:
-        if task is not None and task.cancelling():
+        if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
         if callable(source):
             from .session import _call_callback
@@ -121,7 +122,7 @@ async def _request_options_for(
                 turn_id=request.turn_id,
             )
             value = await _call_callback(source, admit, observed)
-        if task is not None and task.cancelling():
+        if task is not None and cancellation_requested(task):
             raise asyncio.CancelledError
         return dict(_capture_request_options(value)) if value is not None else {}
     finally:
