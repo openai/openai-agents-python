@@ -53,13 +53,14 @@ from ._lifecycle import (
     _SyncRun as _SyncRun,
 )
 from ._mcp_errors import _protect_mcp_methods
+from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .initial_messages import _capture_initial_messages, _initial_messages_json
-from .input import InitialMessage
+from .input import InitialMessage, _native_input, _response_content
 from .model_context import _ContextTransform
 from .models import ModelProvider, NativeModel
 from .tools import ToolRef
@@ -1571,7 +1572,17 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
-        initial_messages = _capture_initial_messages(initial_messages, state=state)
+        audio_budget = [_MAX_AUDIO_INPUT_BYTES]
+        initial_messages = _capture_initial_messages(
+            initial_messages, state=state, _audio_budget=audio_budget
+        )
+        if input is not None and (
+            audio_budget[0] != _MAX_AUDIO_INPUT_BYTES or _contains_audio(input)
+        ):
+            parts = _native_input(input, _audio_budget=audio_budget)
+            _check_audio_json({"initial_messages": initial_messages, "input": parts})
+            if not isinstance(input, str):
+                input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
         try:
             from ._function_tools import FunctionTool

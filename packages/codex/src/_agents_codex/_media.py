@@ -2,7 +2,7 @@
 
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, TypeAlias
 from urllib.parse import urlsplit
 
@@ -27,6 +27,75 @@ def _source(value: object, *, file: bool = False) -> str:
 # Reuse the native model WebSocket ceiling before JSON receipt encoding.
 _MAX_AUDIO_INPUT_BYTES = 64 * 1024 * 1024
 _AUDIO_PART_OVERHEAD = len(json.dumps([{"type": "audio", "audio_url": ""}]))
+
+
+def _contains_audio(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if value.get("type") in ("audio", "input_audio"):
+            return True
+        return any(
+            _contains_audio(value[key])
+            for key in ("input", "content", "initial_messages")
+            if key in value
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_contains_audio(part) for part in value)
+    return False
+
+
+def _check_audio_json(value: Any, *, contains_audio: bool | None = None) -> None:
+    """Bound the complete SDK-owned audio DTO before default ASCII JSON encoding."""
+    if not (_contains_audio(value) if contains_audio is None else contains_audio):
+        return
+    remaining = _MAX_AUDIO_INPUT_BYTES
+    active: set[int] = set()
+
+    def consume(size: int) -> None:
+        nonlocal remaining
+        remaining -= size
+        if remaining < 0:
+            raise ValueError("Audio input exceeds the native request capacity")
+
+    def count(item: Any) -> None:
+        if isinstance(item, str):
+            consume(2)
+            length = str.__len__(item)
+            if length > remaining:
+                raise ValueError("Audio input exceeds the native request capacity")
+            for start in range(0, length, 32_768):
+                consume(len(json.dumps(str.__getitem__(item, slice(start, start + 32_768)))) - 2)
+        elif isinstance(item, (dict, list, tuple)):
+            identity = id(item)
+            if identity in active:
+                raise ValueError("Circular reference detected")
+            active.add(identity)
+            try:
+                consume(2 + max(0, len(item) - 1) * 2)
+                if isinstance(item, dict):
+                    consume(len(item) * 2)
+                    for key, child in item.items():
+                        if not isinstance(key, str):
+                            if key is None or isinstance(key, (bool, int, float)):
+                                key = json.dumps(key)
+                            else:
+                                # Retain the existing encoder's unsupported-key error.
+                                json.dumps({key: None})
+                        count(key)
+                        count(child)
+                else:
+                    for child in item:
+                        count(child)
+            finally:
+                active.remove(identity)
+        else:
+            consume(len(json.dumps(item)))
+
+    count(value)
+
+
+def _audio_json(value: Any) -> str:
+    _check_audio_json(value)
+    return json.dumps(value)
 
 
 def _capture_audio(value: object, budget: list[int] | None = None) -> dict[str, Any]:

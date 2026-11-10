@@ -1,5 +1,6 @@
 """Native audio admission preserves mixed-content order through tool continuation."""
 
+import json
 from typing import Any
 
 import pytest
@@ -7,6 +8,46 @@ import pytest
 from agents import Agent, ModelRequest, ModelResponse, NativeProvider, ToolRef, function_tool
 from agents.input import InputAudio, InputText, UserMessage
 from tests._asyncio import timeout
+
+
+async def test_native_audio_envelope_rejection_preserves_session() -> None:
+    seen: list[dict[str, Any]] = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            seen.append(request.body)
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ]
+            )
+
+    async with (
+        timeout(30),
+        NativeProvider(base_url="https://example.invalid/v1", model_backend=Model()) as provider,
+        Agent(
+            model="custom-model", instructions="Audio admission test", provider=provider
+        ).session() as session,
+    ):
+        overhead = len(json.dumps([{"type": "audio", "audio_url": ""}]))
+        with pytest.raises(ValueError, match="Audio input exceeds"):
+            turn = await session.submit(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_audio", "audio_url": "a" * (64 * 1024 * 1024 - overhead)}
+                    ],
+                }
+            )
+            await turn.get_result()
+        assert seen == []
+        turn = await session.submit("Still usable")
+        assert (await turn.get_result()).final_output == "ok"
+        assert len(seen) == 1
 
 
 async def test_native_audio_survives_function_continuation() -> None:

@@ -79,6 +79,7 @@ from ._lifecycle import (
     _SyncRun as _SyncRun,
 )
 from ._mcp_errors import _protect_mcp_methods
+from ._media import _audio_json, _check_audio_json
 from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._projection import (
     _error_code as _error_code,
@@ -5592,7 +5593,7 @@ class Session(Generic[ContextT, OutputT]):
                     captured = _capture()
                 request["tracing_context"] = captured.context
             try:
-                encoded = json.dumps(request)
+                encoded = _audio_json(request)
                 try:
                     response = await self._native._submit(encoded)
                 except RuntimeError as exc:
@@ -5659,7 +5660,7 @@ class Session(Generic[ContextT, OutputT]):
         # orphan an input Core has already accepted.
         self._check_open()
         self._check_graph_admission()
-        encoded = json.dumps({"input": _native_input(input)})
+        encoded = _audio_json({"input": _native_input(input)})
         try:
             receipt = await self._native._submit_child(
                 child_id, instance_id, encoded, None if turn is None else turn._native
@@ -8934,6 +8935,12 @@ class Session(Generic[ContextT, OutputT]):
                                 await self._native._submit_realtime_tools(json.dumps(request))
                             )
                         else:
+                            try:
+                                _check_audio_json(request)
+                            except (ValueError, TypeError, RecursionError):
+                                # No input reached native admission. Retain the live Session.
+                                confirmed_rejection = True
+                                raise
                             receipt = json.loads(await self._native._submit(json.dumps(request)))
                 confirmed_rejection = receipt["status"] == "not_submitted"
                 handle = self._accept_submission(state, receipt, input)
