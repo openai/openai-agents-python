@@ -138,10 +138,9 @@ jobs:
               printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
             done
           } >> "$GITHUB_ENV"
-      - name: Use a faster Rust profile for cold Windows and macOS harness PR builds
-        # Trusted pushes and builds with a qualified donor keep the release profile.
+      - name: Configure cold harness PR builds
+        # The dependency cache uses the standard build settings.
         if: >-
-          (runner.os == 'Windows' || runner.os == 'macOS') &&
           github.repository == 'openai/openai-agents-python' &&
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
@@ -150,11 +149,15 @@ jobs:
         env:
           COLD_PR_RUST_OPT_LEVEL: ${{ runner.os == 'macOS' && 's' || '1' }}
         run: |
-          {
-            echo "CARGO_PROFILE_RELEASE_LTO=off"
-            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
-            echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
-          } >> "$GITHUB_ENV"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            echo "MATURIN_PGO=false" >> "$GITHUB_ENV"
+          else
+            {
+              echo "CARGO_PROFILE_RELEASE_LTO=off"
+              echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+              echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$COLD_PR_RUST_OPT_LEVEL"
+            } >> "$GITHUB_ENV"
+          fi
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
