@@ -134,7 +134,9 @@ def _capture_agent_graph(
                 agents.append(target)
             target_id = f"{id_prefix}{index}"
             previous = targets.get(name)
-            if previous is not None:
+            if previous is not None and (
+                previous != target_id or name in options or isinstance(reference, RealtimeHandoff)
+            ):
                 raise ValueError(f"Duplicate handoff name in Agent {agent.name!r}: {name}")
             targets[name] = target_id
             if isinstance(reference, RealtimeHandoff):
