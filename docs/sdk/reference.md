@@ -10,14 +10,18 @@ Unless a section gives another import path, import the named types and functions
 
 An Agent declares instructions, tools and final output. Its constructor does not start the runtime. A Session captures the declaration when it opens. See [configuration](configuration.md).
 
+Matching development builds have also been supporting the `decisions` constructor option and `Agent.decide()` below. The `0.24.0-alpha.7` preview has not been including these APIs. The [typed decision configuration](configuration.md#make-typed-decisions) has been linking matching-source setup and complete examples.
+
 ```text
 Agent(*, instructions: str, name=None, tools=None, model=None,
-      model_settings=None, provider=None, output_type=None,
+      model_settings=None, provider=None, decisions=None, output_type=None,
       programmatic_tool_calling=False, transform_context=None,
       before_compact=None, before_complete=None)
 
 agent.validate() -> None
 agent.with_output_type(output_type) -> Agent
+await agent.decide(question, *, input, provider=None, choices=None,
+                   output_type=None) -> Any
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
                 tools=None, before_step=None, state=None, return_state=False,
@@ -40,9 +44,13 @@ The call options follow these rules:
 - `return_state` must be a bool. `True` captures state after successful completion. A capture failure fails the run. Otherwise, `Completed.state` defaults to `None`.
 - `output_type=None` or bare `str` returns text. `with_output_type(...)` creates a variant. There is no one-shot `output_type` argument. See [structured output](configuration.md#structured-output) for formats, validation and restore limits.
 
+`Agent.decide()` has been returning a boolean by default, a selected value with `choices=...`, or a validated typed value with `output_type=...`. Calls have been requiring explicit `input` and accepting at most one of `choices` and `output_type`. The call's `provider=` has been overriding the Agent's `decisions` provider, independently of the generative connection. These calls have not been starting Agent runs or reading conversation history. The [decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been explaining callback helpers, provider ownership, errors and usage.
+
 `validate()` returns `None` for a valid declaration or raises its first `TypeError` or `ValueError`. It opens no Session, reads no credentials and connects to no services. Context, environment, overrides and native model support still require opening-time checks. It produces no validation report.
 
 Restore uses the checkpoint's model and settings. Any non-`None` opening `model` or `model_settings`, including `{}`, raises `ValueError`. Idle updates can change them after restore, except with `NativeAgents`. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
+
+Matching development builds have also been supporting `Agent.handoffs`, `await session.get_active_agent()` and idle `await session.update(agent=target)`. The [Agent handoff guide](sessions.md#hand-off-the-conversation-to-another-agent) has been explaining captured targets, operation tool limits and restore through the original graph root.
 
 ## Sessions and turns
 

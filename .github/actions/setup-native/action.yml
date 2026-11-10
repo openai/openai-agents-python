@@ -12,6 +12,10 @@ runs:
     - name: Install Rust
       shell: bash
       run: rustup toolchain install 1.95.0 --profile minimal
+    - name: Install matching LLVM profile tools
+      if: env.MATURIN_PGO == 'true'
+      shell: bash
+      run: rustup component add llvm-tools --toolchain 1.95.0
     - name: Linux build tools
       if: runner.os == 'Linux'
       shell: bash

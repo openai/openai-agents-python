@@ -1,8 +1,10 @@
-"""Application-owned projection for ag-ui-protocol==0.1.9; see README.md."""
+"""Application-owned projection for ag-ui-protocol==0.1.9; see README.md.
+
+Keep the shared examples/codex/_ui_projection.py helper with this recipe.
+"""
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -26,6 +28,7 @@ from agents.observation import (
     TurnFinished,
     TurnStarted,
 )
+from examples.codex._ui_projection import _complete_display
 
 
 async def stream_turn(
@@ -116,66 +119,14 @@ async def stream_turn(
                     else:
                         terminal = RunErrorEvent(message="The turn failed.", code="turn_failed")
                 else:
-                    plain = output_type is None or output_type is str
-                    final_id = None
-                    unphased_id = None
-                    recorded_text: dict[str, str] = {}
-                    if started and opened:
-                        try:
-                            async for item in session.items(subagent_id=turn.child_id):
-                                if (
-                                    item["type"] == "message"
-                                    and item["role"] == "assistant"
-                                    and item["turn_id"] in observed_turns
-                                    and item["status"] == "completed"
-                                ):
-                                    recorded_text[item["id"]] = "".join(
-                                        part["text"] for part in item["content"]
-                                    )
-                                    if item["turn_id"] != started:
-                                        continue
-                                    if item["phase"] == "final_answer":
-                                        final_id = item["id"]
-                                    elif item["phase"] is None:
-                                        unphased_id = item["id"]
-                                        # Rust treats U+001C..U+001F as nonblank.
-                                        if re.search(r"\S|[\x1c-\x1f]", recorded_text[item["id"]]):
-                                            final_id = item["id"]
-                        except Exception:
-                            # Unavailable identity cannot establish a complete display.
-                            final_id = unphased_id = None
-                            recorded_text.clear()
-                    final_id = final_id or unphased_id
-                    if (
-                        started
-                        and all(
-                            "".join(parts) == recorded_text.get(item_id)
-                            for item_id, parts in opened.items()
-                        )
-                        and (
-                            not plain
-                            or (
-                                not completed.final_output
-                                and not any(any(parts) for parts in opened.values())
-                            )
-                            or (
-                                final_id is not None
-                                and final_id in opened
-                                and (
-                                    "".join(opened[final_id]) == completed.final_output
-                                    or (
-                                        completed.final_output == ""
-                                        # Rust whitespace excludes Python's U+001C..U+001F.
-                                        and re.sub(
-                                            r"^[^\S\x1c-\x1f]+|[^\S\x1c-\x1f]+\Z",
-                                            "",
-                                            "".join(opened[final_id]),
-                                        )
-                                        == ""
-                                    )
-                                )
-                            )
-                        )
+                    if started and await _complete_display(
+                        session,
+                        turn.child_id,
+                        observed_turns,
+                        started,
+                        opened,
+                        output_type is None or output_type is str,
+                        completed.final_output,
                     ):
                         terminal = RunFinishedEvent(thread_id=thread_id, run_id=run_id)
         # No native item-end is exposed. Close only text items actually shown,

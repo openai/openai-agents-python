@@ -1003,6 +1003,73 @@ class RealtimeSession:
                 else:
                     await self._call("response", response=captured)
 
+    async def send_event(self, event: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Send a supported provider-wire event through the native session owner.
+
+        Core accepts guarded session, response, item, and audio-buffer controls;
+        raw tool declarations and fabricated authority rows remain unsupported.
+        Item retrieval returns the provider item; other sends return ``None``.
+        Cancellation publishes the same local playback interruption as interrupt().
+        Capture bounded JSON before waiting for native acceptance. Cancellation
+        joins acceptance, and queued events share the Realtime input budget.
+        Call this outside this session's adapter callbacks.
+        """
+        captured: Any = None
+        try:
+            self._check_live()
+            self._check_adapter_operation("send an event in its own Realtime session")
+            if not isinstance(event, Mapping):
+                raise TypeError("event must be a Mapping")
+            try:
+                size = 256 + _hosted_mcp_schema_size(
+                    event, _INPUT_QUEUE_BYTES_LIMIT - 256, json_text=True
+                )
+            except RuntimeError:
+                raise ValueError("Realtime event exceeds its 8 MiB input limit") from None
+            with self._input_admission(size):
+                captured = json.loads(json.dumps(event, default=_realtime_history_mapping))
+                if captured.get("type") == "response.cancel":
+                    self._session._check_callback_operation("interrupt its own Realtime session")
+
+                serialized = captured.get("type") in (
+                    "input_audio_buffer.append",
+                    "input_audio_buffer.clear",
+                    "input_audio_buffer.commit",
+                    "response.create",
+                )
+
+                async def send(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+                    try:
+                        if serialized:
+                            async with self._input_lock:
+                                self._check_live()
+                                result = await self._call("send_event", event=snapshot)
+                        else:
+                            result = await self._call("send_event", event=snapshot)
+                        if snapshot.get("type") == "response.cancel":
+                            try:
+                                await self._apply_interrupt_receipt(
+                                    result, response_id=snapshot.get("response_id")
+                                )
+                            except BaseException as error:
+                                self._finish(error)
+                                raise
+                            return None
+                        return cast(dict[str, Any] | None, result)
+                    finally:
+                        if serialized:
+                            self._pending_audio_commits -= 1
+                        del snapshot
+
+                if serialized:
+                    self._pending_audio_commits += 1
+                return cast(dict[str, Any] | None, await _join(asyncio.create_task(send(captured))))
+        except BaseException as error:
+            _clear_adapter_error_frames(error)
+            raise
+        finally:
+            del event, captured
+
     async def delete_conversation_item(self, provider_item_id: str) -> None:
         """Delete one eligible provider-observed item and retain its history audit."""
         self._check_live()
@@ -1014,9 +1081,10 @@ class RealtimeSession:
     async def update_history(self, items: Sequence[Mapping[str, Any]]) -> None:
         """Edit provider history observed during this connection, in the supplied order.
 
-        Supply unique item IDs. Only supported message rows are editable; retain
-        tool, MCP, and approval rows exactly and in order. Messages cannot move
-        across those authority anchors. Native validation owns item eligibility.
+        Supply unique item IDs. Only supported message rows are editable. Retain
+        surviving tool, MCP, and approval rows byte-for-byte and in relative order;
+        remove them only after native work has settled. Supported messages may move
+        across retained rows. Native validation owns item eligibility.
         Items predating attachment that this connection has not observed remain
         untouched. The canonical ``history`` audit and Session context remain intact.
         A provider failure after acknowledgements can leave partial edits; retrieve
@@ -1555,66 +1623,85 @@ class RealtimeSession:
                 playback=self._playback_payload(playback),
                 feedback=feedback,
             )
-            if not isinstance(receipt, dict):
-                raise RuntimeError("Realtime interrupt returned no completion receipt")
-            retired = receipt.get("retired_response_ids")
-            cancelled = receipt.get("cancelled_response_id")
-            joined_roots = receipt.get("joined_root_turn_ids", [])
-            if (
-                not isinstance(retired, list)
-                or any(not isinstance(value, str) or not value for value in retired)
-                or (cancelled is not None and (not isinstance(cancelled, str) or not cancelled))
-                or not isinstance(joined_roots, list)
-                or any(not isinstance(value, str) or not value for value in joined_roots)
-                or len(set(joined_roots)) != len(joined_roots)
-            ):
-                raise RuntimeError("Realtime interrupt returned an invalid completion receipt")
-            for source in retired:
-                self._retire_response_output(source)
-                self._discard_response_audio(source)
-                for key, audio in self._audio_samples.items():
-                    if key[0] == source:
-                        audio.retired = True
-            for function in functions:
-                function.retired_by_core.set()
-            for function in self._functions.values():
-                if function.response_id in retired:
-                    function.retired_by_core.set()
-            # Work can arrive while the native command is pending. Retire only
-            # sources named by its completion receipt; a newer response survives.
-            outcomes = await asyncio.gather(
-                self._cancel_functions(functions),
-                *(
-                    self._cancel_work(
-                        tuple(
-                            value
-                            for value in self._delegations.values()
-                            if value.response_id == source
-                            and all(value is not old for old in owned)
-                        ),
-                        tuple(
-                            value
-                            for value in self._functions.values()
-                            if value.response_id == source
-                            and all(value is not old for old in functions)
-                        ),
-                        response_id=source,
-                        exclude_guardrail=asyncio.current_task(),
-                    )
-                    for source in retired
-                ),
-                return_exceptions=True,
+            await self._apply_interrupt_receipt(
+                receipt,
+                response_id=response_id,
+                playback=playback,
+                owned=owned,
+                functions=functions,
+                cleanup=cleanup,
             )
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException):
-                    raise outcome
         except BaseException as error:
             # Local retirement precedes native acknowledgement. An uncertain
             # native failure cannot leave this owner accepting new work.
             self._finish(error)
             await _close_after_error(error, lambda: _join(cleanup))
             raise
-        await _join(cleanup)
+
+    async def _apply_interrupt_receipt(
+        self,
+        receipt: Any,
+        *,
+        response_id: str | None = None,
+        playback: RealtimePlaybackPosition | None = None,
+        owned: tuple[_Delegation, ...] = (),
+        functions: tuple[_FunctionCall, ...] = (),
+        cleanup: asyncio.Task[None] | None = None,
+    ) -> None:
+        if not isinstance(receipt, dict):
+            raise RuntimeError("Realtime interrupt returned no completion receipt")
+        retired = receipt.get("retired_response_ids")
+        cancelled = receipt.get("cancelled_response_id")
+        joined_roots = receipt.get("joined_root_turn_ids", [])
+        if (
+            not isinstance(retired, list)
+            or any(not isinstance(value, str) or not value for value in retired)
+            or (cancelled is not None and (not isinstance(cancelled, str) or not cancelled))
+            or not isinstance(joined_roots, list)
+            or any(not isinstance(value, str) or not value for value in joined_roots)
+            or len(set(joined_roots)) != len(joined_roots)
+        ):
+            raise RuntimeError("Realtime interrupt returned an invalid completion receipt")
+        for source in retired:
+            self._retire_response_output(source)
+            self._discard_response_audio(source)
+            for key, audio in self._audio_samples.items():
+                if key[0] == source:
+                    audio.retired = True
+        for function in functions:
+            function.retired_by_core.set()
+        for function in self._functions.values():
+            if function.response_id in retired:
+                function.retired_by_core.set()
+        # Work can arrive while the native command is pending. Retire only
+        # sources named by its completion receipt; a newer response survives.
+        outcomes = await asyncio.gather(
+            self._cancel_functions(functions),
+            *(
+                self._cancel_work(
+                    tuple(
+                        value
+                        for value in self._delegations.values()
+                        if value.response_id == source and all(value is not old for old in owned)
+                    ),
+                    tuple(
+                        value
+                        for value in self._functions.values()
+                        if value.response_id == source
+                        and all(value is not old for old in functions)
+                    ),
+                    response_id=source,
+                    exclude_guardrail=asyncio.current_task(),
+                )
+                for source in retired
+            ),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        if cleanup is not None:
+            await _join(cleanup)
         # Admission cleanup can register a late accepted root. Join only roots
         # whose native receipt sealed dispatch and confirmed terminal cleanup.
         await _join(

@@ -53,7 +53,7 @@ from uuid import uuid4 as uuid4
 
 from pydantic import BaseModel as BaseModel
 
-from ._agent_profiles import _AgentProfile, _capture_agent_graph
+from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
 from ._compat import cancel_once as cancel_once
 from ._events import (
     CodeInterpreterCallItem,
@@ -2041,10 +2041,7 @@ def _capture_profile_runtimes(
         declaration = profile.declaration
         tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
         catalog = root_catalog if index == 0 else _capture_tools(0, tools, context)
-        if any(
-            tool._ref.namespace is None and tool.name in profile.handoffs for tool in catalog.tools
-        ):
-            raise ValueError("A native handoff name collides with an ordinary function tool")
+        _check_handoff_tool_names((tool._ref for tool in catalog.tools), profile.handoffs)
         _check_namespaced_tool_collisions(
             tools,
             _tool_names(mcp),
@@ -3141,6 +3138,11 @@ class Session(Generic[ContextT, OutputT]):
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
                         **provider._routing_config(),
+                        **{
+                            name: getattr(provider, name)
+                            for name in ("request_max_retries", "stream_max_retries")
+                            if getattr(provider, name) is not None
+                        },
                         # Both native web protocols require a compatible Responses
                         # provider. The declaration admits that provider capability.
                         "supports_standalone_web_search": (
@@ -8492,7 +8494,12 @@ class Session(Generic[ContextT, OutputT]):
             ModelSettings,
             {
                 key: captured[key]
-                for key in ("reasoning_effort", "reasoning_summary", "service_tier")
+                for key in (
+                    "reasoning_effort",
+                    "reasoning_summary",
+                    "service_tier",
+                    "invocation_timeout_ms",
+                )
                 if captured.get(key) is not None
             },
         )
@@ -9672,6 +9679,14 @@ class Session(Generic[ContextT, OutputT]):
                     and self._default_tools is not None
                     and self._profile_current == (message["profile_id"], message["profile_epoch"])
                 ):
+                    handoff_defaults = set(
+                        _handoff_default_names(self._default_tools, source_handoffs) or ()
+                    )
+                    defaults.difference_update(
+                        ToolRef(name, "functions")
+                        for name in source_handoffs or ()
+                        if name not in handoff_defaults
+                    )
                     fixed.intersection_update(
                         ToolRef(ref.name, ref.namespace or "functions")
                         for ref in _selected_tool_refs(

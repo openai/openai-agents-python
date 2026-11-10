@@ -481,7 +481,10 @@ def native_inputs(native):
         raise ValueError("Native source inputs are missing; run a fresh native build")
     paths.extend(path for path in rust if path.is_symlink() or not path.is_dir())
     project = native.parents[1]
-    paths.extend(project / name for name in ("LICENSE", ".gitignore"))
+    paths.extend(
+        project / name
+        for name in ("LICENSE", ".gitignore", "uv.lock", "packages/codex/tests/native_fixtures.py")
+    )
     inputs = {}
     for path in paths:
         if path.is_symlink() or not path.is_file():
@@ -494,6 +497,7 @@ def native_inputs(native):
         ("build-system", config["build-system"]),
         ("tool.hatch", config.get("tool", {}).get("hatch", {})),
         ("tool.uv", config.get("tool", {}).get("uv", {})),
+        ("dependency-groups.pgo", config.get("dependency-groups", {}).get("pgo", [])),
     ):
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         inputs["pyproject.toml::" + name] = hashlib.sha256(encoded).hexdigest()

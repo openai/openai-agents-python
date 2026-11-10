@@ -55,6 +55,14 @@ An invocation deadline raises `NativeError` with `code="model_invocation_deadlin
 
 Development builds also accept a `ToolRef` for `tool_choice`, such as a declared function tool's `tool.ref`. This narrows sampling to one currently admitted eager tool and requires it. It cannot add a tool, restore one removed by `tools` or `before_step`, or select a deferred tool. Set `tool_choice="auto"` or `None` to clear a named target. A required choice can request the same tool on later sampling steps, so bound repeated work with a [run budget](observability.md#limit-a-runs-model-requests-and-usage) or change the selection when idle.
 
+## Make typed decisions
+
+Matching development builds have been supporting `Agent.decide()` for booleans, choices and structured values. The `0.24.0-alpha.7` preview has not been including this API. The [typed decision guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md) has been providing matching-source setup, complete examples and supported output types.
+
+Applications have been selecting a decision provider through `Agent(decisions=provider)`, separately from the generative `model` and `provider`. Each `await agent.decide(question, input=...)` call has been requiring explicit input and returning a boolean by default. Calls with `choices=[...]` have been returning one of those values; calls with `output_type=...` have been returning a validated value of that type. The SDK has been rejecting calls that combine `choices` and `output_type`.
+
+Decision calls have been using only their explicit input, without starting an Agent run or adding conversation history. A per-call `provider=` has been overriding the Agent's `decisions` default. Calls without either provider have been raising `ValueError`. Applications have been owning decision-provider cleanup; Agent and Session have been borrowing that provider. The [provider guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#replace-the-provider) has been describing `DecisionProvider` and the optional `OpenAIDecisions` adapter.
+
 ## Choose tools and workspace access
 
 Declare tools on the Agent or when opening the Session. The Session records Python and manual tool names, together with each MCP server name and raw tool name. Those names limit later updates and turn selections. [Idle updates](tools.md#replace-tools-between-turns) can replace the registered callbacks or MCP connections, including endpoints and credentials. Temporary selections use the accepted bindings and cannot redefine them. The fixed Apps registration from `HostedVerificationMCP` or `ChatGPTAppsMCP` requires a new Session for replacement; see [service-specific integrations](mcp.md#service-specific-integrations).
@@ -281,6 +289,8 @@ for repair in result.repair_attempts:
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
+Corrections have been retaining the accepted model, reasoning effort, reasoning summary and service tier. Matching development builds have also been applying the accepted `invocation_timeout_ms` afresh to each correction. The alpha.7 preview has not been including this timeout setting. Corrections have not been inheriting the other [development model controls](#additional-controls-in-development-builds), including output caps, sampling controls, metadata, provider storage and prompt-cache settings.
+
 Live manual replies and idle restore support structured output. An explicit Session can suspend a settled manual turn with `NativeOutput`, a bare structured output type, or `PromptedOutput`. Restore must match the saved output mode and schema, including the retry setting for prompted output.
 
 Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
@@ -334,6 +344,8 @@ These hooks have separate owners. A context projection does not change admitted 
 Return `None` to accept, `ContinueTurn("specific feedback")` to continue the same turn, or `StopTurn(...)` to stop it. Continuation feedback becomes model-visible conversation data and saved history. Bound root continuations with [`RunBudget`](observability.md#limit-a-runs-model-requests-and-usage). Root budgets exclude children, so use `continuation_count` and `StopTurn` to bound child continuations.
 
 The callback sees proposed text before output-type validation. Rejected text may already have streamed and remains in history. The callback does not run for provider failures, cancellation, compaction, or separate prompted-output repairs. A raised exception fails the turn. Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks. A callback must not mutate its own Session.
+
+Matching development builds have also been supplying `CompletionContext.decide()` for checks with the captured [decision provider](#make-typed-decisions). The [completion-check example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/decisions-guide.md#bind-a-provider-to-an-agent) has been combining a typed decision with a bounded continuation.
 
 ## Edit the next sampling request
 

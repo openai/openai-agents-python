@@ -454,18 +454,36 @@ async def test_prompted_repair_shares_budget_without_root_selector_or_tools(
     assert function_declarations(responses.requests[1]) == []
 
 
-async def test_budget_stop_is_a_supervisory_outcome(responses: ResponsesFixture) -> None:
+@pytest.mark.parametrize(
+    ("code", "expected_requests"),
+    [("run_budget_exceeded", 0), ("run_budget_usage_unavailable", 1)],
+)
+async def test_budget_stop_is_a_supervisory_outcome(
+    responses: ResponsesFixture, code: str, expected_requests: int
+) -> None:
+    budget = RunBudget(max_requests=0)
+    if code == "run_budget_usage_unavailable":
+
+        async def omit_usage(event: dict[str, Any]) -> None:
+            await require_follow_up(event)
+            if event["type"] == "response.completed":
+                event["response"].pop("usage", None)
+
+        responses.before_event = omit_usage
+        responses.respond(assistant_output("Need another sample"))
+        responses.respond(assistant_output("This request must be blocked"))
+        budget = RunBudget(max_tokens=14)
     agent = Agent(instructions="Answer.", provider=provider(responses))
     async with timeout(15), agent.session() as session:
-        turn = await session.submit("Stop before sampling", budget=RunBudget(max_requests=0))
+        turn = await session.submit("Answer", budget=budget)
         outcome = await turn.wait_for_attention()
         from agents import TurnNeedsAttention
 
         assert isinstance(outcome, TurnNeedsAttention)
         assert outcome.reason == "budget_exceeded"
         assert isinstance(outcome.error, NativeError)
-        assert outcome.error.code == "run_budget_exceeded"
+        assert outcome.error.code == code
         with pytest.raises(NativeError) as original:
             await turn.get_result()
         assert original.value is outcome.error
-        assert responses.requests == []
+        assert len(responses.requests) == expected_requests
