@@ -179,6 +179,91 @@ async def test_hosted_approval_after_done_is_issued_once_and_credentials_stay_pr
         assert peer.responses.requests == []
 
 
+@pytest.mark.parametrize("approve", [True, False])
+async def test_raw_hosted_approval_preserves_issued_identity_and_rejects_replay(
+    realtime_peer: RealtimePeer, approve: bool
+) -> None:
+    peer = realtime_peer
+    async with timeout(20), opened(peer) as voice:
+        socket = peer.socket
+        assert socket is not None
+        events, seen = voice.events(), []
+        await peer.frame(lambda frame: frame["type"] == "session.update")
+        cursor = len(peer.frames)
+        with pytest.raises(RuntimeError, match="unknown"):
+            await voice.send_event(
+                {
+                    "type": "conversation.item.create",
+                    "event_id": "unissued-approval-event",
+                    "item": {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": "unissued-approval",
+                        "approve": approve,
+                    },
+                }
+            )
+        assert len(peer.frames) == cursor
+        await approval(socket)
+        request = await next_event(events, RealtimeHostedMcpApprovalRequested, seen)
+        await next_event(events, RealtimeResponse, seen, status="done", response_id=_RESPONSE)
+        event = {
+            "type": "conversation.item.create",
+            "event_id": "issued-approval-event",
+            "previous_item_id": request.request_id,
+            "item": {
+                "type": "mcp_approval_response",
+                "id": "application-approval-response",
+                "approval_request_id": request.request_id,
+                "approve": approve,
+                "reason": "Application raw decision",
+            },
+        }
+        assert await voice.send_event(event) is None
+        sent = await peer.frame(
+            lambda frame: frame.get("event_id") == "issued-approval-event", after=cursor
+        )
+        assert sent == event
+        cursor = len(peer.frames)
+        with pytest.raises(RuntimeError, match="already in use|consumed"):
+            await voice.send_event(event)
+        with pytest.raises(RuntimeError, match="consumed"):
+            await voice.approve_hosted_mcp(request, approve=approve)
+        assert len(peer.frames) == cursor
+        assert approvals(peer) == [event]
+        assert peer.responses.requests == []
+
+
+async def test_raw_hosted_approval_rejects_retired_issued_identity_before_write(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    async with timeout(20), opened(peer) as voice:
+        assert peer.socket is not None
+        events, seen = voice.events(), []
+        await approval(peer.socket, done=False)
+        request = await next_event(events, RealtimeHostedMcpApprovalRequested, seen)
+        await voice.update(
+            {"hosted_mcp_tools": [{**hosted_tool(), "authorization": "replacement"}]}
+        )
+        cursor = len(peer.frames)
+        with pytest.raises(RuntimeError, match="stale|consumed"):
+            await voice.send_event(
+                {
+                    "type": "conversation.item.create",
+                    "event_id": "retired-approval-event",
+                    "item": {
+                        "type": "mcp_approval_response",
+                        "id": "retired-approval-response",
+                        "approval_request_id": request.request_id,
+                        "approve": True,
+                    },
+                }
+            )
+        assert len(peer.frames) == cursor
+        assert approvals(peer) == []
+        assert peer.responses.requests == []
+
+
 @pytest.mark.parametrize("retirement", ["update", "interrupt", "close"])
 async def test_hosted_approval_cannot_outlive_its_configuration_or_response(
     realtime_peer: RealtimePeer, retirement: str

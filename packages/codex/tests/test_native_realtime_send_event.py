@@ -8,11 +8,15 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, NativeProvider
+from agents import Agent, NativeProvider, function_tool
 from agents.realtime import (
     RealtimeConfig,
     RealtimeConversationItemObserved,
+    RealtimeDelegation,
     RealtimeHostedMcpToolsListed,
+    RealtimeResponse,
+    RealtimeText,
+    RealtimeToolCall,
 )
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -164,7 +168,7 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
             "approve": True,
         },
     ],
-    ids=["tool-call", "tool-output", "approval"],
+    ids=["reserved-tool-call", "orphan-tool-output", "unissued-approval"],
 )
 async def test_raw_item_create_rejects_forged_authority_before_wire_send(
     realtime_peer: RealtimePeer, item: dict[str, Any]
@@ -366,3 +370,237 @@ async def test_raw_session_update_waits_for_provider_receipt(realtime_peer: Real
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+async def test_raw_detached_responses_keep_explicit_inputs_and_observed_history(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    observed = {
+        "id": "classification-context",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Classify this synthetic message."}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-detached-response",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, observed)
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def detached_response(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("type") in ("response.created", "response.done"):
+                response = {**data["response"], "conversation_id": None}
+                if data["type"] == "response.done":
+                    item = {
+                        "id": f"detached-{response['id']}",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "synthetic-classification"}],
+                    }
+                    await send_json(
+                        {
+                            "type": "response.output_item.done",
+                            "response_id": response["id"],
+                            "output_index": 0,
+                            "item": item,
+                        }
+                    )
+                    response["output"] = [item]
+                data = {**data, "response": response}
+            await send_json(data, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", detached_response)
+        cursor = len(peer.frames)
+        completions = []
+        for index, inputs in enumerate(
+            ([], [{"type": "item_reference", "id": observed["id"]}]), start=1
+        ):
+            response = {
+                "conversation": "none",
+                "input": inputs,
+                "output_modalities": ["text"],
+                "metadata": {"purpose": "classification"},
+            }
+            event_id = f"classification-request-{index}"
+            assert (
+                await voice.send_event(
+                    {"type": "response.create", "event_id": event_id, "response": response}
+                )
+                is None
+            )
+            frame = await peer.frame(lambda frame: frame["type"] == "response.create", after=cursor)
+            cursor = peer.frames.index(frame, cursor) + 1
+            assert frame == {
+                "type": "response.create",
+                "event_id": event_id,
+                "response": {**response, "tools": [], "tool_choice": "none"},
+            }
+            async for event in events:
+                if isinstance(event, RealtimeResponse):
+                    completions.append((event.response_id, event.status))
+                    if event.status == "done":
+                        assert event.response_id == f"voice-response-{index}"
+                        break
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == observed["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.retrieved", "item": observed}
+                )
+                assert await retrieving == [observed]
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        assert completions == [
+            ("voice-response-1", "created"),
+            ("voice-response-1", "done"),
+            ("voice-response-2", "created"),
+            ("voice-response-2", "done"),
+        ]
+
+
+async def test_detached_output_cannot_dispatch_tools_or_handoffs(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    effects: list[str] = []
+
+    @function_tool
+    async def lookup(key: str) -> str:
+        effects.append(key)
+        return "Local tool output must not be produced."
+
+    seen: list[Any] = []
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-detached-tool-boundary",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", tools=[lookup], provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def provider_response(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("type") not in ("response.created", "response.done"):
+                await send_json(data, *args, **kwargs)
+                return
+            response = data["response"]
+            response_id = response["id"]
+            detached = response_id == "voice-response-1"
+            if detached:
+                # The local detached reservation still owns tool admission.
+                response = {**response, "conversation_id": "default-conversation"}
+            if data["type"] == "response.done":
+                calls = (
+                    [
+                        {
+                            "id": "detached-function-item",
+                            "type": "function_call",
+                            "name": "lookup",
+                            "call_id": "detached-function",
+                            "arguments": '{"key":"detached"}',
+                        },
+                        {
+                            "id": "detached-handoff-item",
+                            "type": "function_call",
+                            "name": "background_agent",
+                            "call_id": "detached-handoff",
+                            "arguments": '{"input_transcript":"Detached delegation must not run."}',
+                        },
+                    ]
+                    if detached
+                    else []
+                )
+                for index, item in enumerate(calls):
+                    for kind in ("response.output_item.added", "response.output_item.done"):
+                        await send_json(
+                            {
+                                "type": kind,
+                                "response_id": response_id,
+                                "output_index": index,
+                                "item": item,
+                            }
+                        )
+                    await send_json(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "response_id": response_id,
+                            "item_id": item["id"],
+                            "output_index": index,
+                            "call_id": item["call_id"],
+                            "name": item["name"],
+                            "arguments": item["arguments"],
+                        }
+                    )
+                    await send_json({"type": "conversation.item.done", "item": item})
+                text = (
+                    "Detached text remains observable."
+                    if detached
+                    else "Normal response continues."
+                )
+                await send_json(
+                    {
+                        "type": "response.output_text.done",
+                        "response_id": response_id,
+                        "item_id": f"text-{response_id}",
+                        "output_index": len(calls),
+                        "content_index": 0,
+                        "text": text,
+                    }
+                )
+                response = {**response, "output": calls}
+            await send_json({**data, "response": response}, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", provider_response)
+        await voice.send_event(
+            {
+                "type": "response.create",
+                "response": {"conversation": "none", "input": [], "output_modalities": ["text"]},
+            }
+        )
+        for response_id, expected_text in (
+            ("voice-response-1", "Detached text remains observable."),
+            ("voice-response-2", "Normal response continues."),
+        ):
+            if response_id == "voice-response-2":
+                await voice.send_text("Continue the normal conversation.")
+            texts = []
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, RealtimeText) and event.final:
+                    texts.append(event.text)
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.status == "done"
+                    and event.response_id == response_id
+                ):
+                    break
+            assert texts == [expected_text]
+        assert not any(isinstance(event, (RealtimeToolCall, RealtimeDelegation)) for event in seen)
+    assert effects == []
+    assert peer.responses.requests == []
+    assert not any(
+        frame.get("item", {}).get("type") == "function_call_output" for frame in peer.frames
+    )
+    assert len([frame for frame in peer.frames if frame["type"] == "response.create"]) == 2

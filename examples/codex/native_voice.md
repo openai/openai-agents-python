@@ -187,7 +187,7 @@ asyncio.run(main(sys.argv[1]))
 
 Inside an open voice context, `await voice.send_event(event)` sends a supported provider-wire event through the native owner. Core validates the event and preserves native tool and approval authority. This method accepts a JSON-compatible mapping, captures it before waiting, and shares the connection's 128-operation/8 MiB input budget. It rejects calls from the same owner's adapter callbacks. Cancellation waits for native acceptance to settle.
 
-For example, use an open `voice` owner to request a response with provider metadata and an event ID:
+For a detached text response, set `conversation` to `"none"` and supply its input in the request.
 
 ```python
 await voice.send_event(
@@ -195,8 +195,10 @@ await voice.send_event(
         "type": "response.create",
         "event_id": "application-response-1",
         "response": {
+            "conversation": "none",
+            "input": [{"type": "item_reference", "id": provider_item_id}],
             "output_modalities": ["text"],
-            "instructions": "Reply briefly.",
+            "instructions": "Classify the referenced message.",
             "metadata": {"request": "application-request-1"},
         },
     }
@@ -206,9 +208,9 @@ await voice.send_event(
 Core accepts these event names with guarded payloads:
 
 - `session.update` accepts existing sparse session settings and waits for the provider acknowledgement. Raw tool declarations remain unsupported; use the Session's admitted tools.
-- `response.create` accepts instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Alternate input and out-of-band responses remain unsupported. Admission and coalescing match `request_response()`.
+- `response.create` accepts alternate `input` and `conversation`, plus instructions, output modality, output-token limits, parallel tool calls, reasoning, metadata, and an event ID. Use `input: []` for an explicitly empty context. Detached responses share the native response queue and run with tools disabled. Their output arrives through the usual response events and stays outside the provider conversation.
 - `response.cancel` retires native work and local buffered output for the exact accepted response IDs. Consume `RealtimePlaybackInterrupted` and discard the indicated unplayed application audio, as with `interrupt()`.
-- `conversation.item.create` accepts supported message rows, an optional item ID, and a known `previous_item_id`. Native validation rejects fabricated function, MCP, and approval rows. Creation waits for the matching provider acknowledgement.
+- `conversation.item.create` accepts supported messages and completed historical function calls and outputs. Create the historical call first, then use its `call_id` on one output. These writes wait for matching provider acknowledgements. To answer a pending hosted MCP approval, send an `mcp_approval_response` with the provider's issued `approval_request_id` and a Boolean `approve` value.
 - `conversation.item.retrieve` returns the full provider item as a dictionary. `conversation.item.delete` waits for the matching provider acknowledgement.
 - `conversation.item.truncate` requires known received assistant audio and a valid playback offset.
 - `input_audio_buffer.append`, `input_audio_buffer.clear`, and `input_audio_buffer.commit` use the native media queue. Audio appends use base64 data in the configured input format.
