@@ -463,11 +463,7 @@
     {
       "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
       "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
-    },
-    {
-      "path": "sdk-local-project-read-cwd.patch",
-      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
     }
   ],
-  "result_tree": "48fe00004f533ba5d27aa87469e239d1122107dc"
+  "result_tree": "a84e7d22396240543240d724a033b00b5afc92b1"
 }

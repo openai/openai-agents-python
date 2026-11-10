@@ -10,7 +10,6 @@ use codex_config::{
     ConfigLayerSource, ProjectTrustLookup, ProjectTrustPath, default_project_root_markers,
     merge_toml_values, project_root_markers_from_config,
 };
-use codex_core::ProjectReadPathMapping;
 use codex_core_api::{EnvironmentManager, Feature, ThreadManager};
 use codex_extension_api::{
     ContextContributor, ExtensionData, ExtensionFuture, PreviousWorldStateSection,
@@ -397,22 +396,13 @@ impl CanonicalRules {
             .cwd
             .infer_path_convention()
             .context("unknown executor path convention")?;
-        let mapping = input.thread_store.get::<ProjectReadPathMapping>();
-        let discovery_cwd = mapping.as_ref().map_or(&selection.cwd, |mapping| {
-            mapping.cwd(&selection.environment_id, &selection.cwd)
-        });
         let repo =
-            codex_git_utils::resolve_root_git_project_uri_for_trust(&fs, discovery_cwd).await;
+            codex_git_utils::resolve_root_git_project_uri_for_trust(&fs, &selection.cwd).await;
         let repo = match repo {
             Some(path) => Some(trust_path(&fs, &path).await),
             None => None,
         };
-        let mut cwd = trust_path(&fs, discovery_cwd).await;
-        cwd.original = selection.cwd.inferred_native_path_string();
-        if discovery_cwd != &selection.cwd {
-            // This key came from the admitted local selection, not alias I/O.
-            cwd.canonical = Some(discovery_cwd.inferred_native_path_string());
-        }
+        let cwd = trust_path(&fs, &selection.cwd).await;
         let selected_root = match selection.workspace_roots.as_slice() {
             [root] => Some(root),
             _ => None,
@@ -473,16 +463,9 @@ impl CanonicalRules {
             let paths = paths?;
             let root = match workspace_root {
                 Some(root) => root.clone(),
-                None => project_root(&fs, discovery_cwd, &markers).await?,
+                None => project_root(&fs, &selection.cwd, &markers).await?,
             };
-            let alias = if workspace_root.is_some()
-                || (discovery_cwd != &selection.cwd && &root == discovery_cwd)
-            {
-                cwd_alias
-            } else {
-                None
-            };
-            load_rules(&fs, &root, alias, &paths).await
+            load_rules(&fs, &root, workspace_root.and(cwd_alias), &paths).await
         }
         .await;
         {
@@ -577,14 +560,7 @@ impl ToolLifecycleContributor for CanonicalRules {
             {
                 return;
             }
-            let mapping = input.thread_store.get::<ProjectReadPathMapping>();
-            let resolved = ProjectReadPathMapping::resolve(
-                mapping.as_deref(),
-                &context.environment_id,
-                &context.cwd,
-                &args.path,
-            );
-            let Ok(path) = resolved else {
+            let Ok(path) = context.cwd.join(&args.path) else {
                 return;
             };
             let pending = PendingImage {
@@ -721,7 +697,6 @@ impl ToolContributor for CanonicalRules {
             .map(|rules| {
                 vec![Arc::new(ReadText {
                     rules,
-                    mapping: thread.get::<ProjectReadPathMapping>(),
                     step: Arc::new(StepAccess::default()),
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>]
@@ -740,7 +715,6 @@ impl ToolContributor for CanonicalRules {
             .map(|rules| {
                 vec![Arc::new(ReadText {
                     rules,
-                    mapping: thread.get::<ProjectReadPathMapping>(),
                     step: step.get_or_init(StepAccess::default),
                 })
                     as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>]
@@ -751,7 +725,6 @@ impl ToolContributor for CanonicalRules {
 
 struct ReadText {
     rules: Arc<Rules>,
-    mapping: Option<Arc<ProjectReadPathMapping>>,
     step: Arc<StepAccess>,
 }
 
@@ -796,12 +769,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadText {
                 );
                 let args: ReadArguments = serde_json::from_str(call.function_arguments()?)?;
                 let env = call.environments.first().context("no selected executor")?;
-                let path = ProjectReadPathMapping::resolve(
-                    self.mapping.as_deref(),
-                    &env.environment_id,
-                    &env.cwd,
-                    &args.path,
-                )?;
+                let path = env.cwd.join(&args.path)?;
                 let context = self
                     .step
                     .0
