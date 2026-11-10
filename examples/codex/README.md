@@ -22,6 +22,51 @@ The example asks the agent to greet Ada with the Python `greeting` tool and prin
 
 To start without model credentials, choose a [scripted recipe](../../docs/sdk/recipes.md#test-application-logic-without-a-model).
 
+## Use ChatGPT plan usage with a registered integration
+
+This example requires a matching SDK source build. It applies to eligible integrations
+that already have a Sign in with ChatGPT registration and the user's consent
+for ChatGPT plan usage. [Registration guide](https://developers.openai.com/siwc/token-sharing-open-source) · [Self-hosted VM setup](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+
+Pass an async function from your application that returns the OAuth access
+token for the selected user and workspace. Choose a model that the account
+can use and the native SDK recognizes as supporting Responses Lite.
+[Model catalog](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+
+```python
+from collections.abc import Awaitable, Callable
+
+from agents import Agent, NativeProvider, SignInWithChatGPT
+
+
+def make_agent(get_access_token: Callable[[], Awaitable[str]], model: str) -> Agent:
+    return Agent(
+        instructions="Help with the team's development work.",
+        model=model,
+        provider=NativeProvider(
+            auth=SignInWithChatGPT(get_access_token=get_access_token),
+        ),
+    )
+```
+
+The SDK captures one access token when you open a Session. Your application
+owns renewal of the one-hour access token and protected credential storage.
+After renewal, open a new Session with the same registration and pass the
+saved conversation state or resume the local thread. The SDK reports auth
+or plan usage failures without switching to API-key billing.
+[Token renewal](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions#refreshing-tokens)
+
+Pause plan-backed requests when `NativeError.category` is `usage_limit_exceeded`.
+For an HTTP plan limit, the SDK also exposes the service code
+`subscription_sharing_usage_limit_exceeded` and the request ID when supplied.
+Your application decides whether to retry a temporary service error.
+[Error recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery)
+
+The route uses HTTP streaming with a Responses Lite model. You can use
+direct Python function tools with one Agent. The SDK excludes handoffs,
+NativeAgents, deferred tool loading, code mode, hosted tools, web search,
+and Realtime on this route.
+
 ## Migrate a v0 workflow
 
 Follow the [migration guide](../../MIGRATION.md) to move directly from v0 to native v1. It maps the APIs, explains conversation cutover, and includes a brief for a frontier coding agent. Start with the [read-only invoice walkthrough](migration/README.md): one agent, one tool, typed context, and typed output. It includes matching-source installation and an optional classic import change.

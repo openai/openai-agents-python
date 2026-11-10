@@ -24,6 +24,7 @@ from _agents_codex.agent import (
     RLock as RLock,
     Sequence as Sequence,
     SessionContextT as SessionContextT,
+    SignInWithChatGPT as SignInWithChatGPT,
     SupportsIndex as SupportsIndex,
     TextAgentT as TextAgentT,
     TracebackType as TracebackType,

@@ -359,7 +359,11 @@
     {
       "path": "0068-decisions.patch",
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
+    },
+    {
+      "path": "0152-siwc-http-errors.patch",
+      "sha256": "218d0a4e56d530c8d21d30510803f0ebc9b9cc2a753e0f35c4e4f4bd7fb3ed9a"
     }
   ],
-  "result_tree": "054297b00a11edfe3e731caaffc36e1c768fee70"
+  "result_tree": "dea30ceb99122b8499449de9f5996c09a9899871"
 }

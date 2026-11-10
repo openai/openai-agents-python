@@ -369,6 +369,12 @@ impl Engine {
             }
             // CanonicalStore loads under its exclusive writer. Keep that lease
             // through startup or failed-opening cleanup; never start Core here.
+            let stored = inner.read_stored_thread(id).await.map_err(py_error)?;
+            engine::EngineState::validate_siwc_resume_provider(
+                &stored.model_provider,
+                &inner.service_config.model_provider_id,
+            )
+            .map_err(py_error)?;
             let history = inner
                 .store
                 .load_history(codex_thread_store::LoadThreadHistoryParams {
@@ -1691,14 +1697,14 @@ impl NativeThread {
         )
     }
 
-    fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _validate_provider_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let current = inner.thread.config_snapshot().await;
             inner
                 .engine
-                .validate_hosted_search_model(current.collaboration_mode.model())
+                .validate_model(current.collaboration_mode.model())
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             Ok(())
@@ -1730,7 +1736,7 @@ impl NativeThread {
             if let Some(model) = &settings.model {
                 inner
                     .engine
-                    .validate_hosted_search_model(model)
+                    .validate_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
@@ -3349,7 +3355,7 @@ fn conversation_opening(
         if has_settings {
             if let Some(model) = &settings.model {
                 inner
-                    .validate_hosted_search_model(model)
+                    .validate_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }
@@ -3479,7 +3485,9 @@ fn create_engine<'py>(
         )
         .await
         .map_err(py_error)?;
-        inner.model_http_pool = model_http_pool;
+        if model_http_pool.is_some() {
+            inner.model_http_pool = model_http_pool;
+        }
         let mut engine = Engine::new(inner);
         if let Some(lease) = lease {
             lease.register_engine(engine.inner.clone())?;

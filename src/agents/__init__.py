@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         CodexLogin as CodexLogin,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
+        SignInWithChatGPT as SignInWithChatGPT,
     )
     from .canonical_storage import (
         CustomStorage as CustomStorage,
@@ -236,6 +237,7 @@ _MODULES = {
     "CodexLogin": ".agent",
     "ModelSettings": ".agent",
     "NativeProvider": ".agent",
+    "SignInWithChatGPT": ".agent",
     "NativeOutput": ".schema",
     "PromptedOutput": ".schema",
     "OutputSpec": ".schema",
