@@ -459,7 +459,19 @@
     {
       "path": "0174-sdk-command-environment-overrides.patch",
       "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-realtime-voice-policies.patch",
+      "sha256": "d0047a055fe2dcde13ec1935255e83094649b480c38cd6e903c4609475c09d9e"
+    },
+    {
+      "path": "sdk-agent-profile-observations.patch",
+      "sha256": "6e7ccb5f3b38d26fa69dbfc33338d829011692ab29a544baa074fb71bbcea607"
+    },
+    {
+      "path": "sdk-realtime-filter-forwarded-batches.patch",
+      "sha256": "42798cf99e804e2d6ac1f5b1a41e1e0a02c44705b30e2f906b8b831b08f2576f"
     }
   ],
-  "result_tree": "bc921ba2b838c6a85bba6e053835ce46b2ec507e"
+  "result_tree": "0bdcca23805256da9c43035950dd80c4bf248ae3"
 }

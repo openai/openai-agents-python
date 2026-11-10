@@ -3098,6 +3098,7 @@ impl PythonTools {
         owner: &str,
         grant: &ManualToolGrant,
         response: DynamicToolResponse,
+        start_response: bool,
     ) -> bool {
         let Some(generation) = self.resolve_generation(grant.key.reply.generation) else {
             return false;
@@ -3121,7 +3122,10 @@ impl PythonTools {
             .remove(&grant.key)
             .expect("checked live invocation")
             .sender
-            .send(response.into())
+            .send(ToolReply {
+                response,
+                start_response,
+            })
             .is_ok();
         if accepted {
             if let Some(owner) = self

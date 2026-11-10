@@ -120,6 +120,7 @@ from .executor import (
 from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
+    _DEFAULT_APPROVAL_REASON as _DEFAULT_APPROVAL_REASON,
     _FORM_MODES as _FORM_MODES,
     _URL_ACCEPT as _URL_ACCEPT,
     ActionReply as ActionReply,
@@ -133,6 +134,7 @@ from .manual import (
     VerificationRequest as VerificationRequest,
     _CapturedApproval as _CapturedApproval,
     _CapturedManual as _CapturedManual,
+    _DefaultApprovalReason as _DefaultApprovalReason,
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
     _PreparedManualResult as _PreparedManualResult,
@@ -172,6 +174,7 @@ from .native_interception import (
     _NativeInterception as _NativeInterception,
 )
 from .observation import (
+    AgentProfileChanged as AgentProfileChanged,
     ApiRateLimitsUpdated as ApiRateLimitsUpdated,
     ContextCompacted as ContextCompacted,
     EventStream as EventStream,
@@ -270,7 +273,7 @@ from .usage import (
 )
 
 if TYPE_CHECKING:
-    from .realtime import RealtimeConfig, RealtimeSession
+    from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -965,7 +968,7 @@ class _Submission:
     writable_roots: tuple[str, ...] | None = None
     parent_trace: TraceContext | None = field(default=None, repr=False)
     tracing: _CapturedTrace | None = field(default=None, repr=False)
-    realtime_tool: tuple[str, str, tuple[str, ...]] | None = None
+    realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None
     output_override: bool = False
     operation_declarations: tuple[Any, ...] | None = None
     operation_agent: Agent[Any, Any] | None = None
@@ -4450,16 +4453,16 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._join_mutation(asyncio.create_task(prepare()))
 
-    async def _realtime_function_tools(
-        self, tools: Sequence[FunctionTool[Any, Any, Any]] | None, *, allow_missing: bool = False
-    ) -> tuple[list[dict[str, Any]] | None, str | None]:
-        """Fence explicit declarations to the exact native source capture."""
-        self._check_open()
-        self._check_callback_operation("configure Realtime tools in its own Session")
-        if tools is None:
-            return None, None
-        if not tools:
-            return [], None
+    async def _realtime_tool_selection(
+        self,
+    ) -> tuple[
+        dict[str, Any],
+        Agent[Any, Any],
+        dict[str, Any] | None,
+        _ToolCatalog,
+        Sequence[Tool[Any]],
+        str,
+    ]:
         snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
         receipt = snapshot["profile_receipt"]
         source_agent = self._agent_for_profile(receipt)
@@ -4479,6 +4482,54 @@ class Session(Generic[ContextT, OutputT]):
         selection_id = snapshot["selection_id"]
         if not isinstance(selection_id, str) or not selection_id:
             raise NativeError("Missing Realtime source selection identity")
+        return snapshot, source_agent, receipt, catalog, bindings, selection_id
+
+    async def _realtime_policy_source(self) -> _RealtimePolicySource:
+        from .realtime import RealtimePolicyContext, RealtimeTool, _RealtimePolicySource
+
+        self._check_open()
+        self._check_callback_operation("configure Realtime policies in its own Session")
+        _, agent, receipt, catalog, _, selection_id = await self._realtime_tool_selection()
+        tools = [
+            RealtimeTool("function", spec["name"])
+            for spec in json.loads(catalog.native_specs())
+            if spec.get("type") == "function" and isinstance(spec.get("name"), str)
+        ]
+        if receipt is not None:
+            tools.extend(
+                RealtimeTool("handoff", name)
+                for name in self._profiles[receipt["profile_id"]].profile.handoffs
+            )
+        return _RealtimePolicySource(
+            RealtimePolicyContext(agent, self._context), tuple(tools), selection_id
+        )
+
+    def _realtime_handoff_source(
+        self, receipt: dict[str, Any] | None, name: str
+    ) -> Agent[Any, Any] | None:
+        agent = self._agent_for_profile(receipt)
+        if receipt is None:
+            return None
+        return agent if name in self._profiles[receipt["profile_id"]].profile.handoffs else None
+
+    async def _realtime_function_tools(
+        self, tools: Sequence[FunctionTool[Any, Any, Any]] | None, *, allow_missing: bool = False
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Fence explicit declarations to the exact native source capture."""
+        self._check_open()
+        self._check_callback_operation("configure Realtime tools in its own Session")
+        if tools is None:
+            return None, None
+        if not tools:
+            return [], None
+        (
+            snapshot,
+            source_agent,
+            receipt,
+            catalog,
+            bindings,
+            selection_id,
+        ) = await self._realtime_tool_selection()
         captured = {tool._ref: tool for tool in catalog.tools}
         selected: list[dict[str, Any]] = []
         seen: set[ToolRef] = set()
@@ -4720,6 +4771,7 @@ class Session(Generic[ContextT, OutputT]):
         response_id: str,
         call_ids: Sequence[str],
         stop_admission: asyncio.Event | None = None,
+        before_dispatch: Callable[[], Awaitable[Sequence[str]]] | None = None,
     ) -> Turn[None]:
         """Admit a response's tools to this generation's native tools root."""
         self._check_open()
@@ -4771,6 +4823,8 @@ class Session(Generic[ContextT, OutputT]):
             if self._active is not state:
                 continue
             assert turn.turn_id is not None
+            disabled = tuple(await before_dispatch()) if before_dispatch is not None else ()
+            check_generation()
             receipt = json.loads(
                 await self._native._submit_realtime_tools(
                     json.dumps(
@@ -4778,6 +4832,7 @@ class Session(Generic[ContextT, OutputT]):
                             "generation": generation,
                             "response_id": response_id,
                             "call_ids": selected,
+                            "disabled_call_ids": disabled,
                             "expected_root_turn_id": turn.turn_id,
                         }
                     )
@@ -4802,8 +4857,10 @@ class Session(Generic[ContextT, OutputT]):
                     if stop_admission is not None and stop_admission.is_set():
                         raise
         check_generation()
+        disabled = tuple(await before_dispatch()) if before_dispatch is not None else ()
+        check_generation()
         issued = await self._start(
-            [], _prepare_spec(None), realtime_tool=(generation, response_id, selected)
+            [], _prepare_spec(None), realtime_tool=(generation, response_id, selected, disabled)
         )
         state = self._owned_submission(issued)
         if state is None:
@@ -5908,6 +5965,23 @@ class Session(Generic[ContextT, OutputT]):
             break
         raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
 
+    async def _realtime_function_enabled(
+        self, state: _CallbackState, message: dict[str, Any]
+    ) -> bool:
+        if (
+            not isinstance(state, _Submission)
+            or state.realtime_tool is None
+            or self._realtime is None
+            or self._realtime._config.is_tool_enabled is None
+        ):
+            return True
+        enabled = await self._realtime._tool_enabled(
+            self._agent_for_message(message), message["tool"]
+        )
+        if not enabled:
+            self._realtime._mark_tool_unavailable(message["callId"])
+        return enabled
+
     async def _prepare_managed_approval(
         self,
         state: _CallbackState,
@@ -5935,6 +6009,17 @@ class Session(Generic[ContextT, OutputT]):
                 permit = state.function_admission
                 await permit.acquire()
                 acquired = True
+            if not admit():
+                return
+            if not await self._realtime_function_enabled(state, message):
+                if admit():
+                    await self._respond(
+                        request,
+                        f"Tool {message['tool']} not found",
+                        _approval_rejection=True,
+                        _background=True,
+                    )
+                return
             if not admit():
                 return
             if request._invocation not in state.manual_inputs:
@@ -6074,7 +6159,7 @@ class Session(Generic[ContextT, OutputT]):
         request: ApprovalRequested[Any],
         approve: bool,
         *,
-        reason: str = "Tool execution was rejected",
+        reason: str = _DEFAULT_APPROVAL_REASON,
         always: bool = False,
     ) -> None:
         self._check_loop()
@@ -6111,7 +6196,33 @@ class Session(Generic[ContextT, OutputT]):
                 raise
             self._observations.notify()
         else:
-            await self._respond(request, reason, _approval_rejection=True)
+            reply_reason = reason
+            if (
+                isinstance(reason, _DefaultApprovalReason)
+                and self._realtime is not None
+                and self._realtime._config.tool_error_formatter is not None
+                and self._active is not None
+                and self._active.realtime_tool is not None
+                and request.subagent_id is None
+            ):
+                if not self._native._check_manual_tool(request._grant):
+                    raise InteractionExpiredError("Managed approval is expired or already decided")
+                source_id = getattr(request, "_approval_source", None)
+                source_receipt = (
+                    None
+                    if source_id is None
+                    else {
+                        "profile_id": source_id,
+                        "epoch": getattr(request, "_approval_profile_epoch", None),
+                    }
+                )
+                reply_reason = await self._realtime._format_approval_rejection(
+                    self._agent_for_profile(source_receipt),
+                    request.name,
+                    request.call_id,
+                    reason,
+                )
+            await self._respond(request, reply_reason, _approval_rejection=True)
             self._approval_ready.pop(request._invocation, None)
         if always:
             self._approval_decisions[key] = (approve, reason)
@@ -6124,6 +6235,7 @@ class Session(Generic[ContextT, OutputT]):
         expected_json: str | None = None,
         prepared: _PreparedManualResult | None = None,
         _approval_rejection: bool = False,
+        _background: bool = False,
     ) -> Turn[Any]:
         self._check_loop()
         if (
@@ -6260,7 +6372,11 @@ class Session(Generic[ContextT, OutputT]):
                 or self._broken
                 or (self._environment_lease is not None and self._environment_lease.interrupted)
                 or self._sealed_checkpoint is not None
-                or not await self._native._respond_manual_tool(request._grant, output)
+                or not await (
+                    self._native._respond_manual_tool(request._grant, output, False)
+                    if _background
+                    else self._native._respond_manual_tool(request._grant, output)
+                )
             ):
                 raise InteractionExpiredError("Manual tool reply is expired or already delivered")
             self._observations.notify()
@@ -7102,7 +7218,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
-        realtime_tool: tuple[str, str, tuple[str, ...]] | None = None,
+        realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
@@ -8739,11 +8855,12 @@ class Session(Generic[ContextT, OutputT]):
                             raise NativeError("Session ended before queued work was admitted")
                         request: dict[str, Any]
                         if state.realtime_tool is not None:
-                            generation, response_id, call_ids = state.realtime_tool
+                            generation, response_id, call_ids, disabled = state.realtime_tool
                             request = {
                                 "generation": generation,
                                 "response_id": response_id,
                                 "call_ids": call_ids,
+                                "disabled_call_ids": disabled,
                             }
                         else:
                             request = {
@@ -9639,6 +9756,21 @@ class Session(Generic[ContextT, OutputT]):
                 assert isinstance(question, ElicitationRequest)
                 await self._probe_child_url_completion(question, retire=True)
             self._observations.notify()
+
+    def _observe_profile_change(self, message: Mapping[str, Any], handle: Turn[Any] | None) -> None:
+        if message.get("thread_id") != self.id:
+            return
+        agent = self._agent_for_message(message)
+        self._observations.append(
+            AgentProfileChanged(
+                session_id=self.id,
+                submission_id=handle.submission_id if handle is not None else None,
+                turn_id=message.get("turn_id"),
+                profile_id=message["profile_id"],
+                profile_epoch=message["profile_epoch"],
+                agent_name=agent.name,
+            )
+        )
 
     async def _read_child_event(self, event: dict[str, Any]) -> None:
         if self._closing:
@@ -10727,6 +10859,13 @@ class Session(Generic[ContextT, OutputT]):
                 if self._realtime is not None and self._realtime._ingest(event):
                     continue
                 message = event.get("msg", {})
+                if (
+                    message.get("type") == "agent_profile_changed"
+                    and message.get("turn_id") is None
+                ):
+                    if not projected:
+                        self._observe_profile_change(message, None)
+                    continue
                 if message.get("type") == "_sdk_callback_cancel":
                     self._cancel_native_callback(message["receipt"], native=event_native)
                     continue
@@ -10991,6 +11130,10 @@ class Session(Generic[ContextT, OutputT]):
                     and state.budget is not None
                 ):
                     state.budget.observe(message["token_usage"])
+                if kind == "agent_profile_changed":
+                    if not projected:
+                        self._observe_profile_change(message, handle)
+                    continue
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -11731,6 +11874,19 @@ class Session(Generic[ContextT, OutputT]):
                 acquired = True
             # Pydantic validators are application code too. Admit the original
             # native request before argument validation can execute that code.
+            if not self._admit_tool(state, request):
+                return
+            if not await self._realtime_function_enabled(state, message):
+                reply = json.dumps(
+                    {
+                        "request": message,
+                        "response": ToolOutput.error(f"Tool {ref.name} not found").to_native(),
+                        "start_response": False,
+                    }
+                )
+                if self._admit_tool(state, request) and await self._respond_tool(state, reply):
+                    status = "failed"
+                return
             if not self._admit_tool(state, request):
                 return
             assert state.handle is not None and state.handle.turn_id is not None

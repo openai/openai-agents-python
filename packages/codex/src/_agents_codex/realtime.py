@@ -77,6 +77,7 @@ from .voice.workflow import NativeSessionVoiceWorkflow
 
 if TYPE_CHECKING:
     from ._function_tools import FunctionTool
+    from .agent import Agent
     from .session import Session
     from .turn import Turn
 
@@ -114,6 +115,96 @@ class RealtimeSIP:
 
 
 @dataclass(frozen=True)
+class RealtimePolicyContext:
+    """Captured source declaration and current application context for voice policies."""
+
+    agent: Agent[Any, Any]
+    context: Any
+    realtime_usage: RealtimeUsage | None = None
+
+
+@dataclass(frozen=True)
+class RealtimeTool:
+    """A captured declaration; predicates only narrow the native tool ceiling."""
+
+    type: Literal["function", "handoff"]
+    name: str
+
+
+@dataclass(frozen=True)
+class RealtimeToolErrorContext:
+    kind: Literal["approval_rejected"]
+    tool_type: Literal["function"]
+    tool_name: str
+    call_id: str
+    default_message: str
+    run_context: RealtimePolicyContext
+
+
+@dataclass(frozen=True)
+class _RealtimePolicySource:
+    context: RealtimePolicyContext
+    tools: tuple[RealtimeTool, ...]
+    selection_id: str
+
+
+@contextmanager
+def _voice_callback_scope(
+    session: Session[Any, Any], *, adapter: object | None = None
+) -> Iterator[None]:
+    from .session import _Invocation, _invocation
+
+    guard = _Invocation(session, realtime_adapter=adapter)
+    token = _invocation.set(guard)
+    try:
+        yield
+    finally:
+        guard.active = False
+        _invocation.reset(token)
+
+
+async def _resolve_realtime_policy(
+    session: Session[Any, Any],
+    config: RealtimeConfig,
+    *,
+    check: Callable[[], None],
+    usage: RealtimeUsage | None = None,
+    profile_update: bool = False,
+) -> tuple[str | None, list[str] | None, str | None]:
+    instructions = config.instructions
+    enabled = config.is_tool_enabled
+    if not callable(instructions) and enabled is None:
+        return (None if profile_update else instructions), None, None
+    source = await session._realtime_policy_source()
+    check()
+    context = replace(source.context, realtime_usage=usage)
+    with _voice_callback_scope(session):
+        resolved = instructions(context) if callable(instructions) else instructions
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        check()
+        if callable(instructions) and not isinstance(resolved, str):
+            raise TypeError("Realtime instructions callback must return a string")
+        disabled = None
+        if enabled is not None:
+            disabled = []
+            for tool in source.tools:
+                accepted = enabled(context, tool)
+                if inspect.isawaitable(accepted):
+                    accepted = await accepted
+                check()
+                if type(accepted) is not bool:
+                    raise TypeError("Realtime tool predicate must return a bool")
+                if not accepted:
+                    disabled.append(tool.name)
+    return (
+        (None if profile_update and not callable(instructions) else resolved),
+        disabled,
+        source.selection_id,
+    )
+
+
+@dataclass(frozen=True)
 class RealtimeConfig:
     """Native Realtime configuration; defaults to a server WebSocket.
 
@@ -124,7 +215,7 @@ class RealtimeConfig:
 
     model: str | None = None
     voice: str | None = None
-    instructions: str | None = None
+    instructions: str | Callable[[RealtimePolicyContext], str | Awaitable[str]] | None = None
     settings: NativeRealtimeSettings | None = field(default=None, repr=False)
     transport: RealtimeWebRTC | RealtimeSIP | None = None
     tools: tuple[FunctionTool[Any, Any, Any], ...] | None = None
@@ -135,6 +226,12 @@ class RealtimeConfig:
     api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
     output_modality: Literal["audio", "text"] = "audio"
+    is_tool_enabled: (
+        Callable[[RealtimePolicyContext, RealtimeTool], bool | Awaitable[bool]] | None
+    ) = field(default=None, repr=False)
+    tool_error_formatter: (
+        Callable[[RealtimeToolErrorContext], str | None | Awaitable[str | None]] | None
+    ) = field(default=None, repr=False)
 
 
 async def _prepare_realtime_params(
@@ -174,8 +271,21 @@ async def _prepare_realtime_params(
                 "voice": config.voice,
             },
         }
-        if config.instructions is not None:
-            params["params"]["prompt"] = config.instructions
+        owner = session._realtime
+        instructions, allowed, policy_selection = await _resolve_realtime_policy(
+            session,
+            config,
+            check=(lambda: owner._check_live(require_ready=False))
+            if owner is not None
+            else session._check_open,
+            usage=owner.usage if owner is not None else None,
+        )
+        if policy_selection is not None:
+            params["expected_selection_id"] = policy_selection
+        if allowed is not None:
+            params["disabled_tool_names"] = allowed
+        if instructions is not None:
+            params["params"]["prompt"] = instructions
         return params
     finally:
         del config
@@ -584,6 +694,13 @@ class _Delegation:
 
 
 @dataclass
+class _FunctionIdentity:
+    name: str
+    source_profile: dict[str, Any] | None
+    unavailable: bool = False
+
+
+@dataclass
 class _FunctionCall:
     response_id: str
     names: dict[str, str]
@@ -648,6 +765,16 @@ class RealtimeSession:
     def __init__(self, session: Session[Any, Any], *, config: RealtimeConfig) -> None:
         self._session = session
         self._config = config
+        if (
+            config.instructions is not None
+            and not isinstance(config.instructions, str)
+            and not callable(config.instructions)
+        ):
+            raise TypeError("Realtime instructions must be a string or callback")
+        if config.is_tool_enabled is not None and not callable(config.is_tool_enabled):
+            raise TypeError("Realtime is_tool_enabled must be a callback")
+        if config.tool_error_formatter is not None and not callable(config.tool_error_formatter):
+            raise TypeError("Realtime tool_error_formatter must be a callback")
         self._input_lock = asyncio.Lock()
         self._input_count = 0
         self._input_bytes = 0
@@ -731,7 +858,7 @@ class RealtimeSession:
         self._function_roots: dict[str, asyncio.Task[None]] = {}
         self._profile_updates: set[asyncio.Task[None]] = set()
         self._pending_functions: dict[str, tuple[str, str | None]] = {}
-        self._function_names: dict[str, str] = {}
+        self._function_names: dict[str, _FunctionIdentity] = {}
         self._finished_functions: set[str] = set()
         self._seen: dict[str, int] = {}
         self._terminal_requests: dict[str, None] = {}
@@ -853,15 +980,78 @@ class RealtimeSession:
 
     @contextmanager
     def _callback_scope(self, *, adapter: bool = False) -> Iterator[None]:
-        from .session import _Invocation, _invocation
-
-        guard = _Invocation(self._session, realtime_adapter=self if adapter else None)
-        token = _invocation.set(guard)
-        try:
+        with _voice_callback_scope(self._session, adapter=self if adapter else None):
             yield
-        finally:
-            guard.active = False
-            _invocation.reset(token)
+
+    def _mark_tool_unavailable(self, call_id: str) -> None:
+        if (call := self._function_names.get(call_id)) is not None:
+            call.unavailable = True
+
+    async def _handoff_policy(self, owned: _FunctionCall) -> Sequence[str]:
+        from .session import TurnStoppedError
+
+        if self._config.is_tool_enabled is None:
+            return ()
+        disabled: list[str] = []
+        for call_id, name in owned.names.items():
+            self._check_live()
+            if owned.stop_admission.is_set():
+                raise TurnStoppedError("Realtime response retired before dispatch")
+            call = self._function_names.get(call_id)
+            if call is None:
+                raise RuntimeError("Realtime call retired before dispatch")
+            agent = self._session._realtime_handoff_source(call.source_profile, name)
+            if agent is not None and not await self._tool_enabled(agent, name, "handoff"):
+                disabled.append(call_id)
+                self._mark_tool_unavailable(call_id)
+        return disabled
+
+    async def _tool_enabled(
+        self, agent: Agent[Any, Any], name: str, kind: Literal["function", "handoff"] = "function"
+    ) -> bool:
+        predicate = self._config.is_tool_enabled
+        if predicate is None:
+            return True
+        self._check_live()
+        with self._callback_scope():
+            result = predicate(
+                RealtimePolicyContext(agent, self._session._context, self.usage),
+                RealtimeTool(kind, name),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+        self._check_live()
+        if type(result) is not bool:
+            raise TypeError("Realtime tool predicate must return a bool")
+        return result
+
+    async def _format_approval_rejection(
+        self, agent: Agent[Any, Any], name: str, call_id: str, default: str
+    ) -> str:
+        formatter = self._config.tool_error_formatter
+        if formatter is None:
+            return default
+        self._check_live()
+        result: object = None
+        try:
+            with self._callback_scope():
+                value = formatter(
+                    RealtimeToolErrorContext(
+                        "approval_rejected",
+                        "function",
+                        name,
+                        call_id,
+                        default,
+                        RealtimePolicyContext(agent, self._session._context, self.usage),
+                    )
+                )
+                result = await value if inspect.isawaitable(value) else value
+        except Exception:
+            pass
+        self._check_live()
+        if result is not None and not isinstance(result, str):
+            raise TypeError("Realtime tool error formatter must return a string or None")
+        return default if result is None else result
 
     async def _resolve_api_key(self) -> str | None:
         source = self._config.api_key
@@ -2193,19 +2383,30 @@ class RealtimeSession:
         definitions, selection_id = await self._session._realtime_function_tools(
             self._selected_tools, allow_missing=True
         )
-        if not self._live:
+        instructions, allowed, policy_selection = await _resolve_realtime_policy(
+            self._session,
+            self._config,
+            check=self._check_live,
+            usage=self.usage,
+            profile_update=True,
+        )
+        self._check_live()
+        if response_id is not None and response_id in self._guardrail_trips:
             return
         # Core validates this exact committed target and captures its settings.
         # Await the provider ACK outside the sole native event reader.
         await self._call(
             "update",
-            update={},
+            update={} if instructions is None else {"instructions": instructions},
             profile={
                 "response_id": response_id,
                 "delegation_id": delegation_id,
                 "target": target,
                 "function_tools": definitions,
-                "expected_selection_id": selection_id,
+                "expected_selection_id": policy_selection
+                if policy_selection is not None
+                else selection_id,
+                "disabled_tool_names": allowed,
             },
         )
 
@@ -2250,6 +2451,7 @@ class RealtimeSession:
                     response_id=owned.response_id,
                     call_ids=tuple(owned.names),
                     stop_admission=owned.stop_admission,
+                    before_dispatch=lambda: self._handoff_policy(owned),
                 )
             )
             owned.submission = submission
@@ -2541,20 +2743,43 @@ class RealtimeSession:
                 call_id, call_id, call_id, value["name"], value.get("response_id") or ""
             )
             self._pending_functions[call_id] = (value["name"], value.get("response_id"))
-            self._function_names[call_id] = value["name"]
+            receipt = value.get("source_profile")
+            if receipt is not None:
+                epoch = receipt.get("epoch") if isinstance(receipt, dict) else None
+                if not isinstance(epoch, str) or not epoch.isascii() or not epoch.isdecimal():
+                    raise RuntimeError("Invalid native Realtime source profile")
+                receipt = {"profile_id": receipt.get("profile_id"), "epoch": int(epoch)}
+            self._function_names[call_id] = _FunctionIdentity(value["name"], receipt)
+        elif name == "FunctionCallRejected":
+            call_id, function_name = value.get("call_id"), value.get("name")
+            if not isinstance(call_id, str) or not isinstance(function_name, str):
+                raise RuntimeError("Invalid native Realtime rejected call")
+            self._emit(
+                RealtimeToolCall(
+                    call_id,
+                    function_name,
+                    "failed",
+                    RuntimeError(f"Tool {function_name} not found"),
+                )
+            )
         elif name == "FunctionCallFinished":
             call_id = value["call_id"]
             if call_id in self._finished_functions:
                 return
-            function_name = self._function_names.get(call_id)
-            if function_name is None:
+            identity = self._function_names.get(call_id)
+            if identity is None:
                 raise RuntimeError("Realtime result has no registered function call")
             self._finished_functions.add(call_id)
             if call_id not in self._functions and call_id not in self._pending_functions:
                 self._finish_request(call_id)
             self._emit(
                 RealtimeToolCall(
-                    call_id, function_name, "completed" if value["succeeded"] else "failed"
+                    call_id,
+                    identity.name,
+                    "completed" if value["succeeded"] else "failed",
+                    RuntimeError(f"Tool {identity.name} not found")
+                    if identity.unavailable
+                    else None,
                 )
             )
         elif name == "Error":

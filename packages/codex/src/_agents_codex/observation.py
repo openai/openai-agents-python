@@ -223,6 +223,23 @@ class ContextCompacted(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AgentProfileChanged(_Event):
+    """A committed change of captured Agent identity, in native commit order.
+
+    Initial/restored bindings and same-profile configuration refreshes are silent.
+    Idle updates have no submission or turn. Names come from the admitted graph,
+    independently of later mutations to the original public Agent objects.
+    """
+
+    profile_id: str
+    profile_epoch: int
+    agent_name: str | None
+    submission_id: str | None = None
+    turn_id: str | None = None
+    type: Literal["agent_profile_changed"] = field(default="agent_profile_changed", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolStarted(_SubmissionEvent):
     """A function was admitted, or native MCP handling began before any approval.
 
@@ -320,6 +337,7 @@ class EventGap(_Event):
 
 Observation: TypeAlias = (
     TurnStarted
+    | AgentProfileChanged
     | ModelRequestDispatching
     | ModelResponseLinked
     | TurnFinished

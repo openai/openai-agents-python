@@ -2611,11 +2611,13 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (grant, response_json, start_response = true))]
     fn _respond_manual_tool<'py>(
         &self,
         py: Python<'py>,
         grant: &python_tools::ManualToolGrant,
         response_json: &str,
+        start_response: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let grant = grant.clone();
@@ -2674,11 +2676,16 @@ impl NativeThread {
                         .commit_sdk_receipt(id, &grant.key, item, reentry)
                         .await
                         .map_err(py_error)?;
-                    Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+                    Ok(tools.respond_manual(
+                        &grant.key.reply.thread,
+                        &grant,
+                        response,
+                        start_response,
+                    ))
                 })
                 .await;
             }
-            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response, start_response))
         })
     }
 

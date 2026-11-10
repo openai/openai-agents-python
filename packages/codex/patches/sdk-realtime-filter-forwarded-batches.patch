@@ -1,0 +1,47 @@
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index c2c64d8..7f6aaa0 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -5916,7 +5916,7 @@ async fn handle_realtime_server_event_with_configuration(
+ ) -> anyhow::Result<()> {
+     // An echo of a historical call is a history receipt. Only a provider-owned
+     // call may enter the live function dispatcher.
+-    let event = match (&handoff_state.sdk, &event) {
++    let mut event = match (&handoff_state.sdk, &event) {
+         (Some(sdk), RealtimeEvent::FunctionCallRequested(call))
+             if sdk
+                 .history
+@@ -6025,6 +6025,17 @@ async fn handle_realtime_server_event_with_configuration(
+             sdk.history.lock().unwrap().observe_deleted(item_id);
+         }
+     }
++    // Publish the same actionable batch that Core admits. A rejected function
++    // already has its correlated error output and cannot enter the host batch.
++    if let RealtimeEvent::ResponseDone(response) = &mut event
++        && let Some(sdk) = &handoff_state.sdk
++    {
++        let calls = sdk.function_calls.lock().await;
++        let seen = sdk.seen.lock().await;
++        response.function_call_ids.retain(|id| {
++            calls.contains_key(id) || !seen.get(id).is_some_and(|call| call.output_published)
++        });
++    }
+     let should_stop = match &event {
+         RealtimeEvent::AudioOut(frame) => {
+             match session_kind {
+@@ -6135,15 +6146,6 @@ async fn handle_realtime_server_event_with_configuration(
+             false
+         }
+         RealtimeEvent::ResponseDone(response) => {
+-            let mut response = response.clone();
+-            if let Some(sdk) = &handoff_state.sdk {
+-                let calls = sdk.function_calls.lock().await;
+-                let seen = sdk.seen.lock().await;
+-                response.function_call_ids.retain(|id| {
+-                    calls.contains_key(id)
+-                        || !seen.get(id).is_some_and(|call| call.output_published)
+-                });
+-            }
+             if handoff_state.sdk.is_some()
+                 && (response.response_id.is_none()
+                     || response.response_id != response_create_queue.sdk_response_id)
