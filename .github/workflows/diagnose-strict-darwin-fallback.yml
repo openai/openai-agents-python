@@ -1,0 +1,154 @@
+name: Diagnose Python strict Darwin fallback
+
+on:
+  push:
+    branches: [diag/python-strict-darwin-fallback-5737]
+    paths:
+      - .github/workflows/diagnose-strict-darwin-fallback.yml
+      - .github/diagnostics/test_native_strict_darwin_fallback.py
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  strict-darwin-fallback:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
+    runs-on: macos-15
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+        working-directory: pinned-source
+    steps:
+      - name: Check out the diagnostic selector
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic
+          persist-credentials: false
+          sparse-checkout: .github/diagnostics/test_native_strict_darwin_fallback.py
+          sparse-checkout-cone-mode: false
+      - name: Check out the qualified source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 5033ab5aea6a8d84968953b344a532889a37a583
+          path: pinned-source
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - name: Verify the runner, checkout, and selector
+        run: |
+          test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
+          test "$(uname -m)" = arm64
+          sw_vers
+          test "$(git rev-parse HEAD)" = 5033ab5aea6a8d84968953b344a532889a37a583
+          test "$(git rev-parse 'HEAD^{tree}')" = d4bc57a0a96a8a3d7f96b2be764d197042b1c7f6
+          git cat-file -p HEAD | grep -Fx 'parent 98d13e8f5c75cfe3c06c1864e7657c62fa70b79c'
+          printf '%s  %s\n' \
+            3f69c1a4bf8b1d5d0ce2a3ce7c349edd33e78fb7d8e0151dbcef23c77bcda3ba \
+            ../diagnostic/.github/diagnostics/test_native_strict_darwin_fallback.py | shasum -a 256 -c -
+      - name: Verify and stage the qualified native artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -I -S - <<'PY'
+          import os
+          import re
+          import runpy
+          import shutil
+          import tempfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          destination = Path(os.environ["RUNNER_TEMP"]) / "strict-darwin-native"
+          destination.mkdir()
+          artifact_id = 13797970699
+          digest = "sha256:663afcc99415ce642541db318efe3c8c1ded87504aea9bdd2c85a060376440c4"
+          download = runpy.run_path(".github/scripts/download-native-snapshot.py")["download_archive"]
+          with tempfile.TemporaryFile() as archive:
+              download(artifact_id, digest, "42877348007", "native-macOS-ARM64", archive)
+              with ZipFile(archive) as bundle:
+                  names = bundle.namelist()
+                  wheel, = [
+                      name for name in names
+                      if re.fullmatch(r"openai_agents-[A-Za-z0-9_.+-]+\.whl", name)
+                  ]
+                  for name in (wheel, wheel + ".pristine.json", "exec-server-fixture"):
+                      assert names.count(name) == 1, f"Expected exactly one {name}"
+                      with bundle.open(name) as source, (destination / name).open("xb") as target:
+                          shutil.copyfileobj(source, target)
+          print(f"Verified qualified native artifact {artifact_id} ({digest})")
+          PY
+      - name: Install and verify the matching wheel outside the checkout
+        run: |
+          stage="$RUNNER_TEMP/strict-darwin-probe"
+          native="$RUNNER_TEMP/strict-darwin-native"
+          tests="$stage/packages/codex/tests"
+          mkdir -p "$tests"
+          cp packages/codex/tests/{__init__,_asyncio,conftest,native_fixtures}.py "$tests/"
+          cp ../diagnostic/.github/diagnostics/test_native_strict_darwin_fallback.py "$tests/"
+          chmod +x "$native/exec-server-fixture"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          uv venv --seed --python 3.12 "$stage/venv"
+          probe_python="$stage/venv/bin/python"
+          wheels=("$native"/openai_agents-*.whl)
+          test "${#wheels[@]}" -eq 1
+          pip_install=("$probe_python" -m pip install --only-binary=:all: --constraint "$stage/constraints.txt")
+          "${pip_install[@]}" aiohttp hatchling pytest pytest-asyncio
+          "$probe_python" -I -B - "${wheels[0]}" <<'PY'
+          import runpy
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1])
+          hooks = runpy.run_path("packages/codex/scripts/hatch_build.py")
+          hooks["_wheel_qualification"](Path("packages/codex").resolve(), wheel)
+          print(f"Verified wheel {wheel.name} sha256:{hooks['_wheel_digest'](wheel)}")
+          PY
+          "${pip_install[@]}" "${wheels[0]}"
+          revision=$(cat packages/codex/CODEX_REVISION)
+          cd "$stage"
+          "$probe_python" -I -B - "$revision" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import agents
+          import agents._native
+
+          prefix = Path(sys.prefix).resolve()
+          assert Path(agents.__file__).resolve().is_relative_to(prefix)
+          assert Path(agents._native.__file__).resolve().is_relative_to(prefix)
+          assert agents._native.CODEX_REVISION == sys.argv[1]
+          print("Installed native revision:", agents._native.CODEX_REVISION)
+          PY
+      - name: Require one passing installed strict Darwin selector
+        run: |
+          stage="$RUNNER_TEMP/strict-darwin-probe"
+          probe_python="$stage/venv/bin/python"
+          report="$stage/result.xml"
+          cd "$stage"
+          env -u OPENAI_API_KEY -u CODEX_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+            OPENAI_AGENTS_DARWIN_FALLBACK_PROBE=1 \
+            CODEX_EXEC_SERVER_TEST_BINARY="$RUNNER_TEMP/strict-darwin-native/exec-server-fixture" \
+            "$probe_python" -I -B -m pytest -vv -s -o "pythonpath=$stage/packages/codex" \
+            -o asyncio_mode=auto -o 'markers=requires_native_macos_sandbox: requires macOS Seatbelt' \
+            --junitxml="$report" \
+            packages/codex/tests/test_native_strict_darwin_fallback.py::test_strict_darwin_local_environment_temp_and_system_trust
+          "$probe_python" -I -B - "$report" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+
+          case, = ElementTree.parse(sys.argv[1]).findall(".//testcase")
+          assert case.attrib["name"] == "test_strict_darwin_local_environment_temp_and_system_trust"
+          assert not any(node.tag in {"skipped", "failure", "error"} for node in case)
+          print("One installed strict Darwin selector passed.")
+          PY
