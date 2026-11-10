@@ -274,6 +274,52 @@ async def test_selected_mcp_projects_peer_identity(name: str) -> None:
         assert not peer.calls
 
 
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("a_b", "a.b"),
+        ("a.b", "a_b"),
+        ("a.b", "a_b", "a_b_4e3eadc5bb9d"),
+        ("a_b_4e3eadc5bb9d", "a_b", "a.b"),
+        ("a_b", "a.b", "a" * 106 + "-" + "x" * 20, "a" * 106 + "_2c5b93688635"),
+        ("a" * 106 + "_2c5b93688635", "a" * 106 + "-" + "x" * 20, "a_b", "a.b"),
+    ],
+)
+async def test_selected_mcp_preserves_valid_identity_among_projected_siblings(
+    names: tuple[str, ...], responses: ResponsesFixture
+) -> None:
+    peer = Peer(names=names)
+    async with (
+        timeout(10),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        namespace: MCPNamespace[None] = MCPNamespace("catalog", client)
+        selected = await select_mcp_tools(namespace, context=None, tool_names=["a_b"])
+        assert [tool.ref for tool in selected] == [ToolRef("a_b", "catalog")]
+        all_tools = await select_mcp_tools(namespace, context=None)
+        by_raw = dict(zip(names, all_tools, strict=True))
+        assert by_raw["a_b"].ref == selected[0].ref
+        assert len({tool.ref for tool in all_tools}) == len(names)
+        assert by_raw["a.b"].name != "a_b"
+        for raw in names:
+            if raw != "a.b" and len("catalog") + len(raw) + 2 <= 128:
+                assert by_raw[raw].ref == ToolRef(raw, "catalog")
+
+        target = "a" * 106 + "_2c5b93688635" if len(names) == 4 else "a_b"
+        call = function_call(target, {"key": "43"}, "valid-borrowed-name")
+        call["item"]["namespace"] = "catalog"
+        responses.replies.extend([[call], [assistant_output("done")]])
+        async with Agent(
+            instructions="Use the selected borrowed tool.",
+            tools=all_tools,
+            provider=provider(responses),
+        ).session() as session:
+            turn = await session.submit("Read the record.", tools=[ToolRef(target, "catalog")])
+            assert (await turn.get_result()).final_output == "done"
+        assert peer.calls == [{"name": target, "arguments": {"key": "43"}}]
+
+
 async def test_empty_and_filtered_selections_do_not_install_tools() -> None:
     peer = Peer(names=("search", "read.records"))
     auth_attempts = []

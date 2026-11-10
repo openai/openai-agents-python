@@ -813,11 +813,23 @@ def _project_tool_names(
             candidate["identity"]
         )
     for candidate in candidates:
-        if len(leaves[candidate["namespace"], candidate["name"]]) > 1:
+        if len(leaves[candidate["namespace"], candidate["name"]]) > 1 and (
+            prefix or candidate["name"] != candidate["raw"]
+        ):
             candidate["name"] += suffix(candidate["identity"])
     projected: dict[tuple[str, str], dict[str, str]] = {}
     used: set[str] = set()
-    for candidate in sorted(candidates, key=lambda item: item["identity"]):
+    # Borrowed native names keep their identity before projected siblings reserve names.
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (
+            not prefix
+            and (
+                item["name"] != item["raw"] or len(item["namespace"]) + len(item["name"]) + 2 > 128
+            ),
+            item["identity"],
+        ),
+    ):
         namespace, name = candidate["namespace"], candidate["name"]
         if len(namespace) + len(name) + 2 > 128 or namespace + name in used:
             attempt = 0

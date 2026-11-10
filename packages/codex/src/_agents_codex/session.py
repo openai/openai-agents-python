@@ -4073,6 +4073,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._last_turn = handle
                     session._restored_turn = handle
                     active.output_override = restored_override or restored_output_type is not None
+                    object.__setattr__(handle, "_guardrail_results", active.guardrail_results)
                     object.__setattr__(handle, "_run_usage", active.run_usage)
                     session._usage_roots[continuation.turn_id] = active.run_usage
                     active.handle = handle
