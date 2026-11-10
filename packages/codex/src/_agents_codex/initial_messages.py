@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
+from ._media import _MAX_AUDIO_INPUT_BYTES
 from ._public import preserve_module_identity as _preserve_module_identity
 from .input import AssistantMessage, InitialMessage, UserMessage, _native_input, _response_content
 
@@ -22,12 +23,15 @@ def _capture_initial_messages(
     if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
         raise TypeError("initial_messages must be a sequence of settled messages")
     captured: list[InitialMessage] = []
+    audio_budget = [_MAX_AUDIO_INPUT_BYTES]
     for message in messages:
         if not isinstance(message, Mapping):
             raise TypeError("initial_messages entries must be user or assistant messages")
         content = message.get("content")
         if message.get("role") == "user":
-            parts = _response_content(_native_input(cast(UserMessage, message)))
+            parts = _response_content(
+                _native_input(cast(UserMessage, message), _audio_budget=audio_budget)
+            )
             for part in parts:
                 for value in part.values():
                     if isinstance(value, str):

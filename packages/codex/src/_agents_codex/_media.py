@@ -1,6 +1,7 @@
 """Capture provider-owned media data without opening files or transports."""
 
 import base64
+import json
 from collections.abc import Mapping
 from typing import Any, Literal, TypeAlias
 from urllib.parse import urlsplit
@@ -23,11 +24,30 @@ def _source(value: object, *, file: bool = False) -> str:
     return value
 
 
-def _capture_audio(value: object) -> dict[str, Any]:
+# Reuse the native model WebSocket ceiling before JSON receipt encoding.
+_MAX_AUDIO_INPUT_BYTES = 64 * 1024 * 1024
+_AUDIO_PART_OVERHEAD = len(json.dumps([{"type": "audio", "audio_url": ""}]))
+
+
+def _capture_audio(value: object, budget: list[int] | None = None) -> dict[str, Any]:
     data = _record(value)
     if set(data) != {"audio_url"}:
         raise ValueError("Audio requires exactly one audio_url")
-    return {"audio_url": _source(data["audio_url"])}
+    audio = _source(data["audio_url"])
+    if budget is None:
+        budget = [_MAX_AUDIO_INPUT_BYTES]
+    size = _AUDIO_PART_OVERHEAD
+    length = str.__len__(audio)
+    if length > budget[0] - size:
+        raise ValueError("Audio input exceeds the native request capacity")
+    # Python receipts use ASCII JSON. Bound quoting scratch, including astral escapes.
+    for start in range(0, length, 32_768):
+        chunk = str.__getitem__(audio, slice(start, start + 32_768))
+        size += len(json.dumps(chunk)) - 2
+        if size > budget[0]:
+            raise ValueError("Audio input exceeds the native request capacity")
+    budget[0] -= size
+    return {"audio_url": audio}
 
 
 def _capture_image(value: object) -> dict[str, Any]:

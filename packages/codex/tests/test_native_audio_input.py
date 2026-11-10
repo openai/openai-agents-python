@@ -52,7 +52,7 @@ async def test_native_audio_survives_function_continuation() -> None:
         timeout(20),
         NativeProvider(base_url="https://example.invalid/v1", model_backend=Model()) as provider,
     ):
-        result = await Agent(
+        agent = Agent(
             model="custom-model",
             instructions="Use lookup once.",
             tools=[lookup],
@@ -61,7 +61,22 @@ async def test_native_audio_survives_function_continuation() -> None:
                 "tool_choice": ToolRef("lookup"),
                 "input_modalities": ["text", "audio"],
             },
-        ).run(message)
+        )
+        with pytest.raises(ValueError, match="Audio input exceeds"):
+            await agent.run(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "audio_url": "https://audio.test/" + "a" * (64 * 1024 * 1024),
+                        }
+                    ],
+                }
+            )
+        assert seen == []
+        assert effects == []
+        result = await agent.run(message)
     assert result.final_output == "ok"
     assert effects == ["lookup"]
     assert len(seen) == 2
