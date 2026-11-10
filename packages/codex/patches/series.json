@@ -483,7 +483,11 @@
     {
       "path": "sdk-realtime-historical-delete-terminal-tests.patch",
       "sha256": "48d2df857342b269a96fe97822c51937fbbd2f5fa528a340072dd60ac681cd02"
+    },
+    {
+      "path": "sdk-realtime-finish-batch-test-fixture.patch",
+      "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
     }
   ],
-  "result_tree": "5c9dddfafdfc2ad4242e4b1fd8b0c75a868962a9"
+  "result_tree": "1baf063cbe5cee4bb591c66d3c907de0e4ca4828"
 }
