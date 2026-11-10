@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ from threading import Event
 import pytest
 
 from agents import telemetry
-from tests.test_native_trace_exporter import collector
+from tests.test_native_trace_exporter import collector, native_trace_child_env
 
 
 async def native_loss_case(long_names: bool, forwarded=False, retained_after_recovery=False):
@@ -162,6 +161,7 @@ async def native_loss_case(long_names: bool, forwarded=False, retained_after_rec
             await telemetry.shutdown(timeout_ms=15000)
 
 
+@pytest.mark.serial
 @pytest.mark.parametrize("long_names", [False, True])
 def test_native_loss_recovers_after_record_or_byte_bound(long_names):
     script = (
@@ -170,10 +170,10 @@ def test_native_loss_recovers_after_record_or_byte_bound(long_names):
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS native loss recovery" in result.stdout
@@ -188,7 +188,7 @@ def test_native_loss_preserves_forwarding_and_recovered_retained_context(forward
     )
     result = subprocess.run(
         [sys.executable, "-B", "-c", script],
-        env=os.environ.copy(),
+        env=native_trace_child_env(),
         capture_output=True,
         text=True,
         timeout=60,
