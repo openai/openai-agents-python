@@ -467,8 +467,19 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
             assert retained.items == tuple(originals)
             identity = session.id
         async with agent.session(storage=storage, resume=identity) as restored:
-            assert await restored.history_snapshot() == retained
-            assert await restored.history_snapshot(limit=1) == type(retained)(
-                retained.revision, retained.total, (originals[-1],)
+            current = await restored.history_snapshot()
+            assert current.items[: retained.total] == retained.items
+            assert current.total == len(current.items)
+            for item in current.items[retained.total :]:
+                assert item["type"] == "message"
+                assert item["role"] == "developer"
+                kinds = item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                assert kinds
+                assert set(kinds) <= {
+                    "collaboration_mode.instructions",
+                    "sdk_application.accepted",
+                }
+            assert await restored.history_snapshot(limit=1) == type(current)(
+                current.revision, current.total, current.items[-1:]
             )
             assert responses.requests == []

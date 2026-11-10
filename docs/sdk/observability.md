@@ -120,29 +120,6 @@ For `agent.session(trace_options=...)`, `agent.run(trace_options=...)`, or `sess
 
 `SpanContext` is process-local and can outlive the recording scope through captured work. Do not serialize it or send it to another process. W3C [trace headers](#continue-a-trace-across-workers) transfer ancestry only. They do not transfer local workflow policy or exporter credentials. `TraceOptions` can also set a trace ID, group ID, application metadata, and private per-trace export headers through `TraceExportCredentials`. Keep credentials out of metadata and header carriers.
 
-## Original trace metadata
-
-Matching source builds have been returning copies of metadata from the owning trace root through `SpanContext.trace_metadata` and `TraceScope.trace_metadata`.
-
-Scope: the owning native root, including child scopes and retained contexts after scope exit. Fresh dictionaries per read; local copy edits without changes to the native root. Contexts without retained root metadata: `None`.
-
-Example fragment, after the application's `telemetry.configure(...)` call:
-
-```python
-from agents import telemetry
-
-with telemetry.trace("Job", options={"metadata": {"tenant": "example"}}) as root:
-    with telemetry.span("Step") as child:
-        context = child.context
-        assert child.trace_metadata == {"tenant": "example"}
-
-snapshot = dict(context.trace_metadata or {})
-snapshot["tenant"] = "local copy"
-assert root.trace_metadata == {"tenant": "example"}
-```
-
-Process-local metadata, separate from W3C ancestry headers.
-
 ## Send native traces to an application sink
 
 This section uses the same [matching preview wheel](installation.md) as local trace scopes. Supply an object with `on_trace_event(event)` through `telemetry.configure(processors=[...])` before opening Sessions. A processor can receive native trace records without an OTLP collector. The interface is separate from classic SDK trace processors.

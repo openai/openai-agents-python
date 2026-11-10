@@ -6,7 +6,6 @@ Pass an `Environment` to a Session to give the model selected process and file t
 | --- | --- |
 | On a supported Linux or macOS application host | [`Environment.local()`](#local-execution) |
 | On an application-owned exec-server service | [A WSS `Environment`](#remote-execution) |
-| With application-defined command variables | [Command environment](#command-environment) |
 | With additional write access | [Write roots](#replace-write-roots-between-turns) |
 | To inspect a workspace without changing its files | [Read-only execution](#inspect-a-read-only-workspace) |
 | With explicit network or local-socket access | [Network policy](#network-and-local-socket-access) |
@@ -311,37 +310,6 @@ For each opening, including restore:
 The SDK enters and exits the manager in one lease task. `ContextVar` changes stay in that task, so pass application data through `context=`. The manager cannot suppress exceptions from the separate Session body.
 
 Close the Session on its opening event loop and handle release failures from Session exit. The SDK keeps the lease until native resource release finishes. Session exit does not guarantee successful backend shutdown.
-
-## Command environment
-
-Source builds: explicit command variables through `Environment.env`, for both local and remote execution.
-
-```python
-from agents import Environment
-
-environment = Environment.local(
-    cwd="/jobs/worker/work",
-    tools=("exec_command",),
-    env={"APP_MODE": "batch", "PATH": "/opt/worker/bin:/usr/bin:/bin"},
-)
-```
-
-Remote equivalent: the same `env` argument on `Environment(url=..., cwd=..., tools=...)`.
-
-Session usage: `agent.session(environment=environment)`. One-shot usage: `agent.run(input, environment=environment)`.
-
-Async values: application-defined resolution inside an [`EnvironmentSource`](#manage-the-executor-lifetime) before yielding the new `Environment`. For restore: a fresh source with current values.
-
-| Setting | Behavior |
-| --- | --- |
-| Explicit values | An immutable copy at construction, overriding the selected executor policy's values for new commands. Empty string values: supported. |
-| `None` or `{}` | Existing execution defaults: a fresh local environment with a system `PATH`, or the remote executor's existing environment policy. |
-| A replacement or restored Session | Current destination values. No saved copy of the earlier map. |
-| Private declaration data | The map excluded from the Environment's representation, saved configuration, and passive observations. Values printed by commands: ordinary tool output. |
-
-Variable names: nonempty strings without `=` or NUL. Values: strings without NUL. Both names and values: valid UTF-8 text. Reserved SDK helper names: `CODEX_SDK_BWRAP_SEARCH_PATH` and `CARGO_BIN_EXE_bwrap`.
-
-Shell startup scripts: possible subsequent changes to the initial command values.
 
 ## Network and local socket access
 

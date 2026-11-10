@@ -325,8 +325,6 @@ class Environment(Generic[ContextT_contra]):
     cwd: str
     tools: Sequence[ExecutorToolName] = ()
     headers: Mapping[str, str] = field(default_factory=dict, repr=False)
-    # Captured command overrides; current declarations only, excluded from saved state.
-    env: Mapping[str, str] | None = field(default=None, repr=False)
     connect_timeout: float | None = None
     capability_directories: Sequence[str] | None = None
     approval: (
@@ -347,6 +345,8 @@ class Environment(Generic[ContextT_contra]):
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
     write_policy: Literal["strict", "legacy"] = "strict"
     read_only: bool = False
+    # Captured command overrides; current declarations only, excluded from saved state.
+    env: Mapping[str, str] | None = field(default=None, repr=False)
 
     @classmethod
     def local(
@@ -354,7 +354,6 @@ class Environment(Generic[ContextT_contra]):
         *,
         cwd: str | PathLike[str],
         tools: Sequence[ExecutorToolName] = (),
-        env: Mapping[str, str] | None = None,
         writable_roots: Sequence[str | PathLike[str]] = (),
         network: NetworkPolicy | RuntimeNetworkPolicy | None = None,
         capability_directories: Sequence[str] | None = None,
@@ -375,6 +374,7 @@ class Environment(Generic[ContextT_contra]):
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
         write_policy: Literal["strict"] = "strict",
         read_only: bool = False,
+        env: Mapping[str, str] | None = None,
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -569,7 +569,12 @@ class Environment(Generic[ContextT_contra]):
                     or not name
                     or "\0" in name
                     or "=" in name
-                    or name in {"CODEX_SDK_BWRAP_SEARCH_PATH", "CARGO_BIN_EXE_bwrap"}
+                    or name
+                    in {
+                        "CODEX_SDK_BWRAP_SEARCH_PATH",
+                        "CARGO_BIN_EXE_bwrap",
+                        "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+                    }
                 ):
                     raise ValueError("Invalid executor environment variable name")
                 if not isinstance(value, str) or "\0" in value:

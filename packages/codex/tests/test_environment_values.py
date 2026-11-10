@@ -1,11 +1,55 @@
 """Capture explicit command environment values without exposing their contents."""
 
+from dataclasses import fields
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from agents import Environment
+
+
+def test_environment_values_preserve_existing_public_field_order() -> None:
+    existing_fields = (
+        "url",
+        "cwd",
+        "tools",
+        "headers",
+        "connect_timeout",
+        "capability_directories",
+        "approval",
+        "transform_arguments",
+        "transform_result",
+        "policy_timeout",
+        "network",
+        "writable_roots",
+        "mounts",
+        "write_policy",
+        "read_only",
+    )
+    assert tuple(item.name for item in fields(Environment))[: len(existing_fields) + 1] == (
+        *existing_fields,
+        "env",
+    )
+    existing_local_parameters = (
+        "cwd",
+        "tools",
+        "writable_roots",
+        "network",
+        "capability_directories",
+        "approval",
+        "transform_arguments",
+        "transform_result",
+        "policy_timeout",
+        "mounts",
+        "write_policy",
+        "read_only",
+    )
+    assert tuple(signature(Environment.local).parameters)[: len(existing_local_parameters) + 1] == (
+        *existing_local_parameters,
+        "env",
+    )
 
 
 @pytest.mark.parametrize("local", [False, True])
@@ -35,6 +79,7 @@ def test_environment_values_are_captured_and_private(local: bool, tmp_path: Path
         {"BAD\0NAME": "value"},
         {"CODEX_SDK_BWRAP_SEARCH_PATH": "private-environment-value"},
         {"CARGO_BIN_EXE_bwrap": "private-environment-value"},
+        {"CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE": "private-environment-value"},
         {"NAME": "bad\0private-environment-value"},
         {"NAME": 1},
         {1: "value"},
