@@ -399,7 +399,11 @@
     {
       "path": "0099-retained-trace-recovery-watermark.patch",
       "sha256": "860664c1fbf24002588e74e5dbbda2ea7b14d4aadd0bca5ba2c1f0e8871625f9"
+    },
+    {
+      "path": "sdk-realtime-raw-events-and-history.patch",
+      "sha256": "4675d414b2e5ff22f463581e1e72ec6b1b44fca1bcf226d7eaf3fb18559f7406"
     }
   ],
-  "result_tree": "b182776b9784eb4dff6f9447f8172c1705db5724"
+  "result_tree": "fe0cf60ddf09719af98a4587b28096b1eea0def7"
 }

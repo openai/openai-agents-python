@@ -11,9 +11,10 @@ from agents import Session, Turn
 from tests._asyncio import timeout
 
 
+@pytest.mark.parametrize("raw", [False, True], ids=["typed", "raw"])
 @pytest.mark.parametrize("late_admission", [False, True])
 async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
-    late_admission: bool, monkeypatch: pytest.MonkeyPatch
+    late_admission: bool, raw: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     admission_entered = asyncio.Event()
     release_admission = asyncio.Event()
@@ -59,7 +60,7 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
     owned.task = asyncio.create_task(voice._run_functions(owned))
 
     async def call(kind: str, **kwargs: Any) -> dict[str, Any]:
-        assert kind == "interrupt"
+        assert kind == ("send_event" if raw else "interrupt")
         await voice._monitor_function_root(c)
         acknowledged.set()
         return {
@@ -69,13 +70,17 @@ async def test_interrupt_joins_only_receipted_root_after_admission_cleanup(
         }
 
     monkeypatch.setattr(voice, "_call", call)
-    stopping: asyncio.Task[None] | None = None
+    stopping: asyncio.Task[Any] | None = None
     async with timeout(5):
         try:
             await admission_entered.wait()
             if not late_admission:
                 await root_entered.wait()
-            stopping = asyncio.create_task(voice.interrupt("response-a"))
+            stopping = asyncio.create_task(
+                voice.send_event({"type": "response.cancel", "response_id": "response-a"})
+                if raw
+                else voice.interrupt("response-a")
+            )
             await acknowledged.wait()
             release_admission.set()
             await root_entered.wait()

@@ -418,5 +418,61 @@ async def test_sip_commit_controls_provider_buffer_without_client_media(call_pee
             with pytest.raises(RuntimeError, match="SIP calls receive audio from the provider"):
                 await owner.send_audio(b"\0\0", commit=True)
             await owner.send_audio(b"", commit=True)
+            await owner.send_event({"type": "input_audio_buffer.clear", "event_id": "sip-clear"})
+            await owner.send_event({"type": "input_audio_buffer.commit", "event_id": "sip-commit"})
+            with pytest.raises(RuntimeError, match="receive media from their provider"):
+                await owner.send_event({"type": "input_audio_buffer.append", "audio": "AAA="})
         await peer.disconnected.wait()
-        assert [frame["type"] for frame in peer.frames] == ["input_audio_buffer.commit"]
+        assert [frame["type"] for frame in peer.frames] == [
+            "input_audio_buffer.commit",
+            "input_audio_buffer.clear",
+            "input_audio_buffer.commit",
+        ]
+        assert peer.frames[1]["event_id"] == "sip-clear"
+        assert peer.frames[2]["event_id"] == "sip-commit"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "input_audio_buffer.append",
+        "input_audio_buffer.clear",
+        "input_audio_buffer.commit",
+    ],
+)
+async def test_raw_input_adapter_send_rejects_nested_text(realtime_peer, monkeypatch, kind):
+    peer = realtime_peer
+    adapter = adapter_for(peer, True)
+    rejected = asyncio.Event()
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-raw-adapter-reentry",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime", adapter=adapter)) as owner,
+    ):
+        assert adapter is not None and adapter.forward is not None
+        await peer.frame(lambda frame: frame["type"] == "session.update")
+        cursor = len(peer.frames)
+
+        async def send(frame):
+            if json.loads(frame)["type"] == kind:
+                with pytest.raises(RuntimeError, match="adapter callback cannot"):
+                    await owner.send_text("Nested adapter text")
+                rejected.set()
+            await adapter.forward(frame)
+
+        monkeypatch.setattr(adapter, "send_hook", send)
+        event = {"type": kind, "event_id": "raw-adapter-reentry"}
+        if kind == "input_audio_buffer.append":
+            event["audio"] = "AAA="
+        await owner.send_event(event)
+        await rejected.wait()
+        frame = await peer.frame(lambda frame: frame["type"] == kind, after=cursor)
+        assert frame["event_id"] == "raw-adapter-reentry"
+        assert not any(
+            frame["type"] == "conversation.item.create" for frame in peer.frames[cursor:]
+        )

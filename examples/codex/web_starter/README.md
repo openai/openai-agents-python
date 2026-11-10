@@ -152,7 +152,11 @@ To require the real Chromium and pinned-client test, install the browser once, t
 
 ```sh
 npm --prefix examples/codex/web_starter exec -- playwright install chromium
-AGENTS_REQUIRE_WEB_BROWSER=1 python -m pytest -q packages/codex/tests/test_web_starter_browser.py
+OPENAI_AGENTS_BROWSER_TESTS=1 python -m pytest -q packages/codex/tests/test_web_starter_browser.py
 ```
 
-The browser test uses real HTTP and checks Send, approval, typed final rendering, disconnect, reload, download, foreign-user denial and Stop. Without installed optional browser files, this test skips unless `AGENTS_REQUIRE_WEB_BROWSER=1`. Scripted tests check application and SDK behavior. They do not measure live model quality or verify production authentication, hard resource limits, or artifact export from remote executors.
+The browser test uses real HTTP and checks Send, approval, typed final rendering, disconnect, reload, download, foreign-user denial and Stop.
+
+Run it on a host that supports Chromium's normal sandbox. The test skips unless `OPENAI_AGENTS_BROWSER_TESTS=1` or the existing `AGENTS_REQUIRE_WEB_BROWSER=1` flag is set. Once enabled, missing browser files or a failed launch fail the test.
+
+Scripted tests check application and SDK behavior. They do not measure live model quality or verify production authentication, hard resource limits, or artifact export from remote executors.
