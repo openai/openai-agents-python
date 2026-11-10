@@ -132,7 +132,11 @@ class _BlockedMessageStringSubclass(str):
         raise RuntimeError("string-subclass-hook")
 
 
-@pytest.mark.parametrize("value", ["", 123, _BlockedMessageStringSubclass("custom")])
+@pytest.mark.parametrize(
+    "value",
+    ["", 123, _BlockedMessageStringSubclass("custom")],
+    ids=["empty", "integer", "string-subclass"],
+)
 def test_run_config_rejects_invalid_output_guardrail_blocked_message(value: object) -> None:
     with pytest.raises(
         (TypeError, ValueError),

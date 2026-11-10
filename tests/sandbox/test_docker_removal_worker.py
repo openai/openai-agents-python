@@ -35,6 +35,12 @@ worker_code = pytest.importorskip(
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_worker_os(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Worker syscall doubles must not alter pytest's own file-descriptor operations.
+    monkeypatch.setattr(worker_code, "os", SimpleNamespace(**vars(worker_code.os)))
+
+
 @pytest.mark.asyncio
 async def test_removal_preserves_protected_literal_backslash_tree(
     service: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
