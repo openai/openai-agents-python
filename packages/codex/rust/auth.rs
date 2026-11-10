@@ -19,6 +19,7 @@ pub(crate) struct SavedCodexLogin {
     pub codex_home: Option<PathBuf>,
     pub account_id: Option<String>,
     pub expected_binding: Option<String>,
+    pub credential_directory: Option<PathBuf>,
 }
 
 pub(crate) struct CodexAccount {
@@ -26,35 +27,52 @@ pub(crate) struct CodexAccount {
     pub plan_type: String,
     pub binding: String,
     pub auth_file: PathBuf,
-    pub auth_home_alias: Option<PathBuf>,
+    pub credential_directory: Option<PathBuf>,
 }
 
 impl SavedCodexLogin {
     pub fn open(self, config: &Config) -> Result<(Arc<AuthManager>, CodexAccount)> {
-        // Preserve the configured spelling for admission checks before Core resolves it.
-        let declared_home = self.codex_home.clone().or_else(|| {
-            std::env::var("CODEX_HOME")
-                .ok()
-                .filter(|home| !home.is_empty())
-                .map(PathBuf::from)
-        });
         let codex_home = match self.codex_home {
             Some(path) => path,
             None => codex_core::config::find_codex_home()
                 .context("Cannot locate the Codex login directory")?
                 .to_path_buf(),
-        };
-        let declared_home = std::path::absolute(declared_home.as_deref().unwrap_or(&codex_home))
-            .context("Cannot open the Codex login directory")?;
-        let codex_home = codex_home
-            .canonicalize()
-            .context("Cannot open the Codex login directory")?;
-        let auth_home_alias = (declared_home != codex_home).then_some(declared_home);
+        }
+        .canonicalize()
+        .context("Cannot open the Codex login directory")?;
         let auth_file = codex_home.join("auth.json");
-        let manager = AuthManager::shared_saved_chatgpt(codex_home, config.auth_route_config())
-            .map_err(|_| anyhow::anyhow!(
+        let credential_directory = self
+            .credential_directory
+            .map(|directory| {
+                ensure!(
+                    directory.is_absolute(),
+                    "CodexLogin.credential_directory must be an absolute path"
+                );
+                let directory = directory
+                    .canonicalize()
+                    .context("Cannot open the Codex credential directory")?;
+                ensure!(
+                    directory.parent().is_some() && directory.is_dir(),
+                    "CodexLogin.credential_directory must be a directory below the filesystem root"
+                );
+                let target = auth_file
+                    .canonicalize()
+                    .context("Cannot resolve the saved Codex login")?;
+                ensure!(
+                    target == directory.join("auth.json"),
+                    "The saved Codex login must resolve to auth.json in CodexLogin.credential_directory"
+                );
+                Ok(directory)
+            })
+            .transpose()?;
+        // Reload and refresh use the same directory as the executor's deny.
+        let storage_home = credential_directory.clone().unwrap_or(codex_home);
+        let manager = AuthManager::shared_saved_chatgpt(storage_home, config.auth_route_config())
+            .map_err(|_| {
+            anyhow::anyhow!(
                 "No usable saved Codex OAuth login. Sign in with ChatGPT using codex login first."
-            ))?;
+            )
+        })?;
         let auth = manager
             .auth_cached()
             .context("Saved Codex OAuth login is unavailable")?;
@@ -91,7 +109,7 @@ impl SavedCodexLogin {
                 plan_type,
                 binding,
                 auth_file,
-                auth_home_alias,
+                credential_directory,
             },
         ))
     }

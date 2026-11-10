@@ -26,7 +26,8 @@ use codex_exec_server::{
 };
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
-    ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
+    EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
+    WindowsSandboxLevel,
 };
 use codex_protocol::models::{PermissionProfile, PermissionProfileSnapshot};
 use codex_protocol::permissions::{
@@ -66,12 +67,19 @@ pub(crate) struct LocalStorageHome<'a> {
 pub(crate) struct LocalPrivatePaths<'a> {
     pub storage_home: Option<LocalStorageHome<'a>>,
     pub saved_login_file: Option<&'a Path>,
-    pub saved_login_home_alias: Option<&'a Path>,
+    pub credential_directory: Option<&'a Path>,
+}
+
+struct LocalCredentialTargets {
+    saved_login: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    legacy_mcp: Option<PathBuf>,
 }
 
 pub async fn for_unattached_threads(
     config: &Config,
     sdk_local: bool,
+    private_read_deny: Option<AbsolutePathBuf>,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -81,10 +89,11 @@ pub async fn for_unattached_threads(
             Some("no local executor is registered".to_owned()),
         ));
     }
-    let paths = ExecServerRuntimeOptions::from_optional_paths(
+    let mut paths = ExecServerRuntimeOptions::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
+    paths.private_read_deny = private_read_deny;
     let paths = if sdk_local {
         let paths = paths.with_join_unreturned_local_exec_on_interrupt();
         #[cfg(target_os = "macos")]
@@ -116,9 +125,10 @@ pub struct EnvironmentOptions {
     capability_directories: Option<Vec<PathUri>>,
     writable_roots: Option<Vec<PathUri>>,
     #[serde(default)]
-    read_only_roots: Vec<PathUri>,
-    #[serde(default)]
     read_only: bool,
+    #[serde(default)]
+    trusted_workspace_write: bool,
+    temp_dir: Option<PathUri>,
     #[serde(default, deserialize_with = "deserialize_mounts")]
     mounts: Vec<LocalStorageMount>,
     #[serde(default)]
@@ -305,8 +315,8 @@ fn capability_roots(
 pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
     storage_mounts: bool,
-    read_only_roots: Vec<AbsolutePathBuf>,
     read_only: bool,
+    trusted_workspace_write: bool,
 }
 
 impl StrictExecutorWrites {
@@ -325,12 +335,11 @@ impl StrictExecutorWrites {
     }
 
     pub(crate) fn check_local_rollout_path(&self, path: &Path) -> Result<()> {
-        let mut roots = self
+        let roots = self
             .roots
             .values()
             .map(PathUri::to_abs_path)
             .collect::<std::io::Result<Vec<_>>>()?;
-        roots.extend(self.read_only_roots.iter().cloned());
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         let mut files = Vec::new();
         collect_local_rollout_files(path, &roots, &mut files)?;
@@ -344,33 +353,28 @@ impl StrictExecutorWrites {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn check_local_read_file_aliases(
-    readable: &[AbsolutePathBuf],
+#[cfg(target_os = "linux")]
+fn check_storage_mount_file_aliases(
+    mounted: &[AbsolutePathBuf],
     writable: &[AbsolutePathBuf],
-    grant: &str,
 ) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let inspect_error = || {
-        format!(
-            "could not inspect {grant} and writable roots for hard links; required directories must be enumerable"
-        )
-    };
-    let mut directories = readable
+    const INSPECT_ERROR: &str = "could not inspect storage mounts and writable roots for hard links; required directories must be enumerable";
+    let mut directories = mounted
         .iter()
         .map(|path| path.as_path().to_path_buf())
         .collect::<Vec<_>>();
     let mut linked_files = Vec::new();
     while let Some(directory) = directories.pop() {
-        for entry in std::fs::read_dir(directory).with_context(inspect_error)? {
-            let entry = entry.with_context(inspect_error)?;
+        for entry in std::fs::read_dir(directory).context(INSPECT_ERROR)? {
+            let entry = entry.context(INSPECT_ERROR)?;
             // DirEntry::metadata does not follow symlinks.
-            let metadata = entry.metadata().with_context(inspect_error)?;
-            // Read grants must not expose special filesystem nodes.
+            let metadata = entry.metadata().context(INSPECT_ERROR)?;
+            // Special nodes can permit IPC through a read-only bind.
             ensure!(
                 metadata.is_file() || metadata.is_dir() || metadata.is_symlink(),
-                "{grant} must contain only regular files, directories, or symlinks"
+                "storage mounts must contain only regular files, directories, or symlinks"
             );
             if metadata.is_dir() {
                 directories.push(entry.path());
@@ -382,78 +386,85 @@ fn check_local_read_file_aliases(
     if linked_files.is_empty() {
         return Ok(());
     }
-    let writable = LocalWriteRoots::new(writable).with_context(inspect_error)?;
+    let writable = LocalWriteRoots::new(writable).context(INSPECT_ERROR)?;
     ensure!(
         !writable
             .contains_hard_link_to_any(&linked_files)
-            .with_context(inspect_error)?,
-        "{grant} share a hard-linked file with cwd or writable roots"
+            .context(INSPECT_ERROR)?,
+        "storage mounts share a hard-linked file with cwd or writable roots"
     );
     Ok(())
 }
 
 impl EnvironmentOptions {
     /// Check application-owned read grants before providers or helpers start.
-    pub(crate) fn validate_read_grants(
+    pub(crate) fn validate_storage_mounts(
         &self,
         config: &Config,
         private_paths: LocalPrivatePaths<'_>,
-    ) -> Result<Vec<AbsolutePathBuf>> {
-        if self.mounts.is_empty() && self.read_only_roots.is_empty() {
-            return Ok(Vec::new());
+    ) -> Result<()> {
+        if self.mounts.is_empty() {
+            return Ok(());
         }
         ensure!(
-            self.mounts.is_empty() || (self.local && cfg!(target_os = "linux")),
+            self.local && cfg!(target_os = "linux"),
             "storage mounts require a local Linux executor"
-        );
-        ensure!(
-            self.read_only_roots.is_empty() || (self.local && cfg!(target_os = "macos")),
-            "read_only_roots requires a local macOS executor"
         );
         ensure!(
             self.url.is_none() && self.headers.is_empty() && self.connect_timeout.is_none(),
             "a local executor does not accept connection settings"
         );
-        let grant = if self.read_only_roots.is_empty() {
-            "storage mounts"
-        } else {
-            "read_only_roots"
-        };
-        let mut readable = Vec::new();
+        let mut mounted = Vec::new();
         for mount in &self.mounts {
             ensure!(
                 mount.strategy == "local_bind" && mount.read_only,
                 "storage mounts require strategy='local_bind' and read_only=true"
             );
+            let path = &mount.source;
             ensure!(
-                mount.source.as_os_str() == mount.destination.as_os_str(),
+                path.as_os_str() == mount.destination.as_os_str()
+                    && path.is_absolute()
+                    && path.parent().is_some(),
                 "storage mounts require the same canonical absolute source and destination"
             );
-            readable.push(canonical_local_read_root(&mount.source, grant)?);
-        }
-        for root in &self.read_only_roots {
-            readable.push(canonical_local_read_root(
-                root.to_abs_path()?.as_path(),
-                grant,
-            )?);
-        }
-        for (index, root) in readable.iter().enumerate() {
-            let single = std::slice::from_ref(root);
-            let current = LocalWriteRoots::new(single)?;
-            for other in &readable[..index] {
+            let canonical = std::fs::canonicalize(path).map_err(|_| {
+                anyhow::anyhow!("storage mounts require existing directories without symlinks")
+            })?;
+            ensure!(
+                canonical.as_os_str() == path.as_os_str() && canonical.is_dir(),
+                "storage mounts require existing canonical directories without symlinks"
+            );
+            // Canonical text alone misses symlinks whose target is an ancestor.
+            for ancestor in path.ancestors() {
                 ensure!(
-                    !current.contains_entry(other.as_path())?
-                        && !current.has_root_at_or_below(other.as_path())?,
-                    "{grant} must not overlap each other"
+                    !std::fs::symlink_metadata(ancestor)?
+                        .file_type()
+                        .is_symlink(),
+                    "storage mounts do not support symlinks"
+                );
+            }
+            mounted.push(AbsolutePathBuf::from_absolute_path(path)?);
+        }
+        for (index, mount) in mounted.iter().enumerate() {
+            let single = std::slice::from_ref(mount);
+            let grant = LocalWriteRoots::new(single)?;
+            for other in &mounted[..index] {
+                ensure!(
+                    !grant.contains_entry(other.as_path())?
+                        && !grant.has_root_at_or_below(other.as_path())?,
+                    "storage mounts must not overlap each other"
                 );
             }
         }
-        let grants = LocalWriteRoots::new(&readable)?;
-        let overlap = format!("{grant} must not overlap cwd or writable roots");
+        let grants = LocalWriteRoots::new(&mounted)?;
         let mut writable = Vec::new();
         for root in std::iter::once(&self.cwd).chain(self.writable_roots.iter().flatten()) {
             let path = root.to_abs_path()?;
-            let resolved = check_local_write_root_overlap(path.as_path(), &grants, &overlap)?;
+            let resolved = check_local_write_root_overlap(
+                path.as_path(),
+                &grants,
+                "storage mounts must not overlap cwd or writable roots",
+            )?;
             let resolved = AbsolutePathBuf::from_absolute_path(resolved)?;
             if !writable.contains(&resolved) {
                 writable.push(resolved);
@@ -462,28 +473,9 @@ impl EnvironmentOptions {
         // Apply the same alias and hard-link checks to reads: private state may
         // contain credentials even when the caller cannot mutate it.
         check_local_private_write_roots(&grants, config.codex_home.as_path(), private_paths)?;
-        if !self.read_only_roots.is_empty()
-            && let Some(file) = private_paths.saved_login_file
-        {
-            // Refresh publishes beside the resolved file, which may be outside
-            // the login directory when auth.json is a symlink.
-            let overlap =
-                "read_only_roots must stay outside saved Codex login and refresh directories";
-            if let Some(alias) = private_paths.saved_login_home_alias {
-                check_local_write_root_overlap(alias, &grants, overlap)?;
-            }
-            let target = check_local_write_root_overlap(file, &grants, overlap)?;
-            for path in [file, target.as_path()] {
-                let parent = path
-                    .parent()
-                    .context("saved login requires a parent directory")?;
-                check_local_write_root_overlap(parent, &grants, overlap)?;
-            }
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        check_local_read_file_aliases(&readable, &writable, grant)?;
-        readable.sort();
-        Ok(readable)
+        #[cfg(target_os = "linux")]
+        check_storage_mount_file_aliases(&mounted, &writable)?;
+        Ok(())
     }
 
     fn id(&self) -> &'static str {
@@ -511,7 +503,7 @@ impl EnvironmentOptions {
         config: &Config,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<EnvironmentManager> {
-        self.validate_read_grants(config, private_paths)?;
+        self.validate_storage_mounts(config, private_paths)?;
         self.check_config(config)?;
         if self.local {
             ensure!(
@@ -519,7 +511,25 @@ impl EnvironmentOptions {
                 "a local executor does not accept connection settings"
             );
             check_local_helpers(config)?;
-            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ true).await?;
+            let private_read_deny = if cfg!(target_os = "linux") && self.trusted_workspace_write {
+                existing_legacy_mcp_file(private_paths)?
+                    .map(|path| {
+                        path.canonicalize()
+                            .context("could not resolve the legacy MCP credential file")
+                    })
+                    .transpose()?
+                    .filter(|target| {
+                        !private_paths
+                            .credential_directory
+                            .is_some_and(|directory| target.starts_with(directory))
+                    })
+                    .map(AbsolutePathBuf::from_absolute_path)
+                    .transpose()?
+            } else {
+                None
+            };
+            let (manager, _) =
+                for_unattached_threads(config, /*sdk_local*/ true, private_read_deny).await?;
             let environment = manager
                 .try_local_environment()
                 .context("local executor requires the native process helper")?;
@@ -549,7 +559,10 @@ impl EnvironmentOptions {
         // SDK selections may publish a host MCP roster after this manager is built.
         // Reserve its lazy local launcher without selecting a host workspace:
         // for_unattached_threads has no default; selection below remains remote.
-        let (manager, _) = for_unattached_threads(config, /*sdk_local*/ false).await?;
+        let (manager, _) = for_unattached_threads(
+            config, /*sdk_local*/ false, /*private_read_deny*/ None,
+        )
+        .await?;
         if needs_local_mcp {
             ensure!(
                 manager.try_local_environment().is_some(),
@@ -618,6 +631,20 @@ impl EnvironmentOptions {
     }
 
     fn check_config(&self, config: &Config) -> Result<()> {
+        if self.trusted_workspace_write {
+            ensure!(
+                self.local && !self.read_only && self.mounts.is_empty(),
+                "trusted workspace-write requires a writable local executor without storage mounts"
+            );
+            ensure!(
+                cfg!(target_os = "linux"),
+                "trusted workspace-write requires a local Linux executor"
+            );
+        }
+        ensure!(
+            self.temp_dir.is_none() || self.trusted_workspace_write,
+            "temp_dir requires trusted workspace-write"
+        );
         if self.read_only {
             ensure!(
                 self.strict_writes(),
@@ -712,7 +739,7 @@ impl EnvironmentOptions {
         config: &Config,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
-        let readable = self.validate_read_grants(config, private_paths)?;
+        self.validate_storage_mounts(config, private_paths)?;
         if self.strict_writes() {
             let (profile, workspace_root, mut writes) = strict_write_profile(
                 environment,
@@ -723,24 +750,25 @@ impl EnvironmentOptions {
                 config.codex_home.as_path(),
                 private_paths,
                 self.read_only,
+                self.trusted_workspace_write,
             )
             .await?;
             let mut policy = profile.file_system_sandbox_policy();
-            if !self.read_only_roots.is_empty() {
-                check_local_helper_write_roots(environment, &LocalWriteRoots::new(&readable)?)?;
-            }
-            for source in &readable {
+            let mut mount_paths = self
+                .mounts
+                .iter()
+                .map(|mount| &mount.source)
+                .collect::<Vec<_>>();
+            mount_paths.sort();
+            for source in mount_paths {
                 policy.entries.push(FileSystemSandboxEntry::new(
                     FileSystemPath::Path {
-                        path: PathUri::from_host_native_path(source.as_path())?,
+                        path: PathUri::from_host_native_path(source)?,
                     },
                     FileSystemAccessMode::Read,
                 ));
             }
             writes.storage_mounts = !self.mounts.is_empty();
-            if !self.read_only_roots.is_empty() {
-                writes.read_only_roots = readable;
-            }
             Ok((
                 PermissionProfile::from_runtime_permissions(
                     &policy,
@@ -764,7 +792,7 @@ impl EnvironmentOptions {
         manager: &EnvironmentManager,
         private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
-        self.validate_read_grants(config, private_paths)?;
+        self.validate_storage_mounts(config, private_paths)?;
         self.check_config(config)?;
         let environment = manager
             .get_environment(self.id())
@@ -809,7 +837,16 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![workspace_root];
-        let mut shell_environment_policy = if self.local {
+        let mut shell_environment_policy = if self.trusted_workspace_write {
+            ShellEnvironmentPolicy {
+                // This environment also starts the native sandbox launcher.
+                // Keep SDK model authentication in the application process.
+                exclude: ["LD_*", "DYLD_*", "OPENAI_API_KEY", "CODEX_API_KEY"]
+                    .map(EnvironmentVariablePattern::new_case_insensitive)
+                    .to_vec(),
+                ..Default::default()
+            }
+        } else if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
                 r#set: local_shell_env(),
@@ -818,7 +855,22 @@ impl EnvironmentOptions {
         } else {
             permissions.shell_environment_policy.clone()
         };
-        shell_environment_policy.set_sdk_environment_overrides(self.env.clone());
+        let mut overrides = self.env.clone();
+        if self.trusted_workspace_write {
+            // Explicit SDK values bypass inherited-value filtering in Core.
+            overrides.retain(|name, _| {
+                !shell_environment_policy
+                    .exclude
+                    .iter()
+                    .any(|pattern| pattern.matches(name))
+            });
+            if let Some(temp_dir) = &self.temp_dir {
+                let path = temp_dir.to_abs_path()?;
+                let path = path.as_path().to_str().context("temp_dir must be UTF-8")?;
+                overrides.insert("TMPDIR".to_owned(), path.to_owned());
+            }
+        }
+        shell_environment_policy.set_sdk_environment_overrides(overrides);
         let selection = TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
@@ -997,7 +1049,14 @@ async fn strict_write_profile(
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
     read_only: bool,
+    trusted_workspace_write: bool,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
+    ensure!(
+        !trusted_workspace_write
+            || (local
+                && Platform::from_platform_os(info.platform_os.as_deref()) == Platform::Linux),
+        "trusted workspace-write requires a local Linux executor"
+    );
     ensure!(
         matches!(
             Platform::from_platform_os(info.platform_os.as_deref()),
@@ -1010,6 +1069,7 @@ async fn strict_write_profile(
     let mut roots = Vec::with_capacity(additional.len() + 1);
     let mut writes = StrictExecutorWrites {
         read_only,
+        trusted_workspace_write,
         ..Default::default()
     };
     for root in std::iter::once(cwd).chain(additional) {
@@ -1050,7 +1110,50 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        check_local_private_write_roots(&roots, codex_home, private_paths)?;
+        let credential_targets =
+            check_local_private_write_roots(&roots, codex_home, private_paths)?;
+        #[cfg(target_os = "linux")]
+        if trusted_workspace_write && let Some(target) = credential_targets.saved_login {
+            use std::os::unix::fs::MetadataExt;
+
+            let metadata = std::fs::symlink_metadata(&target)
+                .context("could not verify the trusted executor's saved Codex login file")?;
+            ensure!(
+                metadata.is_file() && metadata.nlink() == 1,
+                "trusted local executor requires a saved Codex login file without hard links"
+            );
+            let directory = private_paths.credential_directory.context(
+                "trusted local execution with a saved Codex login on Linux requires \
+                 CodexLogin.credential_directory or strict write policy",
+            )?;
+            if let Some(fallback) = &credential_targets.legacy_mcp {
+                let metadata = fallback
+                    .symlink_metadata()
+                    .context("could not verify the legacy MCP credential file")?;
+                ensure!(
+                    metadata.is_file() && metadata.nlink() == 1,
+                    "trusted local executor requires a legacy MCP credential file without hard links"
+                );
+                ensure!(
+                    fallback.starts_with(directory)
+                        || environment
+                            .local_runtime_paths()
+                            .and_then(|paths| paths.private_read_deny.as_deref())
+                            == Some(fallback.as_path()),
+                    "the legacy MCP credential file changed since executor startup"
+                );
+            }
+            filesystem_policy.entries.push(FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: PathUri::from_host_native_path(directory)?,
+                },
+                FileSystemAccessMode::Deny,
+            ));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = credential_targets.saved_login;
+    }
+    if local && !trusted_workspace_write {
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -1089,38 +1192,15 @@ async fn strict_write_profile(
     Ok((profile, roots[0].clone(), writes))
 }
 
-fn canonical_local_read_root(path: &Path, grant: &str) -> Result<AbsolutePathBuf> {
-    ensure!(
-        path.is_absolute() && path.parent().is_some(),
-        "{grant} require existing absolute directories below the filesystem root"
-    );
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|_| anyhow::anyhow!("{grant} require existing directories without symlinks"))?;
-    ensure!(
-        canonical.as_os_str() == path.as_os_str() && canonical.is_dir(),
-        "{grant} require existing canonical directories without symlinks"
-    );
-    // Canonical text alone misses symlinks whose target is an ancestor.
-    for ancestor in path.ancestors() {
-        ensure!(
-            !std::fs::symlink_metadata(ancestor)?
-                .file_type()
-                .is_symlink(),
-            "{grant} do not support symlinks in grant paths"
-        );
-    }
-    AbsolutePathBuf::from_absolute_path(path).map_err(Into::into)
-}
-
 fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
-) -> Result<()> {
+) -> Result<LocalCredentialTargets> {
     let LocalPrivatePaths {
         storage_home,
         saved_login_file,
-        ..
+        credential_directory,
     } = private_paths;
     let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home
@@ -1131,16 +1211,45 @@ fn check_local_private_write_roots(
         roots,
         "local executor writable roots must stay outside the native SDK runtime home",
     )?;
-    let mut protected_files = Vec::new();
-    if let Some(file) = saved_login_file {
-        let target = check_local_write_root_overlap(
-            file,
+    let saved_login_target = saved_login_file
+        .map(|file| {
+            check_local_write_root_overlap(
+                file,
+                roots,
+                "local executor writable roots must stay outside the saved Codex login",
+            )
+        })
+        .transpose()?;
+    if let Some(directory) = credential_directory {
+        let resolved = check_local_write_root_overlap(
+            directory,
             roots,
-            "local executor writable roots must stay outside the saved Codex login",
+            "local executor writable roots must stay outside the Codex credential directory",
         )?;
-        collect_existing_private_file(target, &mut protected_files)
+        let expected_file = directory.join("auth.json");
+        ensure!(
+            resolved == directory && saved_login_target.as_deref() == Some(expected_file.as_path()),
+            "The saved Codex login moved outside CodexLogin.credential_directory"
+        );
+    }
+    let mut protected_files = Vec::new();
+    if let Some(target) = &saved_login_target {
+        collect_existing_private_file(target.clone(), &mut protected_files)
             .context("could not inspect the saved Codex login file")?;
     }
+    #[cfg(target_os = "linux")]
+    let legacy_mcp = existing_legacy_mcp_file(private_paths)?
+        .map(|fallback| {
+            let target = check_local_write_root_overlap(
+                &fallback,
+                roots,
+                "local executor roots must stay outside the legacy MCP credential file",
+            )?;
+            collect_existing_private_file(target.clone(), &mut protected_files)
+                .context("could not inspect the legacy MCP credential file")?;
+            Ok::<_, anyhow::Error>(target)
+        })
+        .transpose()?;
     if let Some(home) = storage_home.as_deref() {
         protected_files.extend(relocated_database_files(home, roots)?);
         if persistent_rollouts {
@@ -1161,7 +1270,29 @@ fn check_local_private_write_roots(
         )?,
         "local executor writable roots contain a hard link to a private native SDK file"
     );
-    Ok(())
+    Ok(LocalCredentialTargets {
+        saved_login: saved_login_target,
+        #[cfg(target_os = "linux")]
+        legacy_mcp,
+    })
+}
+
+fn existing_legacy_mcp_file(private_paths: LocalPrivatePaths<'_>) -> Result<Option<PathBuf>> {
+    let (Some(auth_file), Some(directory)) = (
+        private_paths.saved_login_file,
+        private_paths.credential_directory,
+    ) else {
+        return Ok(None);
+    };
+    if auth_file.parent() == Some(directory) {
+        return Ok(None);
+    }
+    let path = auth_file.with_file_name(".credentials.json");
+    match path.symlink_metadata() {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("could not inspect the legacy MCP credential file"),
+    }
 }
 
 fn check_local_helper_write_roots(
@@ -1536,10 +1667,6 @@ pub(crate) async fn replace_writable_roots(
         "writable roots cannot change while storage mounts are active"
     );
     ensure!(
-        current.read_only_roots.is_empty(),
-        "writable roots cannot change while read_only_roots are active"
-    );
-    ensure!(
         !current.read_only || writable_roots.is_empty(),
         "read-only execution does not accept writable_roots"
     );
@@ -1564,6 +1691,7 @@ pub(crate) async fn replace_writable_roots(
         config.codex_home.as_path(),
         private_paths,
         current.read_only,
+        current.trusted_workspace_write,
     )
     .await?;
     ensure!(
@@ -1920,7 +2048,7 @@ pub async fn connect_environment(
         let config = state.thread.config().await;
         request
             .environment
-            .validate_read_grants(&config, state.engine.local_private_paths())?;
+            .validate_storage_mounts(&config, state.engine.local_private_paths())?;
         let manager = state.engine.manager.environment_manager();
         let environment = request.environment.register(&manager)?;
         environment
