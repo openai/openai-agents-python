@@ -111,7 +111,9 @@ async def _exercise_borrowed_provider(
                     "status": "incomplete" if outcome == "incomplete" else "completed",
                     "output": output,
                     "usage": {
-                        "input_tokens": 3,
+                        "input_tokens": "synthetic-private-output"
+                        if outcome == "invalid_usage"
+                        else 3,
                         "output_tokens": 2,
                         "total_tokens": 5,
                         "input_tokens_details": {"cached_tokens": 1},
@@ -147,7 +149,13 @@ async def _exercise_borrowed_provider(
                         else "tool_calls",
                     }
                 ],
-                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                "usage": {
+                    "prompt_tokens": "synthetic-private-output"
+                    if outcome == "invalid_usage"
+                    else 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
             }
         )
 
@@ -218,8 +226,11 @@ async def _exercise_borrowed_provider(
                             match="completed response|finish_reason=length",
                         ) as caught:
                             await turn.get_result()
-                        if adapter == "responses":
-                            _assert_responses_frame_released(caught.value)
+                        _assert_adapter_frames_released(caught.value)
+                    elif outcome == "invalid_usage":
+                        with pytest.raises(Exception) as caught:
+                            await turn.get_result()
+                        _assert_adapter_frames_released(caught.value)
                     elif outcome == "refusal":
                         with pytest.raises(NativeError) as caught:
                             await turn.get_result()
@@ -278,7 +289,7 @@ async def test_responses_reasoning_replays_through_native_tool_continuation(monk
     await _exercise_borrowed_provider("responses", "complete", monkeypatch, reasoning=True)
 
 
-def _assert_responses_frame_released(error: BaseException) -> None:
+def _assert_adapter_frames_released(error: BaseException) -> None:
     frames = []
     trace = error.__traceback__
     while trace is not None:
@@ -290,6 +301,23 @@ def _assert_responses_frame_released(error: BaseException) -> None:
     # release the request and provider payloads before exposing their failure.
     payload_names = {
         "request",
+        "messages",
+        "native_tools",
+        "content",
+        "tools",
+        "declaration",
+        "leaves",
+        "tool",
+        "options",
+        "text",
+        "output_format",
+        "reasoning",
+        "choice",
+        "message",
+        "output_content",
+        "text_part",
+        "probabilities",
+        "call",
         "body",
         "response",
         "value",
@@ -324,7 +352,7 @@ async def test_responses_failure_traceback_releases_sdk_payloads(status):
                 {"model": "fixture", "input": "synthetic-private-prompt"}, None, "session", "turn"
             )
         )
-    _assert_responses_frame_released(caught.value)
+    _assert_adapter_frames_released(caught.value)
     assert "synthetic-private" not in str(caught.value)
 
 
@@ -338,7 +366,7 @@ async def test_responses_client_failure_keeps_original_exception():
     with pytest.raises(LookupError) as caught:
         await model.complete(ModelRequest({"model": "fixture", "input": "prompt"}, None, "s", "t"))
     assert caught.value is failure
-    _assert_responses_frame_released(caught.value)
+    _assert_adapter_frames_released(caught.value)
 
 
 async def test_responses_malformed_output_traceback_releases_all_sdk_frames():
@@ -353,4 +381,89 @@ async def test_responses_malformed_output_traceback_releases_all_sdk_frames():
     model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
     with pytest.raises(AttributeError) as caught:
         await model.complete(ModelRequest({"model": "fixture", "input": "prompt"}, None, "s", "t"))
-    _assert_responses_frame_released(caught.value)
+    _assert_adapter_frames_released(caught.value)
+
+
+@pytest.mark.parametrize("adapter", ["responses", "chat", "litellm", "anyllm"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["incomplete", "failed", "malformed_output", "malformed_usage", "client_error", "cancel"],
+)
+async def test_borrowed_adapter_failure_releases_all_sdk_frames(adapter, outcome):
+    failure = asyncio.CancelledError() if outcome == "cancel" else LookupError("client failure")
+
+    async def create(**options):
+        if outcome in ("client_error", "cancel"):
+            raise failure
+        if adapter == "responses":
+            value = {
+                "status": outcome if outcome in ("incomplete", "failed") else "completed",
+                "output": [{"type": "message", "content": []}],
+                "private": "synthetic-private-output",
+            }
+            if outcome == "malformed_output":
+                value["output"][0]["content"] = [None]
+            elif outcome == "malformed_usage":
+                value["usage"] = {"input_tokens_details": "synthetic-private-output"}
+        else:
+            value = {
+                "choices": [
+                    {
+                        "finish_reason": "length"
+                        if outcome == "incomplete"
+                        else "failed"
+                        if outcome == "failed"
+                        else "stop",
+                        "message": {"content": "synthetic-private-output"},
+                    }
+                ],
+            }
+            if outcome == "malformed_output":
+                value["choices"][0]["message"] = None
+            elif outcome == "malformed_usage":
+                value["usage"] = {"prompt_tokens_details": "synthetic-private-output"}
+        return SimpleNamespace(model_dump=lambda: value) if adapter == "litellm" else value
+
+    if adapter == "responses":
+        model = ResponsesModel(SimpleNamespace(responses=SimpleNamespace(create=create)))
+    elif adapter == "chat":
+        model = ChatCompletionsModel(
+            SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        )
+    else:
+        model = {"litellm": LitellmModel, "anyllm": AnyLLMModel}[adapter](
+            SimpleNamespace(acompletion=create)
+        )
+    request = ModelRequest(
+        {
+            "model": "fixture",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "synthetic-private-prompt"}],
+                }
+            ],
+        },
+        None,
+        "session",
+        "turn",
+    )
+    expected = (
+        type(failure)
+        if outcome in ("client_error", "cancel")
+        else ValueError
+        if outcome in ("incomplete", "failed")
+        else AttributeError
+    )
+    with pytest.raises(expected) as caught:
+        await model.complete(request)
+    if outcome in ("client_error", "cancel"):
+        assert caught.value is failure
+    _assert_adapter_frames_released(caught.value)
+    assert "synthetic-private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("adapter", ["responses", "chat", "litellm", "anyllm"])
+async def test_borrowed_adapter_invalid_usage_releases_sdk_frames_natively(adapter, monkeypatch):
+    await _exercise_borrowed_provider(adapter, "invalid_usage", monkeypatch)
