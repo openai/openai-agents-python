@@ -3363,6 +3363,9 @@ class Session(Generic[ContextT, OutputT]):
                     }
                 if model is not None:
                     config["model"] = model
+                if codex_login is not None:
+                    # Apps require an explicit MCP registration with its own credentials.
+                    config["features.apps"] = False
                 _configure_native_agents(
                     runtime,
                     config,
