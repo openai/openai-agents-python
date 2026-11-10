@@ -793,8 +793,40 @@ class GitRepo(BaseEntry):
 
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
+            # Keep the verified physical source as the copy process's working
+            # directory, so cp does not resolve the selected pathname again.
             copy = await session.exec(
-                "cp", "-R", "--", f"{git_src_root}/.", f"{sandbox_path_str(dest)}/", shell=False
+                "sh",
+                "-c",
+                """set -eu
+CDPATH=
+cd -P .
+destination=$3
+case "$destination" in
+    /*) ;;
+    *) destination="$PWD/$destination" ;;
+esac
+cd -P /tmp
+tmp_root=$PWD
+cd -P "$1"
+repo_root=$PWD
+[ "$repo_root" = "$tmp_root/${1##*/}" ] || {
+    echo 'Git checkout is outside its temporary directory' >&2
+    exit 1
+}
+cd -P "./$2"
+source_root=$PWD
+case "$source_root" in
+    "$repo_root"|"$repo_root"/*) ;;
+    *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
+esac
+exec cp -R -- . "$destination/"
+""",
+                "sandbox-git-copy",
+                tmp_dir,
+                git_subpath.as_posix() if git_subpath is not None else ".",
+                sandbox_path_str(dest),
+                shell=False,
             )
             if not copy.ok():
                 raise GitCopyError(
