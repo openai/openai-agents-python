@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from errno import ELOOP
@@ -368,6 +369,83 @@ async def test_discover_agents_md_uses_native_sources_and_current_opening(
     assert "previously provided AGENTS.md instructions no longer apply" in json.dumps(
         restored_request["input"]
     )
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("git_marker", ["directory", "worktree"])
+async def test_local_discovery_uses_nearest_git_root_from_nested_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_marker: str
+) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], check=True, timeout=10)
+
+    outer = tmp_path / "outer"
+    project = outer / "project"
+    git("init", "--quiet", str(outer))
+    if git_marker == "worktree":
+        git(
+            "-C",
+            str(outer),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "initial",
+        )
+        git("-C", str(outer), "worktree", "add", "--quiet", "--detach", str(project))
+    else:
+        git("init", "--quiet", str(project))
+
+    cwd = project / "component"
+    cwd.mkdir()
+    outer_text = "Outer repository fixture instructions."
+    (outer / "AGENTS.md").write_text(outer_text, encoding="utf-8")
+    sources = [
+        (project / "AGENTS.md", b"Nearest repository fixture instructions.\n"),
+        (cwd / "AGENTS.md", b"Nested component fixture instructions.\n"),
+    ]
+    for path, content in sources:
+        path.write_bytes(content)
+
+    async with timeout(30), peer() as model:
+        agent = Agent(instructions="Application instructions.", provider=model.provider())
+        async with agent.session(
+            environment=Environment.local(cwd=cwd, writable_roots=[outer]),
+            discover_agents_md=True,
+        ) as session:
+            model.replies.append(message("done"))
+            assert (await (await session.submit("Discover")).get_result()).final_output == "done"
+            [receipt] = [turn["receipt"] async for turn in session.turns()]
+
+    assert receipt["instruction_files"] == [
+        {
+            "path": str(path),
+            "source": "native_project",
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        for path, content in sources
+    ]
+    [request] = model.requests
+    user_text = "\n".join(
+        part["text"]
+        for item in request["input"]
+        if item.get("role") == "user"
+        for part in item.get("content", [])
+        if part.get("type") == "input_text"
+    )
+    root_text, nested_text = (content.decode().strip() for _, content in sources)
+    assert user_text.index(root_text) < user_text.index(nested_text)
+    assert outer_text not in user_text
 
 
 @pytest.mark.parametrize("restore_source", ["different-file", "inline", "legacy-inline"])
