@@ -12,7 +12,7 @@ import os as os
 import re as re
 from collections.abc import (
     AsyncIterator as AsyncIterator,
-    Awaitable,
+    Awaitable as Awaitable,
     Callable as _Callable,
     Mapping as Mapping,
     Sequence as Sequence,

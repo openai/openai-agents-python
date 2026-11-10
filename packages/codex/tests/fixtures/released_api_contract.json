@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "fad1a92f0c234b97a6e58c359f18bc997215ac9a",
+  "baseline_commit": "b7db03a23c898f5a35666f81244966eabea7380c",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -39,7 +39,7 @@
           "TypedAgentT": "TypedAgentT"
         },
         "imports": [
-          "from collections.abc import AsyncIterator as AsyncIterator, Awaitable, Callable as _Callable, Mapping as Mapping, Sequence as Sequence",
+          "from collections.abc import AsyncIterator as AsyncIterator, Awaitable as Awaitable, Callable as _Callable, Mapping as Mapping, Sequence as Sequence",
           "from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager, asynccontextmanager as asynccontextmanager",
           "from dataclasses import dataclass as dataclass, field as field",
           "from pathlib import Path as Path",

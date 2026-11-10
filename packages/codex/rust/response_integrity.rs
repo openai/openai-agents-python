@@ -167,6 +167,7 @@ fn starts_tool_call(event: &ResponseEvent) -> bool {
     matches!(
         item,
         ResponseItem::FunctionCall { .. }
+            | ResponseItem::LocalShellCall { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::ComputerCall { .. }
     ) || matches!(
@@ -301,6 +302,135 @@ impl Stream for Generation {
             }
         }
         next
+    }
+}
+
+#[cfg(test)]
+mod registered_plan_tests {
+    use super::*;
+    use codex_protocol::models::{LocalShellAction, LocalShellExecAction, LocalShellStatus};
+    use codex_protocol::protocol::{ResponseIncompleteReason, ResponseObservation};
+    use futures_util::{pin_mut, poll};
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn shell_and_function_items_wait_for_registered_plan_completion() {
+        let local_shell = ResponseItem::LocalShellCall {
+            id: None,
+            call_id: Some("synthetic-shell".into()),
+            status: LocalShellStatus::Completed,
+            action: LocalShellAction::Exec(LocalShellExecAction {
+                command: Vec::new(),
+                timeout_ms: None,
+                working_directory: None,
+                env: None,
+                user: None,
+            }),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let exec_command = ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".into(),
+            namespace: None,
+            arguments: "{}".into(),
+            encrypted_function_args: None,
+            call_id: "synthetic-function".into(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        for (item, registered_plan, completed) in [
+            (&local_shell, true, true),
+            (&local_shell, true, false),
+            (&local_shell, false, false),
+            (&exec_command, true, true),
+            (&exec_command, true, false),
+            (&exec_command, false, false),
+        ] {
+            let observation = ResponseEvent::ResponseObserved(ResponseObservation {
+                response_id: Some("synthetic-response".into()),
+                upstream_request_id: None,
+                status: if completed {
+                    ResponseObservationStatus::Completed
+                } else {
+                    ResponseObservationStatus::Incomplete
+                },
+                incomplete_reason: (!completed).then_some(ResponseIncompleteReason::Interrupted),
+                usage: None,
+            });
+            let terminal = ResponseEvent::Completed {
+                response_id: "synthetic-response".into(),
+                token_usage: None,
+                usage_metadata: None,
+                end_turn: Some(false),
+            };
+            let (release_terminal, wait_for_terminal) = oneshot::channel();
+            let source = stream::iter([
+                Ok(ResponseEvent::OutputItemAdded(item.clone())),
+                Ok(ResponseEvent::OutputItemDone(item.clone())),
+            ])
+            .chain(
+                stream::once(async move {
+                    wait_for_terminal.await.unwrap();
+                    stream::iter([Ok(observation), Ok(terminal)])
+                })
+                .flatten(),
+            );
+            let interceptor = Box::new(Interceptor {
+                thread: "synthetic-thread".into(),
+                admission: None,
+                registered_plan,
+            });
+            let mut delivered = Vec::new();
+            let mut output = interceptor
+                .intercept_with_tool_admission(Box::pin(source), None)
+                .inspect(|event| {
+                    if let Ok(ResponseEvent::OutputItemDone(item)) = event {
+                        delivered.push(item.clone());
+                    }
+                });
+            let first = {
+                let next = output.next();
+                pin_mut!(next);
+                let before_terminal = poll!(next.as_mut());
+                assert_eq!(before_terminal.is_pending(), registered_plan);
+                release_terminal.send(()).unwrap();
+                match before_terminal {
+                    Poll::Ready(event) => event,
+                    Poll::Pending => next.await,
+                }
+            };
+
+            if registered_plan && !completed {
+                assert!(matches!(
+                    first,
+                    Some(Ok(ResponseEvent::ResponseObserved(_)))
+                ));
+                assert!(matches!(
+                    output.next().await,
+                    Some(Err(ModelResponseError::Stream(_)))
+                ));
+            } else {
+                assert!(matches!(first, Some(Ok(ResponseEvent::OutputItemAdded(_)))));
+                assert!(matches!(
+                    output.next().await,
+                    Some(Ok(ResponseEvent::OutputItemDone(_)))
+                ));
+                assert!(matches!(
+                    output.next().await,
+                    Some(Ok(ResponseEvent::ResponseObserved(_)))
+                ));
+                assert!(matches!(
+                    output.next().await,
+                    Some(Ok(ResponseEvent::Completed { .. }))
+                ));
+            }
+            assert!(output.next().await.is_none());
+            drop(output);
+            if registered_plan && !completed {
+                assert!(delivered.is_empty());
+            } else {
+                assert_eq!(delivered, [item.clone()]);
+            }
+        }
     }
 }
 

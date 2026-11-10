@@ -8,8 +8,10 @@ import importlib
 import json
 import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 from aiohttp import web
@@ -118,6 +120,10 @@ def plan_endpoint(responses, monkeypatch):
 def test_public_auth_and_conflicting_provider_options():
     assert SignInWithChatGPT is AgentSignInWithChatGPT
     assert SignInWithChatGPTCredentials is AgentSignInWithChatGPTCredentials
+    assert (
+        get_type_hints(SignInWithChatGPT)["get_credentials"]
+        == Callable[[], Awaitable[SignInWithChatGPTCredentials | None]]
+    )
     auth = plan_agent(access_token()).provider.auth
     for options in (
         {"api_key": "synthetic-key"},
