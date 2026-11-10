@@ -601,6 +601,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
                 current_manifest,
                 provider_backend_id=session.state.type,
             )
+            current_manifest._validate_git_repo_hosts()
             running = await session.running()
             await session._validate_manifest_application(
                 manifest=current_manifest,
@@ -616,6 +617,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             processed_manifest,
             provider_backend_id=session.state.type,
         )
+        processed_manifest._validate_git_repo_hosts()
         running = await session.running()
         await session._validate_manifest_application(
             manifest=processed_manifest,
