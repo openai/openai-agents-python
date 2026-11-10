@@ -475,7 +475,11 @@
     {
       "path": "sdk-linux-private-credential-file-mask.patch",
       "sha256": "280414d1ef9f7fea874d460629f4ca24732d4f3b09daf47488947cc24c9e7a3e"
+    },
+    {
+      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     }
   ],
-  "result_tree": "04772d64155d93d020a1634bc4ad207a4a5e2a23"
+  "result_tree": "f7b6193a18b3a5189038246b91f3e756833c9f60"
 }
