@@ -828,7 +828,7 @@ index d8941ea55b1e89a7ca6fd350ed3dc282b868282a..298f20f0188d91375ee2c5dd21afcfac
          let item = self
              .items
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
-index 9590e663d66e51fee5cd93d36faaefe03625e80a..4dd06b62a5e3acbc718b6d6e2da6c91c030fe4a9 100644
+index 9590e663d66e51fee5cd93d36faaefe03625e80a..039409df01ce0c49141cf208b322221744c58f66 100644
 --- a/codex-rs/core/src/realtime_conversation/provider_history.rs
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
 @@ -3,8 +3,8 @@
@@ -1250,7 +1250,7 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..4dd06b62a5e3acbc718b6d6e2da6c91c
      }
      fn creation_item(item: &Value) -> CodexResult<Value> {
          let mut remaining = MAX_IMAGE_DECODE_BYTES;
-@@ -1186,6 +1393,160 @@ mod tests {
+@@ -1186,6 +1393,169 @@ mod tests {
      fn message(id: &str, text: &str) -> Value {
          json!({"id":id,"type":"message","role":"user","content":[{"type":"input_text","text":text}]})
      }
@@ -1332,10 +1332,19 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..4dd06b62a5e3acbc718b6d6e2da6c91c
 +        let error = "failed to flush deletion audit";
 +        sdk.fail_provider_item_deletion("hidden", error.into());
 +
-+        assert!(matches!(receipt.try_recv(),
-+            Ok(Err(CodexErr::InvalidRequest(message))) if message == error));
-+        assert!(matches!(internal_receipt.try_recv(),
-+            Ok(Err(CodexErr::InvalidRequest(message))) if message == error));
++        let expected = CodexErr::InvalidRequest(error.into()).to_string();
++        assert_eq!(
++            receipt.try_recv().unwrap().unwrap_err().to_string(),
++            expected
++        );
++        assert_eq!(
++            internal_receipt
++                .try_recv()
++                .unwrap()
++                .unwrap_err()
++                .to_string(),
++            expected
++        );
 +        assert!(sdk.history.lock().unwrap().deadline().is_none());
 +        assert!(sdk.item_deletion.lock().unwrap().deadline().is_none());
 +    }
@@ -1411,7 +1420,7 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..4dd06b62a5e3acbc718b6d6e2da6c91c
      fn replay_pair(id: &str) -> (Value, Value) {
          let call_id = format!("call-{id}");
          (
-@@ -1770,6 +2131,107 @@ mod tests {
+@@ -1770,6 +2140,107 @@ mod tests {
          assert!(!state.busy());
      }
  
