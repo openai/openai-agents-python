@@ -851,3 +851,41 @@ async def test_approval_preserves_rich_callback_result(responses, automatic):
         assert (await turn.get_result()).final_output == "done"
         assert effects == ["effect"]
         assert "validated result" in json.dumps(responses.requests[1])
+
+
+async def test_computer_history_cannot_be_restored_as_managed_function_approval(responses):
+    from agents import SessionState
+
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def risky() -> str:
+        effects.append("function effect")
+        return "done"
+
+    responses.respond(function_call("risky", {}, "family-boundary"))
+    agent = Agent(instructions="Use risky.", tools=[risky], provider=provider(responses))
+    async with agent.session() as source:
+        await source.submit("begin")
+        await next_request(source.interactions(), risky)
+        saved = await source.suspend()
+    raw = json.loads(saved.to_json())
+    original = next(
+        item
+        for item in raw["history"]
+        if item["type"] == "response_item" and item["payload"].get("call_id") == "family-boundary"
+    )
+    original["payload"] = {
+        "type": "computer_call",
+        "call_id": "family-boundary",
+        "actions": [{"type": "wait"}],
+        "pending_safety_checks": [],
+    }
+    forged = SessionState.from_json(json.dumps(raw))
+    with pytest.raises(
+        (RuntimeError, ValueError), match="Manual continuation contains nonportable native work"
+    ):
+        async with agent.session(state=forged):
+            pytest.fail("Computer history cannot grant a managed function callback")
+    assert effects == []
+    assert len(responses.requests) == 1

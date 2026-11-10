@@ -124,7 +124,7 @@ async def test_atomic_canonical_history_replacement_and_restore(responses):
     assert "imported result" in request and "call-history" in request
 
 
-@pytest.mark.parametrize("family", ["function", "custom", "search"])
+@pytest.mark.parametrize("family", ["function", "custom", "search", "computer"])
 async def test_history_transactions_reject_split_or_unpaired_client_tools(responses, family):
     responses.respond(assistant_output("pairs preserved"))
     call = {"id": "call-item", "call_id": "history-pair"}
@@ -135,6 +135,13 @@ async def test_history_transactions_reject_split_or_unpaired_client_tools(respon
     elif family == "custom":
         call.update(type="custom_tool_call", name="lookup", input="raw input")
         output.update(type="custom_tool_call_output", output="retained result")
+    elif family == "computer":
+        call.update(type="computer_call", actions=[{"type": "wait"}], pending_safety_checks=[])
+        output.update(
+            type="computer_call_output",
+            output={"type": "computer_screenshot", "image_url": "data:image/png;base64,AA=="},
+            acknowledged_safety_checks=[],
+        )
     else:
         call.update(type="tool_search_call", execution="client", arguments={})
         output.update(type="tool_search_output", execution="client", status="completed", tools=[])
