@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "285533389a28a8df09018411adebc9c2a127f39f",
+  "baseline_commit": "1771f621ab4ffee2686b3704b586250149096c08",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2317,7 +2317,7 @@
           "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
           "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
           "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem | FileSearchCallItem | CodeInterpreterCallItem | ImageGenerationCallItem)",
-          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile]",
+          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage | InputFile | _InputAudio]",
           "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | UserMessageItem)"
         ],
         "exports": {},
@@ -2325,10 +2325,12 @@
           "from collections.abc import Sequence",
           "from typing import Literal as Literal",
           "from typing_extensions import NotRequired as NotRequired, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
-          "from .config import JsonValue as JsonValue"
+          "from .config import JsonValue as JsonValue",
+          "from .input import InputAudio as _InputAudio"
         ],
         "references": {
-          "JsonValue": "agents.config.JsonValue"
+          "JsonValue": "agents.config.JsonValue",
+          "_InputAudio": "agents.input.InputAudio"
         }
       },
       "agents._function_tools": {

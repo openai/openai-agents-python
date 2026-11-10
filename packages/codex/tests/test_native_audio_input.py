@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import pytest
+
 from agents import Agent, ModelRequest, ModelResponse, NativeProvider, ToolRef, function_tool
 from agents.input import InputAudio, InputText, UserMessage
 from tests._asyncio import timeout
@@ -221,3 +223,136 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
             {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
         ]
         assert "input_modalities" not in body
+
+
+@pytest.mark.parametrize("audio_only", [True, False])
+async def test_public_audio_history_and_restore(audio_only: bool) -> None:
+    content: list[InputText | InputAudio] = [
+        {"type": "input_audio", "audio_url": "opaque:audio-source"}
+    ]
+    if not audio_only:
+        content = [
+            {"type": "input_text", "text": "before"},
+            *content,
+            {"type": "input_text", "text": "after"},
+        ]
+    message: UserMessage = {"role": "user", "content": content}
+    seen: list[dict[str, Any]] = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            seen.append(request.body)
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ]
+            )
+
+    async with NativeProvider(
+        base_url="https://example.invalid/v1", model_backend=Model()
+    ) as provider:
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"input_modalities": ["text", "audio"]},
+        )
+        async with agent.session() as session:
+            await (await session.submit(message)).get_result()
+            items = [item async for item in session.items()]
+            original = next(
+                item for item in items if item["type"] == "message" and item.get("role") == "user"
+            )
+            assert original["content"] == content
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            items = [item async for item in restored.items()]
+            original = next(
+                item for item in items if item["type"] == "message" and item.get("role") == "user"
+            )
+            assert original["content"] == content
+
+
+@pytest.mark.parametrize("audio_only", [True, False])
+async def test_initial_audio_sources_order_and_restore(audio_only: bool) -> None:
+    content: list[InputText | InputAudio] = [
+        {"type": "input_audio", "audio_url": "opaque:audio-source"}
+    ]
+    if not audio_only:
+        content = [
+            {"type": "input_text", "text": "before"},
+            *content,
+            {"type": "input_text", "text": "after"},
+        ]
+    message: UserMessage = {"role": "user", "content": content}
+    seen: list[dict[str, Any]] = []
+
+    class Model:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            seen.append(request.body)
+            return ModelResponse(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ]
+            )
+
+    async with NativeProvider(
+        base_url="https://example.invalid/v1", model_backend=Model()
+    ) as provider:
+        agent = Agent(
+            instructions="Answer.",
+            provider=provider,
+            model_settings={"input_modalities": ["text", "audio"]},
+        )
+        async with agent.session(initial_messages=[message]) as session:
+            snapshot = await session.model_context()
+            original = next(
+                item
+                for item in snapshot.items
+                if item["type"] == "message" and item.get("role") == "user"
+            )
+            assert original["content"] == content
+            assert seen == []
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            await (await restored.submit("continue")).get_result()
+            original = next(item for item in seen[0]["input"] if item.get("role") == "user")
+            assert original["content"] == content
+
+
+async def test_malformed_seeded_audio_rejects_before_model_effects() -> None:
+    for part in [
+        {"type": "input_audio"},
+        {"type": "input_audio", "audio_url": ""},
+        {"type": "input_audio", "audio_url": None},
+        {"type": "input_audio", "audio_url": 42},
+        {"type": "input_audio", "audio_url": "source", "file_id": "other"},
+    ]:
+        calls = 0
+
+        class Model:
+            def complete(self, request: ModelRequest) -> ModelResponse:
+                nonlocal calls
+                calls += 1
+                raise AssertionError("unexpected model effect")
+
+        async with NativeProvider(
+            base_url="https://example.invalid/v1", model_backend=Model()
+        ) as provider:
+            agent = Agent(
+                instructions="Answer.",
+                provider=provider,
+                model_settings={"input_modalities": ["text", "audio"]},
+            )
+            message: Any = {"role": "user", "content": [part]}
+            with pytest.raises((TypeError, ValueError)):
+                async with agent.session(initial_messages=[message]):
+                    raise AssertionError("unexpected admitted seed")
+            assert calls == 0
