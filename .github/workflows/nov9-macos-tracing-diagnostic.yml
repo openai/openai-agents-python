@@ -57,23 +57,62 @@ jobs:
           stage="$RUNNER_TEMP/nov9-macos-tracing"
           cat > "$stage/macos-tracing.patch" <<'FROZEN_PATCH'
           diff --git a/packages/codex/tests/test_native_trace_exporter.py b/packages/codex/tests/test_native_trace_exporter.py
-          index 1f2ef983a803bdbc6fc53b7ae4ff7280d131e630..e7178632ba819b502cce8aa05d619f4016418b88 100644
+          index 1f2ef983a803bdbc6fc53b7ae4ff7280d131e630..57fa828f3bc55764c32c5361e40db5915786b47b 100644
           --- a/packages/codex/tests/test_native_trace_exporter.py
           +++ b/packages/codex/tests/test_native_trace_exporter.py
-          @@ -267,6 +267,12 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
-                       await writer.wait_closed()
+          @@ -10,6 +10,7 @@ import sys
+           from collections.abc import Iterator
+           from contextlib import contextmanager
+           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          +from socketserver import TCPServer
+           from threading import Thread
+           from typing import Any
+           
+          @@ -26,6 +27,11 @@ def collector(
+               received = []
+               replies = list(statuses or [])
+           
+          +    class LoopbackHTTPServer(ThreadingHTTPServer):
+          +        def server_bind(self):
+          +            TCPServer.server_bind(self)
+          +            self.server_name, self.server_port = self.server_address
+          +
+               class Handler(BaseHTTPRequestHandler):
+                   def log_message(self, format, *args):
+                       pass
+          @@ -45,7 +51,7 @@ def collector(
+                       self.send_header("Content-Length", "0")
+                       self.end_headers()
+           
+          -    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+          +    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
+               worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+               worker.start()
+               try:
+          @@ -264,9 +270,21 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
+                           eof.cancel()
+                           await asyncio.gather(eof, return_exceptions=True)
+                       writer.close()
+          -            await writer.wait_closed()
+          +            try:
+          +                await writer.wait_closed()
+          +            except ConnectionResetError:
+          +                if not peer_closed.is_set():
+          +                    raise
                        handler_done.set()
            
           +    if not cancelled:
           +        with collector() as (warmup_endpoint, requests):
-          +            warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=warmup_endpoint)
+          +            warmup = telemetry.OpenAITraceExporter(
+          +                api_key="synthetic-key", endpoint=warmup_endpoint
+          +            )
           +            await warmup.on_trace_event(completed_event())
           +            assert len(requests) == 1
           +
                server = await asyncio.start_server(trickle, "127.0.0.1", 0)
                endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
                secret = "synthetic-private-timeout-key"
-          @@ -330,7 +336,7 @@ async def native_deadline_case():
+          @@ -330,7 +348,7 @@ async def native_deadline_case():
                        )
                        requests.append(json.loads(await reader.readexactly(length)))
                        writer.write(b"HTTP/1.1 200 OK\r\n")
@@ -82,7 +121,7 @@ jobs:
                            eof = asyncio.create_task(reader.read())
                            for _ in range(30):
                                done, _ = await asyncio.wait((eof,), timeout=0.02)
-          @@ -353,6 +359,10 @@ async def native_deadline_case():
+          @@ -353,6 +371,10 @@ async def native_deadline_case():
                server = await asyncio.start_server(receive, "127.0.0.1", 0)
                endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
                try:
@@ -93,38 +132,10 @@ jobs:
                    exporter = telemetry.OpenAITraceExporter(
                        api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
                    )
-          diff --git a/packages/codex/tests/test_tracing_native_loss.py b/packages/codex/tests/test_tracing_native_loss.py
-          index bee4641a2507bf426d75988cd9312af17ab75d3c..fe576e4077e0bc6b9ba3657bf010cdd78fd69d4a 100644
-          --- a/packages/codex/tests/test_tracing_native_loss.py
-          +++ b/packages/codex/tests/test_tracing_native_loss.py
-          @@ -173,7 +173,8 @@ def test_native_loss_recovers_after_record_or_byte_bound(long_names):
-                   env=os.environ.copy(),
-                   capture_output=True,
-                   text=True,
-          -        timeout=30,
-          +        # Cover subprocess startup and multiple bounded lifecycle phases.
-          +        timeout=60,
-               )
-               assert result.returncode == 0, result.stdout + result.stderr
-               assert "PASS native loss recovery" in result.stdout
-          diff --git a/packages/codex/tests/test_tracing_review_regressions.py b/packages/codex/tests/test_tracing_review_regressions.py
-          index cf1e81fdd0620ec917894f36d3feba3fe88e1d8d..ebe4b7acb83fb835a51179c998ca6ffe2aa08c22 100644
-          --- a/packages/codex/tests/test_tracing_review_regressions.py
-          +++ b/packages/codex/tests/test_tracing_review_regressions.py
-          @@ -151,7 +151,8 @@ def test_native_active_root_survives_completed_trace_churn():
-                   env=os.environ.copy(),
-                   text=True,
-                   capture_output=True,
-          -        timeout=30,
-          +        # Cover subprocess startup and multiple bounded lifecycle phases.
-          +        timeout=60,
-               )
-               assert result.returncode == 0, result.stdout + result.stderr
-               assert "PASS native active-root churn" in result.stdout
           FROZEN_PATCH
           cat > "$stage/trace-watchdog-probe.py" <<'FROZEN_PROBE'
-          """Run one unchanged synthetic native tracing case with installed-wheel diagnostics."""
-
+          """Measure real stdlib binding/name lookup and unchanged native tracing cases."""
+          
           import argparse
           import faulthandler
           import hashlib
@@ -134,14 +145,14 @@ jobs:
           import sys
           import time
           from pathlib import Path
-
+          
           START = time.monotonic()
           EXPECTED_NATIVE = {
               "Darwin": "f77e45e5770955cb4b59faaff1fb73c4b6ab4e2325af2a068b9e1f7898ac55ec",
               "Linux": "5aae9ffff9f5d3144ad0a1dd976990331841d728f7d75ac40b7da66e1384e710",
           }
-
-
+          
+          
           def mark(phase, **details):
               print(
                   json.dumps(
@@ -150,8 +161,8 @@ jobs:
                   ),
                   flush=True,
               )
-
-
+          
+          
           def child(args):
               faulthandler.enable(all_threads=True)
               faulthandler.dump_traceback_later(30, repeat=False)
@@ -166,12 +177,51 @@ jobs:
               import asyncio
               import functools
               import runpy
-
+              import socket
+              import socketserver
+          
+              # Preserve call arguments, return values, exceptions, and synchronous execution.
+              # No hostname, address, payload, header, or credential enters these records.
+              measurements = {}
+          
+              def measure_sync(owner, name, label):
+                  original = getattr(owner, name)
+                  stats = measurements[label] = {
+                      "calls": 0, "successes": 0, "errors": 0,
+                      "duration_s": 0.0, "max_duration_s": 0.0,
+                  }
+          
+                  @functools.wraps(original)
+                  def timed(*positional, **keywords):
+                      stats["calls"] += 1
+                      call = stats["calls"]
+                      started = time.monotonic()
+                      mark(label + "_start", call=call)
+                      try:
+                          result = original(*positional, **keywords)
+                      except BaseException as error:
+                          stats["errors"] += 1
+                          mark(label + "_error", call=call, error_type=type(error).__name__)
+                          raise
+                      else:
+                          stats["successes"] += 1
+                          return result
+                      finally:
+                          elapsed = time.monotonic() - started
+                          stats["duration_s"] += elapsed
+                          stats["max_duration_s"] = max(stats["max_duration_s"], elapsed)
+                          mark(label + "_complete", call=call, duration_s=round(elapsed, 6))
+          
+                  setattr(owner, name, timed)
+          
+              measure_sync(socket, "getfqdn", "socket_getfqdn")
+              measure_sync(socketserver.TCPServer, "server_bind", "tcpserver_server_bind")
+          
               import _agents_codex
               import agents
               import agents._native
               from agents import telemetry
-
+          
               modules = (agents, agents._native, _agents_codex, telemetry)
               locations = {module.__name__: str(Path(module.__file__).resolve()) for module in modules}
               prefix = Path(sys.prefix).resolve()
@@ -185,12 +235,42 @@ jobs:
               if platform.system() == "Darwin":
                   assert platform.machine() == "arm64", platform.machine()
                   assert sys.version_info[:3] == (3, 14, 10), sys.version
-              mark("product_verified", native_sha256=digest)
-
+              mark("product_verified", native_sha256=digest,
+                   base_probe_sha256="fd3791498638774ab344a887cf2235f9afbaa5b249edef64849412259dd207f0")
+          
+              # Measure the installed exporter's real delivery operation, including retries.
+              # These aggregate outcomes do not inspect its arguments or response contents.
+              original_send = telemetry.OpenAITraceExporter._send
+              send_stats = measurements["exporter_send"] = {
+                  "calls": 0, "successes": 0, "errors": 0,
+                  "duration_s": 0.0, "max_duration_s": 0.0,
+              }
+          
+              @functools.wraps(original_send)
+              async def timed_send(*positional, **keywords):
+                  send_stats["calls"] += 1
+                  started = time.monotonic()
+                  try:
+                      result = await original_send(*positional, **keywords)
+                  except BaseException:
+                      send_stats["errors"] += 1
+                      raise
+                  else:
+                      send_stats["successes"] += 1
+                      return result
+                  finally:
+                      elapsed = time.monotonic() - started
+                      send_stats["duration_s"] += elapsed
+                      send_stats["max_duration_s"] = max(send_stats["max_duration_s"], elapsed)
+          
+              telemetry.OpenAITraceExporter._send = timed_send
+          
               # This path supplies only the existing tests package, never the SDK runtime.
               sys.path.insert(0, str(args.source / "packages" / "codex"))
               filename = (
-                  "test_tracing_review_regressions.py"
+                  "test_native_trace_exporter.py"
+                  if args.case in ("native_case", "native_batch_case")
+                  else "test_tracing_review_regressions.py"
                   if args.case == "churn"
                   else "test_tracing_native_loss.py"
               )
@@ -202,11 +282,26 @@ jobs:
               )
               fixture = runpy.run_path(str(fixture_path))
               mark("fixture_import_complete")
-
+          
+              # Keep stdout machine-readable without emitting even synthetic trace content.
+              # Only these case functions' progress prints are suppressed; assertions remain.
+              fixture_print_calls = 0
+          
+              def fixture_print(*positional, **keywords):
+                  nonlocal fixture_print_calls
+                  fixture_print_calls += 1
+                  mark("fixture_print", call=fixture_print_calls)
+          
+              function_name = (
+                  args.case if args.case in ("native_case", "native_batch_case")
+                  else "native_churn" if args.case == "churn" else "native_loss_case"
+              )
+              fixture[function_name].__globals__["print"] = fixture_print
+          
               def instrument(name):
                   original = getattr(telemetry, name)
                   calls = 0
-
+          
                   @functools.wraps(original)
                   async def timed(*positional, **keywords):
                       nonlocal calls
@@ -227,7 +322,7 @@ jobs:
                           raise
                       fields = {
                           key: getattr(result, key)
-                          for key in ("status", "dropped_records", "failed_deliveries")
+                          for key in ("status", "dropped_records", "failed_deliveries", "barrier")
                           if hasattr(result, key)
                       }
                       mark(
@@ -237,24 +332,37 @@ jobs:
                           **fields,
                       )
                       return result
-
+          
                   setattr(telemetry, name, timed)
-
+          
               for name in ("configure", "force_flush", "shutdown"):
                   instrument(name)
               mark("fixture_start", case=args.case)
-              if args.case == "churn":
-                  asyncio.run(fixture["native_churn"]())
-              else:
-                  asyncio.run(fixture["native_loss_case"](args.case == "byte"))
-              mark("fixture_complete", case=args.case)
-              faulthandler.cancel_dump_traceback_later()
-
-
+              try:
+                  if args.case in ("native_case", "native_batch_case"):
+                      asyncio.run(fixture[args.case]())
+                  elif args.case == "churn":
+                      asyncio.run(fixture["native_churn"]())
+                  elif args.case == "retained":
+                      asyncio.run(fixture["native_loss_case"](
+                          False, forwarded=False, retained_after_recovery=True
+                      ))
+                  else:
+                      asyncio.run(fixture["native_loss_case"](args.case == "byte"))
+                  mark("fixture_complete", case=args.case)
+              finally:
+                  for label, stats in measurements.items():
+                      mark("measurement_summary", operation=label, **{
+                          key: round(value, 6) if isinstance(value, float) else value
+                          for key, value in stats.items()
+                      })
+                  faulthandler.cancel_dump_traceback_later()
+          
+          
           def main():
               parser = argparse.ArgumentParser(description=__doc__)
               parser.add_argument("--source", type=Path, required=True)
-              parser.add_argument("--case", choices=("record", "byte", "churn"), required=True)
+              parser.add_argument("--case", choices=("record", "byte", "churn", "retained", "native_case", "native_batch_case"), required=True)
               parser.add_argument(
                   "--out",
                   type=Path,
@@ -268,7 +376,7 @@ jobs:
               if args.child:
                   child(args)
                   return 0
-
+          
               args.out.mkdir(parents=True, exist_ok=False)
               (args.out / "home").mkdir()
               environment = {
@@ -322,13 +430,13 @@ jobs:
               (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
               mark("child_complete", **result)
               return returncode
-
-
+          
+          
           if __name__ == "__main__":
               sys.exit(main())
           FROZEN_PROBE
-          printf '%s  %s\n' 20cae68e77a45cb0cee00d29c3a43f0813a28829bbc8b09d31e9058bd9d57803 "$stage/macos-tracing.patch" | shasum -a 256 -c -
-          printf '%s  %s\n' fd3791498638774ab344a887cf2235f9afbaa5b249edef64849412259dd207f0 "$stage/trace-watchdog-probe.py" | shasum -a 256 -c -
+          printf '%s  %s\n' deaec6953404b313e5a119a6a987014173292888f9ba0594a256f4b8de5743ee "$stage/macos-tracing.patch" | shasum -a 256 -c -
+          printf '%s  %s\n' 947d377d5a4e671faa95195840df5ec3905f3ee22816f80263965e1317ab4807 "$stage/trace-watchdog-probe.py" | shasum -a 256 -c -
       - name: Install stock wheel and locked tracing test dependencies
         run: |
           set -euo pipefail
@@ -340,7 +448,7 @@ jobs:
           uv pip install --python "$py" --require-hashes -r "$stage/requirements.txt"
           uv pip install --python "$py" --no-deps \
             "$stage/product/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
-      - name: Run matched before and after acceptance and phase diagnostics
+      - name: Measure matched collector phases and verify ten original acceptance nodes
         timeout-minutes: 10
         run: |
           set -euo pipefail
@@ -379,12 +487,14 @@ jobs:
           print("installed_native_sha256", digest, flush=True)
           PRODUCT
             echo '::endgroup::'
-            echo "::group::$phase eight focused acceptance nodes"
+            echo "::group::$phase ten focused acceptance nodes"
             set +e
             "${clean[@]}" "$py" -I -B -m pytest -p pytest_asyncio.plugin -p xdist.plugin \
               -p no:cacheprovider -n 3 --dist worksteal -vv -rA --durations=0 \
               --basetemp="$out/pytest" --junitxml="$out/results.xml" \
               'packages/codex/tests/test_native_trace_exporter.py::test_real_native_capture_policy_and_openai_export[native_deadline_case]' \
+              'packages/codex/tests/test_native_trace_exporter.py::test_real_native_capture_policy_and_openai_export[native_case]' \
+              'packages/codex/tests/test_native_trace_exporter.py::test_real_native_capture_policy_and_openai_export[native_batch_case]' \
               'packages/codex/tests/test_native_trace_exporter.py::test_export_deadline_and_cancellation_close_trickling_connection' \
               'packages/codex/tests/test_tracing_native_loss.py' \
               'packages/codex/tests/test_tracing_review_regressions.py::test_native_active_root_survives_completed_trace_churn' \
@@ -411,11 +521,17 @@ jobs:
                         "elapsed_s=" + node.get("time", "unknown"), "outcome=" + outcome)
                   for failure in failures:
                       print(ET.tostring(failure, encoding="unicode"))
-              print("JUNIT_NODE_COUNT", len(nodes), "EXPECTED", 8)
+              print("JUNIT_NODE_COUNT", len(nodes), "EXPECTED", 10)
           JUNIT
             echo '::endgroup::'
+          }
+
+          run_probes() {
+            phase="$1"
+            out="$stage/$phase"
+            mkdir -p "$out"
             probe_status=0
-            for selected in record byte churn; do
+            for selected in record retained native_case native_batch_case; do
               echo "::group::$phase $selected phase probe"
               probe_out="$stage/$phase-$selected-probe"
               set +e
@@ -437,16 +553,37 @@ jobs:
             printf '%s\n' "$probe_status" > "$out/probe-exit"
           }
 
-          run_phase before
+          run_probes before
           git apply --check "$patch"
           git apply --index "$patch"
-          test "$(git write-tree)" = 27dc81c52b0e8ad80ce0c0126fff008fa8765d62
-          echo 'candidate_tree=27dc81c52b0e8ad80ce0c0126fff008fa8765d62'
+          test "$(git write-tree)" = 59e1567bce974e5186e9d95d26b87bfcd3c5b340
+          echo 'candidate_tree=59e1567bce974e5186e9d95d26b87bfcd3c5b340'
           run_phase after
-          printf 'before_pytest_exit=%s after_pytest_exit=%s before_probes_exit=%s after_probes_exit=%s\n' \
-            "$(cat "$stage/before/exit")" "$(cat "$stage/after/exit")" \
-            "$(cat "$stage/before/probe-exit")" "$(cat "$stage/after/probe-exit")"
-          test "$(cat "$stage/before/node-count")" -eq 8
-          test "$(cat "$stage/after/node-count")" -eq 8
+          run_probes after
+          printf 'after_pytest_exit=%s before_probes_exit=%s after_probes_exit=%s\n' \
+            "$(cat "$stage/after/exit")" "$(cat "$stage/before/probe-exit")" "$(cat "$stage/after/probe-exit")"
+          test "$(cat "$stage/after/node-count")" -eq 10
+          "$py" -I -B - "$stage" <<'BIND_RECEIPT'
+          import json
+          from pathlib import Path
+          import sys
+
+          stage = Path(sys.argv[1])
+          for phase in ("before", "after"):
+              with (stage / f"{phase}-record-probe" / "stdout.log").open() as stream:
+                  records = [json.loads(line) for line in stream]
+              measurements = {
+                  row["operation"]: row for row in records
+                  if row["phase"] == "measurement_summary"
+              }
+              lookup = measurements["socket_getfqdn"]
+              bind = measurements["tcpserver_server_bind"]
+              print("COLLECTOR_BIND_RECEIPT", phase, json.dumps({"lookup": lookup, "bind": bind}, sort_keys=True))
+              assert bind["successes"] >= 1
+              if phase == "before":
+                  assert lookup["successes"] >= 1
+              else:
+                  assert lookup["calls"] == 0
+          BIND_RECEIPT
           test "$(cat "$stage/after/probe-exit")" -eq 0
           exit "$(cat "$stage/after/exit")"
