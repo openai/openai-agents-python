@@ -682,9 +682,9 @@
         "declarations": [
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitWindow:\n    limit: int | None = None\n    remaining: int | None = None\n    reset_after_seconds: Decimal | None = None",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimits:\n    requests: ApiRateLimitWindow | None = None\n    tokens: ApiRateLimitWindow | None = None\n    project_tokens: ApiRateLimitWindow | None = None\n    retry_after_seconds: int | None = None\n    retry_at: datetime | None = None",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanWindow:\n    used_percent: float\n    window_minutes: int | None\n    resets_at: int | None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanWindow:\n    used_percent: float\n    window_minutes: int | None\n    resets_at: datetime | None",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanCredits:\n    has_credits: bool\n    unlimited: bool\n    balance: str | None",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanSpendLimit:\n    limit: str\n    used: str\n    remaining_percent: int\n    resets_at: int",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanSpendLimit:\n    limit: str\n    used: str\n    remaining_percent: int\n    resets_at: datetime",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanLimit:\n    limit_id: str | None\n    limit_name: str | None\n    normal_model_slug: str | None\n    primary: CodexPlanWindow | None\n    secondary: CodexPlanWindow | None\n    credits: CodexPlanCredits | None\n    spend_control_reached: bool | None\n    rate_limit_reached_type: str | None\n    individual_limit: CodexPlanSpendLimit | None = None",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass CodexPlanUsage:\n    account_id: str | None\n    identity_verified: bool\n    observed_at: datetime\n    plan_type: str | None\n    limits: tuple[CodexPlanLimit, ...]\n    ordinary_usage_allowed: bool | None\n    reset_credits_available: int | None"
         ],
