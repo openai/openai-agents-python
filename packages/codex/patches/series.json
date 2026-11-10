@@ -417,6 +417,10 @@
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     },
     {
+      "path": "0152-siwc-http-errors.patch",
+      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
+    },
+    {
       "path": "0153-sdk-saved-login-durable-refresh.patch",
       "sha256": "3256e6ede7e0d7357bd6cf3c9a3f2fec8fec97aae4cffde957f5c575cf017231"
     },
@@ -485,6 +489,10 @@
       "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     },
     {
+      "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
+    },
+    {
       "path": "sdk-realtime-provider-events-and-scopes.patch",
       "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
     },
@@ -509,5 +517,5 @@
       "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
     }
   ],
-  "result_tree": "8b3f7ba7591d5a6c8f67b141b627a8e514d40462"
+  "result_tree": "5fae19b971d3f9c431f4437c798c48a37ad955d4"
 }

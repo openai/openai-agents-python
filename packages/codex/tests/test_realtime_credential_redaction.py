@@ -477,6 +477,7 @@ async def test_public_sip_builder_releases_config_from_exception_frames(
         SimpleNamespace(
             _check_open=check_open,
             _check_callback_operation=lambda _: None,
+            _check_realtime_provider=lambda: None,
             _prepare_realtime_mcp=prepare_mcp,
             _realtime_function_tools=tools,
             _native=SimpleNamespace(call=call),

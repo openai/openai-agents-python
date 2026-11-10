@@ -761,6 +761,10 @@ pub async fn restore(
 ) -> anyhow::Result<NativeThread> {
     let _lifecycle = engine.lifecycle.lock().await;
     checkpoint.check_revision()?;
+    EngineState::validate_siwc_resume_provider(
+        &checkpoint.root_metadata.model_provider,
+        &engine.service_config.model_provider_id,
+    )?;
     let ids = checkpoint.validate(python_specs.as_deref())?;
     let root = checkpoint.source_session_id;
     if engine
