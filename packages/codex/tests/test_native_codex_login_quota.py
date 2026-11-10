@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeError, NativeProvider, TurnNeedsAttention
-from agents.rate_limits import ApiRateLimits
+from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, responses as responses
 from tests.test_native_codex_login import (
@@ -22,6 +24,34 @@ from tests.test_native_codex_login import (
     codex_agent,
     saved_login,
     uncompressed_model_requests as uncompressed_model_requests,
+)
+
+_HTTP_SLOW_DOWN_HEADERS = {
+    "X-RateLimit-Limit-Requests": "60",
+    "X-RateLimit-Remaining-Requests": "0",
+    "X-RateLimit-Reset-Requests": "1m0.25s",
+    "X-RateLimit-Limit-Tokens": "1000",
+    "X-RateLimit-Remaining-Tokens": "12",
+    "X-RateLimit-Reset-Tokens": "125ms",
+    "X-RateLimit-Limit-Project-Tokens": "2000",
+    "X-RateLimit-Remaining-Project-Tokens": "34",
+    "X-RateLimit-Reset-Project-Tokens": "1.5s",
+    "Retry-After": "2",
+}
+_HTTP_SLOW_DOWN_LIMITS = ApiRateLimits(
+    requests=ApiRateLimitWindow(limit=60, remaining=0, reset_after_seconds=Decimal("60.25")),
+    tokens=ApiRateLimitWindow(limit=1000, remaining=12, reset_after_seconds=Decimal("0.125")),
+    project_tokens=ApiRateLimitWindow(limit=2000, remaining=34, reset_after_seconds=Decimal("1.5")),
+    retry_after_seconds=2,
+)
+_STREAM_LIMIT_HEADERS = {
+    **_HTTP_SLOW_DOWN_HEADERS,
+    "Retry-After": "Wed, 01 Jan 2020 00:00:00 GMT",
+}
+_STREAM_LIMITS = replace(
+    _HTTP_SLOW_DOWN_LIMITS,
+    retry_after_seconds=None,
+    retry_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
 )
 
 
@@ -91,7 +121,7 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
                     "status": "failed",
                     "error": {
                         **rejection,
-                        "headers": {"Retry-After": "Wed, 01 Jan 2020 00:00:00 GMT"},
+                        "headers": _STREAM_LIMIT_HEADERS,
                     },
                 },
             }
@@ -103,7 +133,7 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
         return web.json_response(
             {"error": rejection},
             status=status,
-            headers={"Retry-After": "3600"},
+            headers=_HTTP_SLOW_DOWN_HEADERS if status == 503 else {"Retry-After": "3600"},
         )
 
     app = web.Application()
@@ -135,11 +165,12 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
             assert attention.reason == reason
             assert isinstance(attention.error, NativeError)
             assert attention.error.category == category
-            retry_advice = (
-                ApiRateLimits(retry_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
-                if streamed
-                else ApiRateLimits(retry_after_seconds=3600)
-            )
+            if status == 503:
+                retry_advice = _HTTP_SLOW_DOWN_LIMITS
+            else:
+                retry_advice = (
+                    _STREAM_LIMITS if streamed else ApiRateLimits(retry_after_seconds=3600)
+                )
             assert attention.rate_limits == session.rate_limits() == retry_advice
             assert rejected_headers == [("Bearer saved-token", ACCOUNT)]
 
@@ -148,6 +179,191 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
             next_turn = await session.submit("Reply again.")
             assert (await next_turn.get_result()).final_output == "done"
             assert len(peer.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("saved", "code", "status", "reason", "category"),
+    [
+        (True, "insufficient_quota", None, "quota_blocked", "usage_limit_exceeded"),
+        (True, "rate_limit_exceeded", None, "rate_limited", "rate_limit_exceeded"),
+        (True, "rate_limit_exceeded", 429, "rate_limited", "rate_limit_exceeded"),
+        (True, "slow_down", 503, "rate_limited", "rate_limit_exceeded"),
+        (True, None, None, None, None),
+        (False, "rate_limit_exceeded", None, None, None),
+        (False, "rate_limit_exceeded", 429, None, None),
+    ],
+    ids=[
+        "saved-quota",
+        "saved-throttle",
+        "saved-http-throttle",
+        "saved-http-slow-down",
+        "saved-healthy",
+        "api-key-retry",
+        "api-key-http-retry",
+    ],
+)
+async def test_pre_turn_compaction_respects_credential_retry_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    saved: bool,
+    code: str | None,
+    status: int | None,
+    reason: str | None,
+    category: str | None,
+) -> None:
+    native = importlib.import_module("agents._native")
+    create_engine = native.create_engine
+    compact_prompt = "Summarize the synthetic conversation."
+
+    def with_pre_turn_compaction(
+        config_json: str, runtime_json: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        # Set the native budget while retaining the public Session and TurnHandle path.
+        config = json.loads(config_json)
+        config.update(
+            model_auto_compact_token_limit=10_000,
+            model_post_turn_compact_threshold_percent=0,
+        )
+        config[f"model_providers.{config['model_provider']}"]["stream_idle_timeout_ms"] = 1000
+        runtime = json.loads(runtime_json)
+        runtime["compact_prompt"] = compact_prompt
+        return create_engine(json.dumps(config), json.dumps(runtime), *args, **kwargs)
+
+    monkeypatch.setattr(native, "create_engine", with_pre_turn_compaction)
+    peer = ResponsesFixture()
+    requests: list[str] = []
+    stream_release = asyncio.Event()
+
+    async def complete_response(event: dict[str, Any]) -> None:
+        if event["type"] != "response.completed":
+            return
+        if len(requests) == 1:
+            event["response"]["usage"].update(input_tokens=12_000, total_tokens=12_003)
+        elif saved and requests[-1] == "compaction":
+            event["response"]["end_turn"] = False
+
+    peer.before_event = complete_response
+    peer.respond(assistant_output("Seeded history."))
+    peer.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "compaction", "encrypted_content": "synthetic-summary"},
+        }
+        if saved
+        else assistant_output("Synthetic summary.")
+    )
+    peer.respond(assistant_output("Continued after compaction."))
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        body = await request.json()
+        is_compaction = any(
+            item["type"] == "compaction_trigger"
+            or (
+                item["type"] == "message"
+                and any(content.get("text") == compact_prompt for content in item["content"])
+            )
+            for item in body["input"]
+        )
+        requests.append("compaction" if is_compaction else "sampling")
+        assert request.headers["Authorization"] == (
+            "Bearer saved-token" if saved else "Bearer synthetic-compaction-key"
+        )
+        assert request.headers.get("ChatGPT-Account-Id") == (ACCOUNT if saved else None)
+        if (
+            code is None
+            or not is_compaction
+            or ((not saved or status is not None) and len(requests) != 2)
+        ):
+            return await peer.handle(request)
+        if status is not None:
+            return web.json_response(
+                {"error": {"code": code, "message": "Synthetic compaction rejection"}},
+                status=status,
+                headers=(
+                    _HTTP_SLOW_DOWN_HEADERS
+                    if status == 503
+                    else {
+                        "X-RateLimit-Limit-Requests": "60",
+                        "X-RateLimit-Remaining-Requests": "0",
+                        "X-RateLimit-Reset-Requests": "1m0.25s",
+                        "Retry-After": "0",
+                    }
+                ),
+            )
+        payload = {
+            "type": "response.failed",
+            "response": {
+                "id": f"resp_rejected_compaction_{len(requests)}",
+                "status": "failed",
+                "error": {
+                    "code": code,
+                    "message": "Synthetic compaction rejection",
+                    "headers": _STREAM_LIMIT_HEADERS,
+                },
+            },
+        }
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        await stream_release.wait()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", handle)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    async with timeout(20), TestServer(app) as server:
+        endpoint = str(server.make_url("/"))
+        if saved:
+            monkeypatch.setattr("_agents_codex.session._CODEX_RESPONSES_BASE_URL", endpoint)
+            agent = codex_agent(saved_login(tmp_path / "login"))
+        else:
+            provider = NativeProvider(
+                api_key="synthetic-compaction-key", base_url=endpoint, supports_websockets=False
+            )
+            agent = Agent(instructions="Reply.", model="gpt-5.1-codex", provider=provider)
+        assert agent.provider is not None
+        async with agent.provider, agent.session() as session:
+            try:
+                initial = await session.submit("Seed the conversation.")
+                assert (await initial.get_result()).final_output == "Seeded history."
+                assert requests == ["sampling"]
+
+                turn = await session.submit("Continue.")
+                if reason is None:
+                    assert (await turn.get_result()).final_output == "Continued after compaction."
+                    expected = ["sampling", "compaction", "sampling"]
+                    if not saved:
+                        expected.insert(1, "compaction")
+                    assert requests == expected
+                else:
+                    try:
+                        attention = await turn.wait_for_attention()
+                    except NativeError as error:
+                        pytest.fail(
+                            f"Expected {reason} attention, got {error.category} after {requests}."
+                        )
+                    assert isinstance(attention, TurnNeedsAttention), requests
+                    assert attention.reason == reason, requests
+                    assert isinstance(attention.error, NativeError)
+                    assert attention.error.category == category, requests
+                    assert requests == ["sampling", "compaction"], requests
+                    if status == 503:
+                        expected_limits = _HTTP_SLOW_DOWN_LIMITS
+                    elif status is None:
+                        expected_limits = _STREAM_LIMITS
+                    else:
+                        expected_limits = ApiRateLimits(
+                            requests=ApiRateLimitWindow(
+                                limit=60, remaining=0, reset_after_seconds=Decimal("60.25")
+                            ),
+                            retry_after_seconds=0,
+                        )
+                    assert attention.rate_limits == session.rate_limits() == expected_limits, (
+                        requests
+                    )
+            finally:
+                stream_release.set()
 
 
 async def test_api_key_can_retry_streamed_throttling(responses: ResponsesFixture) -> None:

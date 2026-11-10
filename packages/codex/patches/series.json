@@ -481,6 +481,10 @@
       "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
     },
     {
+      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
+    },
+    {
       "path": "sdk-realtime-provider-events-and-scopes.patch",
       "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
     },
@@ -505,5 +509,5 @@
       "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
     }
   ],
-  "result_tree": "fd19542ca31fd0451aa1ac154b8c52fb6032e57e"
+  "result_tree": "8b3f7ba7591d5a6c8f67b141b627a8e514d40462"
 }
