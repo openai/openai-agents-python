@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -272,12 +272,18 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             else:
                 writer.write(b"Content-Length: 0\r\n\r\n")
                 await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            if not request_started.is_set():
+                raise
+            peer_closed.set()
         finally:
-            if eof is not None and not eof.done():
-                eof.cancel()
+            if eof is not None:
+                if not eof.done():
+                    eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
             handler_done.set()
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
