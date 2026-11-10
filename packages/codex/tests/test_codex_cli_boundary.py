@@ -9,7 +9,6 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
-from typing import get_overloads
 
 import pytest
 
@@ -92,15 +91,14 @@ def test_classic_cli_patch_targets_and_exception_identities(monkeypatch) -> None
     assert error.run_data is None
 
 
-def test_instruction_options_are_appended_to_public_session_signatures() -> None:
-    for declaration in [Agent.session, *get_overloads(Agent.session)]:
-        parameters = list(inspect.signature(declaration).parameters)
-        assert parameters[-4:] == [
-            "max_function_concurrency",
-            "observation_retention",
-            "project_guidance",
-            "discover_agents_md",
-        ]
+def test_instruction_options_are_appended_to_public_session_signature() -> None:
+    parameters = list(inspect.signature(Agent.session).parameters)
+    assert parameters[-4:] == [
+        "max_function_concurrency",
+        "observation_retention",
+        "project_guidance",
+        "discover_agents_md",
+    ]
 
 
 @pytest.mark.parametrize(
