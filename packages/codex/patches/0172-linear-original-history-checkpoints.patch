@@ -1,0 +1,386 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index f2eef7425c41caea5f5d3cbe5ef44ec712b6aed2..d0352c2959b96523541b247fe56f4b8311ceac15 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1090,12 +1090,6 @@ impl CodexThread {
+             .await
+     }
+ 
+-    /// Clone originals and fixed admission metadata for an SDK-owned checkpoint.
+-    #[doc(hidden)]
+-    pub async fn sdk_original_history(&self) -> codex_history::sdk_originals::SdkOriginalHistory {
+-        self.session.sdk_original_history().await
+-    }
+-
+     /// Read fixed admission eligibility without exposing private projection metadata.
+     #[doc(hidden)]
+     pub async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
+diff --git a/codex-rs/core/src/session/guardian_checkpoint.rs b/codex-rs/core/src/session/guardian_checkpoint.rs
+index 925a8f89347ec12d2553ec231e58643eea5d86b4..7e4cd19c696282b05b5eecd31527b2b28bccf0ba 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint.rs
+@@ -12,8 +12,9 @@ impl Session {
+         let state = self.state.lock().await;
+         let history = &state.history;
+         let window_ids = state.auto_compact_window_ids();
++        // This is a new fork history seed, not a compaction of an existing journal.
+         let mut items = vec![RolloutItem::Compacted(CompactedItem {
+-            sdk_originals: Some(state.sdk_originals.clone()),
++            sdk_originals: Some(state.sdk_originals.clone().into()),
+             message: String::new(),
+             replacement_history: Some(history.annotated_items().to_vec()),
+             guardian_history: history.guardian_history_checkpoint(),
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 5fd9c0943598145b065a76ce3d9688b27b638751..50d252c3a9cbda3fb4b44eab2248a17fc3e156f2 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -277,12 +277,6 @@ impl Session {
+         self.state.lock().await.sdk_originals.snapshot(limit)
+     }
+ 
+-    pub(crate) async fn sdk_original_history(
+-        &self,
+-    ) -> codex_history::sdk_originals::SdkOriginalHistory {
+-        self.state.lock().await.sdk_originals.clone()
+-    }
+-
+     /// Return only previously admitted projections within an original-value prefix.
+     pub(crate) async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
+         let state = self.state.lock().await;
+@@ -350,7 +344,7 @@ impl Session {
+         }
+         let revision = originals.revision().to_owned();
+         let checkpoint = codex_history::CompactedItem {
+-            sdk_originals: Some(originals.clone()),
++            sdk_originals: Some(originals.clone().into()),
+             message: String::new(),
+             replacement_history: Some(envelopes.clone()),
+             guardian_history: None,
+diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
+index a88308ee0826b468d67e967f7fbee557ead206c6..d83e4311808ccf2f9e92d5395d5477f746b8b580 100644
+--- a/codex-rs/core/src/session/inject_tests.rs
++++ b/codex-rs/core/src/session/inject_tests.rs
+@@ -199,7 +199,7 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+     let mut checkpoint: codex_history::CompactedItem =
+         serde_json::from_value(json!({"message":""})).unwrap();
+     checkpoint.replacement_history = Some(model.clone());
+-    checkpoint.sdk_originals = Some(catalog);
++    checkpoint.sdk_originals = Some(catalog.into());
+     // Core rollback crosses a compaction only with its surviving native prefix.
+     let mut records: Vec<_> = model.into_iter().map(RolloutItem::ResponseItem).collect();
+     records.push(RolloutItem::Compacted(checkpoint));
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 7742a2dcd1904a3acacb8e5ba169eb578c06b967..b28bea8546f5374b21314c9bd1dbe22af1c29ecf 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4443,7 +4443,9 @@ impl Session {
+             state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
+             state.history.set_world_state_baseline(world_state_baseline);
+             CompactedItem {
+-                sdk_originals: Some(state.sdk_originals.clone()),
++                sdk_originals: Some(
++                    codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::preserve(),
++                ),
+                 message: metadata.message,
+                 replacement_history: Some(replacement_history),
+                 guardian_history: state.history.guardian_history_checkpoint(),
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index aa1a7f7d3cffd6b078d0d9c4686651ad71bc8535..0aae60f4c1ea23c6615dda696ee5819bc37569f5 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -310,7 +310,7 @@ pub use guardian_history::GuardianRetainedOmissions;
+ 
+ #[derive(Clone, Debug, PartialEq)]
+ pub struct CompactedItem {
+-    pub sdk_originals: Option<sdk_originals::SdkOriginalHistory>,
++    pub sdk_originals: Option<sdk_originals::SdkOriginalHistoryCheckpoint>,
+     pub message: String,
+     pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
+     pub guardian_history: Option<GuardianHistoryCheckpoint>,
+diff --git a/codex-rs/history/src/rollout_payload.rs b/codex-rs/history/src/rollout_payload.rs
+index b18c25649e7d02c4583dfe813afc967c53f62d58..8b5e4634607fcd5146f2285c99ab902dfcd07ea6 100644
+--- a/codex-rs/history/src/rollout_payload.rs
++++ b/codex-rs/history/src/rollout_payload.rs
+@@ -261,7 +261,7 @@ pub(super) struct InterAgentCommunicationMetadataPayload {
+ #[derive(Serialize, Deserialize, JsonSchema)]
+ pub(super) struct CompactedItemWire<'a> {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+-    sdk_originals: Option<Cow<'a, crate::sdk_originals::SdkOriginalHistory>>,
++    sdk_originals: Option<Cow<'a, crate::sdk_originals::SdkOriginalHistoryCheckpoint>>,
+     message: Cow<'a, str>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     replacement_history: Option<Vec<Cow<'a, ResponseItem>>>,
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 7728908b6f91631324ef40565f9aafbbb65eb2f3..8ed8e7648a947461f114df1d7fe46e82d8e64bea 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -8,6 +8,43 @@ use std::collections::BTreeMap;
+ 
+ use crate::ResponseItemEnvelope;
+ 
++/// A constant-size compaction reference, or the legacy complete replacement payload.
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
++#[serde(untagged, deny_unknown_fields)]
++pub enum SdkOriginalHistoryCheckpoint {
++    Replace(SdkOriginalHistory),
++    Preserve {
++        #[serde(deserialize_with = "deserialize_preserve")]
++        preserve: bool,
++    },
++}
++
++fn deserialize_preserve<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
++    if bool::deserialize(deserializer)? {
++        Ok(true)
++    } else {
++        Err(serde::de::Error::custom(
++            "original history preservation must be true",
++        ))
++    }
++}
++
++impl SdkOriginalHistoryCheckpoint {
++    pub fn preserve() -> Self {
++        Self::Preserve { preserve: true }
++    }
++
++    pub fn is_preserve(&self) -> bool {
++        matches!(self, Self::Preserve { preserve: true })
++    }
++}
++
++impl From<SdkOriginalHistory> for SdkOriginalHistoryCheckpoint {
++    fn from(history: SdkOriginalHistory) -> Self {
++        Self::Replace(history)
++    }
++}
++
+ /// The projection is fixed at admission. Restore never promotes an audit-only value.
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+ pub struct SdkOriginalItem {
+@@ -196,7 +233,7 @@ impl SdkOriginalHistory {
+         Ok(retained)
+     }
+ 
+-    /// Legacy compaction defines the migration boundary. New checkpoints carry originals.
++    /// Legacy compaction defines the migration boundary. New compactions preserve journal originals.
+     pub fn replay(
+         records: &[crate::RolloutItem],
+         project: impl Fn(&ResponseItemEnvelope) -> Option<ResponseItemEnvelope>,
+@@ -216,7 +253,12 @@ impl SdkOriginalHistory {
+                 }
+                 crate::RolloutItem::Compacted(checkpoint) => {
+                     if let Some(originals) = &checkpoint.sdk_originals {
+-                        history = originals.clone();
++                        match originals {
++                            SdkOriginalHistoryCheckpoint::Replace(originals) => {
++                                history = originals.clone();
++                            }
++                            SdkOriginalHistoryCheckpoint::Preserve { .. } => {}
++                        }
+                     } else if let Some(items) = &checkpoint.replacement_history {
+                         // Never resurrect values removed by an older canonical transaction.
+                         history = Self::default();
+@@ -298,6 +340,70 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn repeated_compaction_references_preserve_originals_without_copying_catalog() {
++        let mut originals = SdkOriginalHistory::default();
++        originals.append(SdkOriginalItem {
++            original: json!({"type":"future", "payload":"x".repeat(128 * 1024)}).to_string(),
++            projection: None,
++        });
++        let before = originals.snapshot(None);
++        let seed: crate::RolloutItem = serde_json::from_value(json!({
++            "type":"compacted", "payload":{"message":"seed", "sdk_originals":originals}
++        }))
++        .unwrap();
++        let marker: crate::RolloutItem = serde_json::from_value(json!({
++            "type":"compacted", "payload":{"message":"summary", "replacement_history":[],
++                "sdk_originals":{"preserve":true}}
++        }))
++        .unwrap();
++        assert!(serde_json::to_vec(&marker).unwrap().len() < 1024);
++        let mut journal = vec![seed];
++        let initial_size = serde_json::to_vec(&journal).unwrap().len();
++        journal.extend(std::iter::repeat_n(marker, 4));
++        assert!(serde_json::to_vec(&journal).unwrap().len() - initial_size < 4096);
++        let restored: Vec<crate::RolloutItem> =
++            serde_json::from_slice(&serde_json::to_vec(&journal).unwrap()).unwrap();
++        let replayed =
++            SdkOriginalHistory::replay(&restored, |item| Some(item.clone()), |_, _| vec![]);
++        assert_eq!(replayed.snapshot(None), before);
++        assert!(replayed.items[0].projection.is_none());
++    }
++
++    #[test]
++    fn preservation_replays_native_journal_but_legacy_compaction_still_resets() {
++        let original =
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}]})
++                .to_string();
++        let row = crate::RolloutItem::ResponseItem(ResponseItemEnvelope::new(
++            input_projection(&original).unwrap().unwrap(),
++        ));
++        let preserve: crate::RolloutItem = serde_json::from_value(json!({
++            "type":"compacted","payload":{"message":"summary","replacement_history":[],"sdk_originals":{"preserve":true}}
++        })).unwrap();
++        let restored = SdkOriginalHistory::replay(
++            &[row.clone(), preserve],
++            |item| Some(item.clone()),
++            |_, _| vec![],
++        );
++        assert_eq!(restored.items.len(), 1);
++        let legacy: crate::RolloutItem = serde_json::from_value(json!({
++            "type":"compacted","payload":{"message":"summary","replacement_history":[]}
++        }))
++        .unwrap();
++        assert!(
++            SdkOriginalHistory::replay(&[row, legacy], |item| Some(item.clone()), |_, _| vec![])
++                .items
++                .is_empty()
++        );
++        for invalid in [
++            json!({"preserve":false}),
++            json!({"preserve":true,"format_version":2,"items":[]}),
++        ] {
++            assert!(serde_json::from_value::<SdkOriginalHistoryCheckpoint>(invalid).is_err());
++        }
++    }
++
+     #[test]
+     fn unknown_values_and_extra_fields_survive_restore_without_projection_promotion() {
+         let unknown =
+@@ -475,7 +581,11 @@ mod tests {
+         let crate::RolloutItem::Compacted(compacted) = restored else {
+             panic!("compacted record");
+         };
+-        assert_eq!(compacted.sdk_originals.unwrap().snapshot(None), before);
++        let SdkOriginalHistoryCheckpoint::Replace(restored) = compacted.sdk_originals.unwrap()
++        else {
++            panic!("legacy complete catalog");
++        };
++        assert_eq!(restored.snapshot(None), before);
+     }
+ 
+     #[test]
+diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
+index 34aa0a9af83532840e648a29a23c64500b52f57d..66db02c37067dc0a6f7fb6ad565d99ba3510322b 100644
+--- a/codex-rs/history/src/tests.rs
++++ b/codex-rs/history/src/tests.rs
+@@ -844,7 +844,30 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
+ fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
+     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
+     let variants = schema["oneOf"].as_array().expect("rollout variants");
+-    assert_eq!(variants.len(), 12);
++    let wire_tags = variants
++        .iter()
++        .map(|variant| variant["properties"]["type"]["enum"][0].as_str().unwrap())
++        .collect::<std::collections::BTreeSet<_>>();
++    assert_eq!(
++        wire_tags,
++        std::collections::BTreeSet::from([
++            "session_meta",
++            "response_item",
++            "inter_agent_communication",
++            "inter_agent_communication_metadata",
++            "compacted",
++            "turn_context",
++            "response_observation_record",
++            "response_fact_record",
++            "token_usage_record",
++            "world_state",
++            "retained_context",
++            "security_risk_score",
++            "event_msg",
++            "realtime_item",
++        ])
++    );
++    assert_eq!(variants.len(), wire_tags.len());
+ 
+     for variant in variants {
+         let required = variant["required"].as_array().expect("required fields");
+diff --git a/codex-rs/rollout/src/model_context.rs b/codex-rs/rollout/src/model_context.rs
+index 3a5854165dc361761fe56c8647219dd66791fb62..02bc23177ff16cf27327bcfc6dead38ea75ec2f0 100644
+--- a/codex-rs/rollout/src/model_context.rs
++++ b/codex-rs/rollout/src/model_context.rs
+@@ -2,7 +2,8 @@
+ //!
+ //! Storage readers feed items newest-to-oldest. The scan stops at the newest compaction that has
+ //! both replacement history and a window number, or at the beginning of the rollout when no such
+-//! compaction exists. Items are returned in chronological order.
++//! compaction exists. Original-preserving compactions also require their preceding journal.
++//! Items are returned in chronological order.
+ 
+ use crate::RolloutItem;
+ 
+@@ -21,6 +22,8 @@ pub enum ModelContextScanProgress {
+ /// boundary. Records after it provide any companion state that was persisted. Older compactions
+ /// missing either field require the complete rollout so reconstruction can rebuild their history
+ /// or window number.
++/// Original-preserving checkpoints additionally need their preceding journal or catalog seed;
++/// bounded model context does not imply bounded reads of the full original catalog.
+ #[derive(Debug, Default)]
+ pub struct ModelContextScan {
+     items_newest_first: Vec<RolloutItem>,
+@@ -34,7 +37,17 @@ impl ModelContextScan {
+             ModelContextScanProgress::Continue
+         } else if let RolloutItem::Compacted(compacted) = &item {
+             if compacted.replacement_history.is_some() && compacted.window_number.is_some() {
+-                ModelContextScanProgress::Complete
++                // A model checkpoint that preserves originals depends on its preceding journal.
++                // Keep scanning to a complete catalog seed or the legacy migration boundary.
++                if compacted
++                    .sdk_originals
++                    .as_ref()
++                    .is_some_and(|catalog| catalog.is_preserve())
++                {
++                    ModelContextScanProgress::Continue
++                } else {
++                    ModelContextScanProgress::Complete
++                }
+             } else {
+                 // This compaction cannot be reconstructed from a bounded suffix. Do not stop at
+                 // an older compaction because this newer one still affects the surviving history.
+@@ -57,3 +70,40 @@ impl ModelContextScan {
+         self.items_newest_first
+     }
+ }
++
++#[cfg(test)]
++mod sdk_original_tests {
++    use super::*;
++    use serde_json::json;
++
++    fn checkpoint(catalog: serde_json::Value) -> RolloutItem {
++        serde_json::from_value(json!({"type":"compacted", "payload":{
++            "message":"summary", "replacement_history":[], "window_number":1,
++            "sdk_originals":catalog
++        }}))
++        .unwrap()
++    }
++
++    #[test]
++    fn original_preservation_requires_the_preceding_journal_or_catalog_seed() {
++        let mut scan = ModelContextScan::default();
++        assert_eq!(
++            scan.push(checkpoint(json!({"preserve":true}))),
++            ModelContextScanProgress::Continue
++        );
++        assert_eq!(
++            scan.push(checkpoint(json!({"preserve":true}))),
++            ModelContextScanProgress::Continue
++        );
++        assert_eq!(
++            scan.push(checkpoint(json!({"format_version":1,"items":[]}))),
++            ModelContextScanProgress::Complete
++        );
++        assert_eq!(scan.finish().len(), 3);
++        let mut legacy = ModelContextScan::default();
++        assert_eq!(
++            legacy.push(checkpoint(serde_json::Value::Null)),
++            ModelContextScanProgress::Complete
++        );
++    }
++}

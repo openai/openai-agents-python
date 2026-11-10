@@ -3256,6 +3256,8 @@ class Session(Generic[ContextT, OutputT]):
             }
             if discover_agents_md:
                 runtime["_sdk_discover_agents_md"] = True
+            if project_guidance:
+                runtime["_sdk_project_guidance_config"] = True
 
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {

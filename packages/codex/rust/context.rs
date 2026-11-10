@@ -42,7 +42,6 @@ pub struct Change {
     pub state: std::sync::Arc<ThreadState>,
     _permit: tokio::sync::OwnedRwLockWriteGuard<()>,
     snapshot: std::sync::Arc<dyn codex_extension_api::ConversationHistorySnapshot>,
-    sdk_originals: codex_history::sdk_originals::SdkOriginalHistory,
     pub checkpoint: Value,
     settings: codex_protocol::protocol::ThreadSettingsSnapshot,
     instructions: Option<String>,
@@ -79,7 +78,6 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
     // read() takes the mutation gate and verifies native idle/pending ownership.
     read(&state).await?;
     let snapshot = state.thread.conversation_history_snapshot().await;
-    let sdk_originals = state.thread.sdk_original_history().await;
     let settings = state.thread.thread_settings_snapshot().await;
     let executor_policy = if state
         .thread
@@ -124,7 +122,6 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
         state,
         _permit: permit,
         snapshot,
-        sdk_originals,
         checkpoint,
         settings,
         instructions,
@@ -316,7 +313,9 @@ impl Change {
         let compacted = CompactedItem {
             message: summary.to_owned(),
             replacement_history: Some(replacement),
-            sdk_originals: Some(self.sdk_originals.clone()),
+            sdk_originals: Some(
+                codex_history::sdk_originals::SdkOriginalHistoryCheckpoint::preserve(),
+            ),
             guardian_history,
             retained_context: self.snapshot.retained_context().cloned(),
             // Full canonical history is preserved. Native restore replays its

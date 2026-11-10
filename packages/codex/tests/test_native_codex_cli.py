@@ -64,7 +64,8 @@ def cli(tmp_path: Path) -> Path:
         },
     ]
     path.write_text(
-        f"#!{sys.executable}\nimport json, sys\nsys.stdin.read()\n"
+        f"#!{sys.executable}\nimport json, sys\ninput = sys.stdin.read()\n"
+        f"open({str(tmp_path / 'stdin.txt')!r}, 'w').write(input)\n"
         f"open({str(tmp_path / 'arguments.jsonl')!r}, 'a').write("
         "json.dumps(sys.argv[1:]) + '\\n')\n"
         f"events = {events!r}\n"
@@ -72,6 +73,83 @@ def cli(tmp_path: Path) -> Path:
     )
     path.chmod(0o700)
     return path
+
+
+async def test_native_cli_forwards_structured_text_and_local_images(tmp_path: Path, responses):
+    executable = cli(tmp_path)
+    image = str(tmp_path / "diagram.png")
+    declaration = codex_tool(codex_options={"codex_path_override": str(executable)})
+    responses.replies.extend(
+        [
+            [
+                function_call(
+                    "codex",
+                    {
+                        "prompt": [
+                            {"type": "text", "text": "First"},
+                            {"type": "local_image", "path": image},
+                            {"type": "text", "text": "Second"},
+                        ]
+                    },
+                    "structured-cli",
+                )
+            ],
+            [assistant_output("done")],
+        ]
+    )
+    async with Agent(
+        instructions="Use codex.", provider=provider(responses), tools=[declaration]
+    ).session() as session:
+        assert (
+            await (await session.submit("Inspect the diagram")).get_result()
+        ).final_output == "done"
+    arguments = json.loads((tmp_path / "arguments.jsonl").read_text())
+    assert arguments[arguments.index("--image") + 1] == image
+    assert (tmp_path / "stdin.txt").read_text() == "First\n\nSecond"
+
+
+@pytest.mark.parametrize("stream_limit", [65536, 262144])
+async def test_native_cli_preserves_process_environment_schema_and_buffer_controls(
+    tmp_path: Path, responses, monkeypatch, stream_limit
+):
+    monkeypatch.setenv("CLI_NOT_INHERITED", "synthetic-private")
+    path = cli(tmp_path)
+    record = tmp_path / "metadata.json"
+    source = path.read_text().replace(
+        "for event in events:",
+        "import os\n"
+        "schema_path = sys.argv[sys.argv.index('--output-schema') + 1]\n"
+        f"json.dump({{'schema':json.load(open(schema_path)), 'path':schema_path, "
+        "'visible':os.getenv('CLI_ONLY'), 'private':os.getenv('CLI_NOT_INHERITED')}, "
+        f"open({str(record)!r}, 'w'))\n"
+        "events[1]['item']['text'] = 'x' * 100000\n"
+        "for event in events:",
+    )
+    path.write_text(source)
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    declaration = codex_tool(
+        codex_options={
+            "codex_path_override": str(path),
+            "env": {"CLI_ONLY": "configured"},
+            "codex_subprocess_stream_limit_bytes": stream_limit,
+        },
+        turn_options={"output_schema": schema},
+    )
+    schema["properties"]["value"]["type"] = "number"
+    binding = declaration._bind(None, None, declaration)
+    def call(context):
+        return binding.callback(context, prompt="Run", thread_id=None)
+    if stream_limit == 65536:
+        with pytest.raises(ValueError, match="limit"):
+            await _run_in_native_session(responses, call)
+    else:
+        result = await _run_in_native_session(responses, call)
+        assert len(result["response"]) == 100000
+    captured = json.loads(record.read_text())
+    assert captured["schema"]["properties"]["value"]["type"] == "string"
+    assert captured["visible"] == "configured"
+    assert captured["private"] is None
+    assert not Path(captured["path"]).exists()
 
 
 @pytest.mark.parametrize("thread_id", [None, "selected-thread"])

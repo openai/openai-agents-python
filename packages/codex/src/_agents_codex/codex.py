@@ -25,7 +25,7 @@ from _agents_shared.codex_cli.events import (
     TurnFailedEvent,
 )
 from _agents_shared.codex_cli.items import is_agent_message_item
-from _agents_shared.codex_cli.thread import Thread
+from _agents_shared.codex_cli.thread import Input, Thread, UserInput
 from _agents_shared.codex_cli.thread_options import (
     ThreadOptions,
     coerce_thread_options,
@@ -144,6 +144,11 @@ def codex_tool(
 ) -> _PythonTool[Any, object]:
     """Declare external CLI delegation without starting a subprocess.
 
+    Prompts: a string or an ordered list of text/local_image inputs, for example
+    [{"type": "text", "text": "Inspect this image"},
+     {"type": "local_image", "path": "/workspace/diagram.png"}].
+    Local image paths: forwarded to the application-selected CLI.
+
     The application authorizes CLI credentials, executable and workspace through
     CodexOptions and ThreadOptions. Native Environment grants do not constrain
     this application function. The returned tool uses the native function route;
@@ -199,14 +204,28 @@ def codex_tool(
     sessions: WeakKeyDictionary[object, _SessionThread] = WeakKeyDictionary()
 
     async def execute(
-        prompt: str,
+        prompt: Input,
         thread_id: str | None,
         state: _SessionThread,
         check: Callable[[], None],
     ) -> dict[str, Any]:
         nonlocal client
-        if not prompt.strip():
+        if not prompt or (isinstance(prompt, str) and not prompt.strip()):
             raise ValueError("prompt must not be empty")
+        if isinstance(prompt, list):
+            normalized: list[UserInput] = []
+            for item in prompt:
+                if item["type"] == "text":
+                    text = item["text"].strip()
+                    if not text:
+                        raise ValueError("text inputs must not be empty")
+                    normalized.append({"type": "text", "text": text})
+                else:
+                    path = item["path"].strip()
+                    if not path:
+                        raise ValueError("local image paths must not be empty")
+                    normalized.append({"type": "local_image", "path": path})
+            prompt = normalized
         check()
         if (
             thread_id is not None
@@ -261,7 +280,7 @@ def codex_tool(
     @function_tool(name=name, description=description)
     async def invoke(
         context: ToolContext[object],
-        prompt: str,
+        prompt: Input,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
         from .session import Session, _Invocation, _invocation, _native_callback_cancelled

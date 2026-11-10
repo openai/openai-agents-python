@@ -35,7 +35,7 @@ pub async fn snapshot(state: &ThreadState, limit: Option<usize>) -> anyhow::Resu
         .try_lock()
         .context("native mutation is in progress")?;
     idle(&state).await?;
-    let (revision, total, items) = state.thread.sdk_history_snapshot(limit).await;
+    let (revision, total, items) = state.thread.sdk_history_snapshot(limit).await?;
     Ok(json!({"revision": revision, "total": total, "items": items}))
 }
 
@@ -87,15 +87,15 @@ pub async fn replace(
     // Validate before durability: neither retained nor appended history may split
     // a client tool call/result pair. Provider-hosted records keep their existing
     // context-validator treatment, including server-side tool-search output.
-    let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await;
+    let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;
     ensure!(
         current_revision == expected,
         "canonical history revision conflict"
     );
     ensure!(keep <= total, "history keep exceeds snapshot length");
     // Eligibility is fixed at admission. Never reinterpret old audit-only JSON.
-    let projected = state.thread.sdk_history_projection(None).await;
-    let retained = state.thread.sdk_history_projection(Some(keep)).await;
+    let projected = state.thread.sdk_history_projection(None).await?;
+    let retained = state.thread.sdk_history_projection(Some(keep)).await?;
     crate::context::check_pairs(&projected, &(0..retained.len()).collect::<Vec<_>>())
         .context("canonical history requires complete tool call/result pairs")?;
     let appended: Vec<ResponseItem> = items
