@@ -315,6 +315,7 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
     result: dict[str, Any] = {}
     controls: dict[str, Any] = {}
     control_fields = {
+        "input_modalities",
         "max_output_tokens",
         "temperature",
         "top_p",
@@ -398,6 +399,7 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
     if "request_controls" in captured:
         controls = captured["request_controls"]
         ordinary = {
+            "input_modalities",
             "max_output_tokens",
             "temperature",
             "top_p",

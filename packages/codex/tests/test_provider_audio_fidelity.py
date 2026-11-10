@@ -254,3 +254,30 @@ async def test_real_borrowed_library_audio_and_named_choice(adapter: str, monkey
         {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
     ]
     assert seen[0]["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+
+
+def test_modality_setting_capture_and_sparse_projection() -> None:
+    from _agents_codex.agent import _copy_model_settings
+    from _agents_codex.session import _native_model_settings
+    from agents import ModelSettings
+
+    values: list[Any] = ["text", "audio"]
+    settings = ModelSettings(input_modalities=values)
+    captured = _copy_model_settings(settings)
+    values.append("image")
+    assert captured["input_modalities"] == ["text", "audio"]
+    assert _native_model_settings(None, captured) == {
+        "request_controls": {"input_modalities": ["text", "audio"]}
+    }
+    assert _native_model_settings(None, {}) == {}
+    assert _native_model_settings(None, {"input_modalities": None}) == {
+        "request_controls": {"input_modalities": None}
+    }
+
+
+@pytest.mark.parametrize("invalid", [[], ["audio", "audio"], ["video"], "audio", [1]])
+def test_invalid_modality_declaration_rejects_locally(invalid: Any) -> None:
+    from _agents_codex.agent import _copy_model_settings
+
+    with pytest.raises(ValueError, match="input_modalities"):
+        _copy_model_settings({"input_modalities": invalid})
