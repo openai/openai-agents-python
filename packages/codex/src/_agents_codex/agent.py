@@ -13,6 +13,7 @@ import re as re
 from collections.abc import (
     AsyncIterator as AsyncIterator,
     Awaitable as Awaitable,
+    Callable as Callable,
     Callable as _Callable,
     Mapping as Mapping,
     Sequence as Sequence,
@@ -369,7 +370,7 @@ class SignInWithChatGPT:
     eligibility, registration, and supported Responses capabilities.
     """
 
-    get_credentials: _Callable[[], Awaitable[SignInWithChatGPTCredentials | None]] = field(
+    get_credentials: Callable[[], Awaitable[SignInWithChatGPTCredentials | None]] = field(
         repr=False
     )
 
