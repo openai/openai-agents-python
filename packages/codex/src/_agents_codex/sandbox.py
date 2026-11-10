@@ -140,6 +140,7 @@ def sandbox_environment(
     Cleanup follows client policy, including deletion of selected backends where
     the provider implements it. The caller must authorize that disposal.
     Supply an application-authorized Manifest and trusted provider options.
+    Provider reuse checks can require a fresh sandbox when current network restrictions differ.
     Mappings are not accepted as manifests. Validate untrusted data before
     constructing a Manifest; construction alone does not authorize its contents.
     """
@@ -194,6 +195,7 @@ def sandbox_environment(
             captured_manifest, provider_backend_id=client.backend_id
         )
         authorized_resume_state.manifest = _manifest(captured_manifest)
+        client.assert_resume_state_authority(authorized_resume_state, captured_options)
 
     @asynccontextmanager
     async def source() -> AsyncIterator[Environment[_ContextT]]:

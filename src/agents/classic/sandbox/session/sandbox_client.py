@@ -115,6 +115,12 @@ class BaseSandboxClient(abc.ABC, Generic[ClientOptionsT]):
         self, session: SandboxSession, options: ClientOptionsT
     ) -> None:
         """Validate current provider policy before a borrowed resource is connected."""
+        self.assert_resume_state_authority(session.state, options)
+
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: ClientOptionsT
+    ) -> None:
+        """Reject current provider restrictions that saved resource state cannot honor."""
         return None
 
     def resolve_trusted_manifest_for_resume(

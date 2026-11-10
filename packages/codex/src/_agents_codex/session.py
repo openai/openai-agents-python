@@ -6771,7 +6771,8 @@ class Session(Generic[ContextT, OutputT]):
                     if any(tool is self._native_agents for tool in selection)
                     else self._native_agents
                 ),
-                project_guidance=self._project_guidance,
+                project_guidance=self._project_guidance
+                and not any(tool is self._executor for tool in selection),
             )
             selected_refs = {tool for tool in selection if isinstance(tool, ToolRef)}
             missing_refs: list[ToolRef] = sorted(

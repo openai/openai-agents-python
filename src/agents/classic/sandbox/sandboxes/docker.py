@@ -1614,10 +1614,22 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             raise ValueError("Use the Docker client's live removal service connection")
         self._removal_service = removal_service
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: DockerSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, DockerSandboxSessionState):
+            raise TypeError("DockerSandboxClient requires Docker sandbox state")
+        if (options.network_mode == "none" and state.network_mode != "none") or set(
+            options.exposed_ports
+        ) != set(state.exposed_ports):
+            raise ValueError("Current Docker networking options require a fresh sandbox session")
+
     @redact_mount_error_data
     async def assert_borrowed_session_authority(
         self, session: SandboxSession, options: DockerSandboxClientOptions
     ) -> None:
+        if set(options.exposed_ports) != set(session.state.exposed_ports):
+            raise ValueError("Current Docker port exposure requires a fresh sandbox session")
         inner = session._inner
         if not isinstance(inner, DockerSandboxSession):
             raise TypeError("DockerSandboxClient requires a Docker sandbox session")
