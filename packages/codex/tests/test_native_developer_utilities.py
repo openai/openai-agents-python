@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from threading import Event
 
 import pytest
 
@@ -161,6 +162,43 @@ async def test_demo_loop_prints_native_tool_output_once_across_turns(monkeypatch
         assert "[tool called]" in output and "[tool completed]" in output
         assert output.count("[tool output: synthetic value]") == 1
         assert "accepted answer" in output and "follow-up answer" in output
+
+
+async def test_demo_loop_displays_acknowledged_output_before_next_response(monkeypatch, capsys):
+    visible = Event()
+    early_output = []
+    original_print = print
+
+    def observe_print(*args, **kwargs):
+        original_print(*args, **kwargs)
+        if any("[tool output: acknowledged value]" in str(value) for value in args):
+            visible.set()
+
+    @function_tool
+    def lookup() -> str:
+        """Return a synthetic value."""
+        return "acknowledged value"
+
+    def next_response(_request):
+        # Withhold the assistant response until the terminal shows tool output.
+        early_output.append(visible.wait(5))
+        return [text("accepted after output")]
+
+    inputs = iter(["lookup", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr("builtins.print", observe_print)
+    async with ScriptedResponses(
+        [tool_call("lookup", {}, call_id="acknowledged-lookup")], next_response
+    ) as peer:
+        await run_demo_loop(
+            Agent(instructions="Use lookup.", provider=peer.provider, tools=[lookup])
+        )
+        output = capsys.readouterr().out
+        assert early_output == [True], "Tool output waited for the entire turn to finish"
+        assert output.count("[tool output: acknowledged value]") == 1
+        assert output.index("[tool output: acknowledged value]") < output.index(
+            "accepted after output"
+        )
 
 
 @pytest.mark.parametrize("stream", [False, True])

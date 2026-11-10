@@ -44,6 +44,7 @@ from .response_facts import (
     RecordedResponseFactSummary as RecordedResponseFactSummary,
     _summarize_response_fact,
 )
+from .tools import ToolOutput as ToolOutput
 from .usage import TokenUsageInfo as TokenUsageInfo
 
 if TYPE_CHECKING:
@@ -240,6 +241,9 @@ class ToolFinished(_SubmissionEvent):
     """A function settled, or Core delivered an MCP end with its result status.
 
     MCP cancellation may have no end event. Status does not imply effect rollback.
+    With include_execution_details=True, output is the acknowledged post-hook
+    function callback response. It is absent for other completions and cancelled
+    delivery. The recorded conversation remains authoritative for model input.
     """
 
     call_id: str
@@ -247,6 +251,7 @@ class ToolFinished(_SubmissionEvent):
     namespace: str | None
     status: Literal["completed", "failed", "cancelled"]
     family: Literal["function", "mcp"] = "function"
+    output: ToolOutput | None = None
     type: Literal["tool_finished"] = field(default="tool_finished", init=False)
 
 
@@ -410,6 +415,10 @@ class _ObservationBuffer:
         )
         if isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
+        if isinstance(event, ToolFinished) and event.output is not None:
+            size += len(
+                json.dumps(event.output.to_native(), ensure_ascii=False, separators=(",", ":"))
+            )
         if isinstance(event, ResponseFactReceived):
             size += len(json.dumps(event.record, ensure_ascii=False, separators=(",", ":")))
         image_size = 0
@@ -558,6 +567,13 @@ class EventStream(AsyncIterator[Observation]):
                                         "type": event_type if isinstance(event_type, str) else None
                                     }
                                 ),
+                            )
+                        elif isinstance(event, ToolFinished):
+                            event = replace(
+                                event,
+                                output=deepcopy(event.output)
+                                if self._include_execution_details
+                                else None,
                             )
                         elif isinstance(event, ExecutionItemCompleted):
                             item = event.item

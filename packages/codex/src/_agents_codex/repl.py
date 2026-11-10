@@ -28,8 +28,9 @@ async def run_demo_loop(
     """Read terminal input until exit, quit, EOF, or Ctrl+C between turns.
 
     One native Session retains the conversation and selected handoff profile.
-    Streaming prints assistant deltas and tool-status notices, then recorded
-    function, MCP and command outputs after the turn settles. Agent notices show
+    Streaming prints assistant deltas, tool status and acknowledged function
+    outputs as observations arrive. Recorded MCP/command outputs and missed
+    function outputs follow after the turn settles. Agent notices show
     the admitted starting Agent and the final committed Agent when it changes;
     they do not report intermediate handoffs within a turn. Non-streaming prints
     accepted final output only. Each turn uses the supplied native RunBudget.
@@ -42,7 +43,7 @@ async def run_demo_loop(
         on_interaction=(_unsupported_interaction if on_interaction is None else on_interaction),
     ) as session:
         del context
-        displayed_outputs: set[tuple[str, str]] = set()
+        displayed_outputs: set[tuple[str, str, str]] = set()
         while True:
             try:
                 # Keep terminal input on the main thread for immediate Ctrl+C.
@@ -62,7 +63,7 @@ async def run_demo_loop(
                 turn = await session.submit(user_input, budget=budget)
                 printed_text = False
                 if stream:
-                    async with aclosing(turn.events()) as events:
+                    async with aclosing(turn.events(include_execution_details=True)) as events:
                         async for event in events:
                             if isinstance(event, OutputTextDelta):
                                 print(event.delta, end="", flush=True)
@@ -71,6 +72,23 @@ async def run_demo_loop(
                                 print("\n[tool called]", flush=True)
                             elif isinstance(event, ToolFinished):
                                 print(f"\n[tool {event.status}]", flush=True)
+                                if event.output is not None:
+                                    key = ("function_call_output", event.turn_id, event.call_id)
+                                    if key not in displayed_outputs:
+                                        parts = event.output.content_items
+                                        display: object = parts
+                                        if all(
+                                            isinstance(part, dict)
+                                            and part.get("type") == "inputText"
+                                            for part in parts
+                                        ):
+                                            display = "\n".join(
+                                                part["text"]
+                                                for part in parts
+                                                if isinstance(part, dict)
+                                            )
+                                        displayed_outputs.add(key)
+                                        print(f"\n[tool output: {display}]", flush=True)
                 result = await turn.get_result()
                 if stream:
                     async for item in session.items():
@@ -80,7 +98,13 @@ async def run_demo_loop(
                             "command_execution",
                         }:
                             continue
-                        key = (item["turn_id"], item["id"])
+                        key = (
+                            item["type"],
+                            item["turn_id"],
+                            item["call_id"]
+                            if item["type"] == "function_call_output"
+                            else item["id"],
+                        )
                         if key in displayed_outputs:
                             continue
                         output = item.get("output")

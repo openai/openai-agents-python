@@ -11704,6 +11704,7 @@ class Session(Generic[ContextT, OutputT]):
         permit: asyncio.Semaphore | None = None
         acquired = False
         status: Literal["completed", "failed", "cancelled"] = "cancelled"
+        observed_output: ToolOutput | None = None
         try:
             request = json.dumps(message)
             marker = message["_sdk_python_tool"]
@@ -12077,7 +12078,8 @@ class Session(Generic[ContextT, OutputT]):
                     del request, message, raw_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             assert output is not None
-            response: dict[str, Any] = {"request": message, "response": output.to_native()}
+            response_output = deepcopy(output.to_native())
+            response: dict[str, Any] = {"request": message, "response": response_output}
             if background:
                 response["start_response"] = False
             reply = json.dumps(response)
@@ -12088,7 +12090,10 @@ class Session(Generic[ContextT, OutputT]):
             # A retired receiver grants no delivery authority; the native owner
             # still supplies the selected terminal cause. Writer errors still raise.
             if accepted:
-                status = "completed" if output.success else "failed"
+                status = "completed" if response_output["success"] else "failed"
+                observed_output = ToolOutput(
+                    deepcopy(response_output["contentItems"]), response_output["success"]
+                )
         except BaseException as error:  # report every callback exit to its owner
             status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
             if _native_callback_cancelled(state):
@@ -12125,6 +12130,7 @@ class Session(Generic[ContextT, OutputT]):
                             name=started.name,
                             namespace=started.namespace,
                             status=status,
+                            output=observed_output if status != "cancelled" else None,
                         )
                     )
             finally:
