@@ -88,7 +88,7 @@ async def test_realtime_rechecks_source_predicate_before_native_mcp(
             assert [call["arguments"]["key"] for call in mcp.calls] == ["allowed"]
 
 
-@pytest.mark.parametrize("phase", ["before", "approval"])
+@pytest.mark.parametrize("phase", ["before", "approval", "metadata"])
 async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
     realtime_peer: RealtimePeer, phase: str
 ) -> None:
@@ -97,6 +97,12 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
     application = {"enabled": True}
     entered = asyncio.Event()
     release = asyncio.Event()
+    predicate_tools = []
+
+    def tool_enabled(context, tool):
+        assert context.agent is agent
+        predicate_tools.append(tool)
+        return context.context["enabled"]
 
     async def before(context, call):
         if phase == "before":
@@ -108,6 +114,11 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
         entered.set()
         await release.wait()
         return True
+
+    async def request_metadata(context):
+        entered.set()
+        await release.wait()
+        return {"fixture": True}
 
     async with (
         timeout(20),
@@ -125,12 +136,11 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
                     tools=["lookup"],
                     before=before,
                     approval=approval if phase == "approval" else None,
+                    request_metadata=request_metadata if phase == "metadata" else None,
                 )
             ],
             provider=provider,
-            realtime=RealtimeAgentConfig(
-                tool_enabled=lambda context, tool: context.context["enabled"]
-            ),
+            realtime=RealtimeAgentConfig(tool_enabled=tool_enabled),
         )
         async with (
             agent.session(context=application) as session,
@@ -156,6 +166,9 @@ async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
             )
             assert "selected MCP result" in result["item"]["output"]
             assert [call["arguments"]["key"] for call in mcp.calls] == ["replacement"]
+            assert all(tool == predicate_tools[0] for tool in predicate_tools)
+            if phase == "metadata":
+                assert mcp.calls[0]["_meta"]["fixture"] is True
 
 
 @pytest.mark.parametrize("with_graph", [False, True])

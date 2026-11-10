@@ -11816,11 +11816,12 @@ class Session(Generic[ContextT, OutputT]):
             if not admitted():
                 return
             if metadata:
+                ref = ToolRef(notice["callable_name"], notice["callable_namespace"])
                 context: Any = MCPMetadataContext(
                     self._context,
                     state.handle,
                     ToolCallInfo(
-                        tool=ToolRef(notice["callable_name"], notice["callable_namespace"]),
+                        tool=ref,
                         session_id=self.id,
                         turn_id=notice["turn_id"],
                         call_id=notice["call_id"] if notice.get("route") == "direct" else None,
@@ -11841,6 +11842,18 @@ class Session(Generic[ContextT, OutputT]):
                     MappingProxyType(deepcopy(notice["arguments"])),
                 )
                 value = await _call_callback(callback, admitted, context)
+                if not admitted():
+                    return
+                if (
+                    isinstance(state, _Submission)
+                    and state.realtime_tool is not None
+                    and not await self._realtime_tool_enabled(notice, self._context, ref, admitted)
+                ):
+                    # A non-object reply settles the metadata receipt as rejected.
+                    self._native._resolve_native_mcp_result(
+                        nonce, notice["turn_id"], notice["call_id"], "false"
+                    )
+                    return
                 if value is not None and not isinstance(value, Mapping):
                     raise TypeError("MCP request_metadata must return an object or None")
                 value = None if value is None else dict(value)
@@ -11952,18 +11965,25 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
-            if isinstance(state, _Submission) and state.realtime_tool is not None:
+            realtime_tool = isinstance(state, _Submission) and state.realtime_tool is not None
+
+            async def admit_source_tool() -> bool:
+                nonlocal status
                 enabled = await self._realtime_tool_enabled(
                     message, entry.context, ref, lambda: self._admit_tool(state, request)
                 )
                 if not self._admit_tool(state, request):
-                    return
-                if not enabled:
-                    denial = ToolOutput.error("Tool disabled by its source Agent")
-                    reply = json.dumps({"request": message, "response": denial.to_native()})
-                    if await self._respond_tool(state, reply):
-                        status = "failed"
-                    return
+                    return False
+                if enabled:
+                    return True
+                denial = ToolOutput.error("Tool disabled by its source Agent")
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if await self._respond_tool(state, reply):
+                    status = "failed"
+                return False
+
+            if realtime_tool and not await admit_source_tool():
+                return
             approved = None
             if managed_approval:
                 approved = self._approval_ready.pop(
@@ -12077,6 +12097,9 @@ class Session(Generic[ContextT, OutputT]):
             if parameter is not None:
                 assert context is not None
                 args = (context,)
+            # The before hook may have yielded while the source grant changed.
+            if realtime_tool and entry.before is not None and not await admit_source_tool():
+                return
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None

@@ -1898,7 +1898,8 @@ class RealtimeSession:
                 raise closed_error
         await self._cancel_work()
         if self._voice_registry_used:
-            await self._session._native._restore_realtime_agent_graph(self._generation)
+            if not self._graph_closed:
+                await self._session._native._restore_realtime_agent_graph(self._generation)
             self._forget_voice_profiles(tuple(self._voice_profile_ids))
             self._voice_target = None
             self._voice_registry_used = False

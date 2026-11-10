@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from agents import (
     Agent,
+    Allow,
     DecisionRequest,
     DecisionResponse,
     NativeProvider,
@@ -85,6 +86,81 @@ async def test_native_voice_resolves_contextual_instructions_and_tool_predicate(
                 assert effects == []
             assert agent.instructions == "Backend instructions"
             assert peer.responses.requests == []
+
+
+@pytest.mark.parametrize("handoff", [False, True])
+async def test_native_voice_rechecks_source_predicate_after_dispatch_hook(realtime_peer, handoff):
+    peer = realtime_peer
+    entered, release = asyncio.Event(), asyncio.Event()
+    application = {"enabled": True}
+    effects = []
+    armed = False
+
+    async def wait_for_policy(_):
+        if armed:
+            entered.set()
+            await release.wait()
+        return True
+
+    async def before(context):
+        await wait_for_policy(context)
+        return Allow()
+
+    @function_tool(before=before)
+    def apply_change() -> str:
+        effects.append("function")
+        return "applied"
+
+    def on_handoff(_):
+        effects.append("handoff")
+
+    target = Agent(name="Destination", instructions="Destination instructions")
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-realtime-dispatch-key",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        source = Agent(
+            name="Source",
+            instructions="Source instructions",
+            provider=provider,
+            tools=[] if handoff else [apply_change],
+            handoffs=[
+                realtime_handoff(
+                    target,
+                    name="apply_change",
+                    is_enabled=wait_for_policy,
+                    on_handoff=on_handoff,
+                )
+            ]
+            if handoff
+            else [],
+            realtime=RealtimeAgentConfig(
+                tool_enabled=lambda context, tool: context.context["enabled"]
+            ),
+        )
+        async with (
+            source.session(context=application) as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")),
+        ):
+            initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+            assert "apply_change" in {tool["name"] for tool in initial["session"]["tools"]}
+            armed = True
+            await peer.function("apply_change", {}, "revoked")
+            await entered.wait()
+            application["enabled"] = False
+            release.set()
+            await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "revoked")
+            assert effects == []
+            assert await session.get_active_agent() is source
+
+            application["enabled"] = True
+            await peer.function("apply_change", {}, "allowed")
+            await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "allowed")
+            assert effects == ["handoff" if handoff else "function"]
 
 
 @pytest.mark.parametrize("dataclass_input", [False, True])
@@ -357,6 +433,23 @@ async def test_close_cancels_voice_agent_configuration(realtime_peer, cancel_wai
                 await asyncio.gather(update, return_exceptions=True)
                 if closing is not None:
                     await asyncio.gather(closing, return_exceptions=True)
+
+
+async def test_session_close_retires_replacement_voice_agent(realtime_peer):
+    peer = realtime_peer
+    replacement = Agent(instructions="Replacement voice instructions")
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Opening backend", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        await voice.update_agent(replacement)
+        assert await voice.get_active_agent() is replacement
+        await session.aclose()
+        await voice.aclose()
 
 
 @pytest.mark.parametrize("close_voice", [False, True])
