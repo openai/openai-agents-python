@@ -141,13 +141,18 @@ def codex_tool(
     persist_session: bool = False,
     thread_id: str | None = None,
     on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None = None,
+    resolve_image: Callable[[str], str | None | Awaitable[str | None]] | None = None,
 ) -> _PythonTool[Any, object]:
     """Declare external CLI delegation without starting a subprocess.
 
     Prompts: a string or an ordered list of text/local_image inputs, for example
     [{"type": "text", "text": "Inspect this image"},
      {"type": "local_image", "path": "/workspace/diagram.png"}].
-    Local image paths: forwarded to the application-selected CLI.
+    Local images require resolve_image. Its input is the model's image reference;
+    its returned path authorizes a CLI read. None denies the image. The application
+    owns safe asset resolution or staging, including filesystem race protection.
+    Working directories and additional directories do not grant image-read authority.
+    Structured text retains its original whitespace.
 
     The application authorizes CLI credentials, executable and workspace through
     CodexOptions and ThreadOptions. Native Environment grants do not constrain
@@ -178,6 +183,8 @@ def codex_tool(
         raise TypeError("persist_session must be a bool")
     if on_event is not None and not callable(on_event):
         raise TypeError("on_event must be callable or None")
+    if resolve_image is not None and not callable(resolve_image):
+        raise TypeError("resolve_image must be callable or None")
     initial_thread_id = _thread_id(thread_id)
     client = codex
     captured_codex_options = deepcopy(coerce_codex_options(codex_options))
@@ -212,20 +219,6 @@ def codex_tool(
         nonlocal client
         if not prompt or (isinstance(prompt, str) and not prompt.strip()):
             raise ValueError("prompt must not be empty")
-        if isinstance(prompt, list):
-            normalized: list[UserInput] = []
-            for item in prompt:
-                if item["type"] == "text":
-                    text = item["text"].strip()
-                    if not text:
-                        raise ValueError("text inputs must not be empty")
-                    normalized.append({"type": "text", "text": text})
-                else:
-                    path = item["path"].strip()
-                    if not path:
-                        raise ValueError("local image paths must not be empty")
-                    normalized.append({"type": "local_image", "path": path})
-            prompt = normalized
         check()
         if (
             thread_id is not None
@@ -233,6 +226,34 @@ def codex_tool(
             and thread_id not in state.issued_ids
         ):
             raise ValueError("thread_id was not issued to this native Session")
+        if isinstance(prompt, list):
+            normalized: list[UserInput] = []
+            for item in prompt:
+                if item["type"] == "text":
+                    text = item["text"]
+                    if not text.strip():
+                        raise ValueError("text inputs must not be empty")
+                    normalized.append({"type": "text", "text": text})
+                else:
+                    path = item["path"]
+                    if not path.strip():
+                        raise ValueError("local image paths must not be empty")
+                    if resolve_image is None:
+                        raise ValueError(
+                            "Local images require an application resolve_image callback"
+                        )
+                    check()
+                    resolved = resolve_image(path)
+                    if inspect.isawaitable(resolved):
+                        resolved = await resolved
+                    check()
+                    if resolved is None:
+                        raise ValueError("Local image was not authorized by the application")
+                    if not isinstance(resolved, str) or not resolved.strip() or "\0" in resolved:
+                        raise ValueError("resolve_image must return a nonempty path string or None")
+                    normalized.append({"type": "local_image", "path": resolved})
+            prompt = normalized
+        check()
         if client is None:
             client = Codex(captured_codex_options)
         thread = (

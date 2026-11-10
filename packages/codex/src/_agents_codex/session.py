@@ -3153,6 +3153,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise TypeError("environment must be an Environment or async context manager")
             lease = _EnvironmentLease(environment)
             environment = await lease.acquire()
+        runtime: dict[str, Any] = {}
+        native_environment: dict[str, Any] | None = None
+        session = None
         try:
             executor = environment
             if (lease is not None or executor is not None) and not isinstance(
@@ -3245,7 +3248,7 @@ class Session(Generic[ContextT, OutputT]):
             if executor is not None:
                 executor._check_context(context)
             home: TemporaryDirectory[str] | None = None
-            runtime: dict[str, Any] = {
+            runtime = {
                 "strict_config": True,
                 "loader": {"ignore_user_config": True, "ignore_project_config": True},
                 "base_instructions": (
@@ -3272,7 +3275,7 @@ class Session(Generic[ContextT, OutputT]):
                 }
             _configure_storage_runtime(runtime, storage, resume, goals)
             if executor is not None:
-                native_environment = executor._to_native()
+                native_environment = cast(dict[str, Any], executor._to_native())
                 native_environment["local_mcp"] = has_host_mcp
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
@@ -3305,7 +3308,6 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
-                session = None
                 engine = None
                 thread = None
                 provider_id = (
@@ -3906,6 +3908,13 @@ class Session(Generic[ContextT, OutputT]):
                 raise
 
         except BaseException as error:
+            # Initialization closures and options share these SDK-owned dictionaries.
+            # Remove secrets in place so every traceback reference loses the payload,
+            # while leaving the application's Environment and exception chain intact.
+            if native_environment is not None:
+                native_environment.clear()
+            runtime.pop("environment", None)
+            environment = executor = None
             if lease is not None:
                 await _close_after_error(error, lambda: opening.fail_environment(lease))
                 if opening.lease is not None and not lease._retired.done():
@@ -3926,6 +3935,10 @@ class Session(Generic[ContextT, OutputT]):
                         raise
                 raise
             finally:
+                # A retired unpublished Session no longer needs the caller's
+                # Environment. Pending native cleanup must retain its policy owner.
+                if opening.lease is None and session is not None:
+                    session._executor = None
                 # Both the original error and a manager-selected replacement
                 # must retain the same existing owner for unfinished cleanup.
                 if (

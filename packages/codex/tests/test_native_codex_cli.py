@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -77,8 +78,20 @@ def cli(tmp_path: Path) -> Path:
 
 async def test_native_cli_forwards_structured_text_and_local_images(tmp_path: Path, responses):
     executable = cli(tmp_path)
-    image = str(tmp_path / "diagram.png")
-    declaration = codex_tool(codex_options={"codex_path_override": str(executable)})
+    image = "  authorized diagram.png  "
+    (tmp_path / image).write_bytes(b"synthetic image")
+    references = []
+
+    async def resolve_image(reference):
+        references.append(reference)
+        await asyncio.sleep(0)
+        return image
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(executable)},
+        thread_options={"working_directory": str(tmp_path)},
+        resolve_image=resolve_image,
+    )
     responses.replies.extend(
         [
             [
@@ -86,9 +99,9 @@ async def test_native_cli_forwards_structured_text_and_local_images(tmp_path: Pa
                     "codex",
                     {
                         "prompt": [
-                            {"type": "text", "text": "First"},
-                            {"type": "local_image", "path": image},
-                            {"type": "text", "text": "Second"},
+                            {"type": "text", "text": "  First\n"},
+                            {"type": "local_image", "path": " asset:diagram "},
+                            {"type": "text", "text": "\nSecond  "},
                         ]
                     },
                     "structured-cli",
@@ -105,7 +118,119 @@ async def test_native_cli_forwards_structured_text_and_local_images(tmp_path: Pa
         ).final_output == "done"
     arguments = json.loads((tmp_path / "arguments.jsonl").read_text())
     assert arguments[arguments.index("--image") + 1] == image
-    assert (tmp_path / "stdin.txt").read_text() == "First\n\nSecond"
+    assert references == [" asset:diagram "]
+    assert (tmp_path / "stdin.txt").read_text() == "  First\n\n\n\nSecond  "
+
+
+@pytest.mark.parametrize("structured", [False, True])
+async def test_native_cli_preserves_exact_text_whitespace(tmp_path, responses, structured):
+    declaration = codex_tool(codex_options={"codex_path_override": str(cli(tmp_path))})
+    binding = declaration._bind(None, None, declaration)
+    original = "  indented\n\ntext with trailing space  \n"
+    prompt = [{"type": "text", "text": original}] if structured else original
+    await _run_in_native_session(
+        responses, lambda context: binding.callback(context, prompt=prompt, thread_id=None)
+    )
+    assert (tmp_path / "stdin.txt").read_text() == original
+
+
+@pytest.mark.parametrize("denial", ["missing", "denied"])
+@pytest.mark.parametrize("initial_thread", [None, "trusted-existing"])
+async def test_native_cli_rejects_unauthorized_images_before_cli(
+    tmp_path, responses, denial, initial_thread
+):
+    kwargs = {"resolve_image": lambda _: None} if denial == "denied" else {}
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(cli(tmp_path))},
+        thread_id=initial_thread,
+        **kwargs,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        with pytest.raises(ValueError, match="resolve_image|not authorized"):
+            await binding.callback(
+                context,
+                prompt=[{"type": "local_image", "path": "/private/ungranted.png"}],
+                thread_id=None,
+            )
+
+    await _run_in_native_session(responses, invoke)
+    assert not (tmp_path / "arguments.jsonl").exists()
+
+
+async def test_native_cli_rechecks_cancellation_after_image_resolution(tmp_path, responses):
+    signal = asyncio.Event()
+
+    async def resolve_image(reference):
+        signal.set()
+        await asyncio.sleep(0)
+        return str(tmp_path / "authorized.png")
+
+    declaration = codex_tool(
+        codex_options={"codex_path_override": str(cli(tmp_path))},
+        turn_options=TurnOptions(signal=signal),
+        resolve_image=resolve_image,
+    )
+    binding = declaration._bind(None, None, declaration)
+
+    async def invoke(context):
+        with pytest.raises(RuntimeError, match="cancelled before execution"):
+            await binding.callback(
+                context, prompt=[{"type": "local_image", "path": "asset"}], thread_id=None
+            )
+
+    await _run_in_native_session(responses, invoke)
+    assert not (tmp_path / "arguments.jsonl").exists()
+
+
+@pytest.mark.parametrize("persist", [False, True])
+async def test_native_cli_timeout_revokes_image_resolution_even_when_cancel_is_suppressed(
+    tmp_path, responses, persist
+):
+    from tests._asyncio import timeout
+
+    cancelled = False
+
+    async def resolve_image(reference):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            task = asyncio.current_task()
+            assert task is not None
+            uncancel = getattr(task, "uncancel", None)
+            if uncancel is not None:
+                uncancel()
+        return str(tmp_path / "authorized.png")
+
+    declaration = replace(
+        codex_tool(
+            codex_options={"codex_path_override": str(cli(tmp_path))},
+            resolve_image=resolve_image,
+            persist_session=persist,
+        ),
+        callback_timeout=0.05,
+        timeout_behavior="error_as_result",
+    )
+    responses.respond(
+        function_call(
+            "codex", {"prompt": [{"type": "local_image", "path": "asset"}]}, "image-timeout"
+        )
+    )
+    responses.respond(assistant_output("timed out"))
+    async with (
+        timeout(10),
+        Agent(
+            instructions="Use codex.", provider=provider(responses), tools=[declaration]
+        ).session() as session,
+    ):
+        assert (
+            await (await session.submit("Inspect image")).get_result()
+        ).final_output == "timed out"
+    assert cancelled
+    assert not (tmp_path / "arguments.jsonl").exists()
 
 
 @pytest.mark.parametrize("stream_limit", [65536, 262144])
@@ -137,8 +262,10 @@ async def test_native_cli_preserves_process_environment_schema_and_buffer_contro
     )
     schema["properties"]["value"]["type"] = "number"
     binding = declaration._bind(None, None, declaration)
+
     def call(context):
         return binding.callback(context, prompt="Run", thread_id=None)
+
     if stream_limit == 65536:
         with pytest.raises(ValueError, match="limit"):
             await _run_in_native_session(responses, call)
