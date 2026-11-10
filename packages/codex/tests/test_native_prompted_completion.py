@@ -3,8 +3,10 @@
 import asyncio
 import json
 from dataclasses import replace
+from typing import Annotated
 
 import pytest
+from pydantic import AfterValidator
 
 from agents import (
     Agent,
@@ -18,7 +20,7 @@ from agents import (
 from agents.observation import TurnFinished
 from agents.usage import TokenUsage
 from tests._asyncio import timeout
-from tests.native_fixtures import assistant_output, responses as responses
+from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
 from tests.test_native_prompted_repair import Report
 
@@ -410,3 +412,41 @@ async def test_cancel_repaired_decide_joins_cleanup_without_charging_model_usage
     assert completed_callbacks == ['{"label":"x"}']
     assert requests == ['{"label":"x"}', '{"label":"corrected"}']
     assert len(responses.requests) == 3
+
+
+@pytest.mark.parametrize("activation", ["handoff", "idle"])
+async def test_profile_repair_borrows_captured_opening_provider(responses, activation):
+    def reject_source_output(value):
+        raise AssertionError("A cannot validate B output")
+
+    target = Agent(
+        name="B",
+        instructions="Return a report.",
+        output_type=PromptedOutput(Report, 1),
+    )
+    opening_provider = provider(responses)
+    source = Agent(
+        name="A",
+        instructions="Route to B.",
+        provider=opening_provider,
+        handoffs=[target],
+        output_type=PromptedOutput(Annotated[Report, AfterValidator(reject_source_output)], 1),
+    )
+    if activation == "handoff":
+        responses.respond(function_call("transfer_to_b", {}, "handoff-b"))
+    responses.respond(assistant_output('{"label":"x"}'))
+    responses.respond(assistant_output('{"label":"corrected"}'))
+    async with timeout(25), opening_provider, source.session() as session:
+        if activation == "idle":
+            await session.update(agent=target)
+        result = await (await session.submit("Finish with B")).get_result()
+        assert result.final_output == Report(label="corrected")
+        assert await session.get_active_agent() is target
+        assert len(result.repair_attempts) == 1
+        assert result.repair_attempts[0]["usage"]["total_tokens"] == 14
+        assert result.thread_usage is not None
+        assert result.thread_usage.total_token_usage.total_tokens == (
+            28 if activation == "handoff" else 14
+        )
+        assert session._repair_session is None
+    assert len(responses.requests) == (3 if activation == "handoff" else 2)

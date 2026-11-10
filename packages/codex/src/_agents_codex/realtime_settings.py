@@ -31,6 +31,7 @@ class NativeRealtimeServerVad(TypedDict, total=False):
     prefix_padding_ms: int
     silence_duration_ms: int
     idle_timeout_ms: int
+    model_version: str
 
 
 class NativeRealtimeSemanticVad(TypedDict, total=False):
@@ -38,6 +39,7 @@ class NativeRealtimeSemanticVad(TypedDict, total=False):
     create_response: bool
     interrupt_response: bool
     eagerness: Literal["auto", "low", "medium", "high"]
+    model_version: str
 
 
 class NativeRealtimeCustomVoice(TypedDict):
@@ -148,6 +150,14 @@ class NativeRealtimeSessionUpdate(NativeRealtimeSettings, total=False):
     model: str
     instructions: str
     output_modality: Literal["audio", "text"]
+
+
+class NativeRealtimeResponseOptions(TypedDict, total=False):
+    """Provider overrides for one response within the accepted session."""
+
+    instructions: str
+    output_modality: Literal["audio", "text"]
+    max_output_tokens: int | Literal["inf"]
 
 
 def serialize_realtime_settings(settings: NativeRealtimeSettings) -> dict[str, Any]:

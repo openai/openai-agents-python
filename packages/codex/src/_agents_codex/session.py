@@ -8457,6 +8457,8 @@ class Session(Generic[ContextT, OutputT]):
             raise asyncio.CancelledError()
         provider = source_agent.provider
         if provider is None:
+            provider = self._opening_agent.provider
+        if provider is None:
             provider = self._owned_provider
         assert provider is not None
         assert self._model_api_key is not None or self._codex_login_binding is not None

@@ -55,6 +55,7 @@ from .realtime_settings import (
     NativeRealtimePromptImage as NativeRealtimePromptImage,
     NativeRealtimePromptText as NativeRealtimePromptText,
     NativeRealtimeReasoning as NativeRealtimeReasoning,
+    NativeRealtimeResponseOptions as NativeRealtimeResponseOptions,
     NativeRealtimeSemanticVad as NativeRealtimeSemanticVad,
     NativeRealtimeServerVad as NativeRealtimeServerVad,
     NativeRealtimeSessionUpdate as NativeRealtimeSessionUpdate,
@@ -127,6 +128,7 @@ class RealtimeConfig:
     # Resolve once per connection; omit to use the Session provider's credentials.
     api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
+    output_modality: Literal["audio", "text"] = "audio"
 
 
 async def _prepare_realtime_params(
@@ -155,7 +157,7 @@ async def _prepare_realtime_params(
                 "backend_reasoning_status": False,
                 "codex_response_handoff_channel_prefixes": None,
                 "model": config.model,
-                "output_modality": "audio",
+                "output_modality": config.output_modality,
                 "include_startup_context": False,
                 "initial_items": [],
                 "realtime_start_instructions": None,
@@ -964,15 +966,29 @@ class RealtimeSession:
                 self._check_live()
                 await self._call("input", content=content, trigger_response=trigger_response)
 
-    async def request_response(self) -> None:
-        """Request a response from accepted input without appending or committing it."""
+    async def request_response(self, response: NativeRealtimeResponseOptions | None = None) -> None:
+        """Request a response from accepted input, with optional one-response overrides.
+
+        When requests coalesce behind an active response, the latest explicit
+        request supplies the overrides. Instructions share the 1 MiB input limit.
+        """
         self._check_live()
+        captured = dict(response) if response is not None else None
+        instructions = captured.get("instructions") if captured is not None else None
+        size = (
+            _user_input_bytes(instructions, _USER_INPUT_BYTES_LIMIT)
+            if isinstance(instructions, str)
+            else 0
+        )
         if self._pending_audio_commits:
             self._check_adapter_operation("enqueue input behind a pending audio commit")
-        with self._input_admission():
+        with self._input_admission(size):
             async with self._input_lock:
                 self._check_live()
-                await self._call("response")
+                if captured is None:
+                    await self._call("response")
+                else:
+                    await self._call("response", response=captured)
 
     async def delete_conversation_item(self, provider_item_id: str) -> None:
         """Delete one eligible provider-observed item and retain its history audit."""
