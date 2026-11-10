@@ -17,6 +17,8 @@ use codex_core_api::{
     EnvironmentNetworkPolicy, NetworkDomainPermission, NetworkDomainPermissionEntry,
     NetworkDomainPermissions, NetworkProxySpec, SqliteConfig,
 };
+#[cfg(target_os = "linux")]
+use codex_exec_server::ExecOutputStream;
 use codex_exec_server::{
     Environment, EnvironmentInfo, ExecParams, ExecProcessEvent, ExecServerError,
     ExecServerRuntimeOptions, FileSystemSandboxContext, GetMetadataOptions, LOCAL_ENVIRONMENT_ID,
@@ -48,6 +50,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
+#[cfg(target_os = "linux")]
+use crate::local_sandbox::APPARMOR_USERNS_PROBE_ARG;
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
 use crate::storage::{LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY};
 
@@ -1589,23 +1593,91 @@ async fn probe_local_sandbox(
     } else {
         SandboxType::LinuxSeccomp
     };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut events = process.process.subscribe_events();
-    let verified = tokio::time::timeout(Duration::from_secs(5), async {
+    #[cfg(target_os = "linux")]
+    let mut stderr = Vec::new();
+    let verified = tokio::time::timeout_at(deadline, async {
+        #[cfg(target_os = "linux")]
+        let mut failed = false;
         while let Ok(event) = events.recv().await {
             match event {
+                #[cfg(target_os = "linux")]
+                ExecProcessEvent::Output(chunk) if chunk.stream == ExecOutputStream::Stderr => {
+                    let remaining = 4096 - stderr.len();
+                    let bytes = chunk.chunk.0.as_slice();
+                    stderr.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                }
                 ExecProcessEvent::Output(_) => {}
-                ExecProcessEvent::Exited { exit_code, .. } => return exit_code == 0,
-                _ => return false,
+                ExecProcessEvent::Exited { exit_code: 0, .. } => return Some(true),
+                #[cfg(target_os = "linux")]
+                ExecProcessEvent::Exited { .. } => failed = true,
+                #[cfg(target_os = "linux")]
+                ExecProcessEvent::Closed { .. } if failed => return Some(false),
+                _ => return None,
             }
         }
-        false
+        None
     })
     .await;
-    if process.sandbox_type != Some(expected_sandbox) || !matches!(verified, Ok(true)) {
-        let _ = process.process.terminate().await;
-        anyhow::bail!("local executor could not establish the platform sandbox");
+    if process.sandbox_type == Some(expected_sandbox) && matches!(verified, Ok(Some(true))) {
+        return Ok(());
     }
-    Ok(())
+    let _ = process.process.terminate().await;
+    #[cfg(target_os = "linux")]
+    if process.sandbox_type == Some(expected_sandbox)
+        && matches!(verified, Ok(Some(false)))
+        && bubblewrap_namespace_capability_denied(&stderr)
+        && apparmor_restricts_local_helper(environment, deadline).await
+    {
+        anyhow::bail!(
+            "local executor could not establish the platform sandbox: bubblewrap could not set up \
+             its user namespace, and AppArmor is restricting user namespace capabilities for the \
+             installed codex-linux-sandbox helper. Ask an administrator to check the kernel audit \
+             record for the failed bubblewrap invocation. If it shows profile=\"unprivileged_userns\" \
+             and operation=\"capable\", an administrator can load a userns profile for the installed \
+             helper. See \
+             https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/execution.md#allow-the-linux-sandbox-helper-to-use-user-namespaces-on-ubuntu-2404"
+        );
+    }
+    anyhow::bail!("local executor could not establish the platform sandbox");
+}
+
+#[cfg(target_os = "linux")]
+fn bubblewrap_namespace_capability_denied(stderr: &[u8]) -> bool {
+    // A pathname in another error can contain line breaks. Match the whole capture.
+    matches!(
+        stderr,
+        b"bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n"
+            | b"bwrap: loopback: Failed RTM_NEWLINK: Operation not permitted\n"
+            | b"bwrap: setting up uid map: Permission denied\n"
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn apparmor_restricts_local_helper(
+    environment: &Environment,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(helper) = environment
+        .local_runtime_paths()
+        .and_then(|paths| paths.codex_linux_sandbox_exe.as_ref())
+    else {
+        return false;
+    };
+    let mut command = tokio::process::Command::new(helper.as_path());
+    command
+        .arg(APPARMOR_USERNS_PROBE_ARG)
+        .current_dir("/")
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    matches!(
+        tokio::time::timeout_at(deadline, command.status()).await,
+        Ok(Ok(status)) if status.success()
+    )
 }
 
 fn remote_startup_error(error: ExecServerError) -> anyhow::Error {
@@ -1870,6 +1942,29 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_sandbox_probe_recognizes_only_complete_namespace_capability_errors() {
+        use super::bubblewrap_namespace_capability_denied;
+
+        for stderr in [
+            b"bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n".as_slice(),
+            b"bwrap: loopback: Failed RTM_NEWLINK: Operation not permitted\n",
+            b"bwrap: setting up uid map: Permission denied\n",
+        ] {
+            assert!(bubblewrap_namespace_capability_denied(stderr));
+        }
+
+        for stderr in [
+            b"bwrap: Creating new namespace failed: Operation not permitted\n".as_slice(),
+            b"bwrap: Can't bind mount /fixture: Permission denied\n",
+            b"bwrap: setting up uid map: Permission denied",
+            b"bwrap: Can't bind mount /fixture\nbwrap: setting up uid map: Permission denied\n",
+        ] {
+            assert!(!bubblewrap_namespace_capability_denied(stderr));
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

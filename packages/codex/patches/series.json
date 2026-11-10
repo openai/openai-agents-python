@@ -365,9 +365,13 @@
       "sha256": "4675d414b2e5ff22f463581e1e72ec6b1b44fca1bcf226d7eaf3fb18559f7406"
     },
     {
+      "path": "sdk-realtime-response-context-and-history.patch",
+      "sha256": "c63b869586bce016995d99f7f4d64328833e850ade390580902aa0432bbef4bf"
+    },
+    {
       "path": "sdk-bwrap-search-path.patch",
       "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
     }
   ],
-  "result_tree": "4067cb8b72483cd4a9fd3b5b183e5ea1c88780c6"
+  "result_tree": "671dbfbf15681c2731239272816c68d2128d095e"
 }
