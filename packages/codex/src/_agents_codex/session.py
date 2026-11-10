@@ -7942,6 +7942,9 @@ class Session(Generic[ContextT, OutputT]):
         # The binding publishes only after validation and its native idle check.
         # Keep Python definitions unchanged until that exact generation is accepted.
         self._catalog = candidate
+        self._profile_generation_high_water = max(
+            self._profile_generation_high_water, candidate.generation
+        )
         profile_id = self._profile_current[0] if self._profile_current is not None else None
         self._profile_catalogs[(profile_id, candidate.generation)] = candidate
         # An admitted opening leaf can be absent from a narrowed current descriptor.

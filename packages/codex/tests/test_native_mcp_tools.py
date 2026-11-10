@@ -203,13 +203,14 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
         ctx.context.calls.append(ctx.call_id)
         return "python-receipt:" + key
 
-    responses.respond(function_call("mcp__docsfind_record", {"key": "43"}, "python-call"))
-    responses.respond(mcp_call("find_record", "mcp__docs", "native-call"))
-    responses.respond(mcp_call("__", "mcp__docs", "unicode-call"))
-    responses.respond(mcp_call("excluded", "mcp__docs", "excluded-call"))
-    responses.respond(assistant_output("complete"))
     async with timeout(30), peer.serve() as url:
         descriptor = HttpMCP(name="docs", url=url, tools=["find-record", "查找"])
+        native_ref = HttpMCP(name="docs", url=url, tools=list(peer.names)).tool("find-record")
+        responses.respond(function_call("mcp__docsfind_record", {"key": "43"}, "python-call"))
+        responses.respond(mcp_call(native_ref.name, native_ref.namespace or "", "native-call"))
+        responses.respond(mcp_call("__", "mcp__docs", "unicode-call"))
+        responses.respond(mcp_call("excluded", "mcp__docs", "excluded-call"))
+        responses.respond(assistant_output("complete"))
         agent = Agent(
             instructions="Use selected tools.",
             tools=[descriptor, local],
@@ -235,10 +236,10 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
             declared = declarations(responses.requests[0])
             assert set(declared) == {
                 ("functions", "mcp__docsfind_record"),
-                ("mcp__docs", "find_record"),
+                ("mcp__docs", native_ref.name),
                 ("mcp__docs", "__"),
             }, json.dumps(responses.requests[0])
-            assert declared["mcp__docs", "find_record"]["parameters"]["properties"] == {
+            assert declared["mcp__docs", native_ref.name]["parameters"]["properties"] == {
                 "key": {"type": "string"}
             }
             items = [item async for item in session.items()]
@@ -247,7 +248,7 @@ async def test_native_mixed_wire_identity_schema_history_and_python_slots(
                 "mcp__docsfind_record",
                 "functions.mcp__docsfind_record",
             }
-            assert names["native-call"] == "mcp__docs.find_record"
+            assert names["native-call"] == f"mcp__docs.{native_ref.name}"
             outputs = {
                 i["call_id"]: i["output"] for i in items if i["type"] == "function_call_output"
             }
@@ -494,7 +495,7 @@ async def test_native_call_cancellation_and_timeout_keep_core_as_owner(
                     await session.save_state()
                 if ending == "timeout":
                     assert (await (handle).get_result()).final_output == "after timeout"
-                    assert "timed out" in str(responses.requests[-1]["input"]).lower()
+                    assert "MCP tool invocation failed" in str(responses.requests[-1]["input"])
                 else:
                     await (handle.cancel() if ending == "cancel" else session._aclose())
                     with pytest.raises(TurnStoppedError):
@@ -596,12 +597,10 @@ async def test_whole_initial_mcp_ceiling_rejects_collisions_before_io(
         {"name": "bad space"},
         {"name": ""},
         {"tools": "read"},
-        {"tools": ["find-record", "find_record"]},
-        {"tools": ["查找", "__"]},
         {"tools": ["read", "read"]},
         {"tools": ["\ud800"]},
         {"tools": [""]},
-        {"tools": ["x" * 122]},
+        {"tools": ["\x00"]},
         {"url": "file:///tmp/mcp"},
         {"url": "https://secret@example.invalid/mcp"},
         {"url": "https://example.invalid/mcp#fragment"},
@@ -965,3 +964,15 @@ async def test_partial_mcp_graph_policy_survives_accepted_update(
             with pytest.raises(CapabilityError):
                 await denied.get_result()
             assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("tools", [["find-record", "find_record"], ["查找", "__"], ["x" * 122]])
+def test_mcp_declarations_project_colliding_unicode_and_long_raw_names(tools: list[str]) -> None:
+    descriptor = HttpMCP(name="docs", url="https://example.invalid/mcp", tools=tools)
+    refs = [descriptor.tool(raw) for raw in tools]
+    assert len({(ref.namespace, ref.name) for ref in refs}) == len(tools)
+    for ref in refs:
+        assert ref.namespace == "mcp__docs"
+        assert ref.name.isascii()
+        assert all(character.isalnum() or character == "_" for character in ref.name)
+        assert len((ref.namespace + "::" + ref.name).encode("ascii")) <= 128

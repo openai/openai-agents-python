@@ -189,11 +189,15 @@ async def test_cancellation_before_policy_starts_returns_native_notice(
     called: list[str] = []
     add_callback = _Submission.add_callback
 
-    def cancel_at_dispatch(state: _Submission, task: asyncio.Task[None]) -> None:
-        add_callback(state, task)
-        if not cancelled:
-            # The only callback is the MCP policy. Stop it before its first poll,
-            # at the same boundary used by submission failure cleanup.
+    def cancel_at_dispatch(
+        state: _Submission, task: asyncio.Task[None], *args: Any, **kwargs: Any
+    ) -> None:
+        add_callback(state, task, *args, **kwargs)
+        receipt = args[0] if args else kwargs.get("receipt")
+        if receipt is None and not cancelled:
+            # Native step selection owns a callback receipt. Wait for the MCP
+            # result policy, then stop it before its first poll at the same
+            # boundary used by submission failure cleanup.
             cancelled.append(task)
             task.cancel()
             state.failure.set_result(NativeError("controlled MCP dispatch cancellation"))
