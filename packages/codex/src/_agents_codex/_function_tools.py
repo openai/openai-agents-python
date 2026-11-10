@@ -52,6 +52,7 @@ from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
 from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
+from .realtime_usage import RealtimeUsage as RealtimeUsage
 from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
@@ -124,6 +125,8 @@ class ToolContext(Generic[ContextT_co]):
     effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
     call: ToolCallInfo = field(kw_only=True)
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
+    # Detached speech usage at callback creation; application context stays caller-owned.
+    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
 
     @overload
     async def decide(
