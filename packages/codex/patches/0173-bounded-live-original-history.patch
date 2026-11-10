@@ -43,10 +43,10 @@ index 7e4cd19c696282b05b5eecd31527b2b28bccf0ba..5d5ba4636d4ae653e207a5386ecc3824
              replacement_history: Some(history.annotated_items().to_vec()),
              guardian_history: history.guardian_history_checkpoint(),
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a307bbc24 100644
+index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638e7bfd363 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -273,21 +273,73 @@ impl Session {
+@@ -273,21 +273,87 @@ impl Session {
      pub(crate) async fn sdk_history_snapshot(
          &self,
          limit: Option<usize>,
@@ -57,10 +57,8 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
 +            return Ok(snapshot);
 +        }
 +        Ok(self.sdk_load_original_history().await?.snapshot(limit))
-     }
- 
--    /// Return only previously admitted projections within an original-value prefix.
--    pub(crate) async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
++    }
++
 +    /// Explicit history operations borrow a temporary catalog from the existing canonical store.
 +    pub(crate) async fn sdk_load_original_history(
 +        &self,
@@ -68,16 +66,20 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
 +        use codex_protocol::error::CodexErr;
 +        let unavailable =
 +            || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
-+        let (total, fallback_policy) = {
++        let (token, total, fallback_policy) = {
 +            let state = self.state.lock().await;
 +            (
++                (
++                    state.sdk_originals.revision().map(str::to_owned),
++                    state.sdk_originals.read_token().1,
++                ),
 +                state.sdk_originals.len(),
 +                state.sdk_originals_replay_policy.unwrap_or(
 +                    codex_utils_output_truncation::TruncationPolicy::Bytes(usize::MAX),
 +                ),
 +            )
 +        };
-+        if total == 0 {
++        if total == Some(0) {
 +            return Ok(Default::default());
 +        }
 +        let live = self.live_thread().ok_or_else(unavailable)?;
@@ -99,17 +101,29 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
 +                history.annotated_items().to_vec()
 +            },
 +        );
-         let state = self.state.lock().await;
--        let originals = &state.sdk_originals;
-+        if originals.revision() != state.sdk_originals.revision()
-+            || originals.items.len() != state.sdk_originals.len()
++        let mut state = self.state.lock().await;
++        let current_token = (
++            state.sdk_originals.revision().map(str::to_owned),
++            state.sdk_originals.read_token().1,
++        );
++        if current_token != token
++            || total.is_some_and(|count| originals.items.len() != count)
++            || token
++                .0
++                .as_ref()
++                .is_some_and(|revision| originals.revision() != revision)
 +        {
 +            return Err(unavailable());
 +        }
++        state.sdk_originals =
++            codex_history::sdk_originals::SdkOriginalHistoryCache::from(&originals);
 +        Ok(originals)
-+    }
-+
-+    /// Return only previously admitted projections within an original-value prefix.
+     }
+ 
+     /// Return only previously admitted projections within an original-value prefix.
+-    pub(crate) async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
+-        let state = self.state.lock().await;
+-        let originals = &state.sdk_originals;
 +    pub(crate) async fn sdk_history_projection(
 +        &self,
 +        keep: Option<usize>,
@@ -127,26 +141,31 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
      }
  
      /// The SDK owns exclusive native ingress and the mutation permit throughout.
-@@ -305,14 +357,24 @@ impl Session {
+@@ -305,14 +371,28 @@ impl Session {
          if active.is_some() {
              return Err(invalid("history transaction requires an idle thread"));
          }
 +        {
 +            let state = self.state.lock().await;
-+            if state.sdk_originals.revision() != expected_revision {
++            if state
++                .sdk_originals
++                .revision()
++                .is_some_and(|revision| revision != expected_revision)
++            {
 +                return Err(invalid("canonical history revision conflict"));
 +            }
-+            if keep > state.sdk_originals.len() {
++            if state.sdk_originals.len().is_some_and(|total| keep > total) {
 +                return Err(invalid("history keep exceeds snapshot length"));
 +            }
 +        }
 +        let current = self.sdk_load_original_history().await?;
          let mut state = self.state.lock().await;
-         if state.sdk_originals.revision() != expected_revision {
+-        if state.sdk_originals.revision() != expected_revision {
++        if state.sdk_originals.revision() != Some(expected_revision) {
              return Err(invalid("canonical history revision conflict"));
          }
 -        if keep > state.sdk_originals.items.len() {
-+        if keep > state.sdk_originals.len() {
++        if keep > current.items.len() {
              return Err(invalid("history keep exceeds snapshot length"));
          }
 -        let mut originals = state.sdk_originals.prefix(keep);
@@ -154,7 +173,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
          for original in appended {
              let projection = input_projection(&original)
                  .map_err(|_| invalid("Invalid canonical history item"))?
-@@ -325,8 +387,7 @@ impl Session {
+@@ -325,8 +405,7 @@ impl Session {
                  projection,
              });
          }
@@ -164,7 +183,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
              .retained_projection(state.history.annotated_items(), keep)
              .map_err(invalid)?;
          envelopes.extend(
-@@ -378,7 +439,8 @@ impl Session {
+@@ -378,7 +457,8 @@ impl Session {
              .await
              .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
          state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
@@ -175,7 +194,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..713ba0e040c61b86ab3578cedb1db41a
      }
  }
 diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
-index d83e4311808ccf2f9e92d5395d5477f746b8b580..9e35b615df7cd7a85e753a0942920dedf132872e 100644
+index d83e4311808ccf2f9e92d5395d5477f746b8b580..f2e034a0153ecb7e30574a5ed7377ee6043716a3 100644
 --- a/codex-rs/core/src/session/inject_tests.rs
 +++ b/codex-rs/core/src/session/inject_tests.rs
 @@ -65,7 +65,11 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
@@ -191,11 +210,10 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..9e35b615df7cd7a85e753a0942920ded
      let full_output = "original native output ".repeat(2000);
      let values = vec![
          json!({"type":"message","id":"user-one","role":"user","content":[{"type":"input_text","text":"first"}]}),
-@@ -85,7 +89,26 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
-         let mut state = session.state.lock().await;
-         state.record_annotated_items(&mut rows, TruncationPolicy::Tokens(64));
-     }
--    let (revision, total, originals) = session.sdk_history_snapshot(None).await;
+@@ -81,11 +85,30 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+                 .into()
+         })
+         .collect();
 +    for row in &mut rows {
 +        if matches!(
 +            row.item,
@@ -206,6 +224,11 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..9e35b615df7cd7a85e753a0942920ded
 +                .history_truncation_token_limit = Some(64);
 +        }
 +    }
+     {
+         let mut state = session.state.lock().await;
+         state.record_annotated_items(&mut rows, TruncationPolicy::Tokens(64));
+     }
+-    let (revision, total, originals) = session.sdk_history_snapshot(None).await;
 +    session
 +        .persist_rollout_items(
 +            &rows
@@ -319,7 +342,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..9e35b615df7cd7a85e753a0942920ded
      let retained_model = session.clone_history().await.into_annotated_items();
      assert_eq!(retained_model.len(), 2);
      assert_eq!(
-@@ -218,3 +255,98 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -218,3 +255,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
          "first"
      );
  }
@@ -418,11 +441,95 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..9e35b615df7cd7a85e753a0942920ded
 +        before[..3]
 +    );
 +}
++
++#[tokio::test]
++async fn sdk_ordinary_compacted_resume_defers_originals_until_explicit_read() {
++    use codex_rollout::ModelContextScan;
++    use codex_rollout::ModelContextScanProgress;
++    use serde_json::json;
++    let (mut session, turn, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
++    let mut originals =
++        vec![json!({"type":"future_audit","payload":"x".repeat(128 * 1024)}).to_string()];
++    originals.extend(
++        (0..2048).map(|n| json!({"type":"audit","n":n,"payload":"x".repeat(128)}).to_string()),
++    );
++    let revision = session.sdk_history_snapshot(Some(0)).await.unwrap().0;
++    session
++        .sdk_replace_history(&revision, 0, originals.clone())
++        .await
++        .unwrap();
++    let compacted: RolloutItem = serde_json::from_value(json!({"type":"compacted","payload":{
++        "message":"summary", "replacement_history":[], "window_number":1,
++        "sdk_originals":{"preserve":true}
++    }}))
++    .unwrap();
++    session
++        .persist_rollout_items(std::slice::from_ref(&compacted))
++        .await;
++    // The owning scanner returns only the complete model checkpoint, not the raw prefix.
++    let mut scan = ModelContextScan::default();
++    assert_eq!(
++        scan.push(compacted.clone()),
++        ModelContextScanProgress::Complete
++    );
++    let bounded = scan.finish();
++    assert_eq!(bounded.len(), 1);
++    session.apply_rollout_reconstruction(&turn, &bounded).await;
++    {
++        let state = session.state.lock().await;
++        assert_eq!(state.sdk_originals.revision(), None);
++        assert_eq!(state.sdk_originals.len(), None);
++        assert_eq!(state.sdk_originals.retained_bytes(), 0);
++        assert!(state.history.annotated_items().is_empty());
++    }
++    let input: ResponseItem = serde_json::from_value(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"after resume"}]})).unwrap();
++    let admitted = session
++        .record_initial_response_items(&turn, vec![input])
++        .await
++        .unwrap();
++    originals.extend(
++        admitted
++            .iter()
++            .map(|item| serde_json::to_string(item).unwrap()),
++    );
++    assert_eq!(session.state.lock().await.sdk_originals.revision(), None);
++    assert!(session.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    // Another ordinary model checkpoint also remains independent of catalog hydration.
++    session
++        .persist_rollout_items(std::slice::from_ref(&compacted))
++        .await;
++    session.apply_rollout_reconstruction(&turn, &bounded).await;
++    assert_eq!(session.state.lock().await.sdk_originals.revision(), None);
++    let snapshot = session.sdk_history_snapshot(None).await.unwrap();
++    assert_eq!(snapshot.2, originals);
++    assert_eq!(snapshot.1, originals.len());
++    assert_eq!(
++        session.state.lock().await.sdk_originals.revision(),
++        Some(snapshot.0.as_str())
++    );
++    assert!(session.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    assert!(
++        session
++            .sdk_replace_history("stale-revision", 0, Vec::new())
++            .await
++            .is_err()
++    );
++    assert_eq!(session.sdk_history_snapshot(None).await.unwrap(), snapshot);
++    session
++        .sdk_replace_history(&snapshot.0, 0, Vec::new())
++        .await
++        .unwrap();
++    assert_eq!(session.sdk_history_snapshot(None).await.unwrap().1, 0);
++}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..ef3272dd3aa46df107dd35220b186d723d36b463 100644
+index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..68851c0e7bd76675f1c0f27a90ced5819f77fb34 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1861,22 +1861,26 @@ impl Session {
+@@ -1861,23 +1861,13 @@ impl Session {
          let reviewer_compaction_hash = reviewer.comp_hash.clone();
          {
              let mut state = self.state.lock().await;
@@ -442,29 +549,17 @@ index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..ef3272dd3aa46df107dd35220b186d72
 -                    history.drop_last_n_user_turns(turns);
 -                    history.annotated_items().to_vec()
 -                },
+-            );
 +            state.sdk_originals_replay_policy =
 +                Some(turn_context.model_info().truncation_policy.into());
-+            state.sdk_originals = codex_history::sdk_originals::SdkOriginalHistoryCache::from(
-+                &codex_history::sdk_originals::SdkOriginalHistory::replay(
++            state.sdk_originals =
++                codex_history::sdk_originals::SdkOriginalHistoryCache::replay_metadata(
 +                    rollout_items,
-+                    |row| {
-+                        let mut projected = crate::context_manager::ContextManager::new();
-+                        projected.replay_annotated_item(
-+                            row,
-+                            turn_context.model_info().truncation_policy.into(),
-+                        );
-+                        projected.annotated_items().last().cloned()
-+                    },
-+                    |items, turns| {
-+                        let mut history = crate::context_manager::ContextManager::new();
-+                        history.replace_annotated(items.to_vec());
-+                        history.drop_last_n_user_turns(turns);
-+                        history.annotated_items().to_vec()
-+                    },
-+                ),
-             );
++                    |row| crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()),
++                );
              state.replace_annotated_history(
                  history,
+                 reference_context_item,
 diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
 index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..ea7e6f5a03d1970ac5c77f0b33b377f4be6a355f 100644
 --- a/codex-rs/core/src/state/session.rs
@@ -530,17 +625,28 @@ index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..ea7e6f5a03d1970ac5c77f0b33b377f4
          }
      }
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
-index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a47485304 100644
+index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..b8a07d35ab9840909e08360a33a54123114b6aca 100644
 --- a/codex-rs/history/src/sdk_originals.rs
 +++ b/codex-rs/history/src/sdk_originals.rs
-@@ -94,12 +94,121 @@ pub struct SdkOriginalHistory {
+@@ -33,10 +33,6 @@ impl SdkOriginalHistoryCheckpoint {
+     pub fn preserve() -> Self {
+         Self::Preserve { preserve: true }
+     }
+-
+-    pub fn is_preserve(&self) -> bool {
+-        matches!(self, Self::Preserve { preserve: true })
+-    }
+ }
+ 
+ impl From<SdkOriginalHistory> for SdkOriginalHistoryCheckpoint {
+@@ -94,12 +90,187 @@ pub struct SdkOriginalHistory {
      index: OriginalIndex,
  }
  
 +/// Bounded hot originals plus constant-size revision metadata; the journal owns the full catalog.
-+#[derive(Clone, Debug, Default)]
++#[derive(Clone, Debug)]
 +pub struct SdkOriginalHistoryCache {
-+    index: OriginalIndex,
++    index: Option<OriginalIndex>,
 +    total: usize,
 +    tail: std::collections::VecDeque<String>,
 +    payload_bytes: usize,
@@ -550,21 +656,27 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
 +    // Cache policy only: older/oversized originals remain in the canonical journal.
 +    const MAX_RETAINED_BYTES: usize = 64 * 1024;
 +
-+    pub fn revision(&self) -> &str {
-+        &self.index.revision
++    pub fn revision(&self) -> Option<&str> {
++        self.index.as_ref().map(|index| index.revision.as_str())
 +    }
-+    pub fn len(&self) -> usize {
-+        self.total
++    pub fn len(&self) -> Option<usize> {
++        self.index.as_ref().map(|_| self.total)
 +    }
 +    pub fn is_empty(&self) -> bool {
-+        self.total == 0
++        self.len() == Some(0)
++    }
++    /// Change detection during an explicit cold read, including an unloaded prefix.
++    pub fn read_token(&self) -> (Option<&str>, usize) {
++        (self.revision(), self.total)
 +    }
 +    pub fn retained_bytes(&self) -> usize {
 +        self.payload_bytes + self.tail.capacity() * std::mem::size_of::<String>()
 +    }
 +
 +    pub fn append(&mut self, original: String) {
-+        self.index.append(self.total, &original);
++        if let Some(index) = &mut self.index {
++            index.append(self.total, &original);
++        }
 +        self.total += 1;
 +        self.cache(original);
 +    }
@@ -591,12 +703,13 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
 +    }
 +
 +    pub fn snapshot(&self, limit: Option<usize>) -> Option<(String, usize, Vec<String>)> {
++        let revision = self.revision()?;
 +        let count = limit.unwrap_or(self.total).min(self.total);
 +        if count > self.tail.len() {
 +            return None;
 +        }
 +        Some((
-+            self.revision().to_owned(),
++            revision.to_owned(),
 +            self.total,
 +            self.tail
 +                .iter()
@@ -607,10 +720,69 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
 +    }
 +}
 +
++impl Default for SdkOriginalHistoryCache {
++    fn default() -> Self {
++        Self {
++            index: Some(OriginalIndex::default()),
++            total: 0,
++            tail: Default::default(),
++            payload_bytes: 0,
++        }
++    }
++}
++
++impl SdkOriginalHistoryCache {
++    fn unloaded() -> Self {
++        Self {
++            index: None,
++            ..Default::default()
++        }
++    }
++
++    /// Resume keeps only hot bytes. A preserved prefix is read only on explicit demand.
++    pub fn replay_metadata(
++        records: &[crate::RolloutItem],
++        eligible: impl Fn(&ResponseItemEnvelope) -> bool,
++    ) -> Self {
++        let mut cache = Self::default();
++        for record in records {
++            match record {
++                crate::RolloutItem::ResponseItem(row) if eligible(row) => {
++                    cache.append(
++                        serde_json::to_string(&row.item).expect("response items serialize"),
++                    );
++                }
++                crate::RolloutItem::Compacted(checkpoint) => match &checkpoint.sdk_originals {
++                    Some(SdkOriginalHistoryCheckpoint::Replace(history)) => {
++                        cache = Self::from(history)
++                    }
++                    Some(SdkOriginalHistoryCheckpoint::Preserve { .. }) => cache = Self::unloaded(),
++                    None => {
++                        if let Some(items) = &checkpoint.replacement_history {
++                            cache = Self::default();
++                            for row in items.iter().filter(|row| eligible(row)) {
++                                cache.append(
++                                    serde_json::to_string(&row.item)
++                                        .expect("response items serialize"),
++                                );
++                            }
++                        }
++                    }
++                },
++                crate::RolloutItem::EventMsg(
++                    codex_protocol::protocol::EventMsg::ThreadRolledBack(_),
++                ) => cache = Self::unloaded(),
++                _ => {}
++            }
++        }
++        cache
++    }
++}
++
 +impl From<&SdkOriginalHistory> for SdkOriginalHistoryCache {
 +    fn from(history: &SdkOriginalHistory) -> Self {
 +        let mut cache = Self {
-+            index: history.index.clone(),
++            index: Some(history.index.clone()),
 +            total: history.items.len(),
 +            ..Default::default()
 +        };
@@ -655,7 +827,7 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
  impl Default for OriginalIndex {
      fn default() -> Self {
          let mut hash = Sha256::new();
-@@ -159,13 +268,7 @@ impl SdkOriginalHistory {
+@@ -159,13 +330,7 @@ impl SdkOriginalHistory {
      }
  
      pub fn append(&mut self, item: SdkOriginalItem) {
@@ -670,7 +842,101 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
          self.items.push(item);
      }
  
-@@ -340,6 +443,47 @@ mod tests {
+@@ -216,17 +381,49 @@ impl SdkOriginalHistory {
+         // The current model window is an ordered subsequence of admitted
+         // originals until compaction introduces a summary. Never reconstruct
+         // that summary from originals or retain its deleted content implicitly.
++        // Legacy restore can mint retained-source versions absent from the journal.
++        // Compare persisted content/metadata, then retain the existing live envelope.
++        let matches = |stored: &SdkOriginalItem, current: &ResponseItemEnvelope| {
++            let Some(stored) = &stored.projection else {
++                return false;
++            };
++            if stored.item != current.item {
++                return false;
++            }
++            let mut stored_metadata = stored.metadata.clone().unwrap_or_default();
++            let mut current_metadata = current.metadata.clone().unwrap_or_default();
++            stored_metadata.retained_source = None;
++            current_metadata.retained_source = None;
++            stored_metadata == current_metadata
++        };
++        let unavailable = "cannot shorten original history across model compaction; use keep=0 to replace it explicitly";
++        let mut earliest = Vec::with_capacity(current.len());
+         let mut originals = self.items.iter().enumerate();
+-        let mut retained = Vec::new();
+         for row in current {
+-            let Some((index, _)) =
+-                originals.find(|(_, item)| item.projection.as_ref() == Some(row))
+-            else {
++            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
++                return Err(unavailable);
++            };
++            earliest.push(index);
++        }
++        // The reverse match detects repeated equal items whose position relative to
++        // keep is ambiguous after model truncation. Neither pass reconstructs content.
++        let mut originals = self.items.iter().enumerate().rev();
++        let mut latest = Vec::with_capacity(current.len());
++        for row in current.iter().rev() {
++            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
++                return Err(unavailable);
++            };
++            latest.push(index);
++        }
++        latest.reverse();
++        let mut retained = Vec::new();
++        for ((row, first), last) in current.iter().zip(earliest).zip(latest) {
++            if first < keep && last >= keep {
+                 return Err(
+-                    "cannot shorten original history across model compaction; use keep=0 to replace it explicitly",
++                    "cannot shorten original history across ambiguous repeated items; use keep=0 to replace it explicitly",
+                 );
+-            };
+-            if index < keep {
++            }
++            if first < keep {
+                 retained.push(row.clone());
+             }
+         }
+@@ -287,6 +484,11 @@ impl SdkOriginalHistory {
+     }
+ 
+     fn after_rollback(&self, retained: Vec<ResponseItemEnvelope>) -> Self {
++        let retained_users: Vec<_> = retained
++            .iter()
++            .filter(|row| matches!(&row.item, ResponseItem::Message { role, .. } if role == "user"))
++            .map(|row| row.item.clone())
++            .collect();
+         let mut by_id: std::collections::HashMap<_, _> = retained
+             .iter()
+             .filter_map(|row| row.item.id().map(|id| (id.to_string(), row.clone())))
+@@ -295,11 +497,19 @@ impl SdkOriginalHistory {
+             .into_iter()
+             .filter(|row| row.item.id().is_none())
+             .collect();
+-        let matched = |row: &ResponseItemEnvelope| {
+-            row.item.id().map_or_else(
+-                || without_id.iter().any(|kept| kept.item == row.item),
+-                |id| by_id.contains_key(id.as_str()),
+-            )
++        let mut retained_users = retained_users.iter();
++        let mut next_user = retained_users.next();
++        let mut matched = |row: &ResponseItemEnvelope| {
++            let found = next_user.is_some_and(|kept| {
++                row.item.id().map_or_else(
++                    || kept == &row.item,
++                    |id| kept.id().is_some_and(|kept_id| kept_id == id),
++                )
++            });
++            if found {
++                next_user = retained_users.next();
++            }
++            found
+         };
+         // Audit-only values belong to the user-turn prefix containing their admitted position.
+         let boundary = self
+@@ -340,6 +550,68 @@ mod tests {
      use super::*;
      use serde_json::json;
  
@@ -696,6 +962,27 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
 +    }
 +
 +    #[test]
++    fn preserved_model_checkpoint_keeps_metadata_unloaded_and_append_byte_bounded() {
++        let checkpoint: crate::RolloutItem =
++            serde_json::from_value(json!({"type":"compacted","payload":{
++                "message":"summary", "replacement_history":[], "window_number":1,
++                "sdk_originals":{"preserve":true}
++            }}))
++            .unwrap();
++        let mut cache = SdkOriginalHistoryCache::replay_metadata(&[checkpoint], |_| true);
++        assert_eq!(cache.revision(), None);
++        assert_eq!(cache.len(), None);
++        assert_eq!(cache.snapshot(Some(0)), None);
++        let before = cache.read_token().1;
++        for n in 0..10_000 {
++            cache.append(json!({"type":"audit","n":n,"text":"x".repeat(128)}).to_string());
++            assert!(cache.retained_bytes() <= SdkOriginalHistoryCache::MAX_RETAINED_BYTES);
++        }
++        assert!(cache.read_token().1 > before);
++        assert_eq!(cache.snapshot(Some(1)), None);
++    }
++
++    #[test]
 +    fn oversized_originals_stay_in_journal_without_a_live_cache_copy() {
 +        let original = json!({"type":"future", "payload":"x".repeat(128 * 1024)}).to_string();
 +        let mut journal = SdkOriginalHistory::default();
@@ -718,3 +1005,140 @@ index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..43aa0b146842301fa6983562ee01225a
      #[test]
      fn repeated_compaction_references_preserve_originals_without_copying_catalog() {
          let mut originals = SdkOriginalHistory::default();
+@@ -498,6 +770,30 @@ mod tests {
+         assert!(rolled.items[1].projection.is_none());
+     }
+ 
++    #[test]
++    fn rollback_consumes_identical_idless_users_before_the_audit_boundary() {
++        let user =
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"same"}]})
++                .to_string();
++        let mut history = SdkOriginalHistory::default();
++        for raw in [
++            user.clone(),
++            json!({"type":"audit","turn":1}).to_string(),
++            user,
++            json!({"type":"audit","turn":2}).to_string(),
++        ] {
++            history.append(SdkOriginalItem {
++                projection: input_projection(&raw)
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++                original: raw,
++            });
++        }
++        let retained = history.projection()[..1].to_vec();
++        let rolled = history.after_rollback(retained);
++        assert_eq!(rolled.snapshot(None).2, history.snapshot(None).2[..2]);
++    }
++
+     #[test]
+     fn projection_identifiers_never_rewrite_missing_original_identifiers() {
+         let original = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}],"future":true});
+@@ -519,6 +815,58 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn restored_versions_preserve_live_metadata_and_reject_ambiguous_duplicate_boundaries() {
++        let original = json!({"type":"message","id":"repeated","role":"user","content":[{"type":"input_text","text":"same"}]});
++        let mut history = SdkOriginalHistory::default();
++        for _ in 0..2 {
++            history.append(SdkOriginalItem {
++                original: original.to_string(),
++                projection: input_projection(&original.to_string())
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++            });
++        }
++        let mut current = history.projection();
++        for (index, row) in current.iter_mut().enumerate() {
++            row.metadata
++                .get_or_insert_with(Default::default)
++                .retained_source = Some(
++                serde_json::from_value(json!({
++                    "id":{"message_id":"repeated","turn_id":"legacy","role":"user"},
++                    "revision":format!("live-{index}"), "complete":true,
++                }))
++                .unwrap(),
++            );
++        }
++        // The complete live ordering disambiguates equal-content originals.
++        assert_eq!(
++            history.retained_projection(&current, 1).unwrap(),
++            current[..1]
++        );
++        // A truncated duplicate cannot be guessed onto either side of the cut.
++        assert!(
++            history
++                .retained_projection(&current[1..], 1)
++                .unwrap_err()
++                .contains("ambiguous")
++        );
++        let different = json!({"type":"message","id":"last","role":"user","content":[{"type":"input_text","text":"last"}]});
++        history.append(SdkOriginalItem {
++            original: different.to_string(),
++            projection: input_projection(&different.to_string())
++                .unwrap()
++                .map(ResponseItemEnvelope::new),
++        });
++        // Ambiguity wholly within the retained prefix cannot change which live row survives.
++        assert_eq!(
++            history.retained_projection(&current[1..], 2).unwrap(),
++            current[1..]
++        );
++        current[0].metadata.as_mut().unwrap().compaction_output = true;
++        assert!(history.retained_projection(&current[..1], 1).is_err());
++    }
++
+     #[test]
+     fn prefix_edits_preserve_model_payload_and_reject_ambiguous_summaries() {
+         let mut history = SdkOriginalHistory::default();
+diff --git a/codex-rs/rollout/src/model_context.rs b/codex-rs/rollout/src/model_context.rs
+index 02bc23177ff16cf27327bcfc6dead38ea75ec2f0..892183d2d2366939b3488e53ba85c14cf115757a 100644
+--- a/codex-rs/rollout/src/model_context.rs
++++ b/codex-rs/rollout/src/model_context.rs
+@@ -37,17 +37,7 @@ impl ModelContextScan {
+             ModelContextScanProgress::Continue
+         } else if let RolloutItem::Compacted(compacted) = &item {
+             if compacted.replacement_history.is_some() && compacted.window_number.is_some() {
+-                // A model checkpoint that preserves originals depends on its preceding journal.
+-                // Keep scanning to a complete catalog seed or the legacy migration boundary.
+-                if compacted
+-                    .sdk_originals
+-                    .as_ref()
+-                    .is_some_and(|catalog| catalog.is_preserve())
+-                {
+-                    ModelContextScanProgress::Continue
+-                } else {
+-                    ModelContextScanProgress::Complete
+-                }
++                ModelContextScanProgress::Complete
+             } else {
+                 // This compaction cannot be reconstructed from a bounded suffix. Do not stop at
+                 // an older compaction because this newer one still affects the surviving history.
+@@ -85,21 +75,13 @@ mod sdk_original_tests {
+     }
+ 
+     #[test]
+-    fn original_preservation_requires_the_preceding_journal_or_catalog_seed() {
++    fn original_preservation_does_not_expand_the_bounded_model_scan() {
+         let mut scan = ModelContextScan::default();
+         assert_eq!(
+             scan.push(checkpoint(json!({"preserve":true}))),
+-            ModelContextScanProgress::Continue
+-        );
+-        assert_eq!(
+-            scan.push(checkpoint(json!({"preserve":true}))),
+-            ModelContextScanProgress::Continue
+-        );
+-        assert_eq!(
+-            scan.push(checkpoint(json!({"format_version":1,"items":[]}))),
+             ModelContextScanProgress::Complete
+         );
+-        assert_eq!(scan.finish().len(), 3);
++        assert_eq!(scan.finish().len(), 1);
+         let mut legacy = ModelContextScan::default();
+         assert_eq!(
+             legacy.push(checkpoint(serde_json::Value::Null)),
