@@ -209,7 +209,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..276739a21f0f7b249e6468be2fda93fb
      }
  }
 diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
-index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fae8ca6158 100644
+index d83e4311808ccf2f9e92d5395d5477f746b8b580..c9972f726c04ada246c767fc8080dcc53207dec8 100644
 --- a/codex-rs/core/src/session/inject_tests.rs
 +++ b/codex-rs/core/src/session/inject_tests.rs
 @@ -65,7 +65,11 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
@@ -225,11 +225,15 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      let full_output = "original native output ".repeat(2000);
      let values = vec![
          json!({"type":"message","id":"user-one","role":"user","content":[{"type":"input_text","text":"first"}]}),
-@@ -81,11 +85,30 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+@@ -81,11 +85,38 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
                  .into()
          })
          .collect();
 +    for row in &mut rows {
++        // The native admission path prepares positional Message classifications before recording.
++        if let Some(content) = codex_context_fragments::to_annotated_content(&mut row.item) {
++            let _ = codex_context_fragments::set_annotated_content(&mut row.item, content);
++        }
 +        if matches!(
 +            row.item,
 +            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. }
@@ -239,6 +243,10 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
 +                .history_truncation_token_limit = Some(64);
 +        }
 +    }
++    let values: Vec<_> = rows
++        .iter()
++        .map(|row| serde_json::to_value(&row.item).unwrap())
++        .collect();
      {
          let mut state = session.state.lock().await;
          state.record_annotated_items(&mut rows, TruncationPolicy::Tokens(64));
@@ -257,7 +265,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      assert_eq!(total, 4);
      assert_eq!(
          originals
-@@ -109,7 +132,7 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+@@ -109,7 +140,7 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
          session.clone_history().await.into_annotated_items(),
          before[..3]
      );
@@ -266,7 +274,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      assert_eq!(total, 4);
      assert_eq!(retained[..3], originals[..3]);
      assert_eq!(
-@@ -121,8 +144,12 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+@@ -121,8 +152,12 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
  #[tokio::test]
  async fn sdk_partial_compaction_edit_rejects_without_live_change() {
      use serde_json::json;
@@ -281,7 +289,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      session.sdk_replace_history(&revision, 0, vec![
          json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}).to_string(),
          json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}).to_string(),
-@@ -134,14 +161,14 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+@@ -134,14 +169,14 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
          .await
          .history
          .replace_annotated(vec![summary.into()]);
@@ -298,7 +306,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      assert_eq!(
          session.clone_history().await.into_annotated_items(),
          model_before
-@@ -158,7 +185,7 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+@@ -158,7 +193,7 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
          session.clone_history().await.into_annotated_items(),
          model_before
      );
@@ -307,7 +315,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      session
          .sdk_replace_history(
              &appended.0,
-@@ -180,7 +207,11 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+@@ -180,7 +215,11 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
  async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_position() {
      use codex_protocol::protocol::ThreadRolledBackEvent;
      use serde_json::json;
@@ -320,7 +328,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      let originals = vec![
          json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}],"future":1}),
          json!({"type":"future","audit":"first"}),
-@@ -189,13 +220,13 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -189,13 +228,13 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
          json!({"type":"future","audit":"second"}),
          json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer two"}]}),
      ].into_iter().map(|value| value.to_string()).collect::<Vec<_>>();
@@ -336,7 +344,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      let mut checkpoint: codex_history::CompactedItem =
          serde_json::from_value(json!({"message":""})).unwrap();
      checkpoint.replacement_history = Some(model.clone());
-@@ -205,12 +236,20 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -205,12 +244,20 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
      records.push(RolloutItem::Compacted(checkpoint));
      records = serde_json::from_value(serde_json::to_value(records).unwrap()).unwrap();
      session.apply_rollout_reconstruction(&turn, &records).await;
@@ -362,7 +370,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fa
      let retained_model = session.clone_history().await.into_annotated_items();
      assert_eq!(retained_model.len(), 2);
      assert_eq!(
-@@ -218,3 +257,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -218,3 +265,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
          "first"
      );
  }
