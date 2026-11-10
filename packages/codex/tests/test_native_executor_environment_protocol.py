@@ -95,7 +95,11 @@ async def test_literal_names_reach_real_child(tmp_path: Path, name: str, value: 
                         output.extend(base64.b64decode(chunk["chunk"]))
                     next_seq = result["nextSeq"]
                     if result["exited"]:
-                        assert result["exitCode"] == 0
+                        assert result["exitCode"] == 0, (
+                            f"captured child stdout/stderr: {output.decode(errors='replace')}"
+                            if name == "ORDINARY_ENV_CONTROL"
+                            else ""
+                        )
                         break
                 else:
                     pytest.fail("Child process did not exit")

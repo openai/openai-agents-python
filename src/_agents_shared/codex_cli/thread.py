@@ -38,14 +38,9 @@ async def _aclosing(
         await generator.aclose()
 
 
-class TextInput(TypedDict):
-    type: Literal["text"]
-    text: str
-
-
-class LocalImageInput(TypedDict):
-    type: Literal["local_image"]
-    path: str
+# Field annotations must remain concrete before restoring Classic module identity.
+TextInput = TypedDict("TextInput", {"type": Literal["text"], "text": str})  # noqa: UP013
+LocalImageInput = TypedDict("LocalImageInput", {"type": Literal["local_image"], "path": str})  # noqa: UP013
 
 
 UserInput: TypeAlias = TextInput | LocalImageInput

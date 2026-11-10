@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -48,11 +49,11 @@ async def test_failed_environment_opening_releases_secrets(
     provider = NativeProvider(api_key="synthetic-model-key")
     if closed_provider:
         await provider.aclose()
-    expected = (
-        "NativeProvider is closed"
-        if closed_provider
-        else "could not resolve an executor write root"
-    )
+        expected = "NativeProvider is closed"
+    elif sys.platform == "win32":
+        expected = "the local executor requires Linux or macOS"
+    else:
+        expected = "could not resolve an executor write root"
     try:
         with pytest.raises(RuntimeError, match=expected) as caught:
             async with Agent(instructions="Answer.", provider=provider).session(
