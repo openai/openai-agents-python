@@ -148,6 +148,7 @@ if TYPE_CHECKING:
         ReconciledCall as ReconciledCall,
         UncertainCall as UncertainCall,
     )
+    from .repl import run_demo_loop as run_demo_loop
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -210,6 +211,7 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "run_demo_loop": ".repl",
     "ChatCompletionsModel": ".models",
     "ResponsesModel": ".models",
     "LitellmModel": ".models",
