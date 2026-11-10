@@ -182,6 +182,11 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
         effects.append("lookup")
         return "found"
 
+    @function_tool
+    def other() -> str:
+        effects.append("other")
+        return "unselected"
+
     async with (
         timeout(30),
         httpx.AsyncClient(transport=httpx.MockTransport(handle)) as transport,
@@ -193,7 +198,7 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
         result = await Agent(
             model="custom-model",
             instructions="Use lookup once.",
-            tools=[lookup],
+            tools=[lookup, other],
             provider=provider,
             model_settings={
                 "input_modalities": ["text", "audio"],
@@ -208,7 +213,8 @@ async def test_native_audio_and_named_selector_through_real_chat_client() -> Non
     assert result.final_output == "ok"
     assert effects == ["lookup"]
     assert len(seen) == 2
-    assert seen[0]["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert seen[0]["tool_choice"] == "required"
+    assert [item["function"]["name"] for item in seen[0]["tools"]] == ["lookup"]
     for body in seen:
         original = next(item for item in body["messages"] if item["role"] == "user")
         assert original["content"] == [
