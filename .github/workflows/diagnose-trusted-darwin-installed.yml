@@ -1,0 +1,163 @@
+name: Verify installed Python trusted Darwin credentials
+
+on:
+  push:
+    branches: [diag/python-trusted-darwin-installed-5688]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  credential-isolation:
+    if: github.repository == 'openai/openai-agents-python'
+    runs-on: macos-15
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    env:
+      SNAPSHOT_COMMIT: 730dda0c2a64003fadba3ce47bb0f53acba50264
+      SNAPSHOT_TREE: 717f88c6012849446ddc871d9467ee60d08c4df1
+      FIXTURE_COMMIT: 2bca08d81b6c3a50fd030f315c5df61a1958b43a
+      FIXTURE_TREE: a867f8fafaa6b568041bea10fb9ebaff40028a65
+      NATIVE_IDENTITY: 0dd871ce0cad9b1537c3e86ad395016950fb9b8cd3ae821b868450f7ca05b713
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: '0.11.14'
+          enable-cache: false
+      - name: Stage exact wheel source and reviewed test files
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS/$RUNNER_ARCH/$(uname -m)" = macOS/ARM64/arm64
+          test "$(id -u)" -ne 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff-tree --no-commit-id --name-only -r HEAD)" = .github/workflows/diagnose-trusted-darwin-installed.yml
+          sw_vers
+          git fetch --no-tags --depth=1 origin "$SNAPSHOT_COMMIT" "$FIXTURE_COMMIT"
+          test "$(git rev-parse "$SNAPSHOT_COMMIT^{tree}")" = "$SNAPSHOT_TREE"
+          test "$(git rev-parse "$FIXTURE_COMMIT^{tree}")" = "$FIXTURE_TREE"
+          project="$RUNNER_TEMP/credential-source"
+          mkdir -m 700 "$project"
+          git archive "$SNAPSHOT_COMMIT" | tar -xf - -C "$project"
+          for file in test_native_codex_login.py test_native_codex_login_refresh.py; do
+            path="packages/codex/tests/$file"
+            git show "$FIXTURE_COMMIT:$path" > "$project/$path"
+          done
+          cd "$project"
+          shasum -a 256 -c <<'HASHES'
+          dac6c363a348fc658edc2d7215e67da6e9bf75fab9627d9071e7d2ae0b515189  packages/codex/tests/test_native_codex_login.py
+          b63938ce08ae823bb973ca3ab06b68e531ff285e76bdb002d17b680ddf31f26d  packages/codex/tests/test_native_codex_login_refresh.py
+          HASHES
+          python -I -S - <<'PY'
+          import os
+          import runpy
+          from pathlib import Path
+
+          identity = runpy.run_path("packages/codex/scripts/source_integrity.py")["native_bundle_identity"]
+          assert identity(Path.cwd()) == os.environ["NATIVE_IDENTITY"]
+          print(f"Verified source {os.environ['SNAPSHOT_COMMIT']} and fixture {os.environ['FIXTURE_COMMIT']}")
+          PY
+      - name: Download and verify the official native snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_SOURCE_RUN: '42907619298'
+          SNAPSHOT_DIRECTORY: ${{ runner.temp }}/credential-wheel
+          NATIVE_ARTIFACTS: >-
+            {"macOS-ARM64":{"id":13805839323,"digest":"sha256:aa91993655bd629c592cdb517932f763ce7ef6a934b8611fede263a84be28d95","name":"native-snapshot-macOS-ARM64-0dd871ce0cad9b1537c3e86ad395016950fb9b8cd3ae821b868450f7ca05b713","provenance":{"head_ref":"5688/merge","pull_request":null,"repository_id":"946380199","run_attempt":"1","run_id":"42907619298","source_sha":"730dda0c2a64003fadba3ce47bb0f53acba50264"}}}
+        run: python -I -S "$RUNNER_TEMP/credential-source/.github/scripts/download-native-snapshot.py"
+      - name: Install the qualified wheel in a fresh environment
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/credential-source"
+          stage="$RUNNER_TEMP/credential-probe"
+          mkdir -m 700 "$stage" "$stage/home" "$stage/tmp"
+          cd "$project"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          uv venv --python "$(command -v python)" "$stage/venv"
+          probe="$stage/venv/bin/python"
+          wheel="$RUNNER_TEMP/credential-wheel/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
+          pip_install=(uv pip install --python "$probe" --only-binary :all: --constraint "$stage/constraints.txt")
+          "${pip_install[@]}" aiohttp cryptography hatchling pytest pytest-asyncio
+          "$probe" -I -B - "$wheel" <<'PY'
+          import runpy
+          import sys
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1])
+          hooks = runpy.run_path("packages/codex/scripts/hatch_build.py")
+          receipt = hooks["_wheel_qualification"](Path("packages/codex").resolve(), wheel)
+          assert receipt["native_build"]["target"] == "aarch64-apple-darwin"
+          assert receipt["patch_series"]["result_tree"] == "73f46a47e15097e7bde5f393a84348937fafef0c"
+          assert len(receipt["native_inputs"]) == 205
+          checksum = hooks["_wheel_digest"](wheel)
+          assert checksum == "4840bc5ccd22a1be1764c40ac081509d0109647ed0c3b5abe9b34f662f4030ab"
+          print(f"Verified ARM64 wheel {wheel.name} sha256:{checksum}")
+          PY
+          "${pip_install[@]}" "$wheel"
+      - name: Require the two installed credential selectors to pass
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/credential-source"
+          stage="$RUNNER_TEMP/credential-probe"
+          probe="$stage/venv/bin/python"
+          tests="$project/packages/codex/tests"
+          report="$stage/result.xml"
+          cd "$stage"
+          env -i PATH="$PATH" HOME="$stage/home" TMPDIR="$stage/tmp" "$probe" -I -B - <<'PY'
+          import hashlib
+          import platform
+          import sys
+          from pathlib import Path
+
+          import _agents_codex.session
+          import agents
+          import agents._native
+
+          assert platform.machine() == "arm64"
+          prefix = Path(sys.prefix).resolve()
+          for module in (agents, agents._native, _agents_codex.session):
+              assert Path(module.__file__).resolve().is_relative_to(prefix)
+          assert agents._native.CODEX_REVISION == "7c2ce90716335c889a5076ded9a630459f9c9899"
+          files = {
+              "_native.abi3.so": "47a17957541084f353dca52423f8642f48430da3da7ecd66b6e9a51c02822b5f",
+              "bin/codex-code-mode-host": "a370f7bbb0e8dad2069b10afebd89ffe1b88c66e94e1357dfa20ed5bfeb34ae5",
+              "bin/codex-execve-wrapper": "6a920dd602caeec311c6ddafe358c86a386bb2949f5f48ba75bf9e48f633fbcd",
+              "bin/codex-sdk-runtime": "6a920dd602caeec311c6ddafe358c86a386bb2949f5f48ba75bf9e48f633fbcd",
+          }
+          root = Path(agents.__file__).resolve().parent
+          for path, expected in files.items():
+              with (root / path).open("rb") as stream:
+                  assert hashlib.file_digest(stream, "sha256").hexdigest() == expected, path
+          print("Verified four installed Mach-O products")
+          PY
+          env -i PATH="$PATH" HOME="$stage/home" TMPDIR="$stage/tmp" \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 RUST_MIN_STACK=16777216 \
+            OPENAI_AGENTS_DISABLE_TRACING=1 \
+            "$probe" -I -B -m pytest -p pytest_asyncio.plugin \
+            -c "$project/pyproject.toml" -o addopts= -o "pythonpath=$project/packages/codex" \
+            -vv --tb=short --junitxml="$report" \
+            "$tests/test_native_codex_login.py::test_trusted_macos_requires_saved_login_directory" \
+            "$tests/test_native_codex_login_refresh.py::test_trusted_macos_keeps_saved_login_private_during_rotation"
+          "$probe" -I -B - "$report" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+
+          cases = ElementTree.parse(sys.argv[1]).findall(".//testcase")
+          assert len(cases) == 2
+          assert {case.attrib["name"] for case in cases} == {
+              "test_trusted_macos_requires_saved_login_directory",
+              "test_trusted_macos_keeps_saved_login_private_during_rotation",
+          }
+          assert not any(node.tag in {"skipped", "failure", "error"} for case in cases for node in case)
+          print("Installed Darwin credential selectors: 2 passed, 0 skipped")
+          PY
