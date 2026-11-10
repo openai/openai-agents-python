@@ -30,7 +30,7 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | Symptom | What to check |
 | --- | --- |
 | Portable restore reports an unsupported Codex revision or `checkpoint core revision differs` | Use a wheel with the saving SDK's pinned Codex revision. Editing `codex_revision` does not migrate state. See [compatibility](state.md#save-and-restore-a-portable-checkpoint). |
-| Local resume reports an unknown tool outcome or an active descendant | Keep the profile. Check application records and supply confirmed outcomes for unresolved root calls. If a child still blocks reopening, keep the conversation closed. See [local recovery](state.md#recover-after-interruption). |
+| Local resume reports an unknown tool outcome or an active descendant | Keep the profile. If reopening raises `LocalRecoveryRequired`, verify the outcomes in `error.calls` against trusted records. Keep the conversation closed while an outcome remains unknown or a writer is active. See [local recovery and wheel version limits](state.md#recover-after-interruption). |
 | Opening fails and cleanup also fails | Follow [provider cleanup recovery](configuration.md#recover-a-failed-managed-environment-opening) before discarding the owning event loop. |
 | A checkpoint cannot be saved or restored | Check [capture readiness and supported boundaries](state.md#check-support-and-capture-readiness), matching tools and instructions, and current permissions. |
 

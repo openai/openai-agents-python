@@ -25,7 +25,61 @@ from owned_process import defer_cleanup_signals, read_ready_line, terminate_grou
 from protocol_peer import final_text
 
 
-async def validate(check_delay: bool) -> None:
+async def validate_websocket(client: ClientSession, base: str) -> None:
+    async def receive(socket, model):
+        events = []
+        while True:
+            event = await socket.receive_json(timeout=10)
+            TypeAdapter(ResponseStreamEvent).validate_python(event)
+            if "response" in event:
+                assert event["response"]["model"] == model
+            events.append(event)
+            if event["type"] == "response.completed":
+                assert [item["sequence_number"] for item in events] == list(range(len(events)))
+                Response.model_validate(event["response"])
+                return event["response"], events
+
+    for index in range(2):
+        op_id, model = f"websocket-{index}", f"benchmark-websocket-{index}"
+        body = {
+            "type": "response.create",
+            "store": False,
+            "model": model,
+            "input": [{"role": "user", "content": f"BENCH_RUN={op_id}"}],
+        }
+        async with client.ws_connect(base + "/responses") as socket:
+            if index == 0:
+                await socket.send_json({**body, "generate": False})
+                warmup, _ = await receive(socket, model)
+                assert warmup["output"] == []
+                usage = warmup["usage"]
+                assert usage["input_tokens_details"]["cached_tokens"] == 0
+                assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+                assert all(value == 0 for value in usage.values() if not isinstance(value, dict))
+                async with client.get(base[:-3] + "/stats") as response:
+                    stats = await response.json()
+                assert stats["requests"] == 0 and stats["receipts"] == []
+                assert stats["websocket_warmups"] == 1
+                body.update(input=[], previous_response_id=warmup["id"])
+            await socket.send_json(body)
+            result, events = await receive(socket, model)
+            assert result["output"][0]["content"][0]["text"] == final_text(op_id, 123)
+            chunks = [e["delta"] for e in events if e["type"] == "response.output_text.delta"]
+            assert len(chunks) == 7 and "".join(chunks) == final_text(op_id, 123)
+        async with client.get(base[:-3] + "/stats?retired=1") as response:
+            stats = await response.json()
+        assert stats["requests"] == index + 1 and stats["errors"] == 0
+        assert stats["websocket_connections"] == index + 1
+        assert stats["websocket_open_connections"] == 0 and stats["websocket_warmups"] == 1
+        receipt = stats["receipts"][-1]
+        assert receipt["wire_transport"] == "websocket" and receipt["status"] == "ok"
+        assert receipt["history_user_markers"] == [op_id]
+        assert receipt["history_assistant_sha256s"] == []
+        assert receipt["history_tool_call_ids"] == receipt["history_tool_output_ids"] == []
+    print("PASS: typed WS warmup/generation; requested models; fresh history; retired sockets")
+
+
+async def validate(check_delay: bool, *, websocket: bool = False) -> None:
     peer = Path(__file__).with_name("protocol_peer.py")
     process = None
     try:
@@ -36,9 +90,9 @@ async def validate(check_delay: bool) -> None:
                     sys.executable,
                     str(peer),
                     "--tool-rounds",
-                    "2",
+                    "0" if websocket else "2",
                     "--tools-per-round",
-                    "2",
+                    "0" if websocket else "2",
                     "--chunks",
                     "7",
                     "--output-chars",
@@ -50,6 +104,9 @@ async def validate(check_delay: bool) -> None:
             )
         base = json.loads(read_ready_line(process))["base_url"]
         async with ClientSession() as client:
+            if websocket:
+                await validate_websocket(client, base)
+                return
 
             async def post(items, stream=False, expected_status=200):
                 body = {
@@ -240,7 +297,11 @@ def main():
     signal.signal(signal.SIGTERM, stop_requested)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-delay", action="store_true")
-    asyncio.run(validate(parser.parse_args().check_delay))
+    parser.add_argument("--check-websocket", action="store_true")
+    args = parser.parse_args()
+    asyncio.run(validate(args.check_delay))
+    if args.check_websocket:
+        asyncio.run(validate(False, websocket=True))
 
 
 if __name__ == "__main__":

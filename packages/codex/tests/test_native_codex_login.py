@@ -241,6 +241,38 @@ async def test_saved_login_runs_a_coding_turn_without_api_keys(
         assert private_value not in state_json
 
 
+async def test_saved_login_session_does_not_admit_implicit_apps(
+    codex_endpoint, monkeypatch, tmp_path
+):
+    home = saved_login(tmp_path / "codex")
+    attempts = 0
+
+    async def unexpected_apps_request(request):
+        nonlocal attempts
+        if request.path.rstrip("/") == "/api/codex/ps/mcp":
+            attempts += 1
+        return web.Response(status=500)
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", unexpected_apps_request)
+    async with TestServer(app) as backend:
+        native = importlib.import_module("agents._native")
+        native_create = native.create_engine
+
+        def create(config_json, *args, **kwargs):
+            config = json.loads(config_json)
+            # Reject implicit Apps before native startup can use any credentials.
+            assert config.get("features.apps") is False
+            config["chatgpt_base_url"] = str(backend.make_url("/"))
+            return native_create(json.dumps(config), *args, **kwargs)
+
+        monkeypatch.setattr(native, "create_engine", create)
+        async with timeout(30), codex_agent(home).session() as session:
+            assert session.codex_account == CodexAccount(account_id=ACCOUNT, plan_type="pro")
+        assert attempts == 0
+        assert codex_endpoint.requests == []
+
+
 @pytest.mark.parametrize("mode", [None, "apikey", "chatgptAuthTokens"])
 async def test_managed_mode_refuses_missing_or_non_oauth_login_despite_env_keys(
     codex_endpoint, monkeypatch, tmp_path, mode
