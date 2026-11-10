@@ -54,7 +54,7 @@ from uuid import uuid4 as uuid4
 from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter
 
 from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
-from ._compat import cancel_once as cancel_once
+from ._compat import cancel_once as cancel_once, cancellation_requested
 from ._events import (
     CodeInterpreterCallItem,
     FileSearchCallItem,
@@ -275,9 +275,11 @@ from .turn_receipt import (
 from .usage import (
     _MAX_SAFE_INTEGER,
     RunBudget,
+    RunUsage,
     TokenUsage,
     TokenUsageInfo as TokenUsageInfo,
     _token_usage_info as _token_usage_info,
+    _UsageCollector,
 )
 
 if TYPE_CHECKING:
@@ -893,6 +895,10 @@ class Completed(Generic[OutputT, TurnT]):
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
+    run_usage: RunUsage = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_usage", self.turn.run_usage)
 
 
 def _future() -> asyncio.Future[Any]:
@@ -936,6 +942,7 @@ class _NativeCallback:
 @dataclass
 class _Submission:
     output: _PreparedOutput
+    run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     observation_after: int = 0
     accepted: asyncio.Future[Turn[Any]] = field(default_factory=_future)
     completion: asyncio.Future[Any] = field(default_factory=_future)
@@ -1027,6 +1034,8 @@ class _ChildCallbacks:
     """Application callbacks for one native child incarnation and turn."""
 
     handle: ChildInvocation
+    root_turn_id: str | None = None
+    run_usage: _UsageCollector = field(default_factory=_UsageCollector)
     observation_after: int = 0
     request_keys: list[str] = field(default_factory=list)
     native_instance: int | None = None
@@ -1495,7 +1504,19 @@ class _OpeningOwner:
         self.lease = None
         self.api_key = None
         value = _validate_output(output, info["output"], None)
+        # Successful native-only runs retain at most 256 events / 256 KiB.
+        # Project measured completions once; do not retain temporary event trees.
+        measured = _UsageCollector()
+        for event in json.loads(archive.json()):
+            if (
+                event is not None
+                and event.get("subagent_id") is None
+                and event.get("id") == info["receipt"]["turn_id"]
+                and event.get("msg", {}).get("type") == "raw_response_completed"
+            ):
+                measured.observe(event["msg"].get("token_usage"))
         result = _CompletedTurnOwner(
+            run_usage=measured.snapshot(),
             opening_agent=agent,
             session_id=info["thread_id"],
             turn_id=info["receipt"]["turn_id"],
@@ -3988,6 +4009,7 @@ class Session(Generic[ContextT, OutputT]):
                     ).hexdigest()
                     active = _Submission(
                         restored_output,
+                        run_usage=_UsageCollector(saved.run_usage),
                         restored_pending=True,
                         observation_after=session._observations.sequence,
                         parent_trace=parent_trace,
@@ -4010,6 +4032,8 @@ class Session(Generic[ContextT, OutputT]):
                     session._last_turn = handle
                     session._restored_turn = handle
                     active.output_override = restored_override or restored_output_type is not None
+                    object.__setattr__(handle, "_run_usage", active.run_usage)
+                    session._usage_roots[continuation.turn_id] = active.run_usage
                     active.handle = handle
                     session._register_request_observation(active, handle)
                     active.accepted.set_result(handle)
@@ -4329,6 +4353,9 @@ class Session(Generic[ContextT, OutputT]):
         self._url_completions: dict[tuple[str, str], ElicitationRequest] = {}
         self._url_completion_lock = asyncio.Lock()
         self._active: _Submission | None = None
+        self._usage_roots: weakref.WeakValueDictionary[str, _UsageCollector] = (
+            weakref.WeakValueDictionary()
+        )
         self._last_turn: Turn[Any] | None = None
         self._repair_turns: list[RecordedTurn] = []
         self._repair_receipts_incomplete = False
@@ -6160,6 +6187,8 @@ class Session(Generic[ContextT, OutputT]):
                 realtime_usage=self.realtime_usage,
             )
 
+            object.__setattr__(context, "_usage_reporter", self._tool_usage_reporter(state, admit))
+
             if not admit():
                 return
             prepared_input = message.get("_sdk_effective_arguments", message["arguments"])
@@ -6188,6 +6217,9 @@ class Session(Generic[ContextT, OutputT]):
                         effective_arguments=_snapshot_function_arguments(
                             function._arguments(parsed), function._ref
                         ),
+                    )
+                    object.__setattr__(
+                        context, "_usage_reporter", self._tool_usage_reporter(state, admit)
                     )
                     object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
                 elif not isinstance(decision, Allow):
@@ -7329,6 +7361,7 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: _RunBudget | None = None,
+        run_usage: _UsageCollector | None = None,
         realtime_tool: tuple[str, str, tuple[str, ...], tuple[str, ...]] | None = None,
         output_override: bool = False,
         guardrail_input: UserInput | None = None,
@@ -7444,6 +7477,7 @@ class Session(Generic[ContextT, OutputT]):
             state = _Submission(
                 output,
                 guardrail_input=guardrail_input,
+                run_usage=run_usage or _UsageCollector(),
                 observation_after=self._observations.sequence,
                 before_step=before_step,
                 prepare_request=prepare_request,
@@ -8831,6 +8865,8 @@ class Session(Generic[ContextT, OutputT]):
             object.__setattr__(handle, "turn_id", receipt["turn_id"])
         if input is not None and state.continued_from is None:
             self._last_turn = handle
+        self._usage_roots[receipt["turn_id"]] = state.run_usage
+        object.__setattr__(handle, "_run_usage", state.run_usage)
         state.handle = handle
         object.__setattr__(handle, "_guardrail_results", state.guardrail_results)
         assert handle.turn_id is not None
@@ -9303,6 +9339,7 @@ class Session(Generic[ContextT, OutputT]):
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
                     budget=state.budget,
+                    run_usage=state.run_usage,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,
@@ -9550,6 +9587,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                         _prepare_spec(str),
                         budget=state.budget,
+                        run_usage=state.run_usage,
                     )
                 except NativeError as error:
                     rejected = error._effects == "not_started"
@@ -10009,6 +10047,7 @@ class Session(Generic[ContextT, OutputT]):
             "turn_complete",
             "turn_aborted",
             "token_count",
+            "raw_response_completed",
             "hosted_tool_call_progress",
             "raw_response_item",
         }:
@@ -10050,7 +10089,12 @@ class Session(Generic[ContextT, OutputT]):
             return
         if not turn_id:
             return
-        if kind in {"token_count", "hosted_tool_call_progress", "raw_response_item"}:
+        if kind in {
+            "token_count",
+            "hosted_tool_call_progress",
+            "raw_response_item",
+            "raw_response_completed",
+        }:
             # Passive progress must not create a never-settling owner without
             # native admission.
             current = self._child_callbacks.get((event["subagent_id"], incarnation, turn_id))
@@ -10068,6 +10112,18 @@ class Session(Generic[ContextT, OutputT]):
                     submission_id=state.handle.submission_id,
                 )
             return
+        if kind in {"task_started", "turn_started"} and state.root_turn_id is None:
+            origin = message.get("root_turn_id")
+            if isinstance(origin, str) and origin:
+                state.root_turn_id = origin
+                if origin == state.handle.turn_id:
+                    self._usage_roots[origin] = state.run_usage
+                else:
+                    parent = self._usage_roots.get(origin)
+                    if parent is not None and parent is not state.run_usage:
+                        parent.attach(state.run_usage)
+        if kind == "raw_response_completed" and event["id"] == state.handle.turn_id:
+            state.run_usage.observe(message.get("token_usage"))
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
             state.observed.set_result(None)
@@ -11635,6 +11691,8 @@ class Session(Generic[ContextT, OutputT]):
                     turn_id = turn_id or event["id"]
                 if turn_id and turn_id != handle.turn_id:
                     continue
+                if kind == "raw_response_completed" and event["id"] == handle.turn_id:
+                    state.run_usage.observe(message.get("token_usage"))
                 if (
                     kind == "raw_response_completed"
                     and event["id"] == handle.turn_id
@@ -12346,6 +12404,36 @@ class Session(Generic[ContextT, OutputT]):
                 state.retain_cleanup_error(error)
             raise
 
+    def _tool_usage_reporter(
+        self, state: _CallbackState, admitted: Callable[[], bool]
+    ) -> Callable[[TokenUsage | None, int], None]:
+        scope = _invocation.get()
+
+        def report(usage: TokenUsage | None, requests: int) -> None:
+            owner = scope
+            try:
+                task = asyncio.current_task()
+            except RuntimeError:  # Synchronous function tools run in a joined worker.
+                task = None
+            if task is not None and cancellation_requested(task):
+                raise asyncio.CancelledError
+            while owner is not None:
+                if not owner.active:
+                    raise RuntimeError("Usage reporting callback is no longer active")
+                owner = owner.parent
+            if scope is None or _native_callback_cancelled(state) or not admitted():
+                raise RuntimeError("Usage reporting requires the admitted native invocation")
+            captured = _UsageCollector.capture(usage, requests)
+            if (task is not None and cancellation_requested(task)) or _native_callback_cancelled(
+                state
+            ):
+                raise asyncio.CancelledError
+            if not admitted():
+                raise RuntimeError("Usage reporting invocation is no longer admitted")
+            state.run_usage.add(captured)
+
+        return report
+
     async def _invoke_tool(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("tool callback", "callback", message.get("tracing_context")) as tracing:
             await self._invoke_tool_body(state, message, tracing)
@@ -12472,6 +12560,12 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     ),
                 )
+            if context is not None:
+                object.__setattr__(
+                    context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
             arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
@@ -12521,6 +12615,12 @@ class Session(Generic[ContextT, OutputT]):
                     context = replace(
                         context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
                     )
+            if context is not None and context._usage_reporter is None:
+                object.__setattr__(
+                    context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:
@@ -13340,6 +13440,11 @@ class Session(Generic[ContextT, OutputT]):
             payload["executor_policy_digest"] = executor_policy_digest
             if self._executor is not None and self._executor.read_only:
                 payload["executor_read_only"] = True
+            if active is not None:
+                usage = active.run_usage.snapshot()
+                payload["run_usage"] = {
+                    name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
+                }
             _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions, graph=bool(self._profiles))

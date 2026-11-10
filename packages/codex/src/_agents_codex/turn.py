@@ -18,6 +18,7 @@ from typing_extensions import TypeVar as TypeVar
 
 from ._mcp_errors import _protect_mcp_methods, _strip_mcp_frames, _uses_mcp
 from ._public import preserve_module_identity as _preserve_module_identity
+from .usage import RunUsage, _UsageCollector
 
 if TYPE_CHECKING:
     from ._completed_turn_owner import _CompletedTurnOwner
@@ -81,6 +82,7 @@ class Turn(Generic[OutputT]):
     instance_id: int | None
     _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)
     _owner: object = field(repr=False, compare=False)
+    _run_usage: _UsageCollector = field(repr=False, compare=False)
     _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)
     _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)
     _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)
@@ -92,6 +94,17 @@ class Turn(Generic[OutputT]):
     def guardrail_results(self) -> tuple[Any, ...]:
         """Completed guardrail diagnostics on this exact owning run."""
         return tuple(self._guardrail_results)
+
+    @property
+    def run_usage(self) -> RunUsage:
+        """Detached measured usage for this logical run, excluding unrelated children."""
+        if self.child_id is not None and hasattr(self._session, "_child_callbacks"):
+            state = self._session._child_callbacks.get(
+                (self.child_id, self._native.incarnation, self.turn_id)
+            )
+            if state is not None:
+                object.__setattr__(self, "_run_usage", state.run_usage)
+        return self._run_usage.snapshot()
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:
         raise TypeError("Turns are issued by a Session or Subagent")
@@ -321,6 +334,9 @@ class ChildTurn(Protocol):
     @property
     def guardrail_results(self) -> tuple[Any, ...]: ...
 
+    @property
+    def run_usage(self) -> RunUsage: ...
+
     async def get_result(self) -> Completed[str, ChildTurn]: ...
     async def wait_for_request_or_result(
         self,
@@ -349,6 +365,7 @@ def _root_turn(
         "instance_id": None,
         "_session": session,
         "_owner": session._owner,
+        "_run_usage": _UsageCollector(),
         "_completion": completion,
         "_continuation": None,
         "_result": None,
@@ -376,6 +393,7 @@ def _child_turn(session: Session[Any, Any], native: Any) -> Turn[str]:
         "instance_id": native.instance_id,
         "_session": session,
         "_owner": session._owner,
+        "_run_usage": observed.run_usage if observed is not None else _UsageCollector(),
         "_completion": None,
         "_continuation": None,
         "_result": None,

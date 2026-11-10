@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
     from .native_agents import ChildStepContext
     from .turn import Turn
+    from .usage import TokenUsage
 
 ToolContextT = TypeVar("ToolContextT")
 _DecisionT = TypeVar("_DecisionT")
@@ -128,6 +129,21 @@ class ToolContext(Generic[ContextT_co]):
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     # Detached speech usage at callback creation; application context stays caller-owned.
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+
+    _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def report_usage(self, usage: TokenUsage | None, *, requests: int = 1) -> None:
+        """Report trusted measured external usage while this invocation is admitted.
+
+        This does not change native context-window estimates or RunBudget. Tool
+        result JSON never reports usage implicitly. Retained contexts lose this
+        capability when the owning callback retires or is cancelled.
+        """
+        if self._usage_reporter is None:
+            raise RuntimeError("Usage reporting requires an admitted native ToolContext")
+        self._usage_reporter(usage, requests)
 
     @overload
     async def decide(

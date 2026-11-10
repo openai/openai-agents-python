@@ -171,8 +171,6 @@ def sandbox_environment(
     if session is not None:
         if session.state.type != client.backend_id:
             raise ValueError("session backend must match the configured client")
-        if concurrency_limits is not None or archive_limits is not None:
-            raise ValueError("configure borrowed session budgets before supplying the session")
         _assert_current_mount_authority(session.state, captured_manifest)
     if authorized_resume_state is not None:
         if not isinstance(authorized_resume_state, SandboxSessionState):
@@ -222,6 +220,10 @@ def sandbox_environment(
                 _assert_current_mount_authority(selected.state, captured_manifest)
                 await selected._validate_manifest_application(manifest=captured_manifest)
                 await client.assert_borrowed_session_authority(selected, captured_options)
+                if concurrency_limits is not None:
+                    selected._set_concurrency_limits(concurrency_limits)
+                if archive_limits is not None:
+                    selected._set_archive_limits(archive_limits)
             yield await owners.enter_async_context(connect(selected))
 
     return source()

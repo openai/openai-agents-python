@@ -1041,3 +1041,84 @@ async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, c
             async with source:
                 pytest.fail("Changed host authority must fail before gateway connection")
         assert "connect" not in events and not {"close", "delete"}.intersection(events)
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+async def test_borrowed_limits_apply_before_gateway_and_persist(supplied: bool) -> None:
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    events: list[str] = []
+    client = Client(events)
+    session = await client.create(manifest=Manifest(), options=Options())
+    client.backend_id = session.state.type
+    old_archive = SandboxArchiveLimits(max_members=11)
+    session._set_archive_limits(old_archive)
+    session._set_concurrency_limits(SandboxConcurrencyLimits(manifest_entries=7))
+    archive = SandboxArchiveLimits(max_members=3)
+    concurrency = SandboxConcurrencyLimits(manifest_entries=2)
+    events.clear()
+
+    def assert_limits():
+        assert session._archive_limits == (archive if supplied else old_archive)
+        assert session._max_manifest_entry_concurrency == (2 if supplied else 7)
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is session
+        assert_limits()
+        events.append("connect")
+        try:
+            yield Environment(url="wss://executor.invalid", cwd="/workspace")
+        finally:
+            events.append("gateway")
+
+    async with sandbox_environment(
+        client,
+        manifest=Manifest(),
+        options=Options(),
+        session=session,
+        connect=connect,
+        **({"archive_limits": archive, "concurrency_limits": concurrency} if supplied else {}),
+    ):
+        assert_limits()
+    assert_limits()
+    assert events == ["connect", "gateway"]
+
+
+@pytest.mark.parametrize("failure", ["manifest", "provider"])
+async def test_borrowed_failed_authority_preserves_limits(failure: str) -> None:
+    from agents.sandbox import SandboxArchiveLimits, SandboxConcurrencyLimits
+
+    client = Client([])
+    session = await client.create(manifest=Manifest(), options=Options())
+    client.backend_id = session.state.type
+    archive = SandboxArchiveLimits(max_members=11)
+    session._set_archive_limits(archive)
+    session._set_concurrency_limits(SandboxConcurrencyLimits(manifest_entries=7))
+
+    async def reject(*args, **kwargs):
+        raise ValueError("Borrowed authority rejected")
+
+    if failure == "manifest":
+        session._validate_manifest_application = reject
+    else:
+        client.assert_borrowed_session_authority = reject
+
+    @asynccontextmanager
+    async def connect(selected):
+        pytest.fail("Rejected authority must not connect")
+        yield
+
+    with pytest.raises(ValueError, match="Borrowed authority rejected"):
+        async with sandbox_environment(
+            client,
+            manifest=Manifest(),
+            options=Options(),
+            session=session,
+            connect=connect,
+            archive_limits=SandboxArchiveLimits(max_members=3),
+            concurrency_limits=SandboxConcurrencyLimits(manifest_entries=2),
+        ):
+            pytest.fail("Rejected authority must not yield")
+    assert session._archive_limits == archive
+    assert session._max_manifest_entry_concurrency == 7

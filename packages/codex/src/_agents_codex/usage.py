@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable as Callable
 from dataclasses import dataclass as dataclass
+from threading import RLock
 from typing import Any as Any, Literal as Literal
 
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -21,6 +22,84 @@ class TokenUsage:
     output_tokens: int
     reasoning_output_tokens: int
     total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunUsage(TokenUsage):
+    """Measured owner-local run totals, separate from native thread/context estimates.
+
+    requests counts observed native response completions and explicitly reported
+    external requests. missing_usage_requests counts requests without token data.
+    Child owners remain separate until an authoritative parent run is known.
+    """
+
+    requests: int
+    missing_usage_requests: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(getattr(self, name)) is not int or getattr(self, name) < 0
+            for name in RunUsage.__dataclass_fields__
+        ):
+            raise ValueError("RunUsage counters must be nonnegative integers")
+        if self.missing_usage_requests > self.requests:
+            raise ValueError("Missing-usage requests exceed measured requests")
+
+
+class _UsageCollector:
+    def __init__(self, initial: RunUsage | None = None) -> None:
+        self.lock = RLock()
+        self.value = initial or RunUsage(0, 0, 0, 0, 0, 0, 0, 0)
+        self.children: set[_UsageCollector] = set()
+
+    @staticmethod
+    def capture(usage: TokenUsage | None, requests: int = 1) -> RunUsage:
+        if type(requests) is not int or requests < 0:
+            raise ValueError("requests must be a nonnegative integer")
+        names = tuple(TokenUsage.__dataclass_fields__)
+        if usage is not None and not isinstance(usage, TokenUsage):
+            raise TypeError("usage must be TokenUsage or None")
+        counts = tuple(0 if usage is None else getattr(usage, name) for name in names)
+        if any(type(count) is not int or count < 0 for count in counts):
+            raise ValueError("usage counters must be nonnegative integers")
+        return RunUsage(*counts, requests, requests if usage is None else 0)
+
+    def add(self, delta: RunUsage) -> None:
+        with self.lock:
+            self.value = RunUsage(
+                *(
+                    getattr(self.value, name) + getattr(delta, name)
+                    for name in RunUsage.__dataclass_fields__
+                )
+            )
+
+    def report(self, usage: TokenUsage | None, requests: int = 1) -> None:
+        self.add(self.capture(usage, requests))
+
+    def observe(self, raw: dict[str, Any] | None) -> None:
+        try:
+            usage = None if raw is None else TokenUsage(**raw)
+            self.report(usage)
+        except (TypeError, ValueError):
+            self.report(None)
+
+    def attach(self, child: _UsageCollector) -> None:
+        with self.lock:
+            self.children.add(child)
+
+    def snapshot(self) -> RunUsage:
+        with self.lock:
+            value = self.value
+            children = tuple(self.children)
+        for child in children:
+            nested = child.snapshot()
+            value = RunUsage(
+                *(
+                    getattr(value, name) + getattr(nested, name)
+                    for name in RunUsage.__dataclass_fields__
+                )
+            )
+        return value
 
 
 @dataclass(frozen=True, slots=True)

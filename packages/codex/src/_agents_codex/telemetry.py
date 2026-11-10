@@ -573,6 +573,10 @@ class TraceScope:
         self.__exit__(None, None, None)
 
     def __enter__(self) -> TraceScope:
+        return self._start_recording(activate=True)
+
+    def _start_recording(self, *, activate: bool = False) -> TraceScope:
+        """Own a recording independently of ambient stack order for item streams."""
         if self._context is not None or self._ended:
             raise RuntimeError("A trace scope can only be entered once")
         value = self._options
@@ -614,7 +618,8 @@ class TraceScope:
             self._context = SpanContext(_handle=handle, **data)
             self._span_handle = handle
             admitted = True
-            self._token = _current.set(self._context)
+            if activate:
+                self._token = _current.set(self._context)
             try:
                 _ensure_processor_pump()
             except BaseException as error:
