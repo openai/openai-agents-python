@@ -16,7 +16,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager
 from dataclasses import dataclass as dataclass, field as field
 from ipaddress import IPv6Address as IPv6Address
-from os import PathLike as PathLike, fspath as fspath
+from os import PathLike as PathLike, fsencode as fsencode, fspath as fspath
 from pathlib import Path as Path, PurePosixPath as PurePosixPath, PureWindowsPath as PureWindowsPath
 from types import MappingProxyType as MappingProxyType
 from typing import (
@@ -29,7 +29,11 @@ from typing import (
     cast as cast,
     get_origin as get_origin,
 )
-from urllib.parse import unquote as unquote, urlsplit as urlsplit
+from urllib.parse import (
+    quote_from_bytes as quote_from_bytes,
+    unquote as unquote,
+    urlsplit as urlsplit,
+)
 
 from typing_extensions import Self as Self, TypeVar as TypeVar
 
@@ -52,6 +56,31 @@ ContextT_contra = TypeVar("ContextT_contra", contravariant=True, default=object)
 ExecutorToolName = Literal[
     "exec_command", "write_stdin", "apply_patch", "project_glob", "project_grep"
 ]
+
+# Core's private credentials, runtime-owned values, and SDK bootstrap controls.
+_RESERVED_ENVIRONMENT_NAMES = frozenset(
+    {
+        "CODEX_SDK_BWRAP_SEARCH_PATH",
+        "CARGO_BIN_EXE_BWRAP",
+        "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+        "CODEX_SANDBOX_COMMAND_ENV_JSON",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CODEX_VERSION",
+        "CODEX_PERMISSION_PROFILE",
+        "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+        "CODEX_PLUGIN_METRICS_OUTPUT",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "NODE_REPL_AUTH_TOKEN",
+        "CODEX_GUARDIAN_DECISIONS_API_KEY",
+        "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+    }
+)
+_RESERVED_ENVIRONMENT_PREFIX = re.compile(
+    r"CODEX_SANDBOX_COMMAND_ENV_JSON_", re.IGNORECASE | re.ASCII
+)
 
 
 def _domain_pattern(value: str) -> str:
@@ -264,7 +293,7 @@ class Environment(Generic[ContextT_contra]):
     sequence keeps only that directory writable. Strict write enforcement is the
     default and requires a Linux or macOS executor. To retain remote approval
     behavior, explicitly select ``write_policy="legacy"`` without writable roots.
-    Local executors also support ``write_policy="trusted_workspace_write"``.
+    Linux local executors also support ``write_policy="trusted_workspace_write"``.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -345,6 +374,8 @@ class Environment(Generic[ContextT_contra]):
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
     write_policy: Literal["strict", "legacy", "trusted_workspace_write"] = "strict"
     read_only: bool = False
+    # Captured command overrides; current declarations only, excluded from saved state.
+    env: Mapping[str, str] | None = field(default=None, repr=False)
     temp_dir: str | PathLike[str] | None = None
 
     @classmethod
@@ -373,6 +404,7 @@ class Environment(Generic[ContextT_contra]):
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
         write_policy: Literal["strict", "trusted_workspace_write"] = "strict",
         read_only: bool = False,
+        env: Mapping[str, str] | None = None,
         temp_dir: str | PathLike[str] | None = None,
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
@@ -385,10 +417,11 @@ class Environment(Generic[ContextT_contra]):
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
 
-        Set ``write_policy="trusted_workspace_write"`` for trusted local jobs.
+        Set ``write_policy="trusted_workspace_write"`` for trusted local Linux jobs.
         Commands can read files accessible to the application user and inherit
         the application process environment, including ambient credentials,
-        subject to native sandbox and network rules. The launcher excludes
+        subject to native sandbox and network rules. Both inherited values and
+        explicit ``env`` overrides exclude
         ``OPENAI_API_KEY``, ``CODEX_API_KEY``, and ``LD_*`` and ``DYLD_*`` overrides.
         Commands can write to the
         workspace and explicit writable roots, subject to native metadata
@@ -414,6 +447,7 @@ class Environment(Generic[ContextT_contra]):
             url=_path_uri(path),
             cwd=path,
             tools=tools,
+            env=env,
             writable_roots=writable_roots,
             network=network,
             capability_directories=capability_directories,
@@ -438,8 +472,11 @@ class Environment(Generic[ContextT_contra]):
             if self._is_local:
                 raise ValueError("write_policy must be strict or trusted_workspace_write")
             raise ValueError("write_policy must be strict or legacy")
-        if self.write_policy == "trusted_workspace_write" and not self._is_local:
-            raise ValueError("Trusted workspace-write requires Environment.local")
+        if self.write_policy == "trusted_workspace_write":
+            if not self._is_local:
+                raise ValueError("Trusted workspace-write requires Environment.local")
+            if sys.platform != "linux":
+                raise ValueError("Trusted workspace-write requires Environment.local on Linux")
         if self.temp_dir is not None:
             if self.write_policy != "trusted_workspace_write":
                 raise ValueError("temp_dir requires trusted workspace-write")
@@ -583,6 +620,32 @@ class Environment(Generic[ContextT_contra]):
                 raise ValueError("Invalid executor header value")
             headers[key] = value
         object.__setattr__(self, "headers", MappingProxyType(headers))
+        if self.env is not None:
+            if not isinstance(self.env, Mapping):
+                raise TypeError("Executor environment must be a string mapping")
+            values = dict(self.env)
+            for name, value in values.items():
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or "\0" in name
+                    or "=" in name
+                    or (name.isascii() and name.upper() in _RESERVED_ENVIRONMENT_NAMES)
+                    or _RESERVED_ENVIRONMENT_PREFIX.match(name) is not None
+                ):
+                    raise ValueError("Invalid executor environment variable name")
+                if not isinstance(value, str) or "\0" in value:
+                    raise ValueError("Invalid executor environment variable value")
+                valid_unicode = True
+                try:
+                    name.encode("utf-8")
+                    value.encode("utf-8")
+                except UnicodeError:
+                    valid_unicode = False
+                if not valid_unicode:
+                    # Raise outside the handler so its context cannot retain the rejected string.
+                    raise ValueError("Executor environment must contain valid Unicode") from None
+            object.__setattr__(self, "env", MappingProxyType(values))
         object.__setattr__(self, "tools", selected)
         if self.capability_directories is not None:
             if isinstance(self.capability_directories, str):
@@ -635,6 +698,8 @@ class Environment(Generic[ContextT_contra]):
             "headers": dict(self.headers),
             "connect_timeout": self.connect_timeout,
         }
+        if self.env is not None:
+            result["env_json"] = json.dumps(dict(self.env))
         if self.read_only:
             result["read_only"] = True
         if self._is_local:
@@ -682,7 +747,19 @@ def _path_uri(value: str) -> str:
     if value.startswith("file:"):
         return value
     path = PurePosixPath(value) if value.startswith("/") else PureWindowsPath(value)
-    return path.as_uri()
+    if sys.version_info < (3, 12):
+        return path.as_uri()
+    if not path.is_absolute():
+        raise ValueError("relative path can't be expressed as a file URI")
+    # Keep the executor's path flavor, independent of the application host.
+    # PurePath.as_uri() is deprecated in Python 3.14.
+    if len(path.drive) == 2 and path.drive[1] == ":":
+        prefix, encoded_path = "file:///" + path.drive, path.as_posix()[2:]
+    elif path.drive:
+        prefix, encoded_path = "file:", path.as_posix()
+    else:
+        prefix, encoded_path = "file://", str(path)
+    return prefix + quote_from_bytes(fsencode(encoded_path))
 
 
 def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
@@ -714,7 +791,7 @@ def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
             valid = False
         if not valid:
             raise ValueError("writable_roots must contain absolute executor directories")
-        roots.add(path.as_uri())
+        roots.add(_path_uri(str(path)))
     return tuple(sorted(roots))
 
 

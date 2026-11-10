@@ -70,9 +70,16 @@ pub(crate) struct LocalPrivatePaths<'a> {
     pub credential_directory: Option<&'a Path>,
 }
 
+struct LocalCredentialTargets {
+    saved_login: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    legacy_mcp: Option<PathBuf>,
+}
+
 pub async fn for_unattached_threads(
     config: &Config,
     sdk_local: bool,
+    private_read_deny: Option<AbsolutePathBuf>,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -82,10 +89,11 @@ pub async fn for_unattached_threads(
             Some("no local executor is registered".to_owned()),
         ));
     }
-    let paths = ExecServerRuntimeOptions::from_optional_paths(
+    let mut paths = ExecServerRuntimeOptions::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
+    paths.private_read_deny = private_read_deny;
     let paths = if sdk_local {
         let paths = paths.with_join_unreturned_local_exec_on_interrupt();
         #[cfg(target_os = "macos")]
@@ -111,6 +119,8 @@ pub struct EnvironmentOptions {
     cwd: PathUri,
     #[serde(default)]
     headers: HashMap<String, String>,
+    #[serde(default, rename = "env_json", deserialize_with = "deserialize_env")]
+    env: HashMap<String, String>,
     connect_timeout: Option<f64>,
     capability_directories: Option<Vec<PathUri>>,
     writable_roots: Option<Vec<PathUri>>,
@@ -135,6 +145,81 @@ struct LocalStorageMount {
     strategy: String,
     #[serde(default = "mount_read_only")]
     read_only: bool,
+}
+
+fn deserialize_env<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    let encoded = String::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("invalid environment variables"))?;
+    let values: HashMap<String, String> = serde_json::from_str(&encoded)
+        .map_err(|_| serde::de::Error::custom("invalid environment variables"))?;
+    if values.iter().any(|(name, value)| {
+        name.is_empty()
+            || codex_protocol::shell_environment::is_non_inheritable_env_var(name)
+            || [
+                "CODEX_SDK_BWRAP_SEARCH_PATH",
+                "CARGO_BIN_EXE_bwrap",
+                "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
+            ]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            || name
+                .get(.."CODEX_SANDBOX_COMMAND_ENV_JSON_".len())
+                .is_some_and(|prefix| {
+                    prefix.eq_ignore_ascii_case("CODEX_SANDBOX_COMMAND_ENV_JSON_")
+                })
+            || name.contains(['\0', '='])
+            || value.contains('\0')
+    }) {
+        return Err(serde::de::Error::custom("invalid environment variables"));
+    }
+    Ok(values)
+}
+
+fn environment_target_name_validation_required(
+    platform: Option<&str>,
+    supported: bool,
+) -> Result<bool> {
+    ensure!(
+        platform.is_some(),
+        "explicit environment variables require the executor platform"
+    );
+    if platform == Some("windows") {
+        ensure!(
+            supported,
+            "explicit environment variables require native name validation on this Windows executor"
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+async fn validate_environment_target_names(
+    environment: &Environment,
+    values: &HashMap<String, String>,
+    info: &EnvironmentInfo,
+) -> Result<()> {
+    if values.is_empty()
+        || !environment_target_name_validation_required(
+            info.platform_os.as_deref(),
+            info.capabilities.environment_variable_name_validation,
+        )?
+    {
+        return Ok(());
+    }
+    environment
+        .validate_environment_variable_names(values.keys().cloned().collect())
+        .await
+        .map_err(|_| anyhow::anyhow!("invalid explicit environment names for this executor"))
 }
 
 fn deserialize_mounts<'de, D: Deserializer<'de>>(
@@ -426,7 +511,25 @@ impl EnvironmentOptions {
                 "a local executor does not accept connection settings"
             );
             check_local_helpers(config)?;
-            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ true).await?;
+            let private_read_deny = if cfg!(target_os = "linux") && self.trusted_workspace_write {
+                existing_legacy_mcp_file(private_paths)?
+                    .map(|path| {
+                        path.canonicalize()
+                            .context("could not resolve the legacy MCP credential file")
+                    })
+                    .transpose()?
+                    .filter(|target| {
+                        !private_paths
+                            .credential_directory
+                            .is_some_and(|directory| target.starts_with(directory))
+                    })
+                    .map(AbsolutePathBuf::from_absolute_path)
+                    .transpose()?
+            } else {
+                None
+            };
+            let (manager, _) =
+                for_unattached_threads(config, /*sdk_local*/ true, private_read_deny).await?;
             let environment = manager
                 .try_local_environment()
                 .context("local executor requires the native process helper")?;
@@ -456,7 +559,10 @@ impl EnvironmentOptions {
         // SDK selections may publish a host MCP roster after this manager is built.
         // Reserve its lazy local launcher without selecting a host workspace:
         // for_unattached_threads has no default; selection below remains remote.
-        let (manager, _) = for_unattached_threads(config, /*sdk_local*/ false).await?;
+        let (manager, _) = for_unattached_threads(
+            config, /*sdk_local*/ false, /*private_read_deny*/ None,
+        )
+        .await?;
         if needs_local_mcp {
             ensure!(
                 manager.try_local_environment().is_some(),
@@ -529,6 +635,10 @@ impl EnvironmentOptions {
             ensure!(
                 self.local && !self.read_only && self.mounts.is_empty(),
                 "trusted workspace-write requires a writable local executor without storage mounts"
+            );
+            ensure!(
+                cfg!(target_os = "linux"),
+                "trusted workspace-write requires a local Linux executor"
             );
         }
         ensure!(
@@ -687,11 +797,13 @@ impl EnvironmentOptions {
         let environment = manager
             .get_environment(self.id())
             .context("selected executor was not registered")?;
-        let needs_info = self.strict_writes()
+        let needs_info = !self.env.is_empty()
+            || self.strict_writes()
             || self.network.is_some()
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
         let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
+            validate_environment_target_names(&environment, &self.env, &info).await?;
             let (profile, workspace_root, writes) = self
                 .profile(&environment, &info, config, private_paths)
                 .await?;
@@ -725,21 +837,15 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![workspace_root];
-        let shell_environment_policy = if self.trusted_workspace_write {
-            let mut policy = ShellEnvironmentPolicy {
+        let mut shell_environment_policy = if self.trusted_workspace_write {
+            ShellEnvironmentPolicy {
                 // This environment also starts the native sandbox launcher.
                 // Keep SDK model authentication in the application process.
                 exclude: ["LD_*", "DYLD_*", "OPENAI_API_KEY", "CODEX_API_KEY"]
                     .map(EnvironmentVariablePattern::new_case_insensitive)
                     .to_vec(),
                 ..Default::default()
-            };
-            if let Some(temp_dir) = &self.temp_dir {
-                let path = temp_dir.to_abs_path()?;
-                let path = path.as_path().to_str().context("temp_dir must be UTF-8")?;
-                policy.r#set.insert("TMPDIR".to_owned(), path.to_owned());
             }
-            policy
         } else if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
@@ -749,6 +855,22 @@ impl EnvironmentOptions {
         } else {
             permissions.shell_environment_policy.clone()
         };
+        let mut overrides = self.env.clone();
+        if self.trusted_workspace_write {
+            // Explicit SDK values bypass inherited-value filtering in Core.
+            overrides.retain(|name, _| {
+                !shell_environment_policy
+                    .exclude
+                    .iter()
+                    .any(|pattern| pattern.matches(name))
+            });
+            if let Some(temp_dir) = &self.temp_dir {
+                let path = temp_dir.to_abs_path()?;
+                let path = path.as_path().to_str().context("temp_dir must be UTF-8")?;
+                overrides.insert("TMPDIR".to_owned(), path.to_owned());
+            }
+        }
+        shell_environment_policy.set_sdk_environment_overrides(overrides);
         let selection = TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
@@ -930,6 +1052,12 @@ async fn strict_write_profile(
     trusted_workspace_write: bool,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
+        !trusted_workspace_write
+            || (local
+                && Platform::from_platform_os(info.platform_os.as_deref()) == Platform::Linux),
+        "trusted workspace-write requires a local Linux executor"
+    );
+    ensure!(
         matches!(
             Platform::from_platform_os(info.platform_os.as_deref()),
             Platform::Linux | Platform::Macos
@@ -982,12 +1110,10 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        let saved_login_target =
+        let credential_targets =
             check_local_private_write_roots(&roots, codex_home, private_paths)?;
-        #[cfg(unix)]
-        if trusted_workspace_write
-            && let (Some(file), Some(target)) = (private_paths.saved_login_file, saved_login_target)
-        {
+        #[cfg(target_os = "linux")]
+        if trusted_workspace_write && let Some(target) = credential_targets.saved_login {
             use std::os::unix::fs::MetadataExt;
 
             let metadata = std::fs::symlink_metadata(&target)
@@ -996,29 +1122,36 @@ async fn strict_write_profile(
                 metadata.is_file() && metadata.nlink() == 1,
                 "trusted local executor requires a saved Codex login file without hard links"
             );
-            if cfg!(target_os = "linux") {
+            let directory = private_paths.credential_directory.context(
+                "trusted local execution with a saved Codex login on Linux requires \
+                 CodexLogin.credential_directory or strict write policy",
+            )?;
+            if let Some(fallback) = &credential_targets.legacy_mcp {
+                let metadata = fallback
+                    .symlink_metadata()
+                    .context("could not verify the legacy MCP credential file")?;
                 ensure!(
-                    private_paths.credential_directory.is_some(),
-                    "trusted local execution with a saved Codex login on Linux requires \
-                     CodexLogin.credential_directory or strict write policy"
+                    metadata.is_file() && metadata.nlink() == 1,
+                    "trusted local executor requires a legacy MCP credential file without hard links"
+                );
+                ensure!(
+                    fallback.starts_with(directory)
+                        || environment
+                            .local_runtime_paths()
+                            .and_then(|paths| paths.private_read_deny.as_deref())
+                            == Some(fallback.as_path()),
+                    "the legacy MCP credential file changed since executor startup"
                 );
             }
-            let denied = match private_paths.credential_directory {
-                Some(directory) => vec![directory],
-                None if file != target => vec![file, target.as_path()],
-                None => vec![file],
-            };
-            for path in denied {
-                filesystem_policy.entries.push(FileSystemSandboxEntry::new(
-                    FileSystemPath::Path {
-                        path: PathUri::from_host_native_path(path)?,
-                    },
-                    FileSystemAccessMode::Deny,
-                ));
-            }
+            filesystem_policy.entries.push(FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: PathUri::from_host_native_path(directory)?,
+                },
+                FileSystemAccessMode::Deny,
+            ));
         }
-        #[cfg(not(unix))]
-        let _ = saved_login_target;
+        #[cfg(not(target_os = "linux"))]
+        let _ = credential_targets.saved_login;
     }
     if local && !trusted_workspace_write {
         for entry in &mut filesystem_policy.entries {
@@ -1063,7 +1196,7 @@ fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
-) -> Result<Option<PathBuf>> {
+) -> Result<LocalCredentialTargets> {
     let LocalPrivatePaths {
         storage_home,
         saved_login_file,
@@ -1104,6 +1237,19 @@ fn check_local_private_write_roots(
         collect_existing_private_file(target.clone(), &mut protected_files)
             .context("could not inspect the saved Codex login file")?;
     }
+    #[cfg(target_os = "linux")]
+    let legacy_mcp = existing_legacy_mcp_file(private_paths)?
+        .map(|fallback| {
+            let target = check_local_write_root_overlap(
+                &fallback,
+                roots,
+                "local executor roots must stay outside the legacy MCP credential file",
+            )?;
+            collect_existing_private_file(target.clone(), &mut protected_files)
+                .context("could not inspect the legacy MCP credential file")?;
+            Ok::<_, anyhow::Error>(target)
+        })
+        .transpose()?;
     if let Some(home) = storage_home.as_deref() {
         protected_files.extend(relocated_database_files(home, roots)?);
         if persistent_rollouts {
@@ -1124,7 +1270,29 @@ fn check_local_private_write_roots(
         )?,
         "local executor writable roots contain a hard link to a private native SDK file"
     );
-    Ok(saved_login_target)
+    Ok(LocalCredentialTargets {
+        saved_login: saved_login_target,
+        #[cfg(target_os = "linux")]
+        legacy_mcp,
+    })
+}
+
+fn existing_legacy_mcp_file(private_paths: LocalPrivatePaths<'_>) -> Result<Option<PathBuf>> {
+    let (Some(auth_file), Some(directory)) = (
+        private_paths.saved_login_file,
+        private_paths.credential_directory,
+    ) else {
+        return Ok(None);
+    };
+    if auth_file.parent() == Some(directory) {
+        return Ok(None);
+    }
+    let path = auth_file.with_file_name(".credentials.json");
+    match path.symlink_metadata() {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("could not inspect the legacy MCP credential file"),
+    }
 }
 
 fn check_local_helper_write_roots(
@@ -1997,6 +2165,99 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn explicit_environment_names_match_receiver_restrictions() {
+        for name in codex_protocol::shell_environment::NON_INHERITABLE_ENV_VARS
+            .iter()
+            .copied()
+            .chain([
+                "CODEX_SDK_BWRAP_SEARCH_PATH",
+                "CARGO_BIN_EXE_bwrap",
+                "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON_0",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON_é",
+            ])
+        {
+            for variant in [name.to_owned(), name.to_ascii_lowercase()] {
+                let values =
+                    std::collections::HashMap::from([(variant, "private-environment-value")]);
+                let result = serde_json::from_value::<super::EnvironmentOptions>(json!({
+                    "cwd": "file:///workspace", "env_json": serde_json::to_string(&values).unwrap()
+                }));
+                let error = result
+                    .err()
+                    .expect("receiver-reserved environment name")
+                    .to_string();
+                assert!(!error.contains("private-environment-value"));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_environment_name_identity_is_owned_by_the_receiver() {
+        assert!(super::environment_target_name_validation_required(Some("windows"), true).unwrap());
+        assert!(
+            super::environment_target_name_validation_required(Some("windows"), false).is_err()
+        );
+        assert!(!super::environment_target_name_validation_required(Some("linux"), false).unwrap());
+        assert!(!super::environment_target_name_validation_required(Some("macos"), false).unwrap());
+        assert!(super::environment_target_name_validation_required(None, false).is_err());
+    }
+
+    #[test]
+    fn explicit_environment_values_validate_before_native_selection() {
+        let valid: super::EnvironmentOptions = serde_json::from_value(json!({
+            "cwd": "file:///workspace",
+            "env_json": r#"{"VALUE":"private-environment-value","EMPTY":"","__proto__":"literal"}"#
+        }))
+        .unwrap();
+        assert_eq!(valid.env["EMPTY"], "");
+        assert_eq!(valid.env["__proto__"], "literal");
+        for (name, value) in [
+            ("$serde_json::private::Number", "7301592846"),
+            (
+                "$serde_json::private::RawValue",
+                r#"{"APP_MODE":"injected-env-marker"}"#,
+            ),
+        ] {
+            let values = std::collections::HashMap::from([(name, value)]);
+            let options: super::EnvironmentOptions = serde_json::from_value(json!({
+                "cwd": "file:///workspace",
+                "env_json": serde_json::to_string(&values).unwrap()
+            }))
+            .unwrap();
+            assert_eq!(options.env.len(), 1);
+            assert_eq!(options.env[name], value);
+        }
+        for values in [
+            json!({"": "private-environment-value"}),
+            json!({"BAD=NAME": "private-environment-value"}),
+            json!({"BAD\0NAME": "private-environment-value"}),
+            json!({"CODEX_SDK_BWRAP_SEARCH_PATH": "private-environment-value"}),
+            json!({"CARGO_BIN_EXE_bwrap": "private-environment-value"}),
+            json!({"NAME": "private-environment-value\0"}),
+            json!({"NAME": 3}),
+            json!(["private-environment-value"]),
+        ] {
+            let result = serde_json::from_value::<super::EnvironmentOptions>(json!({
+                "cwd": "file:///workspace", "env_json": values.to_string()
+            }));
+            let error = match result {
+                Ok(_) => panic!("invalid environment values were accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("environment"));
+            assert!(!error.contains("private-environment-value"));
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

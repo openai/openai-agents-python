@@ -82,6 +82,17 @@ def saved_login(
     return home
 
 
+def split_saved_login(tmp_path: Path) -> tuple[Path, Path]:
+    home = saved_login(tmp_path / "login")
+    credential_directory = tmp_path / "credentials"
+    credential_directory.mkdir()
+    auth_file = home / "auth.json"
+    target = credential_directory / auth_file.name
+    auth_file.rename(target)
+    auth_file.symlink_to(target)
+    return home, credential_directory
+
+
 @pytest.fixture(autouse=True)
 def uncompressed_model_requests(monkeypatch):
     # The shared aiohttp peer can read JSON without an optional Zstandard decoder.
@@ -125,7 +136,17 @@ async def submit(session, prompt: str):
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @pytest.mark.parametrize(
-    "overlap", ["cwd", "additional", "symlink_target", "hard_link", "trusted_read_alias"]
+    "overlap",
+    [
+        "cwd",
+        "additional",
+        "symlink_target",
+        "hard_link",
+        pytest.param(
+            "trusted_read_alias",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
+        ),
+    ],
 )
 async def test_local_executor_rejects_saved_login_overlap(
     codex_endpoint: ResponsesFixture,
@@ -152,6 +173,7 @@ async def test_local_executor_rejects_saved_login_overlap(
         (workspace / "ordinary-name").hardlink_to(auth_file)
         reason = "writable roots contain a hard link"
     elif overlap == "trusted_read_alias":
+        agent = codex_agent(home, credential_directory=home)
         (tmp_path / "readable-alias").hardlink_to(auth_file)
         reason = "requires a saved Codex login file without hard links"
 
@@ -170,32 +192,34 @@ async def test_local_executor_rejects_saved_login_overlap(
     assert codex_endpoint.requests == []
 
 
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@(
-    pytest.mark.requires_native_linux_sandbox
-    if sys.platform == "linux"
-    else pytest.mark.requires_native_macos_sandbox
-)
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("fallback_present", [False, True], ids=["absent", "symlinked"])
 async def test_trusted_local_executor_denies_selected_saved_login_reads(
-    codex_endpoint: ResponsesFixture, tmp_path: Path
+    codex_endpoint: ResponsesFixture, tmp_path: Path, fallback_present: bool
 ) -> None:
     workspace = tmp_path / "work"
     workspace.mkdir()
-    home = saved_login(tmp_path / "login")
+    home, credential_directory = split_saved_login(tmp_path)
     auth_file = home / "auth.json"
-    credential_directory = tmp_path / "credentials"
-    credential_directory.mkdir()
     staging = credential_directory / "staging"
     staging.mkdir()
     target = credential_directory / "auth.json"
-    auth_file.rename(target)
-    auth_file.symlink_to(target)
+    fallback = home / ".credentials.json"
     readable = home / "public"
     readable.write_text("readable")
 
     command = f'set -eu; test "$(cat {shlex.quote(str(readable))})" = readable; '
     for path in (auth_file, target):
         command += f"if ( : < {shlex.quote(str(path))} ) 2>/dev/null; then exit 17; fi; "
+    command += f"test ! -r {shlex.quote(str(credential_directory))}; "
+    if fallback_present:
+        fallback_target = tmp_path / "legacy-marker"
+        fallback_target.write_text("synthetic legacy credential marker")
+        fallback.symlink_to(fallback_target)
+        for path in (fallback, fallback_target):
+            command += f"test ! -r {shlex.quote(str(path))}; "
+    else:
+        command += f"test ! -e {shlex.quote(str(fallback))}; "
     codex_endpoint.respond(
         function_call(
             "exec_command", {"cmd": command, "login": False, "yield_time_ms": 20_000}, "read"
@@ -217,11 +241,75 @@ async def test_trusted_local_executor_denies_selected_saved_login_reads(
         assert (await submit(session, "Check the file read boundaries.")).final_output == "done"
     output = tool_output(codex_endpoint.requests[-1], "read")
     assert "Process exited with code 0" in output, output
+    assert fallback.exists() == fallback_present
     assert len(codex_endpoint.request_headers) == 2
     assert all(
         headers["authorization"] == "Bearer saved-token"
         for headers in codex_endpoint.request_headers
     )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux")
+async def test_trusted_local_executor_rejects_hard_linked_legacy_credentials(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home, credential_directory = split_saved_login(tmp_path)
+    fallback = home / ".credentials.json"
+    fallback.write_text("synthetic legacy credential marker")
+    (tmp_path / "ordinary-name").hardlink_to(fallback)
+    agent = codex_agent(home, credential_directory=credential_directory)
+
+    with pytest.raises(RuntimeError, match="legacy.*hard links"):
+        async with agent.session(
+            environment=Environment.local(cwd=workspace, write_policy="trusted_workspace_write")
+        ):
+            pytest.fail("Trusted execution opened with hard-linked legacy credentials")
+    assert codex_endpoint.requests == []
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("persistent", [False, True], ids=["portable", "persistent"])
+async def test_trusted_split_login_preserves_restore_with_a_private_mask(
+    codex_endpoint: ResponsesFixture, tmp_path: Path, persistent: bool
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home, credential_directory = split_saved_login(tmp_path)
+    agent = codex_agent(home, credential_directory=credential_directory)
+    selected = Environment.local(cwd=workspace, write_policy="trusted_workspace_write")
+    storage = LocalStorage(tmp_path / "threads") if persistent else None
+    codex_endpoint.respond(assistant_output("Original answer."))
+    async with timeout(30), agent.session(environment=selected, storage=storage) as session:
+        assert (await submit(session, "Start.")).final_output == "Original answer."
+        original_id = session.id
+        original_state = None if persistent else await session.save_state()
+
+    private_target = tmp_path / "legacy-marker"
+    private_target.write_text("synthetic legacy credential marker")
+    (home / ".credentials.json").symlink_to(private_target)
+
+    codex_endpoint.respond(assistant_output("Continued answer."))
+    async with (
+        timeout(30),
+        agent.session(
+            environment=selected,
+            storage=storage,
+            resume=original_id if persistent else None,
+            state=original_state,
+        ) as resumed,
+    ):
+        if persistent:
+            assert resumed.id == original_id
+        assert (await submit(resumed, "Continue.")).final_output == "Continued answer."
+        if original_state is not None:
+            state = await resumed.save_state()
+            assert state.executor_policy_digest == original_state.executor_policy_digest
+            assert str(private_target) not in state.to_json()
+            assert str(credential_directory) in state.to_json()
+
+    assert "Original answer." in json.dumps(codex_endpoint.requests[-1]["input"])
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux storage mounts")

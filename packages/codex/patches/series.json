@@ -429,9 +429,57 @@
       "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
     },
     {
-      "path": "sdk-bwrap-read-only-auth-alias.patch",
-      "sha256": "4ecee9ea7a5f1f5378068e7c8a25b6c062e5be2e29349cdbbf689549c172d02d"
+      "path": "sdk-root-metadata-readback.patch",
+      "sha256": "f3148384548bb8c5090f106fe44c18d763d1b9daf5551b2fb10f51937a25791a"
+    },
+    {
+      "path": "0171-original-history-catalog.patch",
+      "sha256": "a0fd58cc346c11bc2320b1e120b7f8d3afc79ad7a2d12ad112636bca373345b3"
+    },
+    {
+      "path": "sdk-rpc-json-fidelity.patch",
+      "sha256": "627e429ded864fb3388b6562c22460e604ca9ba6ad25ec72e38480c1ba61e6ed"
+    },
+    {
+      "path": "0172-linear-original-history-checkpoints.patch",
+      "sha256": "c2009453efb8889a8844186ead76b51ba912fee2512bc6b0524b12ece696989c"
+    },
+    {
+      "path": "sdk-linux-bootstrap-environment.patch",
+      "sha256": "4f453674465f30d922f2bfc0016d3bf47cd6f9016fe3e679abe0bfa9c780fd5e"
+    },
+    {
+      "path": "sdk-environment-name-validation.patch",
+      "sha256": "117f2da7c540d33ba72cfe8eac6601c6d534fa89e5c920a2be7b19d7431c7590"
+    },
+    {
+      "path": "0173-bounded-live-original-history.patch",
+      "sha256": "f3653b99ba819032f5be8dd217135c784e5bf9ba4fae0416a8d81a9364306f43"
+    },
+    {
+      "path": "0174-sdk-command-environment-overrides.patch",
+      "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
+      "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-mount-race.patch",
+      "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-bootstrap.patch",
+      "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
+    },
+    {
+      "path": "sdk-linux-private-credential-file-mask.patch",
+      "sha256": "280414d1ef9f7fea874d460629f4ca24732d4f3b09daf47488947cc24c9e7a3e"
+    },
+    {
+      "path": "sdk-local-project-read-cwd.patch",
+      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
     }
   ],
-  "result_tree": "a64d5c2fb98b6ea884ab031cb5af0400e50040ed"
+  "result_tree": "ed8820a2442873140f7c07f1f0c124817b6bf851"
 }
