@@ -426,8 +426,8 @@
     },
     {
       "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
-      "sha256": "acebedee56c89a69d7303cb56aa0f86c7775cf8e2a2b2786545030c5a0834273"
+      "sha256": "774745ba2b35fe870ad0f3d7cbe8d810f454aadf94e8ffa2d219397e0d1660de"
     }
   ],
-  "result_tree": "867764c497afff5828e3be3bb1c3e1271c1ffdb1"
+  "result_tree": "f4f2748f820a094dd037763c3eb92370876b9a60"
 }

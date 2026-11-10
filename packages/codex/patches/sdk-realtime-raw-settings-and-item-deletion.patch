@@ -447,10 +447,28 @@ index 0906f3aa6997d270cc075627c933e67c1a8abd9d..63be224e7b356e2301fbe3f74a0cbe8d
              "tools".into(),
              tools_json(
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0a7ba97f7 100644
+index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..c2a970b23a9ceb44de96b28d6f9081d0a8d1f981 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -737,6 +737,10 @@ impl SdkRealtimeState {
+@@ -729,6 +729,17 @@ impl SdkRealtimeState {
+         Ok(())
+     }
+ 
++    fn fail_provider_item_deletion(&self, id: &str, message: String) {
++        self.item_deletion
++            .lock()
++            .unwrap()
++            .finish(id, Err(CodexErr::InvalidRequest(message.clone())));
++        self.history
++            .lock()
++            .unwrap()
++            .fail(CodexErr::InvalidRequest(message));
++    }
++
+     async fn retire_tool_work(
+         &self,
+         retire_generation: bool,
+@@ -737,6 +748,10 @@ impl SdkRealtimeState {
          if retire_generation {
              self.active.store(false, Ordering::Release);
          }
@@ -461,7 +479,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
          let mut calls = self.function_calls.lock().await;
          let mut pending = self.pending.lock().await;
          let mut work = SdkToolRetirement {
-@@ -1627,7 +1631,7 @@ impl RealtimeConversationManager {
+@@ -1627,7 +1642,7 @@ impl RealtimeConversationManager {
                      "Item deletion requires RealtimeV2".into(),
                  ));
              }
@@ -470,7 +488,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
          }
          let is_update = matches!(&command, SdkRealtimeCommand::OwnedUpdate { .. });
          #[cfg(test)]
-@@ -1898,6 +1902,16 @@ impl RealtimeConversationManager {
+@@ -1898,6 +1913,16 @@ impl RealtimeConversationManager {
                                  source: profile.source,
                              }),
                          )))
@@ -487,7 +505,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
                      } else {
                          if let Some(tools) = update.function_tools.take() {
                              let accepted = configuration
-@@ -3179,19 +3193,26 @@ async fn run_history_action(
+@@ -3179,19 +3204,26 @@ async fn run_history_action(
                  sdk.history.lock().unwrap().fail(error);
                  return Ok(());
              }
@@ -521,7 +539,19 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
          }
          None => return Ok(()),
      };
-@@ -5221,8 +5242,10 @@ async fn handle_sdk_realtime_command(
+@@ -4067,10 +4099,7 @@ async fn handle_start_inner_with_adapter(
+                                 .err()
+                                 .map(|error| error.to_string())
+                                 .unwrap_or_else(|| "Realtime generation retired".into());
+-                            sdk.item_deletion
+-                                .lock()
+-                                .unwrap()
+-                                .finish(item_id, Err(CodexErr::InvalidRequest(message)));
++                            sdk.fail_provider_item_deletion(item_id, message);
+                             handoff_error = Some("failed to record provider item deletion");
+                             break;
+                         }
+@@ -5221,8 +5250,10 @@ async fn handle_sdk_realtime_command(
                      request,
                      CodexErr::InvalidRequest("Provider item deletion is pending".into()),
                  );
@@ -534,7 +564,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
                      if provider_history::is_tool_replay(item)))
                  && (responses.active_default_response || !sdk.pending.lock().await.is_empty())
              {
-@@ -5260,6 +5283,36 @@ async fn handle_sdk_realtime_command(
+@@ -5260,6 +5291,36 @@ async fn handle_sdk_realtime_command(
                  )));
                  return Ok(());
              }
@@ -571,7 +601,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
              if sdk
                  .item_deletion
                  .lock()
-@@ -5895,9 +5948,20 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5895,9 +5956,20 @@ async fn handle_realtime_server_event_with_configuration(
      response_create_queue: &mut RealtimeResponseCreateQueue,
      configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
  ) -> anyhow::Result<()> {
@@ -593,7 +623,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
          (Some(sdk), RealtimeEvent::FunctionCallRequested(call))
              if sdk
                  .history
-@@ -5911,10 +5975,24 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -5911,10 +5983,24 @@ async fn handle_realtime_server_event_with_configuration(
          }
          _ => event,
      };
@@ -619,7 +649,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
              }
              RealtimeEvent::ConversationItemAdded {
                  item,
-@@ -6100,6 +6178,12 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6100,6 +6186,12 @@ async fn handle_realtime_server_event_with_configuration(
              {
                  return Ok(());
              }
@@ -632,7 +662,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
              defer_sdk_create_until_handoff(handoff_state, response_create_queue).await;
              if response.response_id == response_create_queue.sdk_response_id {
                  response_create_queue.sdk_response_id = None;
-@@ -6235,6 +6319,34 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6235,6 +6327,34 @@ async fn handle_realtime_server_event_with_configuration(
              }
              false
          }
@@ -667,7 +697,7 @@ index 6b77dad55d09c9e1cdbe23d91f078cfd39cc6df1..505661395bcc09e94f5448c82fe53dd0
          RealtimeEvent::FunctionCallRequested(request) => {
              let Some(sdk) = &handoff_state.sdk else {
                  return Ok(());
-@@ -6243,12 +6355,66 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6243,12 +6363,66 @@ async fn handle_realtime_server_event_with_configuration(
              if request.namespace.is_some() {
                  anyhow::bail!("Namespaced Realtime functions are not supported");
              }
@@ -798,7 +828,7 @@ index d8941ea55b1e89a7ca6fd350ed3dc282b868282a..298f20f0188d91375ee2c5dd21afcfac
          let item = self
              .items
 diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
-index 9590e663d66e51fee5cd93d36faaefe03625e80a..3c16d5045ff48f627f0ef08244b00bfc121bc844 100644
+index 9590e663d66e51fee5cd93d36faaefe03625e80a..4dd06b62a5e3acbc718b6d6e2da6c91c030fe4a9 100644
 --- a/codex-rs/core/src/realtime_conversation/provider_history.rs
 +++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
 @@ -3,8 +3,8 @@
@@ -1220,7 +1250,7 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..3c16d5045ff48f627f0ef08244b00bfc
      }
      fn creation_item(item: &Value) -> CodexResult<Value> {
          let mut remaining = MAX_IMAGE_DECODE_BYTES;
-@@ -1186,6 +1393,120 @@ mod tests {
+@@ -1186,6 +1393,160 @@ mod tests {
      fn message(id: &str, text: &str) -> Value {
          json!({"id":id,"type":"message","role":"user","content":[{"type":"input_text","text":text}]})
      }
@@ -1268,6 +1298,46 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..3c16d5045ff48f627f0ef08244b00bfc
 +        assert!(!deletion.can_recreate_message("hidden"));
 +        assert!(deletion.needs_lookup("hidden").is_err());
 +        assert!(history.order.is_empty());
++    }
++
++    #[tokio::test]
++    async fn unobserved_delete_persistence_failure_releases_the_history_request() {
++        let sdk = SdkRealtimeState::new("voice".into());
++        let (reply, mut receipt) = tokio::sync::oneshot::channel();
++        let (internal_reply, mut internal_receipt) = tokio::sync::oneshot::channel();
++        {
++            let mut history = sdk.history.lock().unwrap();
++            let mut deletion = sdk.item_deletion.lock().unwrap();
++            let request = Request::Delete {
++                id: "hidden".into(),
++                event_id: None,
++                reply: item_deletion::DeleteReply::new(reply),
++            };
++            assert!(matches!(history.start(request).unwrap(),
++                Some(Action::Retrieve { id, .. }) if id == "hidden"));
++            let mut item = message("hidden", "pre-attach speech");
++            item["status"] = json!("completed");
++            history
++                .prepare_retrieved_delete(&item, &mut deletion)
++                .unwrap();
++            assert!(matches!(history.retrieved(item).unwrap(),
++                Some(Action::Delete(id)) if id == "hidden"));
++            assert!(deletion.begin(
++                "hidden".into(),
++                item_deletion::DeleteReply::new(internal_reply)
++            ));
++            assert!(deletion.acknowledge("hidden"));
++        }
++
++        let error = "failed to flush deletion audit";
++        sdk.fail_provider_item_deletion("hidden", error.into());
++
++        assert!(matches!(receipt.try_recv(),
++            Ok(Err(CodexErr::InvalidRequest(message))) if message == error));
++        assert!(matches!(internal_receipt.try_recv(),
++            Ok(Err(CodexErr::InvalidRequest(message))) if message == error));
++        assert!(sdk.history.lock().unwrap().deadline().is_none());
++        assert!(sdk.item_deletion.lock().unwrap().deadline().is_none());
 +    }
 +
 +    #[tokio::test]
@@ -1341,7 +1411,7 @@ index 9590e663d66e51fee5cd93d36faaefe03625e80a..3c16d5045ff48f627f0ef08244b00bfc
      fn replay_pair(id: &str) -> (Value, Value) {
          let call_id = format!("call-{id}");
          (
-@@ -1770,6 +2091,107 @@ mod tests {
+@@ -1770,6 +2131,107 @@ mod tests {
          assert!(!state.busy());
      }
  
