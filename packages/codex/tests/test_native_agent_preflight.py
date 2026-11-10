@@ -60,6 +60,36 @@ async def test_run_restores_target_default_selection_with_current_bindings(respo
         assert len(responses.requests) == 2
 
 
+async def test_restored_target_can_checkpoint_original_root_after_handoff(responses):
+    lookup = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-cycle") as provider:
+        root = Agent(
+            name="A",
+            instructions="Read A.",
+            tools=[lookup],
+            handoffs=[lambda: middle],
+            provider=provider,
+        )
+        middle = Agent(name="B", instructions="Return to A.", handoffs=[root])
+        async with root.session() as session:
+            await session.update(agent=middle)
+            saved = await session.save_state()
+        responses.respond(function_call("transfer_to_a", {}, "handoff-A"))
+        responses.respond(function_call("lookup", {"key": "A"}, "lookup-A"))
+        async with timeout(20):
+            with pytest.raises(InteractionRequired) as pending:
+                await root.run("Read A.", state=saved)
+            assert len(responses.requests) == 2
+            assert pending.value.state is not None
+            responses.respond(assistant_output("A completed"))
+            result = await root.run(
+                None,
+                state=pending.value.state,
+                on_interaction=lambda request: request.reply("current reply"),
+            )
+            assert result.final_output == "A completed"
+
+
 async def test_budgeted_restore_resolves_explicit_tool_against_active_profile(responses):
     calls = []
 

@@ -1654,8 +1654,12 @@ class Agent(Generic[ContextT, OutputT]):
                                 and not tool._requires_live_manual_session
                             )
                             has_reachable_manual |= bool(target_manual)
-                            if profile.agent is not self:
-                                pause_manual += target_manual
+                            pause_manual += tuple(
+                                tool
+                                for tool in target_manual
+                                if profile.agent is not self
+                                or any(tool is grant for grant in declared)
+                            )
                             pending.extend(profile.handoffs.values())
                         if budget is not None and has_reachable_manual:
                             raise CapabilityError(
