@@ -32,10 +32,12 @@ agent.run_sync(input, *, context=None, on_interaction=None,
                parent_trace=None, trace_options=None, prepare_request=None, budget=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
-              instruction_files=(), reconciled_calls=(),
+              instruction_files=(), discover_agents_md=False, reconciled_calls=(),
               parent_trace=None, trace_options=None, on_interaction=None)
               -> async context manager[Session]
 ```
+
+Matching source builds have been supporting `discover_agents_md=False` on `agent.session()`. With `True`, native discovery has been loading trusted user and project instruction files. The [instruction guide](sessions.md#check-applied-instructions-and-settings) has been covering file selection, priority, and renewed opt-in on restore.
 
 The call options follow these rules:
 

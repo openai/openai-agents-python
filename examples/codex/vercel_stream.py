@@ -1,12 +1,47 @@
-"""Copyable recipe for fresh Vercel UI text and passive tool progress streams.
+"""Packaged Vercel UI streaming and application-owned response recipes.
 
-Set Content-Type: text/event-stream and x-vercel-ai-ui-message-stream: v1
-on the HTTP response in your own framework. Authentication, rendering and
-history projection belong to the application. This example emits a narrow
-subset of UI Message Stream v1, not the older data-stream v1 protocol.
-Copy this recipe with the sibling _ui_projection.py helper.
-Tests verify this stream with AI SDK client ai@6.0.315 using synthetic fetch.
-They do not cover browser rendering or real network transport.
+Matching source builds have been providing agents.ui.vercel_stream. The source
+setup in packages/codex/MAINTAINING.md#build-from-this-source has been covering
+installation with the matching native extension. A framework-neutral response
+body using the packaged adapter:
+
+    from collections.abc import AsyncGenerator
+    from contextlib import aclosing
+
+    from agents import Agent
+    from agents.ui import vercel_stream
+
+    async def packaged_body(
+        agent: Agent[None, str], prompt: str
+    ) -> AsyncGenerator[bytes, None]:
+        async with agent.session() as session:
+            turn = await session.submit(prompt)
+            async with aclosing(vercel_stream(turn, session=session)) as body:
+                async for chunk in body:
+                    yield chunk
+
+The application has been setting Content-Type: text/event-stream and
+x-vercel-ai-ui-message-stream: v1 on its HTTP response. This adapter has been
+accepting plain-text output, using the Agent's default output or str without
+prompted or structured overrides. The application has been owning authentication,
+history projection, and the Session lifetime. In this example the response has
+been owning the Session; closing the response body has been closing the Session
+and stopping its work. For work surviving disconnects, a worker has been keeping
+the Session open and passing its Turn to vercel_stream. Closing that iterator has
+been releasing only its reader.
+
+The adapter has been omitting tool arguments and results by default. The explicit
+include_tool_data=True option has been sending retained function/MCP input and
+output after settlement. The application has been deciding whether the client
+has permission to receive that data. Each stream has been starting a fresh UI
+message; missing observations have been producing resync_required for recovery
+through an application-authorized history view.
+
+The custom stream_turn and response_body recipes below have been illustrating
+separate ownership and projection choices with the sibling _ui_projection.py
+helper. The AG-UI recipe in ag_ui/README.md has been covering
+AG-UI events. Client tests have been checking the custom Vercel recipe with
+ai@6.0.315 and synthetic fetch, without browser rendering or real HTTP transport.
 """
 
 from __future__ import annotations

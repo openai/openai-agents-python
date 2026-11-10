@@ -43,12 +43,13 @@ class ApiRateLimits:
 class CodexPlanWindow:
     """Provider-reported consumption and reset for one plan window.
 
-    ``resets_at`` is in Unix seconds. Missing values are unknown.
+    ``resets_at`` has been reporting a timezone-aware UTC datetime.
+    Missing values have been remaining unknown.
     """
 
     used_percent: float
     window_minutes: int | None
-    resets_at: int | None
+    resets_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -64,14 +65,14 @@ class CodexPlanCredits:
 class CodexPlanSpendLimit:
     """A reported monthly credit limit for an individual workspace member.
 
-    The provider supplies the limit and usage as strings. The reset time is in
-    Unix seconds.
+    The provider has been supplying the limit and usage as strings. The reset
+    time has been using a timezone-aware UTC datetime.
     """
 
     limit: str
     used: str
     remaining_percent: int
-    resets_at: int
+    resets_at: datetime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -112,6 +113,20 @@ class CodexPlanUsage:
     reset_credits_available: int | None
 
 
+def _codex_plan_window(value: dict[str, Any] | None) -> CodexPlanWindow | None:
+    if value is None:
+        return None
+    return CodexPlanWindow(
+        used_percent=value["used_percent"],
+        window_minutes=value["window_minutes"],
+        resets_at=(
+            datetime.fromtimestamp(value["resets_at"], timezone.utc)
+            if value["resets_at"] is not None
+            else None
+        ),
+    )
+
+
 def _codex_plan_usage(value: dict[str, Any]) -> CodexPlanUsage:
     limits = value["limits"]
     return CodexPlanUsage(
@@ -124,21 +139,22 @@ def _codex_plan_usage(value: dict[str, Any]) -> CodexPlanUsage:
                 limit_id=limit["limit_id"],
                 limit_name=limit["limit_name"],
                 normal_model_slug=limit.get("normal_model_slug"),
-                primary=(
-                    CodexPlanWindow(**limit["primary"]) if limit["primary"] is not None else None
-                ),
-                secondary=(
-                    CodexPlanWindow(**limit["secondary"])
-                    if limit["secondary"] is not None
-                    else None
-                ),
+                primary=_codex_plan_window(limit["primary"]),
+                secondary=_codex_plan_window(limit["secondary"]),
                 credits=(
                     CodexPlanCredits(**limit["credits"]) if limit["credits"] is not None else None
                 ),
                 spend_control_reached=limit["spend_control_reached"],
                 rate_limit_reached_type=limit["rate_limit_reached_type"],
                 individual_limit=(
-                    CodexPlanSpendLimit(**limit["individual_limit"])
+                    CodexPlanSpendLimit(
+                        limit=limit["individual_limit"]["limit"],
+                        used=limit["individual_limit"]["used"],
+                        remaining_percent=limit["individual_limit"]["remaining_percent"],
+                        resets_at=datetime.fromtimestamp(
+                            limit["individual_limit"]["resets_at"], timezone.utc
+                        ),
+                    )
                     if limit["individual_limit"] is not None
                     else None
                 ),

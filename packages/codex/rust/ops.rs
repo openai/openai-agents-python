@@ -1567,7 +1567,7 @@ pub async fn call(thread: &CodexThread, operation: &str, params: Value) -> Resul
                 .submit(Op::RealtimeConversationUpdateHistorySdk {
                     generation: p.generation,
                     items: p.items,
-                    expected_items: None,
+                    expected_items: p.expected_items,
                     reply,
                 })
                 .await?;
@@ -1949,7 +1949,11 @@ params!(RealtimeSdkSendEvent {
     generation: String,
     event: Value
 });
-params!(RealtimeSdkHistory { generation: String, items: Vec<Value> });
+params!(RealtimeSdkHistory {
+    generation: String,
+    items: Vec<Value>,
+    expected_items: Option<Vec<Value>>
+});
 params!(RealtimeSdkDeleteItem {
     generation: String,
     item_id: String

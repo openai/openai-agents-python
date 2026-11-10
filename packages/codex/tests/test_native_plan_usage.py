@@ -145,22 +145,35 @@ async def test_read_codex_plan_usage_before_dispatch(plan_endpoint, monkeypatch,
                 limit_id="codex",
                 limit_name=None,
                 normal_model_slug=None,
-                primary=CodexPlanWindow(used_percent=100, window_minutes=300, resets_at=2000000000),
+                primary=CodexPlanWindow(
+                    used_percent=100,
+                    window_minutes=300,
+                    resets_at=datetime.fromtimestamp(2000000000, timezone.utc),
+                ),
                 secondary=CodexPlanWindow(
-                    used_percent=5, window_minutes=10080, resets_at=2000000100
+                    used_percent=5,
+                    window_minutes=10080,
+                    resets_at=datetime.fromtimestamp(2000000100, timezone.utc),
                 ),
                 credits=CodexPlanCredits(has_credits=True, unlimited=False, balance="12.50"),
                 spend_control_reached=False,
                 rate_limit_reached_type=None,
                 individual_limit=CodexPlanSpendLimit(
-                    limit="25000", used="8000", remaining_percent=68, resets_at=2000000300
+                    limit="25000",
+                    used="8000",
+                    remaining_percent=68,
+                    resets_at=datetime.fromtimestamp(2000000300, timezone.utc),
                 ),
             ),
             CodexPlanLimit(
                 limit_id="extra-codex",
                 limit_name="Extra Codex",
                 normal_model_slug="extra-model",
-                primary=CodexPlanWindow(used_percent=88, window_minutes=60, resets_at=2000000200),
+                primary=CodexPlanWindow(
+                    used_percent=88,
+                    window_minutes=60,
+                    resets_at=datetime.fromtimestamp(2000000200, timezone.utc),
+                ),
                 secondary=None,
                 credits=None,
                 spend_control_reached=None,
@@ -213,7 +226,9 @@ async def test_plan_usage_without_saved_workspace_id(plan_endpoint, tmp_path):
         assert not usage.identity_verified
         assert usage.ordinary_usage_allowed is None
         assert usage.limits[0].primary == CodexPlanWindow(
-            used_percent=9, window_minutes=300, resets_at=2000000000
+            used_percent=9,
+            window_minutes=300,
+            resets_at=datetime.fromtimestamp(2000000000, timezone.utc),
         )
     assert requests == [("/backend-api/wham/usage", "Bearer saved-token", None)]
 
