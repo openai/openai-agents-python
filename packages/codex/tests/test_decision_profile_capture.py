@@ -65,6 +65,7 @@ def callback_session(root):
     session = object.__new__(Session)
     session._profiles = runtime
     session._closing = False
+    session._uses_siwc = False
     session._opening_agent = profiles[0].declaration
     session._decisions_provider = profiles[0].declaration.decisions
     session._profile_current = ("agent_0", 0)

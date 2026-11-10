@@ -77,6 +77,8 @@ pub struct EngineState {
 
 const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
 const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
+pub(crate) const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+const SIWC_VERIFIED_PROVIDER_PREFIX: &str = "native_agent_siwc_verified_";
 
 impl EngineState {
     pub(crate) fn owns_runtime_services(&self) -> bool {
@@ -97,7 +99,18 @@ impl EngineState {
         Ok(())
     }
 
+    pub(crate) fn validate_siwc_resume_provider(stored: &str, current: &str) -> anyhow::Result<()> {
+        ensure!(
+            (!stored.starts_with(SIWC_PROVIDER_PREFIX)
+                && !current.starts_with(SIWC_PROVIDER_PREFIX))
+                || (current.starts_with(SIWC_VERIFIED_PROVIDER_PREFIX) && stored == current),
+            "Saved thread and Session must use the same authentication mode and ChatGPT registration"
+        );
+        Ok(())
+    }
+
     fn validate_resume_provider(stored: &str, current: &str) -> anyhow::Result<()> {
+        Self::validate_siwc_resume_provider(stored, current)?;
         ensure!(
             (!stored.starts_with(CODEX_LOGIN_PROVIDER_PREFIX)
                 && !current.starts_with(CODEX_LOGIN_PROVIDER_PREFIX))
@@ -107,7 +120,18 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) fn validate_hosted_search(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
+    fn requires_model_validation(config: &Config) -> bool {
+        config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX)
+            || (config.web_search_mode.value()
+                != codex_protocol::config_types::WebSearchMode::Disabled
+                && !config.features.enabled(Feature::StandaloneWebSearch))
+    }
+
+    pub(crate) fn validate_provider_model(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
+        ensure!(
+            !config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX) || info.use_responses_lite,
+            "Sign in with ChatGPT requires a native model with Responses Lite support"
+        );
         // Lite selects Core's standalone executor even with its feature flag
         // off. A hosted grant must not silently acquire that other route.
         ensure!(
@@ -154,20 +178,14 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) async fn validate_hosted_search_model(&self, model: &str) -> anyhow::Result<()> {
-        if self.service_config.web_search_mode.value()
-            != codex_protocol::config_types::WebSearchMode::Disabled
-            && !self
-                .service_config
-                .features
-                .enabled(Feature::StandaloneWebSearch)
-        {
+    pub(crate) async fn validate_model(&self, model: &str) -> anyhow::Result<()> {
+        if Self::requires_model_validation(&self.service_config) {
             let info = self
                 .manager
                 .get_models_manager()
                 .get_model_info(model, &self.service_config.to_models_manager_config())
                 .await;
-            Self::validate_hosted_search(&self.service_config, &info)?;
+            Self::validate_provider_model(&self.service_config, &info)?;
         }
         Ok(())
     }
@@ -279,6 +297,7 @@ impl EngineState {
             Self::check_controlled_config(&config)?;
         }
         let native_agents = runtime_options.native_agents();
+        let siwc = config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX);
         let initial_model = initial_models
             .as_ref()
             .and_then(|models| models.root.clone());
@@ -325,7 +344,7 @@ impl EngineState {
             )?;
             (manager, Some(account))
         } else {
-            (crate::auth::manager(&config, api_key).await?, None)
+            (crate::auth::manager(&config, api_key, siwc).await?, None)
         };
         let goals_enabled = runtime_options.native_goal_store_enabled();
         let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
@@ -422,6 +441,14 @@ impl EngineState {
                 .await?;
             Self::validate_resume_provider(&stored.model_provider, &config.model_provider_id)?;
         }
+        // A custom read owns the exclusive writer. Resolve its saved model
+        // during startup, when the Engine can retry cleanup on rejection.
+        let defer_custom_siwc_model = siwc
+            && config.model.is_none()
+            && runtime_options.sdk_resume_thread_id().is_some()
+            && store
+                .as_any()
+                .is::<crate::canonical_storage::CanonicalStore>();
         let provider = codex_model_provider::create_model_provider(
             config.model_provider.clone(),
             Some(auth.clone()),
@@ -449,10 +476,7 @@ impl EngineState {
                 ModelsResponse { models: catalog },
             ))
         } else {
-            if config.web_search_mode.value()
-                != codex_protocol::config_types::WebSearchMode::Disabled
-                && !config.features.enabled(Feature::StandaloneWebSearch)
-            {
+            if Self::requires_model_validation(&config) && !defer_custom_siwc_model {
                 let model = if checkpoint {
                     initial_model.clone()
                 } else {
@@ -469,14 +493,18 @@ impl EngineState {
                                     .is::<crate::canonical_storage::CanonicalStore>(),
                             "SDK resume requires current native canonical storage"
                         );
-                        let model = store
+                        let stored = store
                             .read_thread(ReadThreadParams {
                                 thread_id: id,
                                 include_archived: true,
                                 include_history: false,
                             })
-                            .await?
-                            .model;
+                            .await?;
+                        Self::validate_siwc_resume_provider(
+                            &stored.model_provider,
+                            &config.model_provider_id,
+                        )?;
+                        let model = stored.model;
                         if let Some(local) = &local_checklist_store {
                             local.expect_resume_model(id, model.clone())?;
                         }
@@ -502,7 +530,7 @@ impl EngineState {
                     let info = models
                         .get_model_info(&model, &config.to_models_manager_config())
                         .await;
-                    Self::validate_hosted_search(&config, &info)?;
+                    Self::validate_provider_model(&config, &info)?;
                 }
             }
             models
@@ -633,7 +661,9 @@ impl EngineState {
             recovery,
             cloud_config,
             service_config: config,
-            model_http_pool: None,
+            // The isolated HTTP pool enables Core's redirect rejection when
+            // the provider declares its fixed routing, including on restore.
+            model_http_pool: siwc.then(codex_http_client::SdkModelHttpPool::default),
             // Session opening captures one configuration for its owned runtime
             // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
@@ -730,6 +760,30 @@ impl EngineState {
                 &stored.model_provider,
                 &startup.config.model_provider_id,
             )?;
+            if startup.config.model.is_none()
+                && config::sdk_resume_thread_id(&self.runtime_json)? == Some(id)
+            {
+                startup.config.model = self.service_config.model.clone();
+                if startup.config.model.is_none()
+                    && startup
+                        .config
+                        .model_provider_id
+                        .starts_with(SIWC_PROVIDER_PREFIX)
+                {
+                    let model = self
+                        .manager
+                        .get_models_manager()
+                        .get_default_model(
+                            &stored.model,
+                            false,
+                            RefreshStrategy::OnlineIfUncached,
+                            startup.config.http_client_factory(),
+                        )
+                        .await;
+                    self.validate_model(&model).await?;
+                    startup.config.model = Some(model);
+                }
+            }
             startup.initial_history = self.history_from_stored(stored).await?;
             ensure!(
                 startup
@@ -739,11 +793,6 @@ impl EngineState {
                     .is_empty(),
                 "SDK resume cannot authorize saved startup tools; use an SDK-created thread"
             );
-            if startup.config.model.is_none()
-                && config::sdk_resume_thread_id(&self.runtime_json)? == Some(id)
-            {
-                startup.config.model = self.service_config.model.clone();
-            }
         }
         if let Some(history) = history {
             startup.initial_history = history;

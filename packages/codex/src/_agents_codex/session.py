@@ -94,12 +94,16 @@ from ._trace_context import (
 from .agent import (
     _MAX_FUNCTION_CONCURRENCY_UNSET as _MAX_FUNCTION_CONCURRENCY_UNSET,
     _OBSERVATION_RETENTION_UNSET as _OBSERVATION_RETENTION_UNSET,
+    _SIWC_PROVIDER_PREFIX,
+    _SIWC_RESOURCE,
     Agent as Agent,
     CodexAccount as CodexAccount,
+    CodexLogin,
     ContextT as ContextT,
     ModelSettings as ModelSettings,
     NativeProvider as NativeProvider,
     OutputT as OutputT,
+    SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
 )
 from .canonical_storage import (
@@ -108,7 +112,7 @@ from .canonical_storage import (
 )
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
-from .computer import _CapturedComputer, _ComputerCall, _ComputerResources
+from .computer import _CapturedComputer, _ComputerCall, _ComputerResources, _ComputerTool
 from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
     Environment as Environment,
@@ -682,8 +686,10 @@ class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
     ``status_code``, ``code`` and ``request_id`` contain available provider
-    metadata. Budget failures use an SDK-defined ``code``. ``category`` is the normalized
-    native failure category. Missing or discarded values remain ``None``.
+    metadata. For an unsupported ChatGPT plan capability, ``param`` contains
+    the provider's field path when available. Budget failures use an SDK-defined
+    ``code``. ``category`` is the normalized native failure category. Missing
+    or discarded values remain ``None``.
     Messages and metadata may contain provider-supplied information.
     effects describes only the failed operation, never earlier actions.
     unknown forbids assuming replay is safe.
@@ -699,12 +705,14 @@ class NativeError(RuntimeError):
         code: str | None = None,
         request_id: str | None = None,
         category: str | None = None,
+        param: str | None = None,
     ) -> None:
         super().__init__(*args)
         self.status_code = status_code
         self.code = code
         self.request_id = request_id
         self.category = category
+        self.param = param
         self._response_integrity_reason: ResponseIntegrityReason | None = None
 
     @property
@@ -828,6 +836,7 @@ def _native_error(error: dict[str, Any], message: str | None = None) -> NativeEr
         ),
         request_id=metadata.get("request_id"),
         category=_error_code(error),
+        param=metadata.get("param"),
     )
     reason = error.get("_sdk_response_integrity_reason")
     if isinstance(reason, str) and reason in get_args(ResponseIntegrityReason):
@@ -1111,6 +1120,7 @@ class _Invocation:
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
 _CODEX_ACCOUNT_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_RESPONSES_BASE_URL = f"{_CODEX_ACCOUNT_BASE_URL}/codex"
+_SIWC_RESPONSES_BASE_URL = _SIWC_RESOURCE
 
 
 @dataclass(repr=False)
@@ -1436,6 +1446,30 @@ class _OpeningOwner:
         # Early declaration validation can fail before any resource is acquired.
         # Keep its traceback from retaining the application's private environment.
         self.environment = None
+
+    def capture_api_key(
+        self,
+        provider: NativeProvider,
+        native: Any,
+        *,
+        auth: CodexLogin | SignInWithChatGPT | None,
+        selected: _RestoreDeclaration | None,
+        captured_api_key: str | None,
+    ) -> None:
+        if isinstance(auth, CodexLogin):
+            self.api_key = None
+        elif isinstance(auth, SignInWithChatGPT):
+            assert self.api_key is not None
+        elif provider.model_backend is not None:
+            self.api_key = "native-model-producer"
+        elif selected is not None:
+            self.api_key = selected.api_key
+        elif captured_api_key is not None:
+            self.api_key = captured_api_key
+        elif provider.api_key is None:
+            self.api_key = native._read_openai_api_key_from_env()
+        else:
+            self.api_key = provider.api_key
 
     async def acquire(self, operation: Any) -> Any:
         pending = asyncio.ensure_future(operation)
@@ -2594,6 +2628,22 @@ def _prepare_native_checkpoint(
     return json.dumps(payload), restored_override, restored_defaults, restored_resource_servers
 
 
+def _checkpoint_plan_provider(
+    saved: SessionState, auth: CodexLogin | SignInWithChatGPT | None
+) -> str | None:
+    saved_provider = (saved.root_metadata or {}).get("model_provider")
+    saved_plan_provider = (
+        saved_provider
+        if isinstance(saved_provider, str) and saved_provider.startswith(_SIWC_PROVIDER_PREFIX)
+        else None
+    )
+    if (saved.codex_login_binding is not None) != isinstance(auth, CodexLogin) or (
+        (saved_plan_provider is not None) != isinstance(auth, SignInWithChatGPT)
+    ):
+        raise ValueError("Checkpoint and Session must use the same authentication mode")
+    return saved_plan_provider
+
+
 def _check_restored_output_contract(saved: SessionState, output: _PreparedOutput) -> None:
     """Validate the captured operation decoder before runtime resources open."""
     if saved.native_continuation is not None:
@@ -2834,6 +2884,80 @@ def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
     return config
 
 
+def _validate_siwc_opening_tools(
+    tools: Sequence[Tool[Any]],
+    *,
+    programmatic_tool_calling: bool,
+    deferred_schemas: bool,
+    has_other_agents: bool,
+) -> None:
+    if programmatic_tool_calling or deferred_schemas:
+        raise ValueError("Sign in with ChatGPT requires directly exposed tools")
+    if has_other_agents:
+        raise ValueError("Sign in with ChatGPT requires a single Agent")
+    if any(
+        isinstance(
+            tool, (*_HOSTED_TOOLS, _ComputerTool, WebSearch, ChatGPTAppsMCP, HostedVerificationMCP)
+        )
+        for tool in tools
+    ):
+        raise ValueError(
+            "Sign in with ChatGPT does not support hosted tools, computer tools, or WebSearch"
+        )
+
+
+async def _opening_provider_config(
+    provider: NativeProvider,
+    opening: _OpeningOwner,
+    *,
+    captured_api_key: str | None,
+    captured_siwc_provider: str | None,
+    saved_plan_provider: str | None,
+    standalone_web_search: bool,
+) -> dict[str, Any]:
+    auth = provider.auth
+    provider_id = "native_agent"
+    base_url = provider.base_url or "https://api.openai.com/v1"
+    routing: dict[str, Any] = provider._routing_config()
+    for name in (
+        "request_max_retries",
+        "stream_max_retries",
+        "stream_idle_timeout_ms",
+        "websocket_connect_timeout_ms",
+    ):
+        value = getattr(provider, name)
+        if value is not None:
+            routing[name] = value
+    if isinstance(auth, CodexLogin):
+        provider_id = "native_agent_codex_login"
+        base_url = _CODEX_RESPONSES_BASE_URL
+    elif isinstance(auth, SignInWithChatGPT):
+        if captured_api_key is None:
+            opening.api_key, provider_id = await auth._resolve()
+        else:
+            assert captured_siwc_provider is not None
+            opening.api_key = captured_api_key
+            provider_id = captured_siwc_provider
+        if saved_plan_provider is not None and saved_plan_provider != provider_id:
+            raise ValueError("Checkpoint requires the original ChatGPT registration")
+        base_url = _SIWC_RESPONSES_BASE_URL
+        routing.update(http_headers={}, request_max_retries=0, stream_max_retries=0)
+    return {
+        "model_provider": provider_id,
+        f"model_providers.{provider_id}": {
+            "name": "OpenAI" if isinstance(auth, CodexLogin) else "Native agent provider",
+            "base_url": base_url,
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": provider._websockets_enabled,
+            **routing,
+            # Both native web protocols require a compatible Responses
+            # provider. The declaration admits that provider capability.
+            "supports_standalone_web_search": standalone_web_search,
+        },
+    }
+
+
 def _configure_child_roles(
     config: dict[str, Any], home: TemporaryDirectory[str], native_agents: NativeAgents[Any]
 ) -> None:
@@ -2938,6 +3062,7 @@ class Session(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         discover_agents_md: bool = False,
         _captured_api_key: str | None = None,
+        _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
@@ -3018,7 +3143,9 @@ class Session(Generic[ContextT, OutputT]):
             profiles = (
                 _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
-            codex_login = agent.provider.auth if agent.provider is not None else None
+            auth = agent.provider.auth if agent.provider is not None else None
+            codex_login = auth if isinstance(auth, CodexLogin) else None
+            uses_siwc = isinstance(auth, SignInWithChatGPT)
             programmatic_tool_calling = agent.programmatic_tool_calling
             instructions, instruction_receipts = _load_instruction_files(
                 agent.instructions, instruction_files
@@ -3035,15 +3162,16 @@ class Session(Generic[ContextT, OutputT]):
             restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
             restored_resource_servers: tuple[str, ...] = ()
             restored_override = False
+            saved_plan_provider = None
             if state is not None:
                 if not isinstance(state, SessionState):
                     raise TypeError("state must be a SessionState")
                 # Capture caller-owned data before the first await. The native
                 # importer validates identities, revision, and current tool specs.
                 saved = SessionState.from_json(state.to_json())
-                _check_checkpoint(saved, instructions, graph=bool(profiles))
-                if (saved.codex_login_binding is not None) != (codex_login is not None):
-                    raise ValueError("Checkpoint and Session must use the same authentication mode")
+                saved_plan_provider = _checkpoint_plan_provider(saved, auth)
+                if not uses_siwc:
+                    _check_checkpoint(saved, instructions, graph=bool(profiles))
                 (
                     checkpoint,
                     restored_override,
@@ -3097,6 +3225,13 @@ class Session(Generic[ContextT, OutputT]):
             deferred_schemas = _has_deferred_tools(available) or any(
                 _has_deferred_tools(profile.declaration.tools) for profile in profiles
             )
+            if uses_siwc:
+                _validate_siwc_opening_tools(
+                    available,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                    deferred_schemas=deferred_schemas,
+                    has_other_agents=native_agents is not None or bool(profiles),
+                )
             if state is not None and state.descendants and native_agents is None:
                 raise ValueError("Restoring child state requires current NativeAgents")
             if native_agents is not None:
@@ -3218,7 +3353,7 @@ class Session(Generic[ContextT, OutputT]):
                 and opening.environment is None
                 and not instruction_files
                 and agent.provider is not None
-                and codex_login is None
+                and auth is None
                 and _supports_atomic_first_turn(
                     agent,
                     output_mode=output.mode,
@@ -3389,40 +3524,21 @@ class Session(Generic[ContextT, OutputT]):
                 opening.lease = provider_lease
                 engine = None
                 thread = None
-                provider_id = (
-                    "native_agent_codex_login" if codex_login is not None else "native_agent"
+                provider_config = await _opening_provider_config(
+                    provider,
+                    opening,
+                    captured_api_key=_captured_api_key,
+                    captured_siwc_provider=_captured_siwc_provider,
+                    saved_plan_provider=saved_plan_provider,
+                    standalone_web_search=web_search is not None
+                    and web_search.route == "standalone",
                 )
+                if uses_siwc and state is not None:
+                    _check_checkpoint(saved, instructions, graph=bool(profiles))
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
-                    "model_provider": provider_id,
-                    f"model_providers.{provider_id}": {
-                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
-                        "base_url": (
-                            _CODEX_RESPONSES_BASE_URL
-                            if codex_login is not None
-                            else provider.base_url or "https://api.openai.com/v1"
-                        ),
-                        "wire_api": "responses",
-                        "requires_openai_auth": True,
-                        "supports_websockets": provider._websockets_enabled,
-                        **provider._routing_config(),
-                        **{
-                            name: getattr(provider, name)
-                            for name in (
-                                "request_max_retries",
-                                "stream_max_retries",
-                                "stream_idle_timeout_ms",
-                                "websocket_connect_timeout_ms",
-                            )
-                            if getattr(provider, name) is not None
-                        },
-                        # Both native web protocols require a compatible Responses
-                        # provider. The declaration admits that provider capability.
-                        "supports_standalone_web_search": (
-                            web_search is not None and web_search.route == "standalone"
-                        ),
-                    },
+                    **provider_config,
                     "agents.enabled": False,
                     "features.goals": goals,
                     **guidance_config,
@@ -3451,6 +3567,8 @@ class Session(Generic[ContextT, OutputT]):
 
                 if telemetry._engine_options is not None:
                     config.update(json.loads(telemetry._engine_options))
+                if uses_siwc:
+                    config["features.unbounded_connection_retries"] = False
                 if programmatic_tool_calling:
                     config["features.code_mode_host"] = {
                         "enabled": True,
@@ -3468,18 +3586,13 @@ class Session(Generic[ContextT, OutputT]):
                     instructions,
                     project_guidance=project_guidance,
                 )
-                if provider.model_backend is not None:
-                    opening.api_key = "native-model-producer"
-                elif codex_login is not None:
-                    opening.api_key = None
-                elif selected is not None:
-                    opening.api_key = selected.api_key
-                elif _captured_api_key is not None:
-                    opening.api_key = _captured_api_key
-                elif provider.api_key is None:
-                    opening.api_key = native._read_openai_api_key_from_env()
-                else:
-                    opening.api_key = provider.api_key
+                opening.capture_api_key(
+                    provider,
+                    native,
+                    auth=auth,
+                    selected=selected,
+                    captured_api_key=_captured_api_key,
+                )
                 hosted_verification = next(
                     (server for server in allowed_mcp if type(server) is HostedVerificationMCP),
                     None,
@@ -3649,7 +3762,7 @@ class Session(Generic[ContextT, OutputT]):
                             **(
                                 {
                                     "_capture_initial_config": True,
-                                    "_share_model_http": not owned_provider and codex_login is None,
+                                    "_share_model_http": not owned_provider and auth is None,
                                 }
                                 if checkpoint is None
                                 else {}
@@ -3781,6 +3894,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
+                session._uses_siwc = uses_siwc
                 if codex_login is not None:
                     account_id, plan_type, binding = engine._codex_account
                     session._codex_account = CodexAccount(
@@ -3871,7 +3985,9 @@ class Session(Generic[ContextT, OutputT]):
                 await session._publish_opening_configuration(
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
-                    hosted_search=web_search is not None and web_search.route == "hosted",
+                    validate_provider_model=(
+                        uses_siwc or (web_search is not None and web_search.route == "hosted")
+                    ),
                     instructions=instructions,
                     instruction_receipts=instruction_receipts,
                     mcp_config=mcp_config,
@@ -4172,6 +4288,7 @@ class Session(Generic[ContextT, OutputT]):
         self._parent_trace: TraceContext | None = None
         self._codex_account: CodexAccount | None = None
         self._codex_login_binding: str | None = None
+        self._uses_siwc = False
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._engine = engine
@@ -4318,6 +4435,10 @@ class Session(Generic[ContextT, OutputT]):
         """
         return None if self._realtime is None else self._realtime.usage
 
+    def _check_realtime_provider(self) -> None:
+        if self._uses_siwc:
+            raise CapabilityError("Sign in with ChatGPT Sessions do not support Realtime")
+
     def realtime(self, *, config: RealtimeConfig | None = None) -> RealtimeSession:
         """Open a Realtime connection owned by this native Session.
 
@@ -4328,6 +4449,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_open()
         self._check_callback_operation("open voice in its own Session")
+        self._check_realtime_provider()
         from .realtime import RealtimeConfig, RealtimeSession
 
         return RealtimeSession(self, config=RealtimeConfig() if config is None else config)
@@ -4353,6 +4475,7 @@ class Session(Generic[ContextT, OutputT]):
         try:
             self._check_open()
             self._check_callback_operation("build Realtime SIP configuration in its own Session")
+            self._check_realtime_provider()
             from .realtime import RealtimeConfig, _build_realtime_sip_config
 
             return await _build_realtime_sip_config(
@@ -4366,7 +4489,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         settings: dict[str, Any],
         fresh: bool,
-        hosted_search: bool,
+        validate_provider_model: bool,
         instructions: str,
         instruction_receipts: Sequence[Mapping[str, Any]],
         mcp_config: str,
@@ -4378,8 +4501,8 @@ class Session(Generic[ContextT, OutputT]):
         default_handoffs: list[str] | None = None,
     ) -> None:
         thread = self._native
-        if hosted_search and (not fresh or "model" not in settings):
-            await self._publish_startup(thread._validate_hosted_search_model())
+        if validate_provider_model and (not fresh or "model" not in settings):
+            await self._publish_startup(thread._validate_provider_model())
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5186,8 +5309,9 @@ class Session(Generic[ContextT, OutputT]):
         """Read a fresh Codex plan snapshot using this Session's saved login.
 
         Call before ``submit()`` to inspect provider-reported windows and credits.
-        Missing fields are unknown. An API-key Session returns ``None`` without an
-        account request. A failed account read raises ``RuntimeError``. This read
+        Missing fields are unknown. A Session using an API key or
+        ``SignInWithChatGPT`` returns ``None`` without an account request.
+        A failed account read raises ``RuntimeError``. This read
         uses the Session's cached credentials. If the access token has expired,
         renew the saved login and open a new Session before retrying.
         Closing the Session cancels pending plan usage reads.
@@ -9261,10 +9385,15 @@ class Session(Generic[ContextT, OutputT]):
             self._repair_session = None
         if active is not None and not active():
             raise asyncio.CancelledError()
+        captured_siwc_provider = None
+        if self._uses_siwc:
+            assert self._native_options is not None
+            captured_siwc_provider = json.loads(self._native_options)["config"]["model_provider"]
         repair = await Session[ContextT, str]._open(
             declaration,
             context=self._context,
             _captured_api_key=self._model_api_key,
+            _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
         )
