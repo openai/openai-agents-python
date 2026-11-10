@@ -10860,7 +10860,7 @@ class Session(Generic[ContextT, OutputT]):
                 route="direct",
             )
             callback = source_agent.before_complete
-            if callback is not None:
+            if callback is not None and message.get("guard_only") is not True:
                 decision = await self._call_decision_callback(
                     state,
                     message,
