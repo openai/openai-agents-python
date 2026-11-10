@@ -2977,11 +2977,12 @@ impl NativeThread {
         })
     }
 
-    #[pyo3(signature = (subagent_id=None))]
+    #[pyo3(signature = (subagent_id=None, *, for_reconciliation=false))]
     fn read_thread_history<'py>(
         &self,
         py: Python<'py>,
         subagent_id: Option<&str>,
+        for_reconciliation: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let id = subagent_id
@@ -2993,7 +2994,11 @@ impl NativeThread {
             let history = subagents::read_history(&inner, id)
                 .await
                 .map_err(py_error)?;
-            serde_json::to_string(&history).map_err(py_error)
+            if for_reconciliation {
+                local_reconciliation::encode_history(&history).map_err(py_error)
+            } else {
+                serde_json::to_string(&history).map_err(py_error)
+            }
         })
     }
 

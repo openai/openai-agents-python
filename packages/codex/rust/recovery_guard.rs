@@ -81,6 +81,16 @@ impl Guard {
 #[derive(Debug, Default)]
 pub struct RecoveryContributor {
     threads: Mutex<HashMap<String, Weak<Guard>>>,
+    reconciled_descendants: Mutex<HashMap<String, HashSet<String>>>,
+}
+
+impl RecoveryContributor {
+    pub(crate) fn set_reconciled_descendants(&self, ids: HashMap<String, HashSet<String>>) {
+        *self
+            .reconciled_descendants
+            .lock()
+            .expect("recovery index poisoned") = ids;
+    }
 }
 
 impl ThreadLifecycleContributor<Config> for RecoveryContributor {
@@ -90,13 +100,19 @@ impl ThreadLifecycleContributor<Config> for RecoveryContributor {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let guard = input.thread_store.get_or_init(Guard::default);
+            let id = input.thread_store.level_id();
+            if let Some(ids) = self
+                .reconciled_descendants
+                .lock()
+                .expect("recovery index poisoned")
+                .get(id)
+            {
+                guard.set_reconciled(ids.clone());
+            }
             self.threads
                 .lock()
                 .expect("recovery index poisoned")
-                .insert(
-                    input.thread_store.level_id().to_owned(),
-                    Arc::downgrade(&guard),
-                );
+                .insert(id.to_owned(), Arc::downgrade(&guard));
         })
     }
 
