@@ -1031,14 +1031,16 @@ class RealtimeSession:
                 if captured.get("type") == "response.cancel":
                     self._session._check_callback_operation("interrupt its own Realtime session")
 
+                serialized = captured.get("type") in (
+                    "input_audio_buffer.append",
+                    "input_audio_buffer.clear",
+                    "input_audio_buffer.commit",
+                    "response.create",
+                )
+
                 async def send(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                     try:
-                        if snapshot.get("type") in (
-                            "input_audio_buffer.append",
-                            "input_audio_buffer.clear",
-                            "input_audio_buffer.commit",
-                            "response.create",
-                        ):
+                        if serialized:
                             async with self._input_lock:
                                 self._check_live()
                                 result = await self._call("send_event", event=snapshot)
@@ -1055,8 +1057,12 @@ class RealtimeSession:
                             return None
                         return cast(dict[str, Any] | None, result)
                     finally:
+                        if serialized:
+                            self._pending_audio_commits -= 1
                         del snapshot
 
+                if serialized:
+                    self._pending_audio_commits += 1
                 return cast(dict[str, Any] | None, await _join(asyncio.create_task(send(captured))))
         except BaseException as error:
             _clear_adapter_error_frames(error)

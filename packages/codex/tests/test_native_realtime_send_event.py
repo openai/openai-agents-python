@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from agents import Agent, NativeProvider
-from agents.realtime import RealtimeConfig
+from agents.realtime import (
+    RealtimeConfig,
+    RealtimeConversationItemObserved,
+    RealtimeHostedMcpToolsListed,
+)
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 from tests.test_native_realtime_provider_history import observe_item
@@ -219,12 +223,41 @@ async def test_history_moves_messages_across_retained_rows_and_removes_settled_r
             base_url=peer.responses.url, api_key="synthetic-move-control", supports_websockets=False
         ) as provider,
         Agent(instructions="Keep retained control rows.", provider=provider).session() as session,
-        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                settings={
+                    "hosted_mcp_tools": [
+                        {
+                            "server_label": item["server_label"],
+                            "server_url": "https://mcp.example.test/server",
+                        }
+                        for item in (retained, removed)
+                    ]
+                },
+            )
+        ) as voice,
         aclosing(voice.events()) as events,
     ):
         predecessor = None
         for item in rows:
-            await observe_item(peer, events, item, previous_item_id=predecessor)
+            if item["type"] == "mcp_list_tools":
+                assert peer.socket is not None
+                for kind in ("conversation.item.added", "conversation.item.done"):
+                    await peer.socket.send_json(
+                        {"type": kind, "item": item, "previous_item_id": predecessor}
+                    )
+                observed, listed = False, False
+                async for event in events:
+                    if isinstance(event, RealtimeConversationItemObserved):
+                        observed |= event.item_id == item["id"] and event.status == "done"
+                    elif isinstance(event, RealtimeHostedMcpToolsListed):
+                        listed |= event.item_id == item["id"]
+                    if observed and listed:
+                        break
+                assert observed and listed
+            else:
+                await observe_item(peer, events, item, previous_item_id=predecessor)
             predecessor = item["id"]
         cursor = len(peer.frames)
         start = cursor

@@ -221,3 +221,57 @@ async def test_raw_input_waits_for_all_typed_audio_chunks(
             release.set()
             await asyncio.gather(audio, *([raw] if raw else []))
         assert operations == ["audio", "audio", "send_event"]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "input_audio_buffer.append",
+        "input_audio_buffer.clear",
+        "input_audio_buffer.commit",
+        "response.create",
+    ],
+)
+async def test_raw_input_rejects_nested_adapter_text_until_native_acceptance(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    voice, _ = owner()
+    entered, release = asyncio.Event(), asyncio.Event()
+    operations: list[str] = []
+
+    async def call(operation: str, **params: Any) -> None:
+        operations.append(operation)
+        if operation == "send_event":
+            with voice._callback_scope(adapter=True):
+                with pytest.raises(RuntimeError, match="adapter callback cannot"):
+                    await voice.send_text("Nested adapter input")
+            entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(voice, "_call", call)
+    async with timeout(5):
+        await voice._input_lock.acquire()
+        sending = asyncio.create_task(voice.send_event({"type": kind}))
+        try:
+            await asyncio.sleep(0)
+            with voice._callback_scope(adapter=True):
+                with pytest.raises(RuntimeError, match="adapter callback cannot"):
+                    await voice.send_text("Nested input while raw dispatch is queued")
+        finally:
+            voice._input_lock.release()
+        try:
+            await entered.wait()
+            sending.cancel()
+            await asyncio.sleep(0)
+            assert not sending.done()
+            with voice._callback_scope(adapter=True):
+                with pytest.raises(RuntimeError, match="adapter callback cannot"):
+                    await voice.send_text("Nested input while cancelled caller joins")
+        finally:
+            release.set()
+            await asyncio.gather(sending, return_exceptions=True)
+        assert sending.cancelled()
+        with voice._callback_scope(adapter=True):
+            await voice.send_text("Nested text after raw acceptance")
+        assert operations == ["send_event", "text"]
+        assert voice._pending_audio_commits == 0

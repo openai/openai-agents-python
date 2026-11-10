@@ -539,7 +539,7 @@ index 814be1b3463fd797cb742b84345c038f2138a810..058c7141f7de69bbc6d81091117f5081
  pub use crate::endpoint::RealtimeHostedMcpAllowedTools;
  pub use crate::endpoint::RealtimeHostedMcpApproval;
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109ca5291a84 100644
+index 08f7c4042d398742697c29c57813d293f0c997b3..7b0a340d23969d6e8ec830de59b89ab6c7dc7ba5 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
 @@ -1,11 +1,14 @@
@@ -642,7 +642,19 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
  }
  
  struct RealtimeInputChannels {
-@@ -1521,7 +1555,7 @@ impl RealtimeConversationManager {
+@@ -1514,14 +1548,18 @@ impl RealtimeConversationManager {
+                 "Provider history replacement is pending".into(),
+             ));
+         }
+-        if matches!(&command, SdkRealtimeCommand::Audio(_)) && !state.accepts_audio {
++        if matches!(
++            &command,
++            SdkRealtimeCommand::Audio(_) | SdkRealtimeCommand::RawAudio { .. }
++        ) && !state.accepts_audio
++        {
+             return Err(CodexErr::InvalidRequest(
+                 "Existing calls receive media from their provider".into(),
+             ));
          }
          if matches!(
              &command,
@@ -651,7 +663,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                  | SdkRealtimeCommand::Input(_)
                  | SdkRealtimeCommand::RequestResponse(_)
          ) {
-@@ -1667,10 +1701,45 @@ impl RealtimeConversationManager {
+@@ -1667,10 +1705,45 @@ impl RealtimeConversationManager {
                          )
                      });
              }
@@ -699,7 +711,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                      .map_err(|_| {
                          CodexErr::InvalidRequest(
                              "SDK Realtime media queue is full or closed".into(),
-@@ -1698,6 +1767,7 @@ impl RealtimeConversationManager {
+@@ -1698,6 +1771,7 @@ impl RealtimeConversationManager {
              }
              SdkRealtimeCommand::OwnedUpdate {
                  mut update,
@@ -707,7 +719,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                  profile,
                  mut reply,
              } => {
-@@ -1819,7 +1889,7 @@ impl RealtimeConversationManager {
+@@ -1819,7 +1893,7 @@ impl RealtimeConversationManager {
                                  Some(tool_task::select_accepted_tools(&accepted, tools)?);
                          }
                          let reservation = configuration
@@ -716,7 +728,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                              .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
                          Ok(Some((reservation, None, None)))
                      }
-@@ -2976,19 +3046,36 @@ pub(crate) async fn dispatch_audio_commit_sdk(
+@@ -2976,19 +3050,36 @@ pub(crate) async fn dispatch_audio_commit_sdk(
      sess: &Arc<Session>,
      generation: String,
      reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
@@ -760,7 +772,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
      }
  }
  
-@@ -3037,12 +3124,30 @@ async fn run_history_action(
+@@ -3037,12 +3128,30 @@ async fn run_history_action(
      action: Option<provider_history::Action>,
  ) -> anyhow::Result<()> {
      let result = match action {
@@ -795,7 +807,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
          }
          Some(provider_history::Action::Delete(id)) => {
              // Validate the complete pending deletion plan before its first remote edit.
-@@ -3061,14 +3166,14 @@ async fn run_history_action(
+@@ -3061,14 +3170,14 @@ async fn run_history_action(
                  .item_deletion
                  .lock()
                  .unwrap()
@@ -812,7 +824,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
          }
          None => return Ok(()),
      };
-@@ -3084,6 +3189,7 @@ pub(crate) async fn handle_delete_item_sdk(
+@@ -3084,6 +3193,7 @@ pub(crate) async fn handle_delete_item_sdk(
      sess: &Arc<Session>,
      generation: String,
      item_id: String,
@@ -820,7 +832,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
      reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
  ) {
      let mut owned = item_deletion::DeleteReply::new(reply);
-@@ -3093,6 +3199,7 @@ pub(crate) async fn handle_delete_item_sdk(
+@@ -3093,6 +3203,7 @@ pub(crate) async fn handle_delete_item_sdk(
              &generation,
              SdkRealtimeCommand::DeleteItem {
                  item_id,
@@ -828,7 +840,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                  reply: owned.clone(),
              },
          )
-@@ -3102,6 +3209,38 @@ pub(crate) async fn handle_delete_item_sdk(
+@@ -3102,6 +3213,38 @@ pub(crate) async fn handle_delete_item_sdk(
      }
  }
  
@@ -867,7 +879,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
  pub(crate) async fn handle_update_sdk(
      sess: &Arc<Session>,
      generation: String,
-@@ -3109,7 +3248,7 @@ pub(crate) async fn handle_update_sdk(
+@@ -3109,7 +3252,7 @@ pub(crate) async fn handle_update_sdk(
      profile: Option<codex_protocol::realtime_settings::RealtimeToolProfileUpdate>,
      reply: tokio::sync::oneshot::Sender<CodexResult<()>>,
  ) {
@@ -876,7 +888,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
  }
  
  pub(crate) async fn handle_tool_sdk(
-@@ -5039,7 +5178,11 @@ async fn handle_sdk_realtime_command(
+@@ -5039,7 +5182,11 @@ async fn handle_sdk_realtime_command(
                  Err(error) => sdk.history.lock().unwrap().fail(error),
              }
          }
@@ -889,7 +901,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
              if sdk.history.lock().unwrap().busy() {
                  reply.finish(Err(CodexErr::InvalidRequest(
                      "Provider history operation is pending".into(),
-@@ -5052,7 +5195,10 @@ async fn handle_sdk_realtime_command(
+@@ -5052,7 +5199,10 @@ async fn handle_sdk_realtime_command(
                  .unwrap()
                  .begin(item_id.clone(), reply)
              {
@@ -901,7 +913,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                      sdk.item_deletion
                          .lock()
                          .unwrap()
-@@ -5201,7 +5347,23 @@ async fn handle_sdk_realtime_command(
+@@ -5201,7 +5351,23 @@ async fn handle_sdk_realtime_command(
                  .await
                  .context("SDK batch status route closed")?;
          }
@@ -926,7 +938,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
          SdkRealtimeCommand::Input(params) => {
              writer.send_user_input(params.content).await?;
              if params.trigger_response {
-@@ -5386,6 +5548,7 @@ async fn handle_sdk_realtime_command(
+@@ -5386,6 +5552,7 @@ async fn handle_sdk_realtime_command(
          }
          SdkRealtimeCommand::Interrupt {
              response_id,
@@ -934,7 +946,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
              playback,
              feedback,
              reply,
-@@ -5395,6 +5558,7 @@ async fn handle_sdk_realtime_command(
+@@ -5395,6 +5562,7 @@ async fn handle_sdk_realtime_command(
                  match writer
                      .interrupt_response(
                          response_id,
@@ -942,7 +954,7 @@ index 08f7c4042d398742697c29c57813d293f0c997b3..ca0594b3cf0aeef52df5c0e50a9c109c
                          playback,
                          if responses.pending_create {
                              None
-@@ -6147,24 +6311,46 @@ async fn handle_user_audio_input(
+@@ -6147,24 +6315,46 @@ async fn handle_user_audio_input(
  ) -> anyhow::Result<()> {
      match input.context("user audio input channel closed")? {
          RealtimeAudioInput::Frame(frame) => writer.send_audio_frame(frame).await?,
@@ -1575,10 +1587,10 @@ index 44998634da52145deeb6beb50ef088cbbc32530a..7fd56784c426d4bddd20d8bfda0007d5
                  assert!(state.expire_read());
 diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d45f1ad9ef9c0e7c08d334631a8bd6716382423
+index 0000000000000000000000000000000000000000..906739b0b5d3e0eb244cbd19ea687f8057334b78
 --- /dev/null
 +++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,345 @@
 +use std::collections::BTreeMap;
 +use std::sync::Arc;
 +use std::sync::atomic::Ordering;
@@ -1715,11 +1727,7 @@ index 0000000000000000000000000000000000000000..8d45f1ad9ef9c0e7c08d334631a8bd67
 +    tx
 +}
 +
-+async fn validate_connection(
-+    sess: &Arc<Session>,
-+    generation: &str,
-+    event: &ClientEvent,
-+) -> CodexResult<()> {
++async fn validate_connection(sess: &Arc<Session>, generation: &str) -> CodexResult<()> {
 +    let state = sess.conversation.state.lock().await;
 +    let conversation = state
 +        .conversation
@@ -1732,13 +1740,6 @@ index 0000000000000000000000000000000000000000..8d45f1ad9ef9c0e7c08d334631a8bd67
 +        .ok_or_else(|| invalid("SDK Realtime generation is stale"))?;
 +    if conversation.handoff.event_parser != RealtimeEventParser::RealtimeV2 {
 +        return Err(invalid("Raw client events require RealtimeV2"));
-+    }
-+    if matches!(
-+        event,
-+        ClientEvent::AudioAppend { .. } | ClientEvent::AudioClear {} | ClientEvent::AudioCommit {}
-+    ) && !conversation.accepts_audio
-+    {
-+        return Err(invalid("Existing calls receive media from their provider"));
 +    }
 +    Ok(())
 +}
@@ -1756,7 +1757,7 @@ index 0000000000000000000000000000000000000000..8d45f1ad9ef9c0e7c08d334631a8bd67
 +            return;
 +        }
 +    };
-+    if let Err(error) = validate_connection(sess, &generation, &event).await {
++    if let Err(error) = validate_connection(sess, &generation).await {
 +        let _ = reply.send(Err(error));
 +        return;
 +    }
