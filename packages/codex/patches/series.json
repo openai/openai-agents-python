@@ -254,7 +254,7 @@
     },
     {
       "path": "0057-reuse-model-http-clients.patch",
-      "sha256": "29351a7eed6a09706141a8be50cdee0f9a5d94830eeb7011b89015d1a2c0e4e6"
+      "sha256": "62d8fdbdfabf270d62eb46320efdeaa1523dcd48908c35c0cc144700d62ef29d"
     },
     {
       "path": "0058-reuse-bundled-model-catalog.patch",
@@ -417,17 +417,73 @@
       "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     },
     {
-      "path": "0152-siwc-http-errors.patch",
-      "sha256": "a7a63448ffefe079fe9e95ec879cf9dda6dedfe90b3c931153df913380d6bdc1"
-    },
-    {
       "path": "0153-sdk-saved-login-durable-refresh.patch",
       "sha256": "3256e6ede7e0d7357bd6cf3c9a3f2fec8fec97aae4cffde957f5c575cf017231"
     },
     {
       "path": "sdk-local-agents-md-git-root.patch",
       "sha256": "a23e22f1c99c7e11c270f5bed8a5f1aae78876d319b41f2d9a83e2da39ad7501"
+    },
+    {
+      "path": "sdk-bwrap-search-path.patch",
+      "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
+    },
+    {
+      "path": "sdk-root-metadata-readback.patch",
+      "sha256": "f3148384548bb8c5090f106fe44c18d763d1b9daf5551b2fb10f51937a25791a"
+    },
+    {
+      "path": "0171-original-history-catalog.patch",
+      "sha256": "a0fd58cc346c11bc2320b1e120b7f8d3afc79ad7a2d12ad112636bca373345b3"
+    },
+    {
+      "path": "sdk-rpc-json-fidelity.patch",
+      "sha256": "627e429ded864fb3388b6562c22460e604ca9ba6ad25ec72e38480c1ba61e6ed"
+    },
+    {
+      "path": "0172-linear-original-history-checkpoints.patch",
+      "sha256": "c2009453efb8889a8844186ead76b51ba912fee2512bc6b0524b12ece696989c"
+    },
+    {
+      "path": "sdk-linux-bootstrap-environment.patch",
+      "sha256": "4f453674465f30d922f2bfc0016d3bf47cd6f9016fe3e679abe0bfa9c780fd5e"
+    },
+    {
+      "path": "sdk-environment-name-validation.patch",
+      "sha256": "117f2da7c540d33ba72cfe8eac6601c6d534fa89e5c920a2be7b19d7431c7590"
+    },
+    {
+      "path": "0173-bounded-live-original-history.patch",
+      "sha256": "f3653b99ba819032f5be8dd217135c784e5bf9ba4fae0416a8d81a9364306f43"
+    },
+    {
+      "path": "0174-sdk-command-environment-overrides.patch",
+      "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
+    },
+    {
+      "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
+      "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-mount-race.patch",
+      "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-bootstrap.patch",
+      "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
+    },
+    {
+      "path": "sdk-linux-private-credential-file-mask.patch",
+      "sha256": "280414d1ef9f7fea874d460629f4ca24732d4f3b09daf47488947cc24c9e7a3e"
+    },
+    {
+      "path": "sdk-local-project-read-cwd.patch",
+      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
+    },
+    {
+      "path": "0154-sdk-auto-compaction-terminal-rate-limits.patch",
+      "sha256": "90614549a30f81de06b7b2bd11f70be9e39698552fdc95477655420eeab6485c"
     }
   ],
-  "result_tree": "001540f86a4b31814f9976b7617892487c6c5c4c"
+  "result_tree": "19e117ad4714734704495dfb24919ff42ffece0f"
 }
