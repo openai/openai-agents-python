@@ -890,3 +890,13 @@ def test_hosted_provider_fields_cannot_replace_admitted_identity():
 
     with pytest.raises(ValueError, match="cannot replace"):
         _capture_hosted_tools([ImageGeneration(provider_data={"type": "computer"})])
+
+
+@pytest.mark.parametrize("provider_data", [False, 0, "", []])
+def test_hosted_provider_data_rejects_non_objects(provider_data: Any):
+    from _agents_codex.tools import _capture_hosted_tools
+
+    with pytest.raises(TypeError, match="provider_data must be an object"):
+        _capture_hosted_tools(
+            [FileSearch(vector_store_ids=["vs_fixture"], provider_data=provider_data)]
+        )
