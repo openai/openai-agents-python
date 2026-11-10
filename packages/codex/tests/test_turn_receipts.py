@@ -18,7 +18,7 @@ from _agents_codex.turn_receipt import (
     _project_turn_receipt,
     _redact_checkpoint_executor_receipts,
 )
-from agents import Agent, NativeAgents
+from agents import Agent, Environment, NativeAgents
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
@@ -269,6 +269,105 @@ async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_pa
                     receipts[-1]["developer_instructions_sha256"]
                     == hashlib.sha256(b"Use the new instructions.").hexdigest()
                 )
+
+
+async def test_discover_agents_md_uses_native_sources_and_current_opening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    global_file = home / "AGENTS.override.md"
+    global_text = b"Global fixture instructions."
+    global_file.write_bytes(b"\n" + global_text + b"\r\n")
+    (home / "AGENTS.md").write_text("Shadowed global fixture instructions.", encoding="utf-8")
+    (home / "config.toml").write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    explicit_file = tmp_path / "explicit.md"
+    explicit_text = b"Explicit fixture instructions.\r\n"
+    explicit_file.write_bytes(explicit_text)
+    (tmp_path / "AGENTS.md").write_text("Outside-project fixture instructions.", encoding="utf-8")
+
+    async with timeout(30), ExecutorPeer(tmp_path / "repo").serve() as executor, peer() as model:
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        # A linked worktree has a .git file instead of a directory.
+        (executor.root / ".git").write_text("gitdir: ../git-dir\n", encoding="utf-8")
+        project_config = executor.root / ".codex"
+        project_config.mkdir()
+        (project_config / "config.toml").write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+        cwd = executor.root / "component"
+        cwd.mkdir()
+        root_file = executor.root / "AGENTS.md"
+        root_text = b"Root fixture instructions.\n"
+        root_file.write_bytes(root_text)
+        nested_file = cwd / "AGENTS.md"
+        nested_text = b"Nested fixture instructions.\n"
+        nested_file.write_bytes(nested_text)
+        environment = Environment(
+            url=executor.url,
+            cwd=str(cwd),
+            headers={"Authorization": "Bearer " + executor.token},
+            write_policy="legacy",
+        )
+        agent = Agent(instructions="Application instructions.", provider=model.provider())
+        opening = {"environment": environment, "instruction_files": [explicit_file]}
+
+        async with agent.session(**opening) as disabled:
+            model.replies.append(message("default"))
+            await (await disabled.submit("Default")).get_result()
+            [default] = [turn["receipt"] async for turn in disabled.turns()]
+        async with agent.session(**opening, discover_agents_md=True) as enabled:
+            model.replies.append(message("discovered"))
+            await (await enabled.submit("Discover")).get_result()
+            [discovered] = [turn["receipt"] async for turn in enabled.turns()]
+            state = await enabled.save_state()
+        async with agent.session(**opening, state=state) as restored:
+            model.replies.append(message("restored"))
+            await (await restored.submit("Restore without discovery")).get_result()
+            historical, current = [turn["receipt"] async for turn in restored.turns()]
+
+    assert discovered["instruction_files"] == [
+        {"path": str(path), "source": source, "sha256": hashlib.sha256(text).hexdigest()}
+        for path, source, text in [
+            (explicit_file.resolve(), "application_file", explicit_text),
+            (global_file.resolve(), "native_user", global_text),
+            (root_file, "native_project", root_text),
+            (nested_file, "native_project", nested_text),
+        ]
+    ]
+    assert (
+        default["instruction_files"]
+        == current["instruction_files"]
+        == discovered["instruction_files"][:1]
+    )
+    assert historical["instruction_files"] == discovered["instruction_files"]
+    assert not any(receipt["user_config_applied"] for receipt in (default, discovered, current))
+
+    default_request, discovered_request, restored_request = model.requests
+    assert (
+        application_texts(default_request)
+        == application_texts(discovered_request)
+        == ["Application instructions.\n\n" + explicit_text.decode()]
+    )
+    fragments = [
+        part["text"]
+        for item in discovered_request["input"]
+        if item.get("role") == "user"
+        for part in item["content"]
+        if "Global fixture instructions." in part.get("text", "")
+    ]
+    [discovered_text] = fragments
+    assert (
+        discovered_text.index("Global fixture instructions.")
+        < discovered_text.index("Root fixture instructions.")
+        < discovered_text.index("Nested fixture instructions.")
+    )
+    assert "Shadowed global fixture instructions." not in discovered_text
+    assert "Outside-project fixture instructions." not in discovered_text
+    assert "Global fixture instructions." not in json.dumps(default_request["input"])
+    assert "previously provided AGENTS.md instructions no longer apply" in json.dumps(
+        restored_request["input"]
+    )
 
 
 @pytest.mark.parametrize("restore_source", ["different-file", "inline", "legacy-inline"])

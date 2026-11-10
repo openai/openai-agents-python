@@ -50,6 +50,7 @@ impl EngineState {
             native_threads: std::sync::Mutex::new(Vec::new()),
             startup_warnings: parent.startup_warnings.clone(),
             codex_account: None,
+            plan_usage_client: OnceLock::new(),
             extension_events: parent.extension_events.clone(),
             cloud_config: parent.cloud_config.clone(),
             service_config,
