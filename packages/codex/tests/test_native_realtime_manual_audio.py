@@ -420,7 +420,7 @@ async def test_sip_commit_controls_provider_buffer_without_client_media(call_pee
             await owner.send_audio(b"", commit=True)
             await owner.send_event({"type": "input_audio_buffer.clear", "event_id": "sip-clear"})
             await owner.send_event({"type": "input_audio_buffer.commit", "event_id": "sip-commit"})
-            with pytest.raises(RuntimeError, match="SIP"):
+            with pytest.raises(RuntimeError, match="receive media from their provider"):
                 await owner.send_event({"type": "input_audio_buffer.append", "audio": "AAA="})
         await peer.disconnected.wait()
         assert [frame["type"] for frame in peer.frames] == [
