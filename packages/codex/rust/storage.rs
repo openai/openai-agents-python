@@ -43,17 +43,13 @@ impl ManagedCalls {
 
     pub(crate) fn owns_output(&self, thread: ThreadId, item: &RolloutItem) -> bool {
         if let RolloutItem::ResponseItem(envelope) = item
-            && let ResponseItem::FunctionCallOutput {
-                call_id: Some(call),
-                internal_chat_message_metadata_passthrough: Some(metadata),
-                ..
-            } = &envelope.item
-            && let Some(turn) = &metadata.turn_id
+            && let Some((call, Some(turn))) =
+                crate::local_reconciliation::output_identity(&envelope.item)
         {
             return self.0.lock().expect("managed calls poisoned").contains(&(
                 thread.to_string(),
-                turn.clone(),
-                call.clone(),
+                turn.to_owned(),
+                call.to_owned(),
             ));
         }
         false
@@ -494,9 +490,15 @@ impl MemoryThreadStore {
         // must not be mistaken for completed work. This contains identities
         // only; Core remains the sole owner of actual result payloads.
         let mut unfinished = HashSet::new();
-        // The ID space is shared by function and custom calls. Remember the
+        // The ID space is shared by function, custom and computer calls. Remember the
         // kind until the matching receipt arrives; a receipt cannot settle
         // another kind of call, nor can a repeated ID inherit completion.
+        #[derive(PartialEq)]
+        enum CallKind {
+            Function,
+            Custom,
+            Computer,
+        }
         let mut calls = HashMap::new();
         for item in prefix {
             match item {
@@ -506,10 +508,15 @@ impl MemoryThreadStore {
                 }
                 RolloutItem::ResponseItem(item) => match &item.item {
                     ResponseItem::FunctionCall { call_id, .. }
-                    | ResponseItem::CustomToolCall { call_id, .. } => {
-                        let is_function = matches!(&item.item, ResponseItem::FunctionCall { .. });
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. } => {
+                        let kind = match &item.item {
+                            ResponseItem::FunctionCall { .. } => CallKind::Function,
+                            ResponseItem::CustomToolCall { .. } => CallKind::Custom,
+                            _ => CallKind::Computer,
+                        };
                         anyhow::ensure!(
-                            calls.insert(call_id.as_str(), is_function).is_none(),
+                            calls.insert(call_id.as_str(), kind).is_none(),
                             UnsupportedManualState::NativeWork
                         );
                         unfinished.insert(call_id.as_str());
@@ -519,14 +526,21 @@ impl MemoryThreadStore {
                         ..
                     } => {
                         anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&true)
+                            calls.get(call_id.as_str()) == Some(&CallKind::Function)
+                                && unfinished.remove(call_id.as_str()),
+                            UnsupportedManualState::NativeWork
+                        );
+                    }
+                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                        anyhow::ensure!(
+                            calls.get(call_id.as_str()) == Some(&CallKind::Computer)
                                 && unfinished.remove(call_id.as_str()),
                             UnsupportedManualState::NativeWork
                         );
                     }
                     ResponseItem::CustomToolCallOutput { call_id, .. } => {
                         anyhow::ensure!(
-                            calls.get(call_id.as_str()) == Some(&false)
+                            calls.get(call_id.as_str()) == Some(&CallKind::Custom)
                                 && unfinished.remove(call_id.as_str()),
                             UnsupportedManualState::NativeWork
                         );
@@ -537,9 +551,10 @@ impl MemoryThreadStore {
             }
         }
         anyhow::ensure!(
-            pending
-                .iter()
-                .all(|key| calls.get(key.call.as_str()) != Some(&false)),
+            pending.iter().all(|key| !matches!(
+                calls.get(key.call.as_str()),
+                Some(CallKind::Custom | CallKind::Computer)
+            )),
             UnsupportedManualState::NativeWork
         );
         if unfinished
@@ -1022,6 +1037,7 @@ pub struct LocalChecklistStore {
     inner: LocalThreadStore,
     graph: Arc<MemoryAgentGraph>,
     directory: PathBuf,
+    recovery_locks: Arc<codex_rollout::WriterLockCoordinator>,
     // Serialize through native writer release. Native itself owns cross-process
     // exclusion; this gate only closes the append/shutdown race in this wrapper.
     writers: Mutex<HashMap<ThreadId, ChecklistWriter>>,
@@ -1071,7 +1087,9 @@ impl SamplingState {
             RolloutItem::ResponseItem(envelope)
                 if matches!(
                     &envelope.item,
-                    ResponseItem::FunctionCall { .. } | ResponseItem::CustomToolCall { .. }
+                    ResponseItem::FunctionCall { .. }
+                        | ResponseItem::CustomToolCall { .. }
+                        | ResponseItem::ComputerCall { .. }
                 ) =>
             {
                 self.tool_calls += 1;
@@ -1127,7 +1145,7 @@ impl LossSuspension {
                 if let RolloutItem::ResponseItem(envelope) = item {
                     // Approval and manual keys bind functions only. A custom
                     // call sharing this ID makes cancellation attribution unsafe.
-                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. }
+                    if matches!(&envelope.item, ResponseItem::CustomToolCall { call_id, .. } | ResponseItem::ComputerCall { call_id, .. }
                         if *call_id == key.call)
                     {
                         return None;
@@ -1197,13 +1215,19 @@ impl LossSuspension {
                                     }
                                 }
                             }
-                            ResponseItem::CustomToolCall { call_id, .. } => {
+                            ResponseItem::CustomToolCall { call_id, .. }
+                            | ResponseItem::ComputerCall { call_id, .. } => {
                                 tool_calls += 1;
                                 if *call_id == key.call {
                                     // A later custom call must not turn a real
                                     // function result into a cancellation receipt.
                                     preserve = false;
                                 }
+                            }
+                            ResponseItem::ComputerCallOutput { call_id, .. }
+                                if *call_id == key.call =>
+                            {
+                                preserve = false;
                             }
                             ResponseItem::FunctionCallOutput {
                                 call_id: Some(call_id),
@@ -1256,23 +1280,39 @@ fn sdk_calls_match(bound: &[ResponseItem], requested: &[ResponseItem]) -> bool {
 fn sdk_import_allowed(history: &[RolloutItem], requested: &[ResponseItem]) -> bool {
     let mut existing = HashSet::new();
     let mut unresolved = HashSet::new();
+    let mut computers = HashSet::new();
     for item in history {
         let RolloutItem::ResponseItem(envelope) = item else {
             continue;
         };
         if let Some((call_id, _)) = crate::python_tools::sdk_projection(&envelope.item) {
+            if computers.contains(call_id) {
+                return false;
+            }
             existing.insert(call_id);
             unresolved.insert(call_id);
         }
-        if let ResponseItem::FunctionCallOutput {
-            call_id: Some(call_id),
-            ..
-        } = &envelope.item
-        {
-            unresolved.remove(call_id.as_str());
+        match &envelope.item {
+            ResponseItem::ComputerCall { call_id, .. } => {
+                if !existing.insert(call_id.as_str()) {
+                    return false;
+                }
+                computers.insert(call_id.as_str());
+            }
+            ResponseItem::ComputerCallOutput { call_id, .. } => {
+                computers.remove(call_id.as_str());
+            }
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                ..
+            } => {
+                unresolved.remove(call_id.as_str());
+            }
+            _ => {}
         }
     }
-    unresolved.is_empty()
+    computers.is_empty()
+        && unresolved.is_empty()
         && requested.iter().all(|item| {
             crate::python_tools::sdk_projection(item)
                 .is_some_and(|(call_id, _)| !existing.contains(call_id))
@@ -1297,6 +1337,7 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
     }
     let mut seen = HashSet::new();
     let mut unresolved = Vec::new();
+    let mut computers = HashSet::new();
     for (index, item) in history.iter().enumerate() {
         match item {
             RolloutItem::Compacted(_)
@@ -1314,6 +1355,18 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
                     }
                     unresolved.push((index, envelope.item.clone()));
                 }
+                match &envelope.item {
+                    ResponseItem::ComputerCall { call_id, .. } => {
+                        if !seen.insert(call_id.as_str()) {
+                            return false;
+                        }
+                        computers.insert(call_id.as_str());
+                    }
+                    ResponseItem::ComputerCallOutput { call_id, .. } => {
+                        computers.remove(call_id.as_str());
+                    }
+                    _ => {}
+                }
                 if let ResponseItem::FunctionCallOutput {
                     call_id: Some(call_id),
                     ..
@@ -1330,7 +1383,8 @@ fn sdk_resume_matches(history: &[RolloutItem], turn_id: &str, requested: &[Respo
     }
     // An unresolved call outside this turn still blocks an import/resume, as
     // does omitting or reordering any unresolved original sibling.
-    !requested.is_empty()
+    computers.is_empty()
+        && !requested.is_empty()
         && unresolved.iter().all(|(index, _)| *index > start)
         && sdk_calls_match(
             &unresolved
@@ -1388,7 +1442,7 @@ fn checklist_path(directory: &Path, id: ThreadId) -> PathBuf {
 // std operation: File::open lacks directory flags, and a read directory handle
 // is not a FlushFileBuffers contract. Do not report its absence as write failure
 // or promise POSIX directory crash durability there.
-fn sync_checklist_directory(directory: &Path) -> ThreadStoreResult<()> {
+fn sync_local_directory(directory: &Path) -> ThreadStoreResult<()> {
     #[cfg(not(windows))]
     std::fs::File::open(directory)
         .and_then(|dir| dir.sync_all())
@@ -1437,6 +1491,9 @@ impl LocalChecklistStore {
         graph: Arc<MemoryAgentGraph>,
     ) -> Self {
         let directory = config.codex_home.join(LOCAL_CHECKLIST_DIRECTORY);
+        let recovery_locks = Arc::new(codex_rollout::WriterLockCoordinator::new(
+            &config.codex_home,
+        ));
         let cleanup_directory = directory.clone();
         // Called by native delete only after its reference and writer checks, for
         // both single and bulk delete. A failure leaves native deletion retryable.
@@ -1469,6 +1526,7 @@ impl LocalChecklistStore {
             inner,
             graph,
             directory,
+            recovery_locks,
             writers: Mutex::new(HashMap::new()),
             managed_calls: Arc::new(ManagedCalls::default()),
             resume_model: OnceLock::new(),
@@ -1537,6 +1595,13 @@ impl LocalChecklistStore {
             ));
         }
         let identity = (key.turn.clone(), key.call.clone());
+        if matches!(&item, ResponseItem::ComputerCallOutput { .. })
+            && (key.reply.thread != id.to_string()
+                || crate::local_reconciliation::output_identity(&item)
+                    != Some((key.call.as_str(), Some(key.turn.as_str()))))
+        {
+            return Err(checklist_error("SDK computer receipt identity mismatch"));
+        }
         if writer.early.contains(&identity) {
             return Err(checklist_error("SDK receipt was already committed"));
         }
@@ -1590,7 +1655,7 @@ impl LocalChecklistStore {
             temp.as_file().sync_all().map_err(checklist_error)?;
             temp.persist(checklist_path(&directory, id))
                 .map_err(checklist_error)?;
-            sync_checklist_directory(&directory)
+            sync_local_directory(&directory)
         })
     }
 
@@ -1654,7 +1719,7 @@ impl LocalChecklistStore {
                     temp.flush().map_err(checklist_error)?;
                     temp.as_file().sync_all().map_err(checklist_error)?;
                     temp.persist(&path).map_err(checklist_error)?;
-                    sync_checklist_directory(&directory)?;
+                    sync_local_directory(&directory)?;
                     return Ok(Some(turn));
                 }
                 // A consumed native approval cannot establish "not started".
@@ -1749,16 +1814,95 @@ impl LocalChecklistStore {
         // Checkpoint reads run after the caller flushes. Keep shutdown excluded
         // while reading the exact rollout selected by this native writer.
         let path = self.inner.live_rollout_path(id).await?;
-        let (items, owner, parse_errors) =
-            codex_rollout::RolloutRecorder::load_rollout_items(&path)
-                .await
-                .map_err(checklist_error)?;
+        Self::read_recovery_rollout(id, &path).await
+    }
+
+    async fn read_recovery_rollout(
+        id: ThreadId,
+        path: &Path,
+    ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        let (items, owner, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_items(path)
+            .await
+            .map_err(checklist_error)?;
         if owner != Some(id) || parse_errors != 0 {
             return Err(checklist_error(
                 "cannot capture incomplete rollout or another thread's history",
             ));
         }
         Ok(items)
+    }
+
+    // Use the same exclusive lease as a native runtime, without a recorder task.
+    pub(crate) fn reserve_reconciliation_writers(
+        &self,
+        ids: impl IntoIterator<Item = ThreadId>,
+    ) -> ThreadStoreResult<Vec<codex_rollout::WriterLockGuard>> {
+        tokio::task::block_in_place(|| {
+            ids.into_iter()
+                .map(|id| self.recovery_locks.acquire(id).map_err(checklist_error))
+                .collect()
+        })
+    }
+
+    pub(crate) async fn reconciliation_history(
+        &self,
+        id: ThreadId,
+    ) -> ThreadStoreResult<(PathBuf, Vec<RolloutItem>)> {
+        let stored = self
+            .inner
+            .read_thread(ReadThreadParams {
+                thread_id: id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await?;
+        let path = stored
+            .rollout_path
+            .ok_or_else(|| checklist_error("native thread store returned no rollout path"))?;
+        let items = Self::read_recovery_rollout(id, &path).await?;
+        Ok((path, items))
+    }
+
+    pub(crate) async fn append_reconciliation(
+        &self,
+        id: ThreadId,
+        path: &Path,
+        items: Vec<RolloutItem>,
+    ) -> ThreadStoreResult<Vec<RolloutItem>> {
+        // Keep the original bytes and ordinal offsets for native fork readers.
+        // A process can die during any stage write without tearing the live rollout.
+        let path = codex_rollout::materialize_rollout_for_reference(path)
+            .await
+            .map_err(checklist_error)?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| checklist_error("native rollout has no parent directory"))?;
+        let name = format!(".sdk-recovery-{id}");
+        let staged = tokio::task::block_in_place(|| -> ThreadStoreResult<_> {
+            match std::fs::remove_file(directory.join(&name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(checklist_error(error)),
+            }
+            let file = tempfile::Builder::new()
+                .prefix(&name)
+                .rand_bytes(0)
+                .tempfile_in(directory)
+                .map_err(checklist_error)?;
+            std::fs::copy(&path, file.path()).map_err(checklist_error)?;
+            Ok(file)
+        })?;
+        for item in items {
+            codex_rollout::append_rollout_item_to_path(staged.path(), &item)
+                .await
+                .map_err(checklist_error)?;
+        }
+        tokio::task::block_in_place(|| {
+            staged.as_file().sync_all().map_err(checklist_error)?;
+            staged.persist(&path).map_err(checklist_error)?;
+            sync_local_directory(directory)
+        })?;
+        Self::read_recovery_rollout(id, &path).await
     }
 
     pub async fn begin_rebuild(
@@ -2178,16 +2322,10 @@ impl LocalChecklistStore {
                 // synthesized cancellation claim the external effect settled.
                 let managed = self.managed_calls.owns_output(id, item);
                 if let RolloutItem::ResponseItem(envelope) = item
-                    && let ResponseItem::FunctionCallOutput {
-                        call_id: Some(call_id),
-                        name: None,
-                        namespace: None,
-                        internal_chat_message_metadata_passthrough: Some(meta),
-                        ..
-                    } = &envelope.item
-                    && let Some(turn) = &meta.turn_id
+                    && let Some((call, Some(turn))) =
+                        crate::local_reconciliation::output_identity(&envelope.item)
                 {
-                    return !writer.early.remove(&(turn.clone(), call_id.clone())) && !managed;
+                    return !writer.early.remove(&(turn.to_owned(), call.to_owned())) && !managed;
                 }
                 !managed
             });
@@ -2251,7 +2389,7 @@ impl LocalChecklistStore {
             temp.as_file().sync_all().map_err(checklist_error)?;
             temp.persist(checklist_path(&self.directory, state.thread_id))
                 .map_err(checklist_error)?;
-            sync_checklist_directory(&self.directory)
+            sync_local_directory(&self.directory)
         })
     }
 }
@@ -4864,5 +5002,31 @@ mod graph_tests {
                 .unwrap(),
             vec![grandchild]
         );
+    }
+}
+
+#[cfg(test)]
+mod computer_storage_reentry_tests {
+    use super::*;
+    use serde_json::json;
+    fn row(value: serde_json::Value) -> RolloutItem {
+        RolloutItem::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            serde_json::from_value(value).unwrap(),
+        ))
+    }
+    #[test]
+    fn unknown_computer_effect_cannot_escape_through_function_only_sdk_import() {
+        let call = row(
+            json!({"type":"computer_call","call_id":"computer-1","actions":[{"type":"click","x":1,"y":2}]}),
+        );
+        let mut history = vec![call.clone()];
+        assert!(!sdk_import_allowed(&history, &[]));
+        history.push(row(json!({"type":"function_call_output","call_id":"computer-1","output":"counterfeit completion"})));
+        assert!(!sdk_import_allowed(&history, &[]));
+        history.pop();
+        history.push(row(json!({"type":"computer_call_output","call_id":"computer-1","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="},"acknowledged_safety_checks":[]})));
+        assert!(sdk_import_allowed(&history, &[]));
+        history.push(call);
+        assert!(!sdk_import_allowed(&history, &[]));
     }
 }

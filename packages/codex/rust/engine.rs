@@ -71,6 +71,7 @@ pub struct EngineState {
     pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
+    pub(crate) recovery: Arc<crate::recovery_guard::RecoveryContributor>,
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
 }
 
@@ -538,6 +539,7 @@ impl EngineState {
         } else {
             None
         };
+        let recovery = Arc::new(crate::recovery_guard::RecoveryContributor::default());
         let manager = Arc::new_cyclic(|weak| {
             let extensions = extensions::build(
                 &config,
@@ -550,6 +552,7 @@ impl EngineState {
                 environment.clone(),
                 extension_events.clone(),
                 interception.clone(),
+                recovery.clone(),
                 local_checklist_store
                     .as_ref()
                     .map(|store| store.managed_calls.clone())
@@ -614,6 +617,7 @@ impl EngineState {
             codex_account,
             plan_usage_client: OnceLock::new(),
             extension_events,
+            recovery,
             cloud_config,
             service_config: config,
             model_http_pool: None,
@@ -1425,6 +1429,11 @@ impl EngineState {
             }
             return Ok(());
         }
+        let saved_login = self.codex_account.as_ref().map(|_| {
+            let auth = self.manager.auth_manager();
+            auth.seal_saved_chatgpt_refresh();
+            (auth, tokio::time::Instant::now() + CLOSE_TIMEOUT)
+        });
         let report = self
             .manager
             .shutdown_all_threads_bounded(CLOSE_TIMEOUT)
@@ -1435,6 +1444,11 @@ impl EngineState {
             report.timed_out.len(),
             report.submit_failed.len()
         );
+        if let Some((auth, deadline)) = saved_login {
+            tokio::time::timeout_at(deadline, auth.wait_for_saved_chatgpt_refresh())
+                .await
+                .context("Codex shutdown incomplete: saved login refresh timed out")?;
+        }
         self.interception.check_code_import_cleanup()?;
         if let Some(goals) = &self.goals {
             goals.state_db.close().await;

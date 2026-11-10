@@ -4,6 +4,8 @@ Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlie
 
 ## Unreleased
 
+- Add managed native function approvals with callable policies, Session-scoped remembered decisions, guarded execution, live voice decisions, and portable pending approval restore.
+
 ## 0.24.0-alpha.7 (2026-11-08)
 
 ### Highlights

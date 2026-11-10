@@ -2144,6 +2144,14 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: ModalSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, ModalSandboxSessionState):
+            raise TypeError("ModalSandboxClient requires Modal sandbox state")
+        if set(options.exposed_ports) != set(state.exposed_ports):
+            raise ValueError("Current Modal port exposure requires a fresh sandbox session")
+
     def _validate_manifest_for_workspace_persistence(
         self,
         *,

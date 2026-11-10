@@ -52,6 +52,7 @@ from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
     PtyExecUpdate,
+    _settle_pty_cleanup,
     allocate_pty_process_id,
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
@@ -722,33 +723,26 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 registered = True
         except asyncio.TimeoutError as e:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
         except Exception as e:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await _settle_pty_cleanup(self._terminate_pty_entry(entry))
             if timeout_error_types and isinstance(e, timeout_error_types):
                 raise ExecTimeoutError(command=command, timeout_s=timeout, cause=e) from e
             raise _daytona_exec_transport_error(command=command, cause=e) from e
-        except BaseException:
+        except BaseException as error:
             if not registered:
-                cleanup_task = asyncio.ensure_future(self._terminate_pty_entry(entry))
-                try:
-                    await asyncio.shield(cleanup_task)
-                except BaseException:
-                    await asyncio.shield(cleanup_task)
+                await _settle_pty_cleanup(
+                    self._terminate_pty_entry(entry),
+                    initial_cancellation=error
+                    if isinstance(error, asyncio.CancelledError)
+                    else None,
+                )
             raise
 
         if pruned is not None:
-            await self._terminate_pty_entry(pruned)
+            await _settle_pty_cleanup(self._terminate_pty_entry(pruned))
 
         if process_count >= PTY_PROCESSES_WARNING:
             logger.warning(
@@ -873,7 +867,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                 removed = self._pty_sessions.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
             if removed is not None:
-                await self._terminate_pty_entry(removed)
+                await _settle_pty_cleanup(self._terminate_pty_entry(removed))
             live_process_id = None
 
         return PtyExecUpdate(
@@ -888,8 +882,12 @@ class DaytonaSandboxSession(BaseSandboxSession):
             entries = list(self._pty_sessions.values())
             self._pty_sessions.clear()
             self._reserved_pty_process_ids.clear()
-        for entry in entries:
-            await self._terminate_pty_entry(entry)
+
+        async def terminate_entries() -> None:
+            for entry in entries:
+                await self._terminate_pty_entry(entry)
+
+        await _settle_pty_cleanup(terminate_entries())
 
     async def _collect_pty_output(
         self,
@@ -923,24 +921,41 @@ class DaytonaSandboxSession(BaseSandboxSession):
     async def _terminate_pty_entry(self, entry: _DaytonaPtySessionEntry) -> None:
         try:
             if entry.tty:
-                await self._sandbox.process.kill_pty_session(entry.daytona_session_id)
+                await asyncio.wait_for(
+                    self._sandbox.process.kill_pty_session(entry.daytona_session_id),
+                    timeout=self.state.timeouts.cleanup_s,
+                )
             else:
-                await self._sandbox.process.delete_session(entry.daytona_session_id)
+                await asyncio.wait_for(
+                    self._sandbox.process.delete_session(entry.daytona_session_id),
+                    timeout=self.state.timeouts.cleanup_s,
+                )
         except Exception:
             pass
         finally:
-            worker_task = entry.worker_task
-            entry.worker_task = None
-            if worker_task is not None and worker_task is not asyncio.current_task():
-                if not worker_task.done():
-                    worker_task.cancel()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(worker_task, return_exceptions=True),
-                        timeout=self.state.timeouts.cleanup_s,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+            try:
+                worker_task = entry.worker_task
+                entry.worker_task = None
+                if worker_task is not None and worker_task is not asyncio.current_task():
+                    if not worker_task.done():
+                        worker_task.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(worker_task, return_exceptions=True),
+                            timeout=self.state.timeouts.cleanup_s,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                handle = entry.pty_handle
+                entry.pty_handle = None
+                if handle is not None:
+                    try:
+                        await asyncio.wait_for(
+                            handle.disconnect(), timeout=self.state.timeouts.cleanup_s
+                        )
+                    except Exception:
+                        pass
 
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         workspace_path = await self._validate_path_access(path)
@@ -1236,6 +1251,14 @@ class DaytonaSandboxClient(BaseSandboxClient[DaytonaSandboxClientOptions]):
             instrumentation if instrumentation is not None else Instrumentation()
         )
         self._dependencies = dependencies
+
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: DaytonaSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, DaytonaSandboxSessionState):
+            raise TypeError("DaytonaSandboxClient requires Daytona sandbox state")
+        if set(options.exposed_ports) != set(state.exposed_ports):
+            raise ValueError("Current Daytona port exposure requires a fresh sandbox session")
 
     async def _build_create_params(
         self,

@@ -1,0 +1,397 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index f3b9b05f8187f77c6592e1b52601b74a8e99702b..0f4eaaa379f53b4ad377dd270fd4698fe5682e1b 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -58,6 +58,35 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+     error
+ }
+ 
++pub(crate) fn is_http_slow_down(error: &TransportError) -> bool {
++    let TransportError::Http {
++        status: http::StatusCode::SERVICE_UNAVAILABLE,
++        body: Some(body),
++        ..
++    } = error
++    else {
++        return false;
++    };
++    service_unavailable_error(body)
++        .is_some_and(|error| matches!(error.details(), CodexErrorDetails::RateLimitExceeded(_)))
++}
++
++fn service_unavailable_error(body: &str) -> Option<CodexErr> {
++    let value = serde_json::from_str::<Value>(body).ok()?;
++    let error = value.get("error")?;
++    match error.get("code").and_then(Value::as_str) {
++        Some("server_is_overloaded") => Some(CodexErr::ServerOverloaded),
++        Some("slow_down") => Some(CodexErr::new(CodexErrorDetails::RateLimitExceeded(
++            error
++                .get("message")
++                .and_then(Value::as_str)
++                .unwrap_or_default()
++                .to_owned(),
++        ))),
++        _ => None,
++    }
++}
++
+ fn map_api_error_details(err: ApiError) -> CodexErr {
+     match err {
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+@@ -114,22 +143,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                 let body_text = body.unwrap_or_default();
+ 
+                 if status == http::StatusCode::SERVICE_UNAVAILABLE
+-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+-                    && let Some(error) = value.get("error")
++                    && let Some(error) = service_unavailable_error(&body_text)
+                 {
+-                    match error.get("code").and_then(Value::as_str) {
+-                        Some("server_is_overloaded") => return CodexErr::ServerOverloaded,
+-                        Some("slow_down") => {
+-                            return CodexErr::new(CodexErrorDetails::RateLimitExceeded(
+-                                error
+-                                    .get("message")
+-                                    .and_then(Value::as_str)
+-                                    .unwrap_or_default()
+-                                    .to_owned(),
+-                            ));
+-                        }
+-                        _ => {}
+-                    }
++                    return error;
+                 }
+ 
+                 if (status == http::StatusCode::BAD_REQUEST
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index 40ff37082281faf6356163819a10b87259f57609..e582645ee0419440aa554fea9f1a5c0515aa66d8 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -38,6 +38,7 @@ pub struct ResponsesOptions {
+     pub extra_headers: HeaderMap,
+     pub compression: Compression,
+     pub turn_state: Option<Arc<OnceLock<String>>>,
++    pub terminal_limit_errors: bool,
+ }
+ 
+ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -80,6 +81,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             options.extra_headers,
+             options.compression,
+             options.turn_state,
++            options.terminal_limit_errors,
+         )
+         .await
+     }
+@@ -115,6 +117,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 options.compression,
+                 "application/json",
+                 Some(MAX_JSON_RESPONSE_BODY_BYTES),
++                /*terminal_limit_errors*/ false,
+             )
+             .await?;
+         Ok(super::responses_json::response_stream(
+@@ -166,8 +169,14 @@ impl<T: HttpTransport> ResponsesClient<T> {
+     ) -> Result<ResponseStream, ApiError> {
+         let body = EncodedJsonBody::encode(&body)
+             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+-        self.stream_encoded(body, extra_headers, compression, turn_state)
+-            .await
++        self.stream_encoded(
++            body,
++            extra_headers,
++            compression,
++            turn_state,
++            /*terminal_limit_errors*/ false,
++        )
++        .await
+     }
+ 
+     async fn stream_encoded(
+@@ -176,9 +185,17 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         extra_headers: HeaderMap,
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
++        terminal_limit_errors: bool,
+     ) -> Result<ResponseStream, ApiError> {
+         let stream_response = self
+-            .send_encoded(body, extra_headers, compression, "text/event-stream", None)
++            .send_encoded(
++                body,
++                extra_headers,
++                compression,
++                "text/event-stream",
++                None,
++                terminal_limit_errors,
++            )
+             .await?;
+ 
+         Ok(spawn_response_stream(
+@@ -186,6 +203,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             self.session.provider().stream_idle_timeout,
+             self.sse_telemetry.clone(),
+             turn_state,
++            terminal_limit_errors,
+         ))
+     }
+     async fn send_encoded(
+@@ -195,6 +213,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         accept: &'static str,
+         response_body_limit_bytes: Option<usize>,
++        terminal_limit_errors: bool,
+     ) -> Result<codex_client::StreamResponse, ApiError> {
+         let request_compression = match compression {
+             Compression::None => RequestCompression::None,
+@@ -207,6 +226,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+                 "/responses",
+                 extra_headers,
+                 Some(body),
++                terminal_limit_errors,
+                 |req| {
+                     req.headers
+                         .insert(http::header::ACCEPT, HeaderValue::from_static(accept));
+diff --git a/codex-rs/codex-api/src/endpoint/session.rs b/codex-rs/codex-api/src/endpoint/session.rs
+index 61672726bac367191e6473118d9890e47d153bb3..7e5a1f12c3881fd83b287271c1d3a48b61029d6f 100644
+--- a/codex-rs/codex-api/src/endpoint/session.rs
++++ b/codex-rs/codex-api/src/endpoint/session.rs
+@@ -1,3 +1,4 @@
++use crate::api_bridge::is_http_slow_down;
+ use crate::auth::SharedAuthProvider;
+ use crate::endpoint::responses_json::check_json_structure;
+ use crate::error::ApiError;
+@@ -100,6 +101,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+             self.provider.retry.to_policy(),
+             self.request_telemetry.clone(),
+             make_request,
++            /*is_terminal_error*/ None,
+             |req| {
+                 let auth = self.auth.clone();
+                 let transport = &self.transport;
+@@ -126,6 +128,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+         path: &str,
+         extra_headers: HeaderMap,
+         body: Option<EncodedJsonBody>,
++        terminal_limit_errors: bool,
+         configure: C,
+     ) -> Result<StreamResponse, ApiError>
+     where
+@@ -143,6 +146,7 @@ impl<T: HttpTransport> EndpointSession<T> {
+             self.provider.retry.to_policy(),
+             self.request_telemetry.clone(),
+             make_request,
++            terminal_limit_errors.then_some(is_http_slow_down),
+             |req| {
+                 let auth = self.auth.clone();
+                 let transport = &self.transport;
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 8a2810076dcb0fe0a80396b75c9b9e2ddd1fed42..bdba7398e143dd2c60d46c7be09976924ce4d2d6 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -42,6 +42,7 @@ pub fn spawn_response_stream(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     turn_state: Option<Arc<OnceLock<String>>>,
++    terminal_limit_errors: bool,
+ ) -> ResponseStream {
+     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
+     let api_rate_limits = parse_api_rate_limits(&stream_response.headers);
+@@ -106,6 +107,7 @@ pub fn spawn_response_stream(
+             idle_timeout,
+             telemetry,
+             safety_buffering_treatment,
++            terminal_limit_errors,
+         )
+         .await;
+             } => {},
+@@ -695,6 +697,7 @@ pub async fn process_sse(
+         idle_timeout,
+         telemetry,
+         SafetyBufferingTreatment::default(),
++        /*terminal_limit_errors*/ false,
+     )
+     .await;
+ }
+@@ -705,6 +708,7 @@ async fn process_sse_with_treatment(
+     idle_timeout: Duration,
+     telemetry: Option<Arc<dyn SseTelemetry>>,
+     safety_buffering_treatment: SafetyBufferingTreatment,
++    terminal_limit_errors: bool,
+ ) {
+     let mut stream = stream.eventsource();
+     let mut response_error: Option<ApiError> = None;
+@@ -842,12 +846,21 @@ async fn process_sse_with_treatment(
+             Ok(None) => {}
+             Err(error) => {
+                 let error = error.into_api_error();
+-                if matches!(
+-                    error,
+-                    ApiError::FlexUnavailable
+-                        | ApiError::InvalidRequest { .. }
+-                        | ApiError::ResponseIntegrity { .. }
+-                ) {
++                let terminal_limit = terminal_limit_errors
++                    && matches!(
++                        error,
++                        ApiError::QuotaExceeded
++                            | ApiError::UsageNotIncluded
++                            | ApiError::RateLimitExceeded { .. }
++                    );
++                if terminal_limit
++                    || matches!(
++                        error,
++                        ApiError::FlexUnavailable
++                            | ApiError::InvalidRequest { .. }
++                            | ApiError::ResponseIntegrity { .. }
++                    )
++                {
+                     let _ = tx_event.send(Err(error)).await;
+                     return;
+                 }
+@@ -1990,6 +2003,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         assert_eq!(stream.upstream_request_id.as_deref(), Some("req-1"));
+         let event = stream
+@@ -2030,6 +2044,7 @@ mod tests {
+             idle_timeout(),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         let mut events = Vec::new();
+         while let Some(event) = stream.rx_event.recv().await {
+diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+index db9998ee378ab1861df22902a4d18ede06d55233..dd81df0523227f6ae81adf75f5ed78dbca6b284c 100644
+--- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
++++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
+@@ -42,6 +42,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
+             Duration::from_secs(60),
+             /*telemetry*/ None,
+             /*turn_state*/ None,
++            /*terminal_limit_errors*/ false,
+         );
+         let mut observed_failures = 0;
+         let error = loop {
+diff --git a/codex-rs/codex-api/src/telemetry.rs b/codex-rs/codex-api/src/telemetry.rs
+index 91918a65b92d69ddb9198ced8101a24277394eeb..f70b8cec0c3d8cbcec41da28ff1622f1f4acfc81 100644
+--- a/codex-rs/codex-api/src/telemetry.rs
++++ b/codex-rs/codex-api/src/telemetry.rs
+@@ -69,6 +69,7 @@ pub(crate) async fn run_with_request_telemetry<T, F, Fut>(
+     policy: RetryPolicy,
+     telemetry: Option<Arc<dyn RequestTelemetry>>,
+     make_request: impl FnMut() -> Request,
++    is_terminal_error: Option<fn(&TransportError) -> bool>,
+     send: F,
+ ) -> Result<T, TransportError>
+ where
+@@ -91,8 +92,14 @@ where
+                 };
+                 t.on_request(attempt, status, err, start.elapsed());
+             }
+-            result
++            // Return terminal errors intact through the retry loop.
++            match result {
++                Err(error) if !is_terminal_error.is_some_and(|is_terminal| is_terminal(&error)) => {
++                    Err(error)
++                }
++                result => Ok(result),
++            }
+         }
+     })
+-    .await
++    .await?
+ }
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index db06ee1ffa588d4bc2a0dd3d4d04d148147a37e7..bb8977906a03a67ae9b81240bab4a906b08776de 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -677,6 +677,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+                 extra_headers,
+                 compression: Compression::None,
+                 turn_state: None,
++                terminal_limit_errors: false,
+             },
+         )
+         .await?;
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 405bc81438df5a6fe208ea39fd9ee4a0305e32bd..0097a646e9ec4012a66f6caa1ecb5392fd90be05 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1635,6 +1635,16 @@ impl Drop for ModelClientSession {
+ }
+ 
+ impl ModelClientSession {
++    pub(crate) fn saved_login_limits_need_attention(&self) -> bool {
++        let source = &self.client.state.session_source;
++        // ThreadSpawn children expose the same attention API as root turns.
++        (!source.is_non_root_agent() || source.parent_thread_id().is_some())
++            && self
++                .client
++                .auth_manager()
++                .is_some_and(|manager| manager.uses_saved_chatgpt_login())
++    }
++
+     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
+         let previous = self
+             .client
+@@ -1679,6 +1689,10 @@ impl ModelClientSession {
+             },
+             compression,
+             turn_state: Some(Arc::clone(&self.turn_state)),
++            terminal_limit_errors: matches!(
++                responses_metadata.request_kind,
++                Some(crate::responses_metadata::CodexResponsesRequestKind::Turn)
++            ) && self.saved_login_limits_need_attention(),
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f54a12115256fc758b36fac5a608e8c371536ebe..a0fd6b1d3fc0673b7c1c61b5cc339811822fb919 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1957,6 +1957,7 @@ async fn run_sampling_request(
+         Arc::clone(&turn_diff_tracker),
+     );
+     let max_retries = turn_context.provider.info().stream_max_retries();
++    let stop_at_rate_limit = client_session.saved_login_limits_need_attention();
+     let mut retry_state = ResponsesStreamRetryState::default();
+     let mut recovery_attempt = 0;
+     let mut initial_input = Some(input);
+@@ -2121,6 +2122,17 @@ async fn run_sampling_request(
+                     if let Some(snapshot) = err.api_rate_limits().cloned() {
+                         sess.emit_api_rate_limits(&turn_context, snapshot).await;
+                     }
++                    let rate_limited = match err.details() {
++                        CodexErrorDetails::RateLimitExceeded(_) => true,
++                        CodexErrorDetails::RetryLimit(error) => {
++                            error.status == http::StatusCode::TOO_MANY_REQUESTS
++                        }
++                        _ => false,
++                    };
++                    if rate_limited && stop_at_rate_limit {
++                        // SDK callers decide when to resubmit after saved-login throttling.
++                        return Err(err);
++                    }
+                     match err.details() {
+                         CodexErrorDetails::ContextWindowExceeded => {
+                             sess.set_total_tokens_full(&turn_context, &step_context.settings)
+diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
+index 918a3b04023d5fa172d2c8952e6707c14e251964..156c5d454e339e971ca88490426660f89733eef3 100644
+--- a/codex-rs/login/src/auth/manager.rs
++++ b/codex-rs/login/src/auth/manager.rs
+@@ -3122,6 +3122,11 @@ impl AuthManager {
+         Ok(())
+     }
+ 
++    /// Returns whether this manager was opened from an SDK-managed saved login.
++    pub fn uses_saved_chatgpt_login(&self) -> bool {
++        self.saved_chatgpt_owner.is_some()
++    }
++
+     /// Returns the precise kind of credentials backing the current authentication.
+     pub fn get_api_auth_mode(&self) -> Option<AuthMode> {
+         self.auth_cached().as_ref().map(CodexAuth::api_auth_mode)

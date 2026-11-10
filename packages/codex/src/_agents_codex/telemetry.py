@@ -10,6 +10,7 @@ import asyncio as asyncio
 import importlib as importlib
 import json as json
 from collections.abc import (
+    Callable as _Callable,
     Coroutine as Coroutine,
     Iterator as Iterator,
     Mapping as Mapping,
@@ -40,6 +41,10 @@ from ._lifecycle import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
+from ._trace_export import (
+    ConsoleTraceProcessor as ConsoleTraceProcessor,
+    OpenAITraceExporter as OpenAITraceExporter,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -414,6 +419,41 @@ class TraceOptions:
 
 _current: ContextVar[SpanContext | None] = ContextVar("agents_trace_context", default=None)
 _in_processor: ContextVar[bool] = ContextVar("agents_trace_processor", default=False)
+_tracing_disabled = False
+_sensitive_data_logging_enabled = True
+
+
+def set_tracing_disabled(disabled: bool) -> None:
+    """Set capture policy for subsequently admitted scopes and operations.
+
+    Existing native work retains its captured policy. Re-enabling capture never
+    relaxes a disabled ancestor's restrictions.
+    """
+    if not isinstance(disabled, bool):
+        raise TypeError("disabled must be bool")
+    global _tracing_disabled
+    _tracing_disabled = disabled
+
+
+def set_sensitive_data_logging_enabled(enabled: bool) -> None:
+    """Restrict new native scopes to metadata while disabled.
+
+    Enabling this switch permits explicit include_sensitive_data options; it
+    does not enable content capture by default or relax existing ancestors.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be bool")
+    global _sensitive_data_logging_enabled
+    _sensitive_data_logging_enabled = enabled
+
+
+def _admission_policy() -> dict[str, bool]:
+    policy = {}
+    if _tracing_disabled or _in_processor.get():
+        policy["disabled"] = True
+    if not _sensitive_data_logging_enabled:
+        policy["include_sensitive_data"] = False
+    return policy
 
 
 def current_context() -> SpanContext | None:
@@ -533,9 +573,10 @@ class TraceScope:
                 "trace_id": value.trace_id,
                 "group_id": value.group_id,
                 "metadata": dict(value.metadata),
-                "disabled": True if _in_processor.get() else value.disabled,
+                "disabled": value.disabled,
                 "include_sensitive_data": value.include_sensitive_data,
                 "credential_ref": None,
+                **_admission_policy(),
             }
             if self._restrictions:
                 wire["restrictions_parents"] = list(self._restrictions)
@@ -572,16 +613,42 @@ class TraceScope:
                 native.release_trace_span(handle)
         return self
 
-    def set_outcome(self, *, status: str, category: str | None = None) -> None:
-        if status not in ("ok", "error", "cancelled"):
-            raise ValueError("Invalid span outcome status")
-        if category is not None and (
-            not isinstance(category, str)
-            or len(category) > 256
-            or any(not (char.isascii() and (char.isalnum() or char == "_")) for char in category)
-        ):
-            raise ValueError("Invalid span outcome category")
-        self._outcome = {"status": status, "category": category, "data": {}}
+    def set_outcome(
+        self,
+        *,
+        status: str,
+        category: str | None = None,
+        data: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Set completion data; native privacy and payload bounds still apply."""
+        payload = None
+        serialization_error: type[TypeError] | type[ValueError] | None = None
+        try:
+            if status not in ("ok", "error", "cancelled"):
+                raise ValueError("Invalid span outcome status")
+            if category is not None and (
+                not isinstance(category, str)
+                or len(category) > 256
+                or any(
+                    not (char.isascii() and (char.isalnum() or char == "_")) for char in category
+                )
+            ):
+                raise ValueError("Invalid span outcome category")
+            if data is not None and not isinstance(data, Mapping):
+                raise TypeError("data must be a mapping or None")
+            # Capture JSON now so caller mutation cannot change completion records.
+            try:
+                payload = json.loads(
+                    json.dumps(dict(data if data is not None else {}), allow_nan=False)
+                )
+            except (TypeError, ValueError, OverflowError, RecursionError) as error:
+                serialization_error = TypeError if isinstance(error, TypeError) else ValueError
+            if serialization_error is None:
+                self._outcome = {"status": status, "category": category, "data": payload}
+        finally:
+            del self, data, payload
+        if serialization_error is not None:
+            raise serialization_error("Span outcome data must be JSON serializable") from None
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if self._ended or self._context is None:
@@ -603,13 +670,35 @@ class TraceScope:
             "data": {},
         }
         native = _native_tracing()
+        self._outcome = None
+        failed = False
         try:
             assert self._span_handle is not None
             native.end_trace_span(self._span_handle, json.dumps(outcome))
+        except Exception:
+            failed = True
+            # Native payload validation can reject before ending the recording
+            # span. Retained parent contexts still own it after handle release.
+            try:
+                native.end_trace_span(
+                    self._span_handle,
+                    '{"status":"cancelled","category":"trace_end_error","data":{}}'
+                    if status == "cancelled"
+                    else '{"status":"error","category":"trace_end_error","data":{}}',
+                )
+            except Exception:
+                pass
         finally:
+            del outcome
             if self._span_handle is not None:
                 native.release_trace_span(self._span_handle)
                 self._span_handle = None
+        if failed:
+            if exc is not None:
+                _retain_cleanup_error(exc, RuntimeError("Native trace span end failed"), ())
+                return
+            del self, exc_type, exc, traceback
+            raise RuntimeError("Native trace span end failed") from None
 
 
 def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) -> TraceScope:
@@ -670,7 +759,7 @@ def _capture(
         if (
             options is not None
             or (context is not None and fallback is not None)
-            or _in_processor.get()
+            or bool(_admission_policy())
         ):
             # Native operation spans own their immutable parent and policy. The
             # caller's ambient context is restored before any queue or await.
@@ -745,6 +834,9 @@ class TraceLifecycleEvent(TypedDict):
 class TraceProcessor(Protocol):
     """Receive immutable native lifecycle snapshots; callbacks may be async.
 
+    A processor may define on_trace_events(events) to consume a native-drain
+    batch instead of individual callbacks. The SDK awaits that callback before
+    acknowledging any event in the batch; failures count against every event.
     This native interface is separate from classic v0 processors. Each event
     runs on a private worker loop and has a one-second delivery budget. At most
     16 workers may remain live, including stalled removed routes. A stalled
@@ -773,6 +865,9 @@ _processor_serial = 0
 _active_processor_ids: set[str] = set()
 _retired_routes: dict[str, int] = {}
 _processor_acknowledged = 0
+_processor_dropped_records = 0
+_processor_loss_watermark = 0
+_processor_recovery_epoch = 0
 _worker_count = 0
 _worker_lock = Lock()
 _MAX_PROCESSOR_WORKERS = 16
@@ -950,6 +1045,7 @@ class _ProcessorDelivery:
 @dataclass
 class _ProcessorBatch:
     deliveries: tuple[_ProcessorDelivery, ...]
+    loss_epoch: int = 0
     admitted_at: float = field(default_factory=monotonic)
     stopped: Event = field(default_factory=Event)
     completion: Future[None] | None = None
@@ -987,14 +1083,15 @@ class _ProcessorRoute:
         self.processor = processor
         self.loop: asyncio.AbstractEventLoop | None = None
         self.pending: _ProcessorBatch | None = None
+        self.loss_epoch = 0
 
-    async def _invoke(self, event: TraceLifecycleEvent) -> None:
+    async def _invoke(self, callback: _Callable[..., Any], *args: Any) -> None:
         import inspect
 
         failed = False
         token = _in_processor.set(True)
         try:
-            result = self.processor.on_trace_event(event)
+            result = callback(*args)
             if inspect.isawaitable(result):
                 await result
         except BaseException:
@@ -1006,8 +1103,31 @@ class _ProcessorRoute:
         if failed:
             raise RuntimeError("Trace processor delivery failed")
 
+    async def _recover_loss(self, epoch: int) -> None:
+        if epoch > self.loss_epoch:
+            callback = getattr(self.processor, "_on_native_trace_loss", None)
+            if callable(callback):
+                await self._invoke(callback)
+            self.loss_epoch = epoch
+
     async def _invoke_batch(self, batch: _ProcessorBatch) -> None:
         previous_finished = batch.admitted_at
+        callback = getattr(self.processor, "on_trace_events", None)
+        if callable(callback):
+            success = False
+            if not batch.stopped.is_set() and monotonic() < previous_finished + 1.0:
+                try:
+                    await self._recover_loss(batch.loss_epoch)
+                    await self._invoke(callback, tuple(item.event for item in batch.deliveries))
+                    success = monotonic() < previous_finished + 1.0 and not batch.stopped.is_set()
+                except Exception:
+                    pass
+            if not success:
+                batch.stopped.set()
+            finished = monotonic()
+            for delivery in batch.deliveries:
+                delivery.result.set_result((success, finished))
+            return
         for delivery in batch.deliveries:
             now = monotonic()
             deadline = previous_finished + 1.0
@@ -1017,7 +1137,8 @@ class _ProcessorRoute:
                 continue
             success = True
             try:
-                await self._invoke(delivery.event)
+                await self._recover_loss(batch.loss_epoch)
+                await self._invoke(self.processor.on_trace_event, delivery.event)
             except Exception:
                 success = False
             finished = monotonic()
@@ -1029,7 +1150,7 @@ class _ProcessorRoute:
             delivery.result.set_result((success, finished))
             previous_finished = finished
 
-    def submit(self, events: Sequence[TraceLifecycleEvent]) -> _ProcessorBatch:
+    def submit(self, events: Sequence[TraceLifecycleEvent], loss_epoch: int = 0) -> _ProcessorBatch:
         from threading import Thread
 
         global _worker_count
@@ -1064,7 +1185,9 @@ class _ProcessorRoute:
                 with _worker_lock:
                     _worker_count -= 1
                 raise
-        batch = _ProcessorBatch(tuple(_ProcessorDelivery(event) for event in events))
+        batch = _ProcessorBatch(
+            tuple(_ProcessorDelivery(event) for event in events), loss_epoch=loss_epoch
+        )
         work = self._invoke_batch(batch)
         try:
             batch.completion = asyncio.run_coroutine_threadsafe(work, self.loop)
@@ -1128,7 +1251,8 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
     if ready is not None:
         # Eager task factories must not drain before route publication commits.
         await ready
-    global _processor_acknowledged
+    global _processor_acknowledged, _processor_dropped_records
+    global _processor_loss_watermark, _processor_recovery_epoch
     native = _native_tracing()
     while True:
         drain = _ProcessorDrain(native.drain_trace_events(64))
@@ -1137,24 +1261,50 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
         try:
             await asyncio.shield(drain)
             batch = json.loads(drain.outcome.result())
-            routes: dict[str, list[TraceLifecycleEvent]] = {}
-            for event in batch["events"]:
-                snapshot = _freeze(event)
-                for identifier in event.get("processor_ids", []):
-                    routes.setdefault(identifier, []).append(snapshot)
-            for identifier, events in routes.items():
-                with _processor_lock:
-                    processor = _processors.get(identifier)
-                    if processor is None or (
-                        processor.pending is not None and not processor.pending.done()
-                    ):
-                        continue
-                    try:
-                        delivery = processor.submit(events)
-                    except Exception:
-                        continue
-                deliveries.append(delivery)
-                await delivery.wait()
+            if batch["dropped_records"] > _processor_dropped_records:
+                # No-op merge preserves routes and captures the native sequence
+                # under its lock, including dropped records beyond the queue tail.
+                _processor_loss_watermark = native.set_trace_routes(
+                    '{"processor_ids":[],"replace":false}'
+                )
+                _processor_dropped_records = batch["dropped_records"]
+            watermark = _processor_loss_watermark
+            groups = [batch["events"]]
+            if watermark and batch["through_sequence"] >= watermark:
+                groups = [
+                    [event for event in batch["events"] if event["sequence"] <= watermark],
+                    [event for event in batch["events"] if event["sequence"] > watermark],
+                ]
+            for index, group in enumerate(groups):
+                if index == 1:
+                    _processor_recovery_epoch = watermark
+                    _processor_loss_watermark = 0
+                routes: dict[str, list[TraceLifecycleEvent]] = {}
+                for event in group:
+                    descriptors = batch.get("root_descriptors", {})
+                    descriptor = descriptors.get(str(event["sequence"])) if descriptors else None
+                    snapshot = _freeze(
+                        {
+                            **event,
+                            "recovery_sequence": _processor_recovery_epoch,
+                            **({"root_descriptor": descriptor} if descriptor is not None else {}),
+                        }
+                    )
+                    for identifier in event.get("processor_ids", []):
+                        routes.setdefault(identifier, []).append(snapshot)
+                for identifier, events in routes.items():
+                    with _processor_lock:
+                        processor = _processors.get(identifier)
+                        if processor is None or (
+                            processor.pending is not None and not processor.pending.done()
+                        ):
+                            continue
+                        try:
+                            delivery = processor.submit(events, _processor_recovery_epoch)
+                        except Exception:
+                            continue
+                    deliveries.append(delivery)
+                    await delivery.wait()
         finally:
             # Retain the result even if loop shutdown cancels the pump before
             # its native read finishes or before Python resumes with that read.

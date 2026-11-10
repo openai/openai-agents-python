@@ -111,6 +111,16 @@ Complete `codex login` separately before opening an SDK Session. This mode reads
 
 `CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
 
+#### Set up a login on a headless host
+
+1. Ask your ChatGPT workspace admin to enable device-code sign-in in the workspace permissions. For a personal account, enable it in your ChatGPT security settings.
+2. On the headless host, run `codex login --device-auth`. Open the displayed link in a browser on another device and enter the one-time code. Use the ChatGPT account and workspace you want the SDK to use.
+3. Make sure the CLI saved `auth.json` in the directory that `CodexLogin` will read. If your setup uses a credential store, see the [file storage settings](https://learn.chatgpt.com/docs/auth#credential-storage).
+
+If device-code sign-in is unavailable, use a copied login if your workspace permits file storage. Sign in with `codex login` on a machine with a browser and file storage enabled. Then [copy `auth.json` over a secure connection](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache) to the Codex directory on the headless host. Use the default directory or set `CodexLogin(codex_home=...)` to the destination directory. Give the user running the SDK write access to that directory and restrict access to the cache file to that user. Treat the file like a password and keep it out of source control, logs, and shared artifacts.
+
+Sessions in one SDK process can share the same saved login. The SDK coordinates token refresh in that process and writes renewed credentials back to the file. Keep the updated file so the next process can use it after a restart. Use a single process at a time to refresh a saved login, even if copies of the file exist on other hosts.
+
 #### Run a coding turn without an API key
 
 This complete script makes a live model request using the saved login. Run it with an SDK build that includes this experimental API:
@@ -159,6 +169,36 @@ The example asks for code and tests in the answer. To execute commands or edit w
 The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
 This mode uses HTTPS on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
+
+### Read Codex plan usage
+
+Matching development builds have been supporting `plan_usage()` and its UTC reset datetimes. The `0.24.0-alpha.7` preview has not been including this API. The [source-build guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) has been providing setup for the matching source commit.
+
+`await session.plan_usage()` has been requesting a fresh usage snapshot through the Session's saved `CodexLogin`. API-key Sessions have been returning `None` without an account request. Each call has been reading current provider data rather than reusing the previous snapshot. `observed_at` has been tracking the snapshot receipt time. Applications have been choosing how long to reuse the snapshot before another read.
+
+Inside an open Session, this fragment has been showing each reported primary-window reset:
+
+```python
+usage = await session.plan_usage()
+if usage is None:
+    print("API-key Session: no Codex plan snapshot")
+else:
+    print("Observed:", usage.observed_at)
+    print("Identity verified:", usage.identity_verified)
+    print("Included usage allowed:", usage.ordinary_usage_allowed)
+    print("Available window resets:", usage.reset_credits_available)
+    for limit in usage.limits:
+        window = limit.primary
+        if window is not None and window.resets_at is not None:
+            print(limit.limit_id, window.used_percent)
+            print("Time until reset at observation:", window.resets_at - usage.observed_at)
+```
+
+Window `resets_at`, individual spend-limit `resets_at`, and `observed_at` have been using timezone-aware UTC datetimes. Missing windows, credits, and optional fields have been representing unknown data. `CodexPlanSpendLimit.limit` and `.used` and `CodexPlanCredits.balance` have been preserving the provider's strings. Additional usage buckets have been appearing in `limits` alongside the main Codex bucket.
+
+`account_id` has been naming the Session's saved workspace when available. `identity_verified=True` has been indicating that the response identified both the saved account and user. Omitted identity fields have been leaving verification false; conflicting identities have been raising `RuntimeError`. `ordinary_usage_allowed` has been reporting the provider's evidence for included usage only with verified identity, and otherwise has been remaining `None`. `reset_credits_available` has been counting available window resets rather than credit balance.
+
+These values have been serving as scheduling hints before `submit()`. The provider has been deciding admission for each turn; the snapshot has been offering no reservation of capacity. Failed account reads have been raising `RuntimeError`. Reads have been using the Session's cached credentials. After token expiry, applications have been renewing the saved login and opening a new Session before retrying. Closing the Session has been cancelling pending reads. The [Codex usage dashboard](https://chatgpt.com/codex/settings/usage) has been providing a separate account view.
 
 ### Read API-key rate limits
 

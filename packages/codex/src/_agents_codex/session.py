@@ -51,7 +51,7 @@ from typing import (
 )
 from uuid import uuid4 as uuid4
 
-from pydantic import BaseModel as BaseModel
+from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter
 
 from ._agent_profiles import _AgentProfile, _capture_agent_graph, _check_handoff_tool_names
 from ._compat import cancel_once as cancel_once
@@ -108,6 +108,7 @@ from .canonical_storage import (
 )
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
+from .computer import _CapturedComputer, _ComputerCall, _ComputerResources
 from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
     Environment as Environment,
@@ -116,18 +117,21 @@ from .executor import (
     _path_uri as _path_uri,
     _writable_roots as _writable_roots,
 )
-from .history import RecordedTurn as RecordedTurn
+from .history import CanonicalHistorySnapshot, RecordedTurn as RecordedTurn
 from .input import UserInput as UserInput, _native_input as _native_input
 from .manual import (
     _FORM_MODES as _FORM_MODES,
     _URL_ACCEPT as _URL_ACCEPT,
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
+    ApprovalDecision as ApprovalDecision,
+    ApprovalRequested as ApprovalRequested,
     ElicitationRequest as ElicitationRequest,
     FormRequest as FormRequest,
     Interaction as Interaction,
     UrlRequest as UrlRequest,
     VerificationRequest as VerificationRequest,
+    _CapturedApproval as _CapturedApproval,
     _CapturedManual as _CapturedManual,
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
@@ -320,6 +324,10 @@ def _native_model_settings(model: str | None, settings: ModelSettings | None) ->
         "store",
         "prompt_cache_retention",
         "prompt_cache_ttl",
+        "truncation",
+        "include",
+        "context_management",
+        "extra_body",
     }
     for key, value in copied.items():
         if key == "tool_choice":
@@ -399,6 +407,10 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
             "store",
             "prompt_cache_retention",
             "prompt_cache_ttl",
+            "truncation",
+            "include",
+            "context_management",
+            "extra_body",
         }
         if not isinstance(controls, dict) or controls.keys() - (ordinary | {"named_tool_choice"}):
             raise ValueError("Manual checkpoint has invalid accepted request controls")
@@ -557,7 +569,9 @@ class Capabilities:
                 "Opening and operation ceilings apply to every tool family",
             )
         if feature == "function_policy":
-            if any(isinstance(tool, _CapturedFunction) for tool in s._bound_tools):
+            if any(
+                isinstance(tool, (_CapturedFunction, _CapturedApproval)) for tool in s._bound_tools
+            ):
                 return FeatureSupport(
                     "supported",
                     "Opening Python callbacks support controls",
@@ -1625,11 +1639,16 @@ async def _call_callback_body(
     return value
 
 
+_PROJECT_GUIDANCE_TOOL_NAMES = ("read_text_file", "view_image")
+
+
 def _fixed_tool_refs(
     tools: Sequence[Tool[Any]],
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
     native_agents: NativeAgents[Any] | None,
+    *,
+    project_guidance: bool = False,
 ) -> set[ToolRef]:
     """Derive selectors only from native grants captured for this opening."""
     from .native_agents import _COLLABORATION_TOOLS
@@ -1654,6 +1673,8 @@ def _fixed_tool_refs(
         fixed.update((ToolRef("exec", "functions"), ToolRef("wait", "functions")))
     if environment is not None:
         fixed.update(ToolRef(name, "functions") for name in environment.tools)
+    if project_guidance:
+        fixed.update(ToolRef(name, "functions") for name in _PROJECT_GUIDANCE_TOOL_NAMES)
     if native_agents is not None:
         fixed.update(ToolRef(name, "collaboration") for name in _COLLABORATION_TOOLS)
     return fixed
@@ -1713,6 +1734,7 @@ def _split_tools(
     ceiling: Sequence[Tool[ContextT]] | None = None,
     rebind: bool = False,
     handoffs: Mapping[str, str] | None = None,
+    project_guidance: bool = False,
 ) -> tuple[
     tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents[Any] | None
 ]:
@@ -1728,6 +1750,7 @@ def _split_tools(
             programmatic_tool_calling,
             environment,
             native_agents,
+            project_guidance=project_guidance,
         )
         fixed.update(ToolRef(name) for name in handoffs or ())
         for declaration in opening:
@@ -1772,6 +1795,7 @@ def _split_tools(
                 False,
                 tool if isinstance(tool, Environment) else None,
                 tool if isinstance(tool, NativeAgents) else None,
+                project_guidance=project_guidance and isinstance(tool, Environment),
             )
             if retained.intersection(refs):
                 raise CapabilityError("Operation tools must select distinct fixed capabilities")
@@ -1921,11 +1945,13 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
-def _check_buffered_native_agents(
+def _check_native_agents_provider(
     native_agents: NativeAgents[Any] | None, provider: NativeProvider | None
 ) -> None:
     if native_agents is not None and provider is not None and provider.response_mode == "buffered":
         raise CapabilityError("Buffered Responses do not support native child agents")
+    if native_agents is not None and provider is not None and provider.model_backend is not None:
+        raise ValueError("model_backend does not yet support native child agents")
 
 
 def _check_native_agents_environment(
@@ -1949,6 +1975,7 @@ def _selected_tool_refs(
     programmatic_tool_calling: bool,
     environment: Environment[Any] | None,
     native_agents: NativeAgents[Any] | None,
+    project_guidance: bool = False,
 ) -> tuple[ToolRef, ...]:
     """Normalize admitted declarations through the same identities as dispatch."""
     refs = {tool.ref for tool in python}
@@ -1965,6 +1992,7 @@ def _selected_tool_refs(
             False,
             environment if any(item is environment for item in selection) else None,
             native_agents if any(item is native_agents for item in selection) else None,
+            project_guidance=project_guidance and any(item is environment for item in selection),
         )
     )
     # Execution helpers remain an implementation detail of an admitted nonempty
@@ -1985,6 +2013,47 @@ def _selected_tool_refs(
 
 def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
+
+
+@dataclass
+class _ApprovalArguments:
+    value: Any
+    approved: bool = False
+
+
+def _same_approval_arguments(
+    left: Any, right: Any, seen: set[tuple[int, int]] | None = None
+) -> bool:
+    if left is right:
+        return True
+    seen = set() if seen is None else seen
+    pair = (id(left), id(right))
+    if pair in seen:
+        return True
+    seen.add(pair)
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Mapping):
+        return {(type(key), key) for key in left} == {(type(key), key) for key in right} and all(
+            _same_approval_arguments(left[key], right[key], seen) for key in left
+        )
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(
+            _same_approval_arguments(a, b, seen) for a, b in zip(left, right, strict=True)
+        )
+    if isinstance(left, BaseModel):
+        return all(
+            _same_approval_arguments(a, b, seen)
+            for a, b in (
+                (left.__dict__, right.__dict__),
+                (left.__pydantic_extra__, right.__pydantic_extra__),
+                (left.__pydantic_private__, right.__pydantic_private__),
+                (left.__pydantic_fields_set__, right.__pydantic_fields_set__),
+            )
+        )
+    if hasattr(left, "__dict__"):
+        return _same_approval_arguments(vars(left), vars(right), seen)
+    return bool(left == right)
 
 
 def _snapshot_function_arguments(arguments: dict[str, Any], tool: ToolRef) -> Mapping[str, Any]:
@@ -2155,6 +2224,8 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "computer":
+        return ToolRef("computer")
     if spec.get("type") == "namespace":
         tools = spec.get("tools")
         if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
@@ -2190,7 +2261,9 @@ def _restore_operation_slots(
     available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
     if any(tool.ref not in available for tool in selected):
         raise ValueError("Saved operation names tools outside its native generation")
-    manual_names = {tool.name for tool in selected if tool._bind is None}
+    manual_names = {
+        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
+    }
     if any(name not in manual_names for name in pending_names):
         raise ValueError("Saved operation does not admit its pending manual tools")
     return tuple(available[tool.ref] for tool in selected)
@@ -2206,6 +2279,7 @@ def _restore_operation_tools(
     environment: Environment[Any] | None,
     native_agents: NativeAgents | None,
     handoffs: Mapping[str, str] | None,
+    project_guidance: bool = False,
 ) -> tuple[
     tuple[int, ...],
     tuple[ToolRef, ...],
@@ -2221,6 +2295,7 @@ def _restore_operation_tools(
         environment=environment,
         native_agents=native_agents,
         handoffs=handoffs,
+        project_guidance=project_guidance,
     )
     refs = _selected_tool_refs(
         saved.operation_tools,
@@ -2229,6 +2304,7 @@ def _restore_operation_tools(
         programmatic_tool_calling=programmatic_tool_calling,
         environment=environment,
         native_agents=native_agents,
+        project_guidance=project_guidance,
     )
     if set(refs) != set(saved.operation_tools):
         raise ValueError("Saved operation does not describe a canonical tool subset")
@@ -2352,13 +2428,14 @@ def _check_namespaced_tool_collisions(
     available: Sequence[Tool[Any]],
     *,
     native_agents: NativeAgents[Any] | None = None,
+    project_guidance: bool = False,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
     namespaced = {ref for ref in python_refs if ref.namespace is not None}
     if not namespaced:
         return
     other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
-        available, False, None, native_agents
+        available, False, None, native_agents, project_guidance=project_guidance
     )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
@@ -2559,12 +2636,67 @@ def _validate_storage_opening(
     return reconciliation
 
 
+def _capture_project_guidance(
+    enabled: bool,
+) -> tuple[dict[str, bool], dict[str, bool], list[dict[str, str]]]:
+    if not enabled:
+        return {}, {}, []
+    return (
+        {"features.view_image": True},
+        {"_canonical_rules": True},
+        [{"name": name, "namespace": "functions"} for name in _PROJECT_GUIDANCE_TOOL_NAMES],
+    )
+
+
 def _configure_project_search(
     runtime: dict[str, Any], environment: Environment[Any], cwd: str
 ) -> None:
     search_tools = [name for name in environment.tools if name in ("project_glob", "project_grep")]
     if search_tools:
         runtime["_sdk_project_search"] = {"root": cwd, "tools": search_tools}
+
+
+def _configure_native_agents(
+    runtime: dict[str, Any],
+    config: dict[str, Any],
+    native_agents: NativeAgents | None,
+    instructions: str,
+    *,
+    project_guidance: bool,
+) -> None:
+    if native_agents is not None:
+        runtime["_native_agents"] = True
+        # Core enables the owned route only for non-root child creation.
+        runtime["approval_policy"] = "never"
+        config.update(
+            {
+                "agents.enabled": True,
+                "features.multi_agent_v2": {
+                    "subagent_developer_instructions": instructions,
+                    "enabled": True,
+                    "tool_namespace": "collaboration",
+                    "expose_spawn_agent_model_overrides": False,
+                    **(
+                        {"max_concurrent_threads_per_session": (native_agents.max_children + 1)}
+                        if native_agents.max_children is not None
+                        else {}
+                    ),
+                },
+                "features.view_image": project_guidance,
+                "features.image_generation": False,
+                "features.current_time_reminder": False,
+                "features.sleep_tool": False,
+                "features.request_permissions_tool": False,
+                "features.token_budget": False,
+                "features.deferred_executor": False,
+                "features.apps": False,
+                "features.plugins": False,
+                "features.memory_tool": False,
+                "features.tool_suggest": False,
+                "features.send_message_to_user_async": False,
+                "tools.experimental_request_user_input.enabled": False,
+            }
+        )
 
 
 def _configure_storage_runtime(
@@ -2648,6 +2780,29 @@ def _capture_opening_agent(
     )
 
 
+def _supports_atomic_first_turn(
+    agent: Agent[Any, Any],
+    *,
+    output_mode: str,
+    programmatic_tool_calling: bool,
+    tools: Sequence[Tool[Any]],
+) -> bool:
+    return (
+        output_mode == "plain"
+        and not programmatic_tool_calling
+        and agent.transform_context is None
+        and agent.before_compact is None
+        and agent.before_complete is None
+        and all(
+            isinstance(tool, FunctionTool)
+            and tool._bind is not None
+            and tool.needs_approval is False
+            and not tool.defer_loading
+            for tool in tools
+        )
+    )
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -2683,10 +2838,16 @@ class Session(Generic[ContextT, OutputT]):
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
         retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
         if retention_omitted:
             observation_retention = "bounded"
+        if not isinstance(project_guidance, bool):
+            raise TypeError("project_guidance must be a bool")
+        guidance_config, guidance_options, guidance_tools = _capture_project_guidance(
+            project_guidance
+        )
         function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
         if function_concurrency_omitted:
             max_function_concurrency = None
@@ -2821,7 +2982,7 @@ class Session(Generic[ContextT, OutputT]):
                 *restored_defaults,
                 *(_MCPResourceRef(name) for name in restored_resource_servers),
             )
-        _check_buffered_native_agents(native_agents, agent.provider)
+        _check_native_agents_provider(native_agents, agent.provider)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -2832,12 +2993,12 @@ class Session(Generic[ContextT, OutputT]):
             or checklist
             or mcp_tools
             or environment is not None
-            or any(isinstance(tool, (WebSearch, *_HOSTED_TOOLS)) for tool in available)
-            or any(tool._bind is None for tool in tools)
+            or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
+            or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
         ):
             raise ValueError(
                 "CustomStorage preview does not support children, goals, checklist, "
-                "code mode, manual tools, native tools or environments"
+                "code mode, manual tools, standalone native tools or environments"
             )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
@@ -2870,6 +3031,7 @@ class Session(Generic[ContextT, OutputT]):
             mcp_names,
             available,
             native_agents=native_agents,
+            project_guidance=project_guidance,
         )
         model = agent.model
         catalog = _capture_tools(0, tools, context)
@@ -2963,14 +3125,11 @@ class Session(Generic[ContextT, OutputT]):
             and not instruction_files
             and agent.provider is not None
             and codex_login is None
-            and output.mode == "plain"
-            and not programmatic_tool_calling
-            and agent.transform_context is None
-            and agent.before_compact is None
-            and agent.before_complete is None
-            and all(
-                isinstance(tool, FunctionTool) and tool._bind is not None and not tool.defer_loading
-                for tool in available
+            and _supports_atomic_first_turn(
+                agent,
+                output_mode=output.mode,
+                programmatic_tool_calling=programmatic_tool_calling,
+                tools=available,
             )
         )
         lease = None
@@ -2987,6 +3146,8 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if project_guidance and executor is None:
+                raise ValueError("project_guidance requires an Environment")
             if executor is not None:
                 for tool in allowed_tools:
                     if tool.ref.namespace in (None, "functions") and tool.name in executor.tools:
@@ -3020,6 +3181,7 @@ class Session(Generic[ContextT, OutputT]):
                     handoffs=restored_handoffs,
                     environment=executor,
                     native_agents=native_agents,
+                    project_guidance=project_guidance,
                 )
             if manual_restore and saved.operation_tools is not None:
                 (
@@ -3036,6 +3198,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=executor,
                     native_agents=native_agents,
                     handoffs=operation_handoffs,
+                    project_guidance=project_guidance,
                 )
             # Capture bindings at opening; acquire only a promoted operation's
             # selected servers. A manual restore already owns admitted work.
@@ -3150,7 +3313,12 @@ class Session(Generic[ContextT, OutputT]):
                         **provider._routing_config(),
                         **{
                             name: getattr(provider, name)
-                            for name in ("request_max_retries", "stream_max_retries")
+                            for name in (
+                                "request_max_retries",
+                                "stream_max_retries",
+                                "stream_idle_timeout_ms",
+                                "websocket_connect_timeout_ms",
+                            )
                             if getattr(provider, name) is not None
                         },
                         # Both native web protocols require a compatible Responses
@@ -3161,6 +3329,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     "agents.enabled": False,
                     "features.goals": goals,
+                    **guidance_config,
                     "tools.update_plan.enabled": checklist,
                     "mcp_servers": {},
                     "features.non_prefixed_mcp_tool_names": False,
@@ -3193,44 +3362,16 @@ class Session(Generic[ContextT, OutputT]):
                     }
                 if model is not None:
                     config["model"] = model
-                if native_agents is not None:
-                    runtime["_native_agents"] = True
-                    # Core enables the owned route only for non-root child creation.
-                    runtime["approval_policy"] = "never"
-                    config.update(
-                        {
-                            "agents.enabled": True,
-                            "features.multi_agent_v2": {
-                                "subagent_developer_instructions": instructions,
-                                "enabled": True,
-                                "tool_namespace": "collaboration",
-                                "expose_spawn_agent_model_overrides": False,
-                                **(
-                                    {
-                                        "max_concurrent_threads_per_session": (
-                                            native_agents.max_children + 1
-                                        )
-                                    }
-                                    if native_agents.max_children is not None
-                                    else {}
-                                ),
-                            },
-                            "features.view_image": False,
-                            "features.image_generation": False,
-                            "features.current_time_reminder": False,
-                            "features.sleep_tool": False,
-                            "features.request_permissions_tool": False,
-                            "features.token_budget": False,
-                            "features.deferred_executor": False,
-                            "features.apps": False,
-                            "features.plugins": False,
-                            "features.memory_tool": False,
-                            "features.tool_suggest": False,
-                            "features.send_message_to_user_async": False,
-                            "tools.experimental_request_user_input.enabled": False,
-                        }
-                    )
-                if codex_login is not None:
+                _configure_native_agents(
+                    runtime,
+                    config,
+                    native_agents,
+                    instructions,
+                    project_guidance=project_guidance,
+                )
+                if provider.model_backend is not None:
+                    opening.api_key = "native-model-producer"
+                elif codex_login is not None:
                     opening.api_key = None
                 elif selected is not None:
                     opening.api_key = selected.api_key
@@ -3251,6 +3392,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    **guidance_options,
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
@@ -3334,6 +3476,7 @@ class Session(Generic[ContextT, OutputT]):
                             else []
                         )
                         + ([{"name": "update_plan", "namespace": "functions"}] if checklist else [])
+                        + guidance_tools
                         + (
                             [
                                 {"name": name, "namespace": "functions"}
@@ -3437,6 +3580,8 @@ class Session(Generic[ContextT, OutputT]):
                         and observation_retention == "bounded"
                         and context is None
                         and not owned_provider
+                        and provider is not None
+                        and provider.model_backend is None
                         and not available
                         and not agent.handoffs
                         and _tracing_context is None
@@ -3554,6 +3699,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._bindings = agent.tools
                 session._catalog_bindings[(None, catalog.generation)] = agent.tools
                 session._executor = executor
+                session._project_guidance = project_guidance
                 if executor is not None and executor.writable_roots is not None:
                     session._writable_roots = _writable_roots(executor.writable_roots)
                 session._native_agents = native_agents
@@ -3587,7 +3733,11 @@ class Session(Generic[ContextT, OutputT]):
                     # Other current opening declarations remain explicitly selectable.
                     restored_fixed_refs: list[ToolRef] = sorted(
                         _fixed_tool_refs(
-                            restored_available, programmatic_tool_calling, executor, native_agents
+                            restored_available,
+                            programmatic_tool_calling,
+                            executor,
+                            native_agents,
+                            project_guidance=project_guidance,
                         ),
                         key=lambda ref: (ref.namespace or "", ref.name),
                     )
@@ -3638,6 +3788,9 @@ class Session(Generic[ContextT, OutputT]):
                         json.dumps(saved.history)
                     )
                     session._mcp_tools = mcp_tools
+                session._model_backend = provider.model_backend
+                if provider.model_backend is not None:
+                    session._native._enable_model_producer(True)
                 session._provider_lease = provider_lease
                 session._parent_trace = parent_trace
                 session._native_options = json.dumps(options)
@@ -3770,21 +3923,52 @@ class Session(Generic[ContextT, OutputT]):
         # The writer is held. Read the saved graph, including
         # cold descendants, before publishing current tools.
         descendants = json.loads(await self._publish_startup(self._native.call("list_subagents")))
+        if any(child["runtime_loaded"] for child in descendants):
+            raise RuntimeError("Native local history has a live descendant writer")
+        children = {child["id"]: child for child in descendants}
+        histories: dict[str, dict[str, Any]] = {}
+        projected: dict[str, tuple[list[RecordedTurn], list[SessionItem], list[UncertainCall]]] = {}
+        for subagent_id in [None, *children]:
+            read_history = (
+                self._native.read_thread_history(None)
+                if subagent_id is None
+                else self._native.read_thread_history(subagent_id, for_reconciliation=True)
+            )
+            encoded = await self._publish_startup(read_history)
+            thread_id = subagent_id if subagent_id is not None else self.id
+            calls: list[UncertainCall] = []
+            turns, items = project_history(
+                json.loads(encoded), self.id, subagent_id, uncertain_calls=calls
+            )
+            if subagent_id is not None:
+                child = children[subagent_id]
+                histories[subagent_id] = {
+                    "digest": hashlib.sha256(encoded.encode()).hexdigest(),
+                    "parent": child["parent_agent_id"],
+                    "status": child["status"],
+                    "interrupted": [],
+                }
+            projected[thread_id] = turns, items, calls
+
         recorded: dict[str, list[RecordedTurn]] = {}
         recorded_items: list[SessionItem] = []
         unknown: list[UncertainCall] = []
-        for subagent_id in [None, *(child["id"] for child in descendants)]:
-            history = json.loads(
-                await self._publish_startup(self._native.read_thread_history(subagent_id))
-            )
-            turns, items = project_history(history, self.id, subagent_id, uncertain_calls=unknown)
-            thread_id = subagent_id if subagent_id is not None else self.id
+        prior: set[tuple[str, str, str]] = set()
+        for thread_id, (turns, items, calls) in projected.items():
+            if thread_id in children:
+                # Forks can retain parent turns. Only their owner can reconcile them.
+                parent = children[thread_id]["parent_agent_id"]
+                inherited = {turn["id"] for turn in projected[parent][0]}
+                turns = [turn for turn in turns if turn["id"] not in inherited]
+                items = [item for item in items if item["turn_id"] not in inherited]
+                calls = [call for call in calls if call.turn_id not in inherited]
             recorded[thread_id] = turns
             recorded_items.extend(items)
-        if any(call.thread_id != self.id for call in unknown):
-            raise RuntimeError(
-                "Native local history has an unknown tool outcome in a descendant; "
-                "local recovery cannot reconcile descendant calls"
+            unknown.extend(calls)
+            prior.update(
+                (thread_id, item["turn_id"], item["call_id"])
+                for item in items
+                if item["type"] == "function_call_output" and "reconciliation" in item
             )
         if unknown and not reconciliation:
             raise LocalRecoveryRequired(
@@ -3792,30 +3976,49 @@ class Session(Generic[ContextT, OutputT]):
                 tuple(turn for turns in recorded.values() for turn in turns),
                 tuple(recorded_items),
             )
+        missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+        supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
+        if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
+            raise ValueError("Reconciliation must cover every unresolved call once")
+        recovery_turns = {(thread, turn) for thread, turn, _ in missing}
+        recovery_lineage: dict[str, str] = {}
+        for thread, _, _ in supplied:
+            while thread in children and thread not in recovery_lineage:
+                parent = children[thread]["parent_agent_id"]
+                recovery_lineage[thread] = parent
+                thread = parent
+        # The crashed owner's spawning turn can still be open when its child
+        # records an effect. Use the completed spawn to identify that exact turn.
+        if recovery_lineage:
+            for item in recorded_items:
+                if (
+                    item["type"] == "create_subagent_call"
+                    and item["status"] == "completed"
+                    and (spawned := item["subagent_id"]) is not None
+                    and recovery_lineage.get(spawned) == item["agent_id"]
+                ):
+                    recovery_turns.add((item["agent_id"], item["turn_id"]))
         for child in descendants:
-            if child["status"] == "closed":
-                continue
+            child_id = child["id"]
             # An open edge can outlive settled native work. Parent
             # turns inherited at fork do not prove child completion.
-            parent_ids = {turn["id"] for turn in recorded[child["parent_agent_id"]]}
-            own_turns = [turn for turn in recorded[child["id"]] if turn["id"] not in parent_ids]
-            if not own_turns or any(turn["status"] == "in_progress" for turn in own_turns):
+            own_turns = recorded[child_id]
+            unfinished = [turn["id"] for turn in own_turns if turn["status"] == "in_progress"]
+            interrupted = [turn for turn in unfinished if (child_id, turn) in recovery_turns]
+            if child["status"] != "closed" and (not own_turns or unfinished != interrupted):
                 raise RuntimeError(
                     "Native local history has an active descendant; its runtime cannot be restored"
                 )
+            histories[child_id]["interrupted"] = interrupted
         if isinstance(self._storage, LocalStorage):
-            missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
-            supplied = {(call.thread_id, call.turn_id, call.call_id) for call in reconciliation}
-            prior = {
-                (self.id, item["turn_id"], item["call_id"])
-                for item in recorded_items
-                if item["type"] == "function_call_output" and "reconciliation" in item
-            }
-            if len(supplied) != len(reconciliation) or not missing <= supplied <= missing | prior:
-                raise ValueError("Reconciliation must cover every unresolved call once")
             await self._publish_startup(
                 self._native._reconcile_local_calls(
-                    json.dumps([asdict(call) for call in reconciliation])
+                    json.dumps(
+                        {
+                            "receipts": [asdict(call) for call in reconciliation],
+                            "histories": histories,
+                        }
+                    )
                 )
             )
 
@@ -3851,7 +4054,9 @@ class Session(Generic[ContextT, OutputT]):
             (None, catalog.generation): catalog
         }
         self._catalog_bindings: dict[tuple[str | None, int], Sequence[Tool[Any]]] = {}
+        self._computer_resources = _ComputerResources()
         self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
+        self._model_backend: Any = None
         self._model_api_key: str | None = None
         self._parent_trace: TraceContext | None = None
         self._codex_account: CodexAccount | None = None
@@ -3866,6 +4071,9 @@ class Session(Generic[ContextT, OutputT]):
         )
         self._home = home
         self._catalog = catalog
+        self._approval_decisions: dict[tuple[str | None, str, int, int], tuple[bool, str]] = {}
+        self._approval_preparations: set[int] = set()
+        self._approval_ready: dict[int, _ApprovalArguments] = {}
         self._max_function_concurrency = max_function_concurrency
         # MCP publication keeps this exact captured tuple; rebinding an idle
         # Python catalog creates another. No second set of bindings is made.
@@ -3895,6 +4103,7 @@ class Session(Generic[ContextT, OutputT]):
             | None
         ) = None
         self._executor: Environment[Any] | None = None
+        self._project_guidance = False
         self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents[Any] | None = None
@@ -3929,6 +4138,7 @@ class Session(Generic[ContextT, OutputT]):
         self._resources_retired = False
         self._native_scope_failure: BaseException | None = None
         self._broken = False
+        self._history_context_retired = False
         self._startup_failure: asyncio.Future[BaseException] | None = None
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
@@ -4097,6 +4307,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
+            project_guidance=self._project_guidance,
         )
         if mcp == self._mcp_tools:
             return
@@ -4322,7 +4533,11 @@ class Session(Generic[ContextT, OutputT]):
             return None
         declared = state.operation_declarations or ()
         allowed = _fixed_tool_refs(
-            source.tools, source.programmatic_tool_calling, self._executor, self._native_agents
+            source.tools,
+            source.programmatic_tool_calling,
+            self._executor,
+            self._native_agents,
+            project_guidance=self._project_guidance,
         )
         if state.operation_agent is source:
             allowed.update(ToolRef(name) for name in handoffs or ())
@@ -5323,6 +5538,13 @@ class Session(Generic[ContextT, OutputT]):
             pending = self._native._pending_manual_tools()
             live_invocations = {invocation for invocation, _, _ in pending}
             seen.intersection_update(live_invocations)
+            self._approval_preparations.intersection_update(live_invocations)
+            for invocation in tuple(self._approval_ready):
+                if (
+                    invocation not in live_invocations
+                    and not self._approval_ready[invocation].approved
+                ):
+                    del self._approval_ready[invocation]
             for owner in [self._active, *self._child_callbacks.values()]:
                 if owner is not None:
                     for invocation in tuple(owner.manual_inputs):
@@ -5330,6 +5552,9 @@ class Session(Generic[ContextT, OutputT]):
                             del owner.manual_inputs[invocation]
             for invocation, grant, raw in pending:
                 if invocation in seen:
+                    continue
+                prepared = self._approval_ready.get(invocation)
+                if prepared is not None and prepared.approved:
                     continue
                 message = json.loads(raw)["msg"]
                 if _call_id is not None and message["callId"] != _call_id:
@@ -5371,7 +5596,7 @@ class Session(Generic[ContextT, OutputT]):
                 if not self._native._check_manual_tool(grant):
                     state.manual_inputs.pop(invocation, None)
                     continue
-                if self._fail_unhandled_questions:
+                if self._fail_unhandled_questions and not isinstance(entry, _CapturedApproval):
                     state.failure.set_result(
                         InteractionRequired(
                             "Manual tools require on_interaction or Agent.session()"
@@ -5387,7 +5612,7 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     tracing_context = state.tracing.context
                 new_input = invocation not in state.manual_inputs
-                if new_input:
+                if new_input and not isinstance(entry, _CapturedApproval):
                     with (
                         _clear_current(),
                         _owned_span("manual input validation", "validation", tracing_context),
@@ -5403,7 +5628,11 @@ class Session(Generic[ContextT, OutputT]):
                     state.manual_inputs[invocation] = arguments
                 # Cache validation, never grant authority. Every cursor receives
                 # its own value and we check the native grant on every exposure.
-                arguments = deepcopy(state.manual_inputs[invocation])
+                arguments = deepcopy(
+                    state.manual_inputs.get(invocation)
+                    if isinstance(entry, _CapturedApproval)
+                    else state.manual_inputs[invocation]
+                )
                 if (
                     state.stopping
                     or state.failure.done()
@@ -5424,6 +5653,48 @@ class Session(Generic[ContextT, OutputT]):
                     model=message.get("_sdk_model"),
                     tracing_context=tracing_context,
                 )
+                if (
+                    message.get("_sdk_restored_approval")
+                    and message.get("_sdk_approval_required")
+                    and not isinstance(entry, _CapturedApproval)
+                ):
+                    raise NativeError(
+                        "Saved managed approval requires an approval-enabled callback"
+                    )
+                if isinstance(entry, _CapturedApproval):
+                    assert isinstance(request, ApprovalRequested)
+                    if message.get("_sdk_restored_approval") and not message.get(
+                        "_sdk_approval_required"
+                    ):
+                        raise NativeError(
+                            "A saved manual result cannot acquire managed callback authority"
+                        )
+                    if not self._native._require_tool_approval(grant):
+                        continue
+                    object.__setattr__(request, "_approval_source", message.get("profile_id"))
+                    object.__setattr__(
+                        request, "_approval_profile_epoch", message.get("profile_epoch")
+                    )
+                    object.__setattr__(request, "_approval_generation", marker["generation"])
+                    object.__setattr__(
+                        request,
+                        "_effective_arguments",
+                        deepcopy(
+                            self._approval_ready[invocation].value
+                            if invocation in self._approval_ready
+                            else arguments
+                        ),
+                    )
+                    if invocation not in self._approval_ready:
+                        if invocation not in self._approval_preparations:
+                            self._approval_preparations.add(invocation)
+                            preparation = _create_task(
+                                self._prepare_managed_approval(
+                                    state, entry, request, deepcopy(message)
+                                )
+                            )
+                            state.add_callback(preparation)
+                        continue
                 if new_input:
                     self._dispatch_interaction(request, state)
                 return request
@@ -5522,6 +5793,213 @@ class Session(Generic[ContextT, OutputT]):
             break
         raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
 
+    async def _prepare_managed_approval(
+        self,
+        state: _CallbackState,
+        entry: _CapturedApproval,
+        request: ApprovalRequested[Any],
+        message: dict[str, Any],
+    ) -> None:
+        scope = _Invocation(self)
+        token = _invocation.set(scope)
+        permit: asyncio.Semaphore | None = None
+        acquired = False
+
+        def admit() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and not self._closing
+                and self._native._check_manual_tool(request._grant)
+            )
+
+        try:
+            if self._max_function_concurrency is not None:
+                if state.function_admission is None:
+                    state.function_admission = asyncio.Semaphore(self._max_function_concurrency)
+                permit = state.function_admission
+                await permit.acquire()
+                acquired = True
+            if not admit():
+                return
+            if request._invocation not in state.manual_inputs:
+                with (
+                    _clear_current(),
+                    _owned_span("manual input validation", "validation", request._tracing_context),
+                ):
+                    arguments = entry.input_adapter.validate_python(deepcopy(message["arguments"]))
+                if not admit():
+                    return
+                state.manual_inputs[request._invocation] = arguments
+            arguments = deepcopy(state.manual_inputs[request._invocation])
+            object.__setattr__(request, "arguments", arguments)
+            object.__setattr__(request, "_effective_arguments", deepcopy(arguments))
+            function = entry.function
+            if "_sdk_effective_arguments" in message:
+                object.__setattr__(
+                    request,
+                    "_effective_arguments",
+                    function._parse_arguments(message["_sdk_effective_arguments"]),
+                )
+            kwargs = function._arguments(request.effective_arguments)
+            raw_arguments = message["arguments"]
+            if isinstance(raw_arguments, str):
+                raw_arguments = json.loads(raw_arguments)
+            assert state.handle is not None
+            context = ToolContext(
+                function.context,
+                state.handle,
+                request.call_id,
+                MappingProxyType(deepcopy(raw_arguments)),
+                _snapshot_function_arguments(kwargs, function._ref),
+                call=request.call,
+            )
+
+            if not admit():
+                return
+            prepared_input = message.get("_sdk_effective_arguments", message["arguments"])
+            preapproval_complete = message.get("_sdk_restored_approval") and (
+                "_sdk_effective_arguments" in message
+            )
+            if (
+                entry.declaration.run_before_approval
+                and function.before is not None
+                and not preapproval_complete
+            ):
+                decision = await self._call_decision_callback(
+                    state, message, function.before, admit, context
+                )
+                if not admit():
+                    return
+                if isinstance(decision, Deny):
+                    scope.active = False
+                    await self._decide_approval(request, False, reason=decision.reason)
+                    return
+                if isinstance(decision, ReplaceArguments):
+                    prepared_input = deepcopy(decision.arguments)
+                    parsed = function._parse_arguments(prepared_input)
+                    context = replace(
+                        context,
+                        effective_arguments=_snapshot_function_arguments(
+                            function._arguments(parsed), function._ref
+                        ),
+                    )
+                    object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
+                elif not isinstance(decision, Allow):
+                    raise TypeError("Function before must return Allow, Deny or ReplaceArguments")
+            # This raw input snapshot also records completed preparation. It
+            # avoids repeating schema transforms on the approved callback.
+            effective = (
+                prepared_input
+                if isinstance(prepared_input, str)
+                else _TypeAdapter(Any).dump_json(prepared_input).decode()
+            )
+            if not self._native._require_tool_approval(request._grant, effective):
+                return
+            if message.get("_sdk_restored_approval"):
+                required = True
+            else:
+                cached = self._approval_decisions.get(
+                    (
+                        message.get("profile_id"),
+                        str(message.get("profile_epoch")),
+                        request._approval_generation,
+                        id(entry.declaration),
+                    )
+                )
+                if cached is not None:
+                    scope.active = False
+                    await self._decide_approval(request, cached[0], reason=cached[1])
+                    return
+                policy = entry.declaration.needs_approval
+                required = (
+                    policy
+                    if isinstance(policy, bool)
+                    else await self._call_decision_callback(state, message, policy, admit, context)
+                )
+                if not admit():
+                    return
+                if not isinstance(required, bool):
+                    raise TypeError("needs_approval must return a bool")
+            if not admit():
+                return
+            if not required:
+                scope.active = False
+                await self._decide_approval(request, True)
+                return
+            if self._fail_unhandled_questions:
+                state.failure.set_result(
+                    InteractionRequired(
+                        "Managed approval requires on_interaction or Agent.session()"
+                    )
+                )
+                return
+            self._approval_ready[request._invocation] = _ApprovalArguments(
+                request.effective_arguments
+            )
+            self._dispatch_interaction(request, state)
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            if acquired:
+                assert permit is not None
+                permit.release()
+            scope.active = False
+            _invocation.reset(token)
+            if isinstance(state, _Submission):
+                state.changed.set()
+            self._observations.notify()
+
+    async def _decide_approval(
+        self,
+        request: ApprovalRequested[Any],
+        approve: bool,
+        *,
+        reason: str = "Tool execution was rejected",
+        always: bool = False,
+    ) -> None:
+        self._check_loop()
+        if self._closing or self._closed or self._broken or self._sealed_checkpoint is not None:
+            raise InteractionExpiredError("Managed approval is expired")
+        self._check_open()
+        if not isinstance(always, bool) or not isinstance(reason, str):
+            raise TypeError("Approval always must be a bool and reason must be a string")
+        if (
+            request._session() is not self
+            or request.session_id != self.id
+            or self._sealed_checkpoint is not None
+        ):
+            raise InteractionExpiredError("Managed approval is foreign or expired")
+        key = (
+            getattr(request, "_approval_source", None),
+            str(getattr(request, "_approval_profile_epoch", None)),
+            request._approval_generation,
+            id(request._declaration),
+        )
+        if approve:
+            approved = self._approval_ready.get(request._invocation)
+            if approved is not None and approved.approved:
+                raise InteractionExpiredError("Managed approval is expired or already decided")
+            if approved is None:
+                approved = _ApprovalArguments(request.effective_arguments)
+                self._approval_ready[request._invocation] = approved
+            approved.approved = True
+            try:
+                if not await self._native._approve_manual_tool(request._grant):
+                    raise InteractionExpiredError("Managed approval is expired or already decided")
+            except BaseException:
+                self._approval_ready.pop(request._invocation, None)
+                raise
+            self._observations.notify()
+        else:
+            await self._respond(request, reason, _approval_rejection=True)
+            self._approval_ready.pop(request._invocation, None)
+        if always:
+            self._approval_decisions[key] = (approve, reason)
+
     async def _respond(
         self,
         request: ActionRequested[Any, Any],
@@ -5529,6 +6007,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         expected_json: str | None = None,
         prepared: _PreparedManualResult | None = None,
+        _approval_rejection: bool = False,
     ) -> Turn[Any]:
         self._check_loop()
         if (
@@ -5542,7 +6021,11 @@ class Session(Generic[ContextT, OutputT]):
                 "Manual tool reply is foreign, expired or already delivered"
             )
         invocation = _invocation.get()
-        if invocation is not None and invocation.active:
+        if (
+            invocation is not None
+            and invocation.active
+            and not isinstance(request, ApprovalRequested)
+        ):
             raise RuntimeError("A callback must return its reply; it cannot respond directly")
         state: _CallbackState | None = (
             self._active
@@ -5618,11 +6101,20 @@ class Session(Generic[ContextT, OutputT]):
         else:
             assert state.handle is not None
             handle = state.handle
+        if isinstance(request, ApprovalRequested) and not _approval_rejection:
+            if not isinstance(result, ApprovalDecision):
+                raise TypeError("A managed function reply requires an approval decision")
+            await self._decide_approval(
+                request, result.approve, reason=result.reason, always=result.always
+            )
+            return handle
         scope = _Invocation(self)
         token = _invocation.set(scope)
         output: str | None = None
         try:
-            if prepared is None:
+            if _approval_rejection:
+                output = json.dumps(ToolOutput.error(result).to_native())
+            elif prepared is None:
                 with (
                     _clear_current(),
                     _owned_span("manual output validation", "validation", request._tracing_context),
@@ -5659,48 +6151,8 @@ class Session(Generic[ContextT, OutputT]):
             if isinstance(state, _Submission) and state.restored_pending:
                 submission = state
                 assert submission.handle is not None
-                observation_route = submission.handle.submission_id
 
-                async def continue_restored_turn() -> None:
-                    try:
-                        # Core may already have queued recovery when this callback
-                        # is cancelled. Retain its mutation ownership through the
-                        # admission acknowledgement before retirement can pass it.
-                        context = (
-                            submission.tracing.context if submission.tracing is not None else None
-                        )
-                        tracing_args = {}
-                        if context is not None:
-                            tracing_args["tracing_context"] = context
-                        if submission.parent_trace is not None:
-                            tracing_args["trace_json"] = json.dumps(
-                                submission.parent_trace.to_headers()
-                            )
-                        if submission.operation_declaration_source is not None:
-                            tracing_args["operation_declaration_source_json"] = json.dumps(
-                                submission.operation_declaration_source
-                            )
-                        operation = self._native._continue_manual(observation_route, **tracing_args)
-                        with _private_task(operation) as (admitting, admitted):
-                            receipt = json.loads(await _join(admitting, outcome=admitted))
-                        if receipt["status"] == "pending":
-                            return
-                        if receipt["status"] == "not_pending":
-                            # A concurrently submitted last reply already recovered
-                            # this frame. Its owned task validates the receipt.
-                            submission.restored_pending = False
-                            return
-                        if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
-                            raise NativeError("Native manual continuation was not resumed")
-                        submission.restored_pending = False
-                    except BaseException as error:
-                        if not submission.stopping and not submission.failure.done():
-                            submission.failure.set_result(error)
-                        raise
-                    finally:
-                        submission.changed.set()
-
-                continuation = _create_task(continue_restored_turn())
+                continuation = _create_task(self._continue_restored_turn(submission))
                 submission.add_callback(continuation)
                 await _join(continuation)
             if isinstance(state, _Submission):
@@ -5710,6 +6162,44 @@ class Session(Generic[ContextT, OutputT]):
         with _clear_current(), _private_task(deliver_and_continue()) as (delivery, delivered):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
+
+    async def _continue_restored_turn(self, submission: _Submission) -> None:
+        assert submission.handle is not None
+        try:
+            # Core may already have queued recovery when this callback
+            # is cancelled. Retain its mutation ownership through the
+            # admission acknowledgement before retirement can pass it.
+            context = submission.tracing.context if submission.tracing is not None else None
+            tracing_args = {}
+            if context is not None:
+                tracing_args["tracing_context"] = context
+            if submission.parent_trace is not None:
+                tracing_args["trace_json"] = json.dumps(submission.parent_trace.to_headers())
+            if submission.operation_declaration_source is not None:
+                tracing_args["operation_declaration_source_json"] = json.dumps(
+                    submission.operation_declaration_source
+                )
+            operation = self._native._continue_manual(
+                submission.handle.submission_id, **tracing_args
+            )
+            with _private_task(operation) as (admitting, admitted):
+                receipt = json.loads(await _join(admitting, outcome=admitted))
+            if receipt["status"] == "pending":
+                return
+            if receipt["status"] == "not_pending":
+                # A concurrently submitted last reply already recovered
+                # this frame. Its owned task validates the receipt.
+                submission.restored_pending = False
+                return
+            if receipt["status"] != "started" or receipt["turn_id"] != submission.handle.turn_id:
+                raise NativeError("Native manual continuation was not resumed")
+            submission.restored_pending = False
+        except BaseException as error:
+            if not submission.stopping and not submission.failure.done():
+                submission.failure.set_result(error)
+            raise
+        finally:
+            submission.changed.set()
 
     async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:
         """Return all prompts from a selected ordinary MCP server while idle.
@@ -5799,6 +6289,7 @@ class Session(Generic[ContextT, OutputT]):
             environment=self._executor,
             native_agents=self._native_agents,
             handoffs=self._effective_handoffs(),
+            project_guidance=self._project_guidance,
         )
         selected_server = next(
             (
@@ -5842,6 +6333,70 @@ class Session(Generic[ContextT, OutputT]):
             return json.loads(result)
 
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
+
+    async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
+        """Read effective canonical response items from an idle Session.
+
+        ``limit`` returns the latest items; zero returns only revision and count.
+        The revision identifies the entire canonical input, including an omitted
+        prefix. This is distinct from projected ``items()`` and raw audit records.
+        """
+        self._check_callback_operation("read canonical history from its own Session")
+        self._check_idle_update()
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a nonnegative integer or None")
+
+        async def capture() -> CanonicalHistorySnapshot:
+            value = json.loads(await self._native._canonical_history(limit))
+            return CanonicalHistorySnapshot(
+                value["revision"], value["total"], tuple(value["items"])
+            )
+
+        return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def transact_history(
+        self,
+        *,
+        expected_revision: str,
+        keep: int,
+        items: Sequence[Mapping[str, Any]] = (),
+    ) -> str:
+        """Atomically retain a prefix and replace its suffix with native items.
+
+        Use a current ``history_snapshot().revision``. Core rejects a conflict,
+        invalid item batch or non-idle owner before committing. ``keep=0`` replaces
+        the effective conversation; append with ``keep=snapshot.total``. The
+        acknowledged replacement survives restore through canonical storage.
+        An uncertain persistence outcome retires this Session; close it and
+        restore from storage before continuing. Raw rollout audit records remain.
+        Child graphs, goals and pending work
+        must settle or use their dedicated APIs before editing history.
+        """
+        self._check_callback_operation("edit canonical history from its own Session")
+        self._check_idle_update()
+        if not isinstance(expected_revision, str) or not expected_revision:
+            raise ValueError("expected_revision must be nonempty text")
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
+            raise ValueError("keep must be a nonnegative integer")
+        captured = json.dumps(list(items))
+
+        async def replace() -> str:
+            value = json.loads(
+                await self._native._transact_history(expected_revision, keep, captured)
+            )
+            if value.get("outcome") == "uncertain":
+                self._history_context_retired = True
+                self._broken = True
+                self._model_context_snapshots.clear()
+                raise NativeError(
+                    "Canonical history commit outcome is uncertain; close and restore the Session"
+                )
+            self._model_context_snapshots.clear()
+            return str(value["revision"])
+
+        return await self._join_mutation(asyncio.create_task(replace()))
 
     async def model_context(self) -> ModelContextSnapshot:
         """Read the current native model context of an idle Session.
@@ -6023,6 +6578,8 @@ class Session(Generic[ContextT, OutputT]):
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
+            if self._model_backend is not None:
+                thread._enable_model_producer(True)
             await change.validate_candidate(thread)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
@@ -6486,6 +7043,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=None if tools is None else self._native_agents,
                     handoffs=self._effective_handoffs(),
+                    project_guidance=self._project_guidance,
                 )
                 if tools is not None:
                     operation_refs = _selected_tool_refs(
@@ -6495,6 +7053,7 @@ class Session(Generic[ContextT, OutputT]):
                         programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                         environment=self._executor,
                         native_agents=self._native_agents,
+                        project_guidance=self._project_guidance,
                     )
                 if tools is not None:
                     chosen = {tool.ref for tool in python}
@@ -6783,6 +7342,8 @@ class Session(Generic[ContextT, OutputT]):
                     if any(tool is self._native_agents for tool in selection)
                     else self._native_agents
                 ),
+                project_guidance=self._project_guidance
+                and not any(tool is self._executor for tool in selection),
             )
             selected_refs = {tool for tool in selection if isinstance(tool, ToolRef)}
             missing_refs: list[ToolRef] = sorted(
@@ -6798,6 +7359,7 @@ class Session(Generic[ContextT, OutputT]):
                 handoffs=self._effective_handoffs(),
                 environment=self._executor,
                 native_agents=self._native_agents,
+                project_guidance=self._project_guidance,
             )
             for tool in python:
                 tool._check_context(self._context)
@@ -7956,6 +8518,7 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
+                            project_guidance=self._project_guidance,
                         )
             if admitted:
                 handle = state.handle
@@ -9089,6 +9652,79 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    async def _produce_model_response(self, state: _Submission, message: dict[str, Any]) -> None:
+        request_id = message["request_id"]
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+        reply: str | None = None
+        failed = True
+
+        def active() -> bool:
+            if self._active is not state or state.stopping or state.failure.done():
+                return False
+            try:
+                self._catalog_for_message(message, message["generation"])
+            except NativeError:
+                return False
+            try:
+                return bool(self._native._check_model_producer(request_id))
+            except RuntimeError:
+                return False
+
+        try:
+            if not active():
+                return
+            if self._model_backend is None:
+                raise NativeError("Native model producer has no current application backend")
+            from .models import ModelRequest, ModelResponse
+
+            request = ModelRequest(
+                deepcopy(message["data"]), self._context, self.id, message["turn_id"]
+            )
+            backend = self._model_backend
+            if not callable(getattr(backend, "complete", None)):
+                backend = await _call_callback(backend.get_model, active, request.body["model"])
+                if not active():
+                    return
+
+            def invoke(request: ModelRequest) -> Any:
+                value = backend.complete(request)
+                if inspect.isawaitable(value):
+                    # Keep the original coroutine visible to callback admission
+                    # so cancellation can close it before application entry.
+                    return value
+                if not isinstance(value, ModelResponse):
+                    raise TypeError("NativeModel.complete must return ModelResponse")
+                return value._capture()
+
+            produced = await _call_callback(invoke, active, request)
+            # Awaited producers settle on this loop. Capture immediately, before
+            # another await or handing the retained value back to the application.
+            if isinstance(produced, ModelResponse):
+                reply = produced._capture()
+            elif produced is not None and not isinstance(produced, str):
+                raise TypeError("NativeModel.complete must return ModelResponse")
+            else:
+                reply = produced
+            if not active():
+                return
+            failed = False
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            try:
+                accepted = self._native._reply_model_producer(request_id, reply, error=failed)
+                if not accepted and not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+            except RuntimeError:
+                if not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+
     async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
         request_id = message["request_id"]
         guard = _Invocation(self)
@@ -9712,6 +10348,7 @@ class Session(Generic[ContextT, OutputT]):
                     source_agent.programmatic_tool_calling,
                     self._executor,
                     self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 # Idle subsets narrow only the current root profile's defaults.
                 if (
@@ -9737,6 +10374,7 @@ class Session(Generic[ContextT, OutputT]):
                             programmatic_tool_calling=source_agent.programmatic_tool_calling,
                             environment=self._executor,
                             native_agents=self._native_agents,
+                            project_guidance=self._project_guidance,
                         )
                     )
                 defaults.update(fixed)
@@ -9751,6 +10389,7 @@ class Session(Generic[ContextT, OutputT]):
                     handoffs=source_handoffs,
                     environment=self._executor,
                     native_agents=self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 refs = set(
                     _selected_tool_refs(
@@ -9760,6 +10399,7 @@ class Session(Generic[ContextT, OutputT]):
                         programmatic_tool_calling=source_agent.programmatic_tool_calling,
                         environment=self._executor,
                         native_agents=self._native_agents,
+                        project_guidance=self._project_guidance,
                     )
                 )
                 refs = {ToolRef(ref.name, ref.namespace or "functions") for ref in refs}
@@ -9881,9 +10521,20 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 callback.close()
                 owner.native._release_python_callback(json.dumps(owner.receipt))
+                if (
+                    isinstance(state, _Submission)
+                    and state.restored_pending
+                    and not state.stopping
+                    and not state.failure.done()
+                    and not self._closing
+                ):
+                    continuation = _create_task(self._continue_restored_turn(state))
+                    state.add_callback(continuation)
             except BaseException as error:
                 state.retain_cleanup_error(error)
             finally:
+                if owner.receipt.get("kind") == "tool":
+                    self._approval_ready.pop(int(owner.receipt["invocation"]), None)
                 guard.active = False
                 if _task in state.callbacks:
                     state.callbacks[_task] = None
@@ -10257,6 +10908,9 @@ class Session(Generic[ContextT, OutputT]):
                             "expired" if message.get("policy_stop") is True else None
                         )
                         state.failure.set_result(_model_failure_error(message))
+                elif kind == "_sdk_model_produce":
+                    task = asyncio.create_task(self._produce_model_response(state, message))
+                    state.add_callback(task)
                 elif kind == "_sdk_prepare_request":
                     task = asyncio.create_task(self._prepare_sampling_request(state, message))
                     state.add_callback(task)
@@ -10923,6 +11577,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool request belongs to a different thread")
             catalog = self._catalog_for_message(message, marker["generation"])
             entry = catalog.tools[marker["slot"]]
+            managed_approval = isinstance(entry, _CapturedApproval)
+            if isinstance(entry, _CapturedApproval):
+                entry = entry.function
             if not isinstance(entry, _CapturedFunction):
                 raise NativeError("Native callback does not match a function declaration")
             ref = entry._ref
@@ -10951,8 +11608,23 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
-            parsed = entry._parse_arguments(message["arguments"])
+            approved = None
+            if managed_approval:
+                approved = self._approval_ready.pop(
+                    int(message["_sdk_callback"]["invocation"]), None
+                )
+                if approved is None or not approved.approved:
+                    raise NativeError("Managed approval arguments are no longer available")
+            if approved is None:
+                parsed = entry._parse_arguments(
+                    message.get("_sdk_effective_arguments", message["arguments"])
+                )
+            else:
+                parsed = deepcopy(approved.value)
             kwargs = entry._arguments(parsed)
+            approved_kwargs = (
+                _snapshot_function_arguments(kwargs, ref) if approved is not None else None
+            )
             raw_arguments = message["arguments"]
             if isinstance(raw_arguments, str):
                 raw_arguments = json.loads(raw_arguments)
@@ -10994,6 +11666,7 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     ),
                 )
+            arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
                 decision = await self._call_decision_callback(
@@ -11013,6 +11686,7 @@ class Session(Generic[ContextT, OutputT]):
                             status = "failed"
                     return
                 if isinstance(decision, ReplaceArguments):
+                    arguments_replaced = True
                     parsed = entry._parse_arguments(decision.arguments)
                     kwargs = entry._arguments(parsed)
                     context = replace(
@@ -11023,6 +11697,24 @@ class Session(Generic[ContextT, OutputT]):
                 # A returned decision may alias SDK-owned input. Do not retain it
                 # across output validation.
                 del decision
+            if (
+                approved_kwargs is not None
+                and arguments_replaced
+                and not _same_approval_arguments(dict(approved_kwargs), kwargs)
+            ):
+                denial = ToolOutput.error("Tool input policy changed approved arguments")
+                reply = json.dumps({"request": message, "response": denial.to_native()})
+                if self._admit_tool(state, request):
+                    if await self._respond_tool(state, reply):
+                        status = "failed"
+                return
+            if approved is not None:
+                parsed = deepcopy(approved.value)
+                kwargs = entry._arguments(parsed)
+                if context is not None:
+                    context = replace(
+                        context, effective_arguments=_snapshot_function_arguments(kwargs, ref)
+                    )
             args: tuple[ToolContext[ContextT | None], ...] = ()
             parameter = entry.context_parameter
             if parameter is not None:
@@ -11032,7 +11724,21 @@ class Session(Generic[ContextT, OutputT]):
                 return
             timeout_output: ToolOutput | None = None
             duration = entry.callback_timeout
-            if duration is None:
+            if isinstance(entry, _CapturedComputer):
+                assert context is not None and isinstance(parsed, _ComputerCall)
+                value = await self._call_decision_callback(
+                    state,
+                    message,
+                    partial(
+                        entry.invoke,
+                        self._computer_resources,
+                        lambda: self._admit_tool(state, request),
+                    ),
+                    lambda: self._admit_tool(state, request),
+                    context,
+                    parsed,
+                )
+            elif duration is None:
                 value = await self._call_decision_callback(
                     state,
                     message,
@@ -11257,6 +11963,8 @@ class Session(Generic[ContextT, OutputT]):
             elif not isinstance(error, asyncio.CancelledError):
                 state.retain_cleanup_error(error)
         finally:
+            approved = None
+            approved_kwargs = None
             if tracing is not None:
                 tracing.set_outcome(
                     status="ok"
@@ -11541,7 +12249,8 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         if any(
-            isinstance(tool, _CapturedFunction) and tool._requires_live_manual_session
+            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+            and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):
             raise CapabilityError(
@@ -11612,9 +12321,13 @@ class Session(Generic[ContextT, OutputT]):
     ) -> str:
         active_uses_executor = active is not None and (
             active.operation_refs is None
-            or not _fixed_tool_refs((), False, self._executor, self._native_agents).isdisjoint(
-                active.operation_refs
-            )
+            or not _fixed_tool_refs(
+                (),
+                False,
+                self._executor,
+                self._native_agents,
+                project_guidance=self._project_guidance,
+            ).isdisjoint(active.operation_refs)
             or any(
                 isinstance(server, StdioMCP) and server.location == "environment"
                 for server in active.operation_mcp or ()
@@ -11658,6 +12371,7 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                             handoffs=self._effective_handoffs(),
+                            project_guidance=self._project_guidance,
                         )
                         bound = {tool._ref: tool for tool in self._bound_tools}
                         selected = tuple(bound[tool.ref] for tool in python)
@@ -11769,6 +12483,7 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=self._native_agents,
                     handoffs=self._effective_handoffs(),
+                    project_guidance=self._project_guidance,
                 )
                 default_refs = _selected_tool_refs(
                     self._default_tools,
@@ -11777,6 +12492,7 @@ class Session(Generic[ContextT, OutputT]):
                     programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
                     environment=self._executor,
                     native_agents=self._native_agents,
+                    project_guidance=self._project_guidance,
                 )
                 payload["agent_options"]["_sdk_default_tools"] = [
                     {"name": ref.name, "namespace": ref.namespace} for ref in default_refs
@@ -11999,6 +12715,7 @@ class Session(Generic[ContextT, OutputT]):
         self._profile_catalogs.clear()
         self._catalog_bindings.clear()
         self._parent_trace = None
+        self._approval_ready.clear()
         self._closed = True
 
     async def _close_session(self) -> None:
@@ -12037,7 +12754,12 @@ class Session(Generic[ContextT, OutputT]):
                     await asyncio.gather(self._mutation, return_exceptions=True)
                 if self._checkpoint_task is not None:
                     await asyncio.gather(self._checkpoint_task, return_exceptions=True)
-                if state is None or not state.restored_pending:
+                # History retirement holds the exclusive native context fence
+                # after idle admission without children/background execution.
+                # Its native owner still needs close, but cannot accept stop work.
+                if not self._history_context_retired and (
+                    state is None or not state.restored_pending
+                ):
                     try:
                         # Reserve the graph fence synchronously, before closing
                         # interception releases any native result to Core.
@@ -12123,7 +12845,11 @@ class Session(Generic[ContextT, OutputT]):
                     if graph_stopped and (state is None or state.deferred_close is None):
                         await asyncio.gather(*interrupts, return_exceptions=True)
                     try:
-                        if self._executor is not None and not self._executor_termination_attempted:
+                        if (
+                            self._executor is not None
+                            and not self._executor_termination_attempted
+                            and not self._history_context_retired
+                        ):
                             self._executor_termination_attempted = True
                             await self._native._terminate_executor_processes()
                     except BaseException as error:
@@ -12168,17 +12894,32 @@ class Session(Generic[ContextT, OutputT]):
                             if engine_closed:
                                 if self._realtime is not None:
                                     await self._realtime._native_shutdown()
-                                if self._home is not None:
-                                    await _finish_native_home_cleanup(self._home.cleanup)
-                                self._resources_retired = (
-                                    self._reader.done()
-                                    and (self._mcp_reader is None or self._mcp_reader.done())
-                                    and (
-                                        self._interception is None
-                                        or self._interception.reader is None
-                                        or self._interception.reader.done()
+
+                                async def finish_retirement() -> None:
+                                    if self._home is not None:
+                                        await _finish_native_home_cleanup(self._home.cleanup)
+                                    self._resources_retired = (
+                                        self._reader.done()
+                                        and (self._mcp_reader is None or self._mcp_reader.done())
+                                        and (
+                                            self._interception is None
+                                            or self._interception.reader is None
+                                            or self._interception.reader.done()
+                                        )
                                     )
-                                )
+
+                                computer_scope = _Invocation(self)
+                                computer_token = _invocation.set(computer_scope)
+                                try:
+                                    try:
+                                        await self._computer_resources.close()
+                                    finally:
+                                        computer_scope.active = False
+                                        _invocation.reset(computer_token)
+                                except BaseException as error:
+                                    await _close_after_error(error, finish_retirement)
+                                    raise
+                                await finish_retirement()
 
         except BaseException as error:
             # Keep the original close failure primary, then its stop-owner errors.

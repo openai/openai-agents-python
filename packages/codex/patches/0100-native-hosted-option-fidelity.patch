@@ -1,0 +1,87 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 405bc81438df5a6fe208ea39fd9ee4a0305e32bd..af73108e72af9f33a87258221612a0aa3481e153 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1183,7 +1183,7 @@ impl ModelClient {
+                 codex_tools::ToolSpec::FileSearch(config) if config.include_search_results => {
+                     include.push("file_search_call.results".to_string());
+                 }
+-                codex_tools::ToolSpec::CodeInterpreter(_) => {
++                codex_tools::ToolSpec::CodeInterpreter(config) if config.include_outputs => {
+                     include.push("code_interpreter_call.outputs".to_string());
+                 }
+                 _ => {}
+diff --git a/codex-rs/tools/src/hosted_tools.rs b/codex-rs/tools/src/hosted_tools.rs
+index bc3b917e8df547ca832acba3948fd1a05e120936..0c9bf808e4d462f33ae48d16ff9ccfa9be2a9a8f 100644
+--- a/codex-rs/tools/src/hosted_tools.rs
++++ b/codex-rs/tools/src/hosted_tools.rs
+@@ -45,6 +45,8 @@ pub enum CodeInterpreterNetworkPolicy {
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct FileSearchTool {
++    #[serde(flatten)]
++    pub provider_data: serde_json::Map<String, serde_json::Value>,
+     pub vector_store_ids: Vec<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub filters: Option<serde_json::Value>,
+@@ -75,6 +77,10 @@ pub struct FileSearchHybridSearch {
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct CodeInterpreterTool {
++    #[serde(default = "include_outputs_default", skip_serializing)]
++    pub include_outputs: bool,
++    #[serde(flatten)]
++    pub provider_data: serde_json::Map<String, serde_json::Value>,
+     pub container: CodeInterpreterContainer,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub allowed_callers: Option<Vec<String>>,
+@@ -101,6 +107,8 @@ pub struct CodeInterpreterDomainSecret {
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct ImageGenerationTool {
++    #[serde(flatten)]
++    pub provider_data: serde_json::Map<String, serde_json::Value>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub action: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -214,3 +222,40 @@ mod tests {
+         );
+     }
+ }
++
++fn include_outputs_default() -> bool {
++    true
++}
++
++#[cfg(test)]
++mod option_fidelity_tests {
++    use super::*;
++
++    #[test]
++    fn hosted_provider_fields_survive_without_sdk_include_controls() {
++        for value in [
++            serde_json::json!({"type":"file_search", "vector_store_ids":["vs_test"], "future_option":{"nested":[true, null]}}),
++            serde_json::json!({"type":"code_interpreter", "container":"cntr_test", "future_option":{"nested":[true, null]}}),
++            serde_json::json!({"type":"image_generation", "future_option":{"nested":[true, null]}}),
++        ] {
++            let spec: HostedToolSpec = serde_json::from_value(value.clone()).unwrap();
++            assert_eq!(serde_json::to_value(spec).unwrap(), value);
++        }
++    }
++
++    #[test]
++    fn code_output_inclusion_defaults_true_and_is_not_a_provider_field() {
++        for include in [None, Some(false), Some(true)] {
++            let mut value = serde_json::json!({"container":"cntr_test"});
++            if let Some(include) = include {
++                value["include_outputs"] = include.into();
++            }
++            let config: CodeInterpreterTool = serde_json::from_value(value).unwrap();
++            assert_eq!(config.include_outputs, include.unwrap_or(true));
++            assert_eq!(
++                serde_json::to_value(config).unwrap(),
++                serde_json::json!({"container":"cntr_test"})
++            );
++        }
++    }
++}

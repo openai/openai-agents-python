@@ -4,21 +4,142 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
-use codex_history::RolloutItem;
+use codex_history::{ResponseItemEnvelope, RolloutItem};
+use codex_protocol::ThreadId;
 use codex_protocol::models::{
     ContentItemKind, FunctionCallOutputBody, FunctionCallOutputPayload,
     InternalChatMessageMetadataPassthrough, PermissionProfile, ResponseItem,
 };
 use codex_protocol::permissions::{FileSystemAccessMode, FileSystemPath};
-use codex_protocol::protocol::{EventMsg, sdk_executor_policy_receipt};
+use codex_protocol::protocol::{
+    EventMsg, TurnAbortReason, TurnAbortedEvent, sdk_executor_policy_receipt,
+};
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::engine::ThreadState;
 
 const APPLIED: &str = "sdk_reconciliation.applied";
 const NOT_APPLIED: &str = "sdk_reconciliation.not_applied";
+
+pub(crate) fn output_identity(item: &ResponseItem) -> Option<(&str, Option<&str>)> {
+    let call = match item {
+        ResponseItem::FunctionCallOutput {
+            call_id: Some(call),
+            ..
+        }
+        | ResponseItem::CustomToolCallOutput { call_id: call, .. }
+        | ResponseItem::ComputerCallOutput { call_id: call, .. } => call,
+        _ => return None,
+    };
+    Some((call, item.turn_id()))
+}
+
+pub(crate) fn output_matches_invocation(call: &ResponseItem, result: &ResponseItem) -> bool {
+    match (call, result) {
+        (
+            ResponseItem::FunctionCall {
+                call_id: expected, ..
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(actual),
+                ..
+            },
+        )
+        | (
+            ResponseItem::CustomToolCall {
+                call_id: expected, ..
+            },
+            ResponseItem::CustomToolCallOutput {
+                call_id: actual, ..
+            },
+        )
+        | (
+            ResponseItem::ComputerCall {
+                call_id: expected, ..
+            },
+            ResponseItem::ComputerCallOutput {
+                call_id: actual, ..
+            },
+        ) => expected == actual,
+        _ => false,
+    }
+}
+
+pub(crate) fn computer_receipt(
+    invocation: &ResponseItem,
+    response: codex_protocol::dynamic_tools::DynamicToolResponse,
+    turn: &str,
+) -> Result<ResponseItem> {
+    use codex_tools::ToolOutput as _;
+    let ResponseItem::ComputerCall { call_id, .. } = invocation else {
+        anyhow::bail!("Computer reconciliation requires its original call");
+    };
+    let arguments = serde_json::to_string(invocation)
+        .map_err(|_| anyhow::anyhow!("Invalid original computer call"))?;
+    let output = codex_tools::ComputerToolOutput::from_dynamic_response(&arguments, response)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Computer reconciliation requires a valid screenshot and safety acknowledgements"
+            )
+        })?;
+    let mut item: ResponseItem = output
+        .to_response_item(call_id, &codex_tools::ToolPayload::Computer { arguments })
+        .into();
+    let ResponseItem::ComputerCallOutput {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut item
+    else {
+        unreachable!("validated computer output has the native computer shape");
+    };
+    *internal_chat_message_metadata_passthrough = Some(InternalChatMessageMetadataPassthrough {
+        turn_id: Some(turn.to_owned()),
+        ..Default::default()
+    });
+    Ok(item)
+}
+
+fn computer_reconciliation(
+    invocation: &ResponseItem,
+    result: &str,
+    turn: &str,
+) -> Result<ResponseItem> {
+    computer_receipt(
+        invocation,
+        codex_protocol::dynamic_tools::DynamicToolResponse {
+            content_items: vec![
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                    text: result.to_owned(),
+                },
+            ],
+            success: true,
+        },
+        turn,
+    )
+}
+
+fn computer_result_matches(item: &ResponseItem, result: &str) -> bool {
+    let ResponseItem::ComputerCallOutput {
+        output,
+        acknowledged_safety_checks,
+        ..
+    } = item
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+        return false;
+    };
+    value.get("output") == Some(output)
+        && match value.get("acknowledged_safety_checks") {
+            Some(serde_json::Value::Array(checks)) => checks == acknowledged_safety_checks,
+            None => acknowledged_safety_checks.is_empty(),
+            _ => false,
+        }
+}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,11 +160,34 @@ impl Outcome {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconciledCall {
-    thread_id: String,
+    thread_id: ThreadId,
     turn_id: String,
     call_id: String,
     outcome: Outcome,
     result: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryRequest {
+    receipts: Vec<ReconciledCall>,
+    histories: HashMap<ThreadId, DescendantHistory>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DescendantHistory {
+    digest: String,
+    parent: ThreadId,
+    status: String,
+    interrupted: Vec<String>,
+}
+
+pub(crate) fn encode_history(history: &[RolloutItem]) -> serde_json::Result<String> {
+    // Some rollout payloads use hash maps. Compare canonical JSON across reads.
+    let mut value = serde_json::to_value(history)?;
+    value.sort_all_objects();
+    serde_json::to_string(&value)
 }
 
 fn output(item: &ResponseItem) -> Option<(&str, &FunctionCallOutputPayload)> {
@@ -69,6 +213,10 @@ fn tag(item: &ResponseItem) -> Option<&str> {
         | ResponseItem::CustomToolCallOutput {
             internal_chat_message_metadata_passthrough,
             ..
+        }
+        | ResponseItem::ComputerCallOutput {
+            internal_chat_message_metadata_passthrough,
+            ..
         } => internal_chat_message_metadata_passthrough.as_ref()?,
         _ => return None,
     };
@@ -82,10 +230,10 @@ fn tag(item: &ResponseItem) -> Option<&str> {
 fn matches_receipt(item: &ResponseItem, receipt: &ReconciledCall) -> bool {
     item.turn_id() == Some(receipt.turn_id.as_str())
         && tag(item) == Some(receipt.outcome.tag())
-        && output(item).is_some_and(|(id, payload)| {
-            id == receipt.call_id
-                && matches!(&payload.body, FunctionCallOutputBody::Text(text) if text == &receipt.result)
-        })
+        && output_identity(item).is_some_and(|(id, _)| id == receipt.call_id)
+        && (output(item).is_some_and(|(_, payload)| {
+            matches!(&payload.body, FunctionCallOutputBody::Text(text) if text == &receipt.result)
+        }) || computer_result_matches(item, &receipt.result))
 }
 
 pub(crate) async fn executor_policies(state: &ThreadState) -> Result<Vec<Value>> {
@@ -215,6 +363,7 @@ fn has_sampled_model(history: &[RolloutItem]) -> bool {
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::FunctionCall { .. }
             | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::ComputerCall { .. }
             | ResponseItem::ToolSearchCall { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. } => true,
@@ -340,7 +489,7 @@ async fn validate_recorded_executor_policy(
 }
 
 pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> {
-    let receipts: Vec<ReconciledCall> = serde_json::from_str(encoded)
+    let request: RecoveryRequest = serde_json::from_str(encoded)
         .map_err(|_| anyhow::anyhow!("Invalid local reconciliation receipt"))?;
     let tools = state
         .thread
@@ -363,11 +512,133 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .get::<crate::recovery_guard::Guard>()
         .context("Reconciliation requires the SDK replay guard")?;
 
+    let has_receipts = !request.receipts.is_empty();
+    let mut receipts_by_thread = HashMap::<_, Vec<_>>::new();
+    for receipt in &request.receipts {
+        ensure!(
+            receipt.thread_id == state.id || request.histories.contains_key(&receipt.thread_id),
+            "Reconciliation receipt belongs to a different thread"
+        );
+        receipts_by_thread
+            .entry(receipt.thread_id)
+            .or_default()
+            .push(receipt);
+    }
+    let root_receipts = receipts_by_thread.remove(&state.id).unwrap_or_default();
+    let (root_append, protected) = plan(&history, &root_receipts)?;
+
+    // The root writer fences the original owner. Also reserve each child writer
+    // so an independently reopened child cannot race recovery or change topology.
+    verify_descendants(state, &request.histories).await?;
+    let _child_writers = store.reserve_reconciliation_writers(request.histories.keys().copied())?;
+    if !_child_writers.is_empty() {
+        verify_descendants(state, &request.histories).await?;
+    }
+    let mut child_appends = Vec::new();
+    let mut protected_children = HashMap::new();
+    for (&id, expected) in &request.histories {
+        let (path, history) = store.reconciliation_history(id).await?;
+        ensure!(
+            format!("{:x}", Sha256::digest(encode_history(&history)?)) == expected.digest,
+            "Native descendant history changed during local recovery"
+        );
+        let receipts = receipts_by_thread.remove(&id).unwrap_or_default();
+        let (outputs, protected) = plan(&history, &receipts)?;
+        if !protected.is_empty() {
+            protected_children.insert(id.to_string(), protected);
+        }
+        let writes_receipts = !outputs.is_empty();
+        if writes_receipts || !expected.interrupted.is_empty() {
+            ensure!(
+                has_receipts,
+                "An interrupted descendant turn requires a confirmed call"
+            );
+            let mut items = Vec::new();
+            for turn in &expected.interrupted {
+                items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
+                    TurnAbortedEvent {
+                        turn_id: Some(turn.clone()),
+                        reason: TurnAbortReason::Interrupted,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                )));
+            }
+            items.extend(
+                outputs
+                    .into_iter()
+                    .map(|item| RolloutItem::ResponseItem(ResponseItemEnvelope::new(item))),
+            );
+            child_appends.push((writes_receipts, id, path, items, receipts));
+        }
+    }
+    // Validate every supplied result before recording any part of the batch.
+    // Publish interrupted ancestors before receipts that could clear the last
+    // unresolved call and allow the next open without confirmations.
+    child_appends.sort_by_key(|(writes_receipts, ..)| *writes_receipts);
+    for (_, id, path, items, receipts) in child_appends {
+        confirm_durable(
+            &store.append_reconciliation(id, &path, items).await?,
+            &receipts,
+        )?;
+    }
+    if !root_append.is_empty() {
+        state.thread.inject_response_items(root_append).await?;
+        state.thread.flush_rollout().await?;
+        confirm_durable(&store.load_owned_history(state.id).await?, &root_receipts)?;
+    }
+    guard.set_reconciled(protected);
+    state
+        .engine
+        .recovery
+        .set_reconciled_descendants(protected_children);
+    Ok(())
+}
+
+async fn verify_descendants(
+    state: &ThreadState,
+    expected: &HashMap<ThreadId, DescendantHistory>,
+) -> Result<()> {
+    state.engine.agent_graph.hydrate(state.id).await?;
+    let current = crate::subagents::list(state).await?;
+    ensure!(
+        current.len() == expected.len()
+            && current.iter().all(|child| {
+                expected.get(&child.id).is_some_and(|snapshot| {
+                    !child.runtime_loaded
+                        && child.parent_agent_id == snapshot.parent
+                        && child.status == snapshot.status
+                })
+            }),
+        "Native descendant ownership changed during local recovery"
+    );
+    Ok(())
+}
+
+fn confirm_durable(history: &[RolloutItem], receipts: &[&ReconciledCall]) -> Result<()> {
+    for receipt in receipts {
+        ensure!(
+            history.iter().any(|record| matches!(
+                record,
+                RolloutItem::ResponseItem(envelope) if matches_receipt(&envelope.item, receipt)
+            )),
+            "Reconciliation result was not confirmed in native storage"
+        );
+    }
+    Ok(())
+}
+
+fn plan(
+    history: &[RolloutItem],
+    receipts: &[&ReconciledCall],
+) -> Result<(Vec<ResponseItem>, HashSet<String>)> {
     let mut seen = HashMap::new();
     let mut outputs = HashMap::new();
     let mut protected = HashSet::new();
     let mut context_turn = None;
-    for record in &history {
+    for record in history {
         match record {
             RolloutItem::TurnContext(context) => {
                 context_turn = context.turn_id.as_deref().or(context_turn);
@@ -379,14 +650,21 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
                 };
                 match item {
                     ResponseItem::FunctionCall { call_id, .. }
-                    | ResponseItem::CustomToolCall { call_id, .. } => {
+                    | ResponseItem::CustomToolCall { call_id, .. }
+                    | ResponseItem::ComputerCall { call_id, .. } => {
+                        if matches!(item, ResponseItem::ComputerCall { .. })
+                            && seen.contains_key(&(turn, call_id.as_str()))
+                        {
+                            seen.insert((turn, call_id.as_str()), None);
+                            continue;
+                        }
                         let entry = seen.entry((turn, call_id.as_str())).or_insert(Some(item));
                         if *entry != Some(item) {
                             *entry = None;
                         }
                     }
                     _ => {
-                        if let Some((call_id, _)) = output(item) {
+                        if let Some((call_id, _)) = output_identity(item) {
                             let entry = outputs.entry((turn, call_id)).or_insert(Some(item));
                             if *entry != Some(item) {
                                 *entry = None;
@@ -403,22 +681,48 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     }
     let mut requested = HashSet::new();
     let mut append = Vec::new();
-    for receipt in &receipts {
+    for receipt in receipts {
         let key = (receipt.turn_id.as_str(), receipt.call_id.as_str());
-        ensure!(
-            receipt.thread_id == thread_id && requested.insert(key),
-            "Reconciliation receipt is duplicate or belongs to a different thread"
-        );
+        ensure!(requested.insert(key), "Reconciliation receipt is duplicate");
         let call = seen
             .get(&key)
             .copied()
             .flatten()
             .context("Reconciliation does not identify one retained invocation")?;
+        let computer = if matches!(call, ResponseItem::ComputerCall { .. }) {
+            Some(computer_reconciliation(
+                call,
+                &receipt.result,
+                &receipt.turn_id,
+            )?)
+        } else {
+            None
+        };
         if let Some(existing) = outputs.get(&key) {
             ensure!(
-                existing.is_some_and(|existing| matches_receipt(existing, receipt)),
+                existing.is_some_and(|existing| output_matches_invocation(call, existing)
+                    && matches_receipt(existing, receipt)),
                 "Reconciliation conflicts with a retained result"
             );
+            continue;
+        }
+        if let Some(mut item) = computer {
+            if let ResponseItem::ComputerCallOutput {
+                internal_chat_message_metadata_passthrough,
+                ..
+            } = &mut item
+            {
+                *internal_chat_message_metadata_passthrough =
+                    Some(InternalChatMessageMetadataPassthrough {
+                        turn_id: Some(receipt.turn_id.clone()),
+                        content_item_kinds: Some(vec![ContentItemKind(
+                            receipt.outcome.tag().to_owned(),
+                        )]),
+                        ..Default::default()
+                    });
+            }
+            append.push(item);
+            protected.insert(receipt.call_id.clone());
             continue;
         }
         let output = FunctionCallOutputPayload {
@@ -452,22 +756,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         });
         protected.insert(receipt.call_id.clone());
     }
-    if !append.is_empty() {
-        state.thread.inject_response_items(append).await?;
-        state.thread.flush_rollout().await?;
-        let durable = store.load_owned_history(state.id).await?;
-        for receipt in &receipts {
-            ensure!(
-                durable.iter().any(|record| matches!(
-                    record,
-                    RolloutItem::ResponseItem(envelope) if matches_receipt(&envelope.item, receipt)
-                )),
-                "Reconciliation result was not confirmed in native storage"
-            );
-        }
-    }
-    guard.set_reconciled(protected);
-    Ok(())
+    Ok((append, protected))
 }
 
 #[cfg(test)]
@@ -517,5 +806,100 @@ mod tests {
         assert!(!is_legacy_executor_profile(&workspace_profile(&[
             cwd, extra
         ])));
+    }
+}
+
+#[cfg(test)]
+mod computer_recovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn invocation() -> ResponseItem {
+        serde_json::from_value(json!({
+            "type": "computer_call", "call_id": "computer-1",
+            "actions": [{"type": "click", "x": 1, "y": 2}],
+            "pending_safety_checks": [{"id": "check-1", "code": "confirm", "message": "Confirm the action"}],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
+        })).unwrap()
+    }
+
+    fn screenshot() -> String {
+        json!({
+            "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AA=="},
+            "acknowledged_safety_checks": [{"id": "check-1", "code": "confirm", "message": "Confirm the action"}]
+        }).to_string()
+    }
+
+    #[test]
+    fn computer_receipt_preserves_native_kind_and_exact_turn_call_identity() {
+        let call = invocation();
+        let result = computer_reconciliation(&call, &screenshot(), "turn-1").unwrap();
+        assert_eq!(
+            output_identity(&result),
+            Some(("computer-1", Some("turn-1")))
+        );
+        assert!(output_matches_invocation(&call, &result));
+        assert!(
+            matches!(&result, ResponseItem::ComputerCallOutput { acknowledged_safety_checks, .. } if acknowledged_safety_checks.len() == 1)
+        );
+        let function: ResponseItem = serde_json::from_value(json!({
+            "type": "function_call_output", "call_id": "computer-1", "output": screenshot()
+        }))
+        .unwrap();
+        assert!(!output_matches_invocation(&call, &function));
+        assert!(!computer_result_matches(&function, &screenshot()));
+    }
+
+    #[test]
+    fn computer_reconciliation_requires_real_screenshot_and_complete_original_checks() {
+        let call = invocation();
+        for invalid in [
+            "verified absent".to_owned(),
+            json!({"output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="}}).to_string(),
+            json!({"output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="},"acknowledged_safety_checks":[{"id":"check-1"}]}).to_string(),
+        ] {
+            assert!(computer_reconciliation(&call, &invalid, "turn-1").is_err());
+        }
+        assert!(computer_reconciliation(&call, &screenshot(), "turn-1").is_ok());
+    }
+
+    #[test]
+    fn failed_or_invalid_computer_result_cannot_leak_payload_in_receipt_errors() {
+        let call = invocation();
+        let secret = "SYNTHETIC_CALLBACK_SECRET";
+        let response = codex_protocol::dynamic_tools::DynamicToolResponse {
+            content_items: vec![
+                codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem::InputText {
+                    text: secret.to_owned(),
+                },
+            ],
+            success: false,
+        };
+        let error = computer_receipt(&call, response, "turn-1").unwrap_err();
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    #[test]
+    fn computer_reconciliation_receipts_preserve_outcome_and_structured_result() {
+        let mut item = computer_reconciliation(&invocation(), &screenshot(), "turn-1").unwrap();
+        if let ResponseItem::ComputerCallOutput {
+            internal_chat_message_metadata_passthrough: Some(meta),
+            ..
+        } = &mut item
+        {
+            meta.content_item_kinds = Some(vec![ContentItemKind(NOT_APPLIED.into())]);
+        }
+        let receipt = ReconciledCall {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".into(),
+            call_id: "computer-1".into(),
+            outcome: Outcome::NotApplied,
+            result: screenshot(),
+        };
+        assert!(matches_receipt(&item, &receipt));
+        let changed = ReconciledCall {
+            outcome: Outcome::Applied,
+            ..receipt
+        };
+        assert!(!matches_receipt(&item, &changed));
     }
 }

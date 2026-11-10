@@ -32,7 +32,7 @@ from source_integrity import (
 # Regression ceilings in bytes for qualified platform families. Re-measure and
 # review before raising them; see packages/codex/MAINTAINING.md.
 WHEEL_BUDGETS = {
-    r"manylinux(?:\d+|_\d+_\d+)_x86_64": (160_000_000, 500_000_000),
+    r"manylinux(?:\d+|_\d+_\d+)_(?:x86_64|aarch64)": (160_000_000, 500_000_000),
     r"win_amd64": (125_000_000, 375_000_000),
     r"macosx_\d+_\d+_arm64": (130_000_000, 375_000_000),
 }

@@ -61,7 +61,13 @@ class ReconciledCall:
 
 
 class LocalRecoveryRequired(RuntimeError):
-    """Local recovery stopped before model work because root tool outcomes are unknown."""
+    """Local recovery stopped before model work because tool outcomes are unknown.
+
+    Each call identifies its owning thread and original turn. With ``LocalStorage``,
+    reopen the root Session with verified results for all listed calls. With
+    ``CustomStorage``, record the results through ``CustomStorage.reconcile()``
+    before reopening.
+    """
 
     def __init__(
         self,
@@ -79,10 +85,10 @@ class LocalRecoveryRequired(RuntimeError):
 
 
 def _uncertain_call(
-    thread_id: str, item: FunctionCallItem, *, custom_input: str | None
+    thread_id: str, item: FunctionCallItem, *, original_input: JsonValue | None
 ) -> UncertainCall:
-    arguments = custom_input if custom_input is not None else item["arguments"]
-    if custom_input is None and isinstance(arguments, str):
+    arguments = original_input if original_input is not None else item["arguments"]
+    if original_input is None and isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except ValueError:

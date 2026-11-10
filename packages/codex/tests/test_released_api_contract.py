@@ -31,6 +31,11 @@ def candidate(tmp_path: Path) -> Path:
         ignore=shutil.ignore_patterns("*.so", "*.pyd", "bin", "licenses", "__pycache__"),
     )
     shutil.copytree(
+        ROOT / "src/_agents_shared",
+        tmp_path / "src/_agents_shared",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shutil.copytree(
         ROOT / "packages/codex/src/_agents_codex",
         tmp_path / "packages/codex/src/_agents_codex",
         ignore=shutil.ignore_patterns("__pycache__"),
@@ -487,3 +492,13 @@ def test_release_checks_baseline_before_generating(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert not (tmp_path / "generated").exists()
+
+
+def test_shared_public_imports_keep_declaration_coverage() -> None:
+    api = runpy.run_path(str(SCRIPT))["public_api"]()
+    cli = api["modules"]["agents.codex"]
+    assert cli["references"]["Codex"] == "_agents_shared.codex_cli.codex.Codex"
+    declarations = api["root_definitions"]["_agents_shared.codex_cli.codex"]["declarations"]
+    assert any("class Codex" in declaration for declaration in declarations)
+    limits = api["root_definitions"]["_agents_shared.sandbox_limits"]["declarations"]
+    assert any("class SandboxArchiveLimits" in declaration for declaration in limits)

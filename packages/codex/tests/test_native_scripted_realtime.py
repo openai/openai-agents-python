@@ -44,6 +44,8 @@ async def test_scripted_native_session_ack_history_and_completion():
             assert "Scripted native answer" in repr(voice.history)
     adapter.assert_complete()
     assert adapter.connect_calls[0].model == "fixture"
+    assert adapter.connect_calls[0].url == "ws://127.0.0.1:1/v1/realtime"
+    assert adapter.connect_calls[0].api_key_provided is True
     assert "synthetic-key" not in repr(adapter.connect_calls)
     snapshot = adapter.sent_events
     snapshot[0]["type"] = "changed"

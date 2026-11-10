@@ -1,0 +1,195 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -20,6 +20,18 @@
+     pub disabled: bool,
+     pub include_sensitive_data: bool,
+     pub credential: Option<Arc<crate::sdk_trace_routes::TraceCredentials>>,
++    pub(crate) root_descriptor: Arc<RootDescriptor>,
++}
++
++#[derive(Default)]
++pub(crate) struct RootDescriptor {
++    pub snapshot: OnceLock<Value>,
++    pub ended: AtomicBool,
++}
++impl std::fmt::Debug for RootDescriptor {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("RootDescriptor")
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -399,6 +411,14 @@
+         disabled,
+         include_sensitive_data: capture,
+         credential,
++        root_descriptor: if options.detached {
++            Default::default()
++        } else {
++            inherited
++                .as_ref()
++                .map(|policy| Arc::clone(&policy.root_descriptor))
++                .unwrap_or_default()
++        },
+     });
+     let metadata = options.metadata.unwrap_or_else(|| json!({}));
+     bounded_value(&metadata, 0)?;
+@@ -631,6 +651,7 @@
+             disabled: true,
+             include_sensitive_data: false,
+             credential: None,
++            root_descriptor: Default::default(),
+         });
+         let context = Context::new().with_value(policy);
+         let sample = ScopeSampler::default().should_sample(
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -153,13 +153,7 @@
+     s.replaced |= options.replace;
+     Ok(s.sequence)
+ }
+-fn event(s: &mut Routes, span: &SpanData, lifecycle: &str) {
+-    s.sequence += 1;
+-    let sequence = s.sequence;
+-    if s.processors.is_empty() {
+-        return;
+-    }
+-    // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
++fn attributes(span: &SpanData) -> BTreeMap<String, Value> {
+     let mut attrs = BTreeMap::new();
+     // User metadata has 64 fields; reserve the native SDK's full 128-attribute
+     // capacity for SDK kind/group fields and configured span attributes too.
+@@ -174,9 +168,54 @@
+         };
+         attrs.insert(key, val);
+     }
+-    let value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
++    attrs
++}
++fn retained_root_descriptor(
++    span: &SpanData,
++    lifecycle: &str,
++    policy: Option<&crate::sdk_trace::ScopePolicy>,
++) -> Option<Value> {
++    let owner = &policy?.root_descriptor;
++    if span.parent_span_id == opentelemetry::trace::SpanId::INVALID {
++        owner.snapshot.get_or_init(|| {
++            let mut attrs = attributes(span);
++            attrs.retain(|key, _| key.starts_with("sdk.metadata.") || key == "sdk.group_id");
++            json!({"name":truncate(&span.name,4096),"attributes":attrs})
++        });
++        if lifecycle == "end" {
++            owner
++                .ended
++                .store(true, std::sync::atomic::Ordering::Release);
++        }
++        return None;
++    }
++    if !owner.ended.load(std::sync::atomic::Ordering::Acquire) {
++        return None;
++    }
++    owner.snapshot.get().cloned()
++}
++fn event(s: &mut Routes, span: &SpanData, lifecycle: &str, root_descriptor: Option<Value>) {
++    s.sequence += 1;
++    let sequence = s.sequence;
++    if s.processors.is_empty() {
++        return;
++    }
++    // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
++    let attrs = attributes(span);
++    let mut value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
++    if serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
++        dropped(s, sequence);
++        return;
++    }
++    if let Some(descriptor) = root_descriptor {
++        if serde_json::to_vec(&descriptor).map_or(MAX_BYTES + 1, |v| v.len()) > 65536 {
++            dropped(s, sequence);
++            return;
++        }
++        value["__root_descriptor"] = descriptor;
++    }
+     let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
+-    if bytes > 65536 || s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
++    if s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
+         dropped(s, sequence);
+         return;
+     }
+@@ -194,6 +233,7 @@
+ pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
+     let mut s = lock();
+     let mut events = Vec::new();
++    let mut root_descriptors = BTreeMap::new();
+     let cutoff = s
+         .flush_snapshot
+         .map(|(barrier, _, _)| barrier)
+@@ -205,18 +245,24 @@
+         {
+             break;
+         }
+-        let Some((seq, value, bytes)) = s.queue.pop_front() else {
++        let Some((seq, mut value, bytes)) = s.queue.pop_front() else {
+             break;
+         };
+         s.bytes -= bytes;
+         s.delivered = seq;
++        if let Some(descriptor) = value
++            .as_object_mut()
++            .and_then(|event| event.remove("__root_descriptor"))
++        {
++            root_descriptors.insert(seq.to_string(), descriptor);
++        }
+         events.push(value);
+     }
+     let through = cutoff.unwrap_or(s.sequence);
+     if s.queue.front().is_none_or(|(seq, _, _)| *seq > through) {
+         s.delivered = s.delivered.max(through);
+     }
+-    serde_json::to_string(&json!({"events":events,"dropped_records":s.dropped,"failed_deliveries":s.failed,"through_sequence":s.delivered})).map_err(|_| "trace event serialization failed".into())
++    serde_json::to_string(&json!({"events":events,"root_descriptors":root_descriptors,"dropped_records":s.dropped,"failed_deliveries":s.failed,"through_sequence":s.delivered})).map_err(|_| "trace event serialization failed".into())
+ }
+ pub fn ack_trace_events(sequence: u64, failed: u64) -> Result<(), String> {
+     let mut s = lock();
+@@ -802,14 +848,16 @@
+ }
+ impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
+     fn on_start(&self, span: &mut Span, cx: &Context) {
+-        if crate::sdk_trace::policy_for_context(cx).is_some_and(|p| p.disabled) {
++        let policy = crate::sdk_trace::policy_for_context(cx);
++        if policy.as_ref().is_some_and(|p| p.disabled) {
+             return;
+         }
+         self.inner.on_start(span, cx);
+         let mut s = lock();
+-        if !s.processors.is_empty() {
+-            if let Some(data) = span.exported_data() {
+-                event(&mut s, &data, "start");
++        if let Some(data) = span.exported_data() {
++            let descriptor = retained_root_descriptor(&data, "start", policy.as_deref());
++            if !s.processors.is_empty() {
++                event(&mut s, &data, "start", descriptor);
+             }
+         }
+     }
+@@ -819,7 +867,8 @@
+             return;
+         }
+         let mut s = lock();
+-        event(&mut s, &span, "end");
++        let descriptor = retained_root_descriptor(&span, "end", policy.as_deref());
++        event(&mut s, &span, "end", descriptor);
+         if s.replaced || !self.default_enabled {
+             return;
+         }
+@@ -1333,7 +1382,7 @@
+             processors: vec!["recording".into()],
+             ..Default::default()
+         };
+-        event(&mut routes, &data, "end");
++        event(&mut routes, &data, "end", None);
+         let snapshot = &routes.queue.front().unwrap().1;
+         let attributes = snapshot["attributes"].as_object().unwrap();
+         assert_eq!(attributes.len(), 66);

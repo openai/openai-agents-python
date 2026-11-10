@@ -76,7 +76,7 @@ def _declaration(node: ast.stmt) -> ast.stmt | None:
 
 def _references(declaration: ast.stmt) -> set[str]:
     names = {node.id for node in ast.walk(declaration) if isinstance(node, ast.Name)}
-    annotations = []
+    annotations: list[ast.AST | None] = []
     for node in ast.walk(declaration):
         if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation is not None:
             annotations.append(node.annotation)
@@ -90,24 +90,24 @@ def _references(declaration: ast.stmt) -> set[str]:
                 annotations.extend(keyword.value for keyword in node.keywords)
     # Quoted forward references are types too; Literal strings remain values.
     while annotations:
-        node = annotations.pop()
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            annotations.append(ast.parse(node.value, mode="eval").body)
-        elif isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Subscript) and ast.unparse(node.value) in {
+        annotation = annotations.pop()
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotations.append(ast.parse(annotation.value, mode="eval").body)
+        elif isinstance(annotation, ast.Name):
+            names.add(annotation.id)
+        elif isinstance(annotation, ast.Subscript) and ast.unparse(annotation.value) in {
             "Literal",
             "typing.Literal",
         }:
             continue
         elif (
-            isinstance(node, ast.Subscript)
-            and ast.unparse(node.value) in {"Annotated", "typing.Annotated"}
-            and isinstance(node.slice, ast.Tuple)
+            isinstance(annotation, ast.Subscript)
+            and ast.unparse(annotation.value) in {"Annotated", "typing.Annotated"}
+            and isinstance(annotation.slice, ast.Tuple)
         ):
-            annotations.append(node.slice.elts[0])
-        elif node is not None:
-            annotations.extend(ast.iter_child_nodes(node))
+            annotations.append(annotation.slice.elts[0])
+        elif annotation is not None:
+            annotations.extend(ast.iter_child_nodes(annotation))
     return names
 
 
@@ -155,6 +155,8 @@ def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Modul
             or value.__module__ != owner
         ):
             raise ValueError(f"Public type alias {module.__name__}.{name} differs from {owner}")
+        assert isinstance(declaration.value, ast.Call)
+        assert isinstance(declaration.value.func, ast.Name)
         declaration.value.func.id = "TypeAliasType"
     tree.body.remove(guards[0])
 
@@ -216,7 +218,7 @@ def _module_contract(
             break
         selected = expanded
     imports = []
-    references = {}
+    references: dict[str, str] = {}
     relative_groups: dict[int, list[int]] = {}
     import_statements = [
         (statement, group)
@@ -257,6 +259,7 @@ def _module_contract(
                         owner == "agents"
                         or owner.startswith("agents.")
                         or owner.startswith("_agents_codex.")
+                        or owner.startswith("_agents_shared.")
                     ):
                         references.update(
                             (alias.asname or alias.name, f"{owner}.{alias.name}")
@@ -308,7 +311,7 @@ def public_api() -> dict[str, Any]:
     public_modules.add("agents.realtime")
     # Follow only imports used by retained declarations. A typing alias reports
     # its runtime owner as typing, so its source binding defines this boundary.
-    required = {name: set() for name in public_modules | {"agents"}}
+    required: dict[str, set[str]] = {name: set() for name in public_modules | {"agents"}}
     while True:
         contracts = {
             name: _module_contract(

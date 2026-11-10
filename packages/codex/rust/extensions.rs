@@ -107,6 +107,7 @@ pub fn build(
     environment: Arc<EnvironmentManager>,
     events: Arc<Events>,
     interception: Arc<crate::native_interception::Boundary>,
+    recovery: Arc<crate::recovery_guard::RecoveryContributor>,
     managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(events);
@@ -147,7 +148,6 @@ pub fn build(
         manager: manager.clone(),
     }));
     builder.tool_lifecycle_contributor(python_tools);
-    let recovery = Arc::new(crate::recovery_guard::RecoveryContributor::default());
     builder.thread_lifecycle_contributor(recovery.clone());
     builder.turn_lifecycle_contributor(recovery.clone());
     builder.tool_lifecycle_contributor(recovery.clone());
@@ -269,6 +269,9 @@ pub fn build(
         skills_registry.build(),
         crate::native_interception::DirectOutput::Json,
     );
+    builder.model_request_contributor(Arc::new(crate::python_tools::ModelProducerContributor(
+        interception.clone(),
+    )));
     builder.model_request_contributor(Arc::new(crate::python_tools::PreparedRequestContributor));
     builder.model_request_contributor(recovery);
     builder.model_request_contributor(interception.clone());

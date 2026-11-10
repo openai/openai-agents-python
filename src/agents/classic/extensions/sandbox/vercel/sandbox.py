@@ -1573,6 +1573,13 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
         )
         self._dependencies = dependencies
 
+    def resolve_trusted_manifest_for_resume(
+        self, manifest: Manifest, options: VercelSandboxClientOptions
+    ) -> Manifest:
+        return _with_released_vercel_s3_credential_exposure_compatibility(
+            _resolve_manifest_root(manifest), options.allow_s3_credential_exposure
+        )
+
     def _wrap_session(
         self,
         inner: BaseSandboxSession,
@@ -1584,6 +1591,18 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
             instrumentation=instrumentation,
             dependencies=self._resolve_dependencies(),
         )
+
+    def assert_resume_state_authority(
+        self, state: SandboxSessionState, options: VercelSandboxClientOptions
+    ) -> None:
+        if not isinstance(state, VercelSandboxSessionState):
+            raise TypeError("VercelSandboxClient requires Vercel sandbox state")
+        if (
+            options.network_policy is not None
+            and _serialize_network_policy(options.network_policy)
+            != _serialize_network_policy(state.network_policy)
+        ) or set(options.exposed_ports) != set(state.exposed_ports):
+            raise ValueError("Current Vercel networking options require a fresh sandbox session")
 
     @redact_mount_error_data
     async def create(

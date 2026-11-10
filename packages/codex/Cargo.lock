@@ -2817,6 +2817,7 @@ dependencies = [
  "codex-protocol",
  "codex-secrets",
  "codex-terminal-detection",
+ "codex-utils-path",
  "codex-utils-process",
  "codex-utils-template",
  "codex-workload-identity",

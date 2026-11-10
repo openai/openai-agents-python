@@ -61,6 +61,7 @@ from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
+from .models import ModelProvider, NativeModel
 from .tools import ToolRef
 from .usage import RunBudget
 
@@ -140,6 +141,10 @@ class ModelSettings(TypedDict, total=False, closed=True):
     prompt_cache_retention: Literal["in_memory", "24h"] | None
     prompt_cache_ttl: Literal["30m", "12h"] | None
     invocation_timeout_ms: int | None
+    truncation: Literal["auto", "disabled"] | None
+    include: list[str] | None
+    context_management: list[dict[str, Any]] | None
+    extra_body: Mapping[str, Any] | None
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
@@ -179,6 +184,57 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
         elif key in ("parallel_tool_calls", "store"):
             if type(value) is not bool:
                 raise TypeError(f"{key} must be bool or None")
+        elif key == "truncation":
+            if value not in ("auto", "disabled"):
+                raise ValueError("truncation must be auto or disabled")
+        elif key == "include":
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise TypeError("include must be a list of strings")
+            captured[key] = list(value)
+        elif key in ("context_management", "extra_body"):
+            if key == "context_management":
+                if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                    raise TypeError("context_management must be a list of JSON objects")
+            elif not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+                raise TypeError("extra_body must be a JSON object")
+            if key == "extra_body" and set(value) & {
+                "tool_choice",
+                "client_metadata",
+                "service_tier",
+                "tools",
+                "access_programs",
+                "metadata",
+                "previous_response_id",
+                "stream",
+                "parallel_tool_calls",
+                "prompt_cache_retention",
+                "model",
+                "prompt_cache_key",
+                "stream_options",
+                "conversation",
+                "temperature",
+                "prompt_cache_options",
+                "truncation",
+                "top_p",
+                "generate",
+                "store",
+                "context_management",
+                "instructions",
+                "type",
+                "reasoning",
+                "include",
+                "input",
+                "top_logprobs",
+                "text",
+                "max_output_tokens",
+            }:
+                raise ValueError(
+                    "extra_body cannot replace native request fields; "
+                    "use the corresponding model setting"
+                )
+            captured[key] = json.loads(
+                json.dumps(dict(value) if isinstance(value, Mapping) else value, allow_nan=False)
+            )
         elif key in ("verbosity", "prompt_cache_retention", "prompt_cache_ttl"):
             allowed = {
                 "verbosity": ("low", "medium", "high"),
@@ -291,6 +347,11 @@ class NativeProvider:
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
+    Retry budgets and phase timeouts are native provider settings. Omission keeps
+    Core defaults. Zero disables retries or sets an immediate phase deadline.
+    Core caps request and stream retry budgets at 100 and retains retry safety,
+    cancellation, and replay ownership. Timeouts use integer milliseconds.
+
     Routing maps are captured at construction. ``env_headers`` resolves values
     once; missing/empty values stay omitted. Query pairs use URL encoding.
     Supplied routing options reject same-origin and cross-origin redirects.
@@ -325,11 +386,19 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    model_backend: NativeModel | ModelProvider | None = field(default=None, repr=False, hash=False)
     request_max_retries: int | None = None
     stream_max_retries: int | None = None
+    stream_idle_timeout_ms: int | None = field(default=None, repr=False)
+    websocket_connect_timeout_ms: int | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        for name in ("request_max_retries", "stream_max_retries"):
+        for name in (
+            "request_max_retries",
+            "stream_max_retries",
+            "stream_idle_timeout_ms",
+            "websocket_connect_timeout_ms",
+        ):
             value = getattr(self, name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
@@ -352,6 +421,16 @@ class NativeProvider:
                 raise ValueError("Buffered Responses require API-key authentication")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
                 raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
+        if self.model_backend is not None:
+            if not any(
+                callable(getattr(self.model_backend, name, None))
+                for name in ("complete", "get_model")
+            ):
+                raise TypeError(
+                    "model_backend must implement complete(request) or get_model(model_name)"
+                )
+            if self.supports_websockets is True or self.auth is not None:
+                raise ValueError("model_backend requires HTTP mode without CodexLogin")
         self._capture_routing()
 
     def _capture_routing(self) -> None:
@@ -481,6 +560,8 @@ class NativeProvider:
 
     @property
     def _websockets_enabled(self) -> bool:
+        if self.model_backend is not None:
+            return False
         return (
             self.auth is None
             and self.response_mode == "streaming"
@@ -600,28 +681,30 @@ class NativeProvider:
                         else:
                             await release()
 
-                async def close_with_openings() -> None:
+                async def close_with_openings() -> bool:
                     try:
-                        await native_closing
+                        rotation_save_failed = await native_closing
                     except BaseException as error:
                         # A home removal error alone must not strand a manager.
                         # fail_environment separately proves its resource join.
                         await _close_after_error(error, release_openings)
                         raise
                     await release_openings()
+                    return bool(rotation_save_failed)
 
                 operation = close_with_openings()
             else:
                 operation = native_closing
 
-        pending = asyncio.ensure_future(operation)
-        try:
-            await _join(pending)
-        finally:
-            if pending.done() and not pending.cancelled() and pending.exception() is None:
-                with _PROVIDER_LOCK:
-                    object.__setattr__(self, "_closed", True)
-                    object.__setattr__(self, "_transport", None)
+        async def retire() -> None:
+            rotation_save_failed = await operation
+            with _PROVIDER_LOCK:
+                object.__setattr__(self, "_closed", True)
+                object.__setattr__(self, "_transport", None)
+            if rotation_save_failed:
+                raise RuntimeError("Could not save the refreshed Codex login")
+
+        await _join(asyncio.create_task(retire()))
 
     async def __aenter__(self) -> NativeProvider:
         with _PROVIDER_LOCK:
@@ -993,6 +1076,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
@@ -1018,6 +1102,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
@@ -1043,6 +1128,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
@@ -1068,6 +1154,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        project_guidance: bool = False,
         discover_agents_md: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
@@ -1129,6 +1216,10 @@ class Agent(Generic[ContextT, OutputT]):
         another ambient scope or explicit parent changes the trace linkage.
         Tracing context and export credentials never enter SessionState.
 
+        project_guidance loads native workspace instructions and enables native
+        workspace image viewing. It requires an Environment and uses only that
+        executor's granted paths. It does not grant command or write access.
+
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
         borrowed. A standard async context manager yielding an Environment
@@ -1160,11 +1251,11 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. An unknown root tool outcome raises LocalRecoveryRequired.
+        provider. An unknown root or descendant tool outcome raises LocalRecoveryRequired.
         Check the effect using application records and pass reconciled_calls
-        on reopen. The SDK records those outcomes without running those
-        calls. An unknown descendant tool outcome raises RuntimeError because
-        descendant calls cannot be reconciled. Local storage and portable
+        with the original root Session ID. The SDK records each result in the
+        owning thread without restarting the interrupted work. Read descendant
+        results with ``session.items(subagent_id=call.thread_id)``. Local storage and portable
         ``state`` cannot be combined. Local storage rejects code mode because
         individual nested tool identities lack durable intent and result receipts.
 
@@ -1202,6 +1293,7 @@ class Agent(Generic[ContextT, OutputT]):
                 environment=environment,
                 tools=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
@@ -1242,6 +1334,7 @@ class Agent(Generic[ContextT, OutputT]):
         discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
+        project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
@@ -1269,6 +1362,7 @@ class Agent(Generic[ContextT, OutputT]):
                 model_settings=model_settings,
                 tool_selection=tools,
                 instruction_files=instruction_files,
+                project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
@@ -1462,6 +1556,7 @@ class Agent(Generic[ContextT, OutputT]):
         options: dict[str, Any] = {}
         try:
             from ._function_tools import FunctionTool
+            from .manual import _CapturedApproval
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
             from .session import (
@@ -1531,7 +1626,7 @@ class Agent(Generic[ContextT, OutputT]):
                 if on_interaction is None
                 and before_step is None
                 and prepare_request is None
-                and tool._bind is None
+                and (tool._bind is None or tool.needs_approval is not False)
                 and (tools is None or tool in tools or tool.ref in tools)
             )
             if state is None and budget is not None and pause_manual:
@@ -1648,7 +1743,11 @@ class Agent(Generic[ContextT, OutputT]):
                         handoffs=handoffs,
                     )
                     if on_interaction is None and before_step is None and prepare_request is None:
-                        selected_manual = tuple(tool for tool in selected if tool._bind is None)
+                        selected_manual = tuple(
+                            tool
+                            for tool in selected
+                            if tool._bind is None or tool.needs_approval is not False
+                        )
                         if state is not None:
                             active_profile = session._profile_current
                             pause_declarations: Sequence[Tool[Any]] = declared
@@ -1683,7 +1782,7 @@ class Agent(Generic[ContextT, OutputT]):
                                 tool
                                 for tool in profile.declaration.tools
                                 if isinstance(tool, FunctionTool)
-                                and tool._bind is None
+                                and (tool._bind is None or tool.needs_approval is not False)
                                 and not tool._requires_live_manual_session
                             )
                             has_reachable_manual |= bool(target_manual)
@@ -1703,7 +1802,10 @@ class Agent(Generic[ContextT, OutputT]):
                     if (
                         prepare_request is not None
                         and before_step is None
-                        and any(tool._bind is None for tool in selected)
+                        and any(
+                            tool._bind is None or tool.needs_approval is not False
+                            for tool in selected
+                        )
                     ):
                         raise InteractionRequired(
                             "Running manual tools with prepare_request requires on_interaction. "
@@ -1718,7 +1820,7 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._storage is not None
                         or selected_mcp
                         or any(
-                            isinstance(tool, _CapturedFunction)
+                            isinstance(tool, (_CapturedFunction, _CapturedApproval))
                             and tool._requires_live_manual_session
                             for tool in session._bound_tools
                         )

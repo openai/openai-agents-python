@@ -113,11 +113,13 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 #### Identify the artifact
 
-Every selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact before any SDK or installed-package qualification starts in that run. Qualification repacks the current Python SDK around the verified native payload, then publishes the existing `native-<OS>-<ARCH>` output. Installed-package, IPC, executable-symbol and receipt checks remain required.
+Each selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact. Qualification repacks the current Python SDK around the verified native payload, then publishes `native-<OS>-<ARCH>`. Installed-package, IPC, executable-symbol and receipt checks apply by platform.
+
+Preview code changes build Linux ARM64 on `ubuntu-24.04-arm`. Pull request and merge queue qualification start after the ARM64 producer succeeds. Preview push qualification also waits for the Linux x86_64, macOS, and Windows producers so the push can supply reusable artifacts. Linux ARM64 builds from source and qualifies the installed wheel with a local Session on CPython 3.10 and 3.14. Its `native-Linux-ARM64` artifact includes both Session test reports.
 
 #### Check donor eligibility
 
-A donor is a push run that supplies a reusable native artifact. For each donor, CI:
+A donor is a push run that supplies a reusable native artifact for Linux x86_64, macOS, or Windows. For each donor, CI:
 
 - Checks the complete caller and native workflows at the push commit.
 - Compares committed native and build inputs against the current checkout.
@@ -138,7 +140,7 @@ Artifact-control Python commands isolate startup from unbound checkout imports. 
 
 Native producers do not restore or save Actions caches. They prefer verified native snapshots.
 
-If only local Rust source and Python SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments.
+If only local Rust source and Python SDK files changed, platforms with donor support can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. CI applies the same donor, digest, publication and qualification checks as for snapshots. Dependency artifacts preserve dependency sources and timestamps, exclude compiled `codex-agents-python` outputs, and require matching build environments.
 
 Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
 
