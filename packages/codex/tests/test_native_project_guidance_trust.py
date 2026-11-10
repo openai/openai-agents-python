@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,10 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.test_native_agent import provider
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="requires a real Linux or macOS sandboxed image read",
+)
 @pytest.mark.parametrize("trusted", [False, True], ids=["untrusted", "trusted"])
 async def test_project_guidance_projects_only_explicit_host_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, responses, trusted: bool

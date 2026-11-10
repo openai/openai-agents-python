@@ -321,6 +321,67 @@ Return a nonempty summary string to skip model summarization, or `None` to let C
 
 Async callbacks run on the Session loop; sync callbacks run in a worker. Cancellation joins started callbacks and discards late results. A callback must not mutate its own Session. A raised exception fails compaction instead of falling back to a model summary. Restore uses current callbacks and application context.
 
+## Read and edit original history
+
+Matching [source builds](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md#build-the-sdk-from-source) have been providing `session.history_snapshot()` and `session.transact_history()`. The `0.24.0-alpha.7` wheel has not been including these methods. Both methods have been requiring an idle Session with current application bindings.
+
+`history_snapshot()` has been returning a `CanonicalHistorySnapshot` from `agents.history`, with `revision`, `total`, and a tuple of original JSON object records in `items`. `limit=N` has been selecting the latest N records. `limit=0` has been returning an empty tuple with the full revision and count. The revision and total have been covering all original records, including omitted prefixes and audit-only records. Unknown fields and missing IDs have been remaining unchanged.
+
+The following complete script has been replacing history with one user message, appending an application note, checking a stale revision, and restoring accepted state. After installing the matching source build, applications have been running it with `python edit_history.py`. The script has been using a synthetic credential and making no model requests.
+
+```python
+import asyncio
+
+from agents import Agent, NativeProvider
+
+
+async def main() -> None:
+    async with NativeProvider(api_key="synthetic-history-example") as provider:
+        agent = Agent(instructions="Answer briefly.", provider=provider)
+        async with agent.session() as session:
+            before = await session.history_snapshot(limit=0)
+            message = {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Use the label atlas."}],
+            }
+            await session.transact_history(
+                expected_revision=before.revision,
+                keep=0,
+                items=[message],
+            )
+            current = await session.history_snapshot(limit=0)
+            note = {"type": "application_note", "value": "Reviewed by the application"}
+            revision = await session.transact_history(
+                expected_revision=current.revision,
+                keep=current.total,
+                items=[note],
+            )
+            try:
+                await session.transact_history(
+                    expected_revision=current.revision,
+                    keep=0,
+                )
+            except RuntimeError:
+                assert (await session.history_snapshot(limit=0)).revision == revision
+            else:
+                raise AssertionError("A stale revision unexpectedly succeeded")
+            accepted = await session.history_snapshot()
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            assert await restored.history_snapshot() == accepted
+            print("History replacement, append, revision check, and restore passed.")
+
+
+asyncio.run(main())
+```
+
+`transact_history()` has been checking `expected_revision` before committing one prefix-and-suffix replacement. `keep=snapshot.total` with a positive total has been appending records while preserving current model context. `keep=0` has been replacing all original history and model context, including when `items=()` clears both. Other prefixes have been retaining only model projections from the selected original records. Ambiguous partial edits across a compaction summary have been failing before commit. A stale revision has been leaving accepted history unchanged; applications have been reading a fresh snapshot and reconsidering the edit before retrying.
+
+Original history, current model input, and the audit record have been serving separate purposes. `model_context()` has been reading current model input, which can contain a compaction summary instead of originals. `items()` and `turns()` have been projecting recorded activity. Original-history transactions have been preserving raw storage audit records rather than erasing earlier activity. Unknown imported record types, including the application note above, have been serving only as audit data without adding model input or executing work. Native validation has been rejecting malformed executable records and invalid tool-call/result pairs.
+
+Acknowledged history replacements have been surviving native save and restore. A transaction with uncertain persistence has been retiring the Session and requiring closure and restore before further work. Child graphs, goals, background work, and unresolved tool effects have been requiring their dedicated lifecycle operations before history edits. Limited reads have been copying only selected records; durable reopen has still been loading full stored history.
+
 ## Inspect recorded items and turns
 
 `ContextCompacted` from `agents.observation` reports explicit or native automatic compaction, with native item and turn IDs. The pinned history format retains the summary, completed turn, and replacement history, but not the observation's compaction item ID.
