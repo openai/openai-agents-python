@@ -1266,8 +1266,8 @@ async def test_cancelled_function_enablement_cannot_publish_schema(responses):
 
 
 async def test_function_enablement_restored_manual_advertisement(responses):
-    from tests.test_native_manual_tools import LookupArgs, next_request
     from tests.test_native_agent import function_declarations
+    from tests.test_native_manual_tools import LookupArgs, next_request
 
     enabled = True
     effects = []
