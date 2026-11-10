@@ -13,6 +13,7 @@ import pytest
 from agents import Environment
 from agents.classic.extensions.sandbox.daytona import sandbox as daytona
 from agents.sandbox import Manifest, NoopSnapshot, SandboxSession, sandbox_environment
+from tests._asyncio import original_cancellation
 from tests.test_sandbox_environment import Client, Options
 
 
@@ -162,7 +163,7 @@ async def test_native_daytona_cleanup_settles_after_cancellation(
         release_disconnect.set()
         with pytest.raises(asyncio.CancelledError) as cancelled:
             await task
-        assert cancelled.value.args == ("first cancellation",)
+        assert original_cancellation(cancelled.value).args == ("first cancellation",)
         assert closed == list(range(entry_count))
         await client.session.pty_terminate_all()
         for handle in handles:
@@ -221,7 +222,7 @@ async def test_native_daytona_completed_pty_preserves_first_cancellation(
             release_disconnect.set()
             with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
-            assert cancelled.value.args == ("first cancellation",)
+            assert original_cancellation(cancelled.value).args == ("first cancellation",)
             assert closed.is_set()
             handle.disconnect.assert_awaited_once()
         finally:
@@ -272,7 +273,7 @@ async def test_native_daytona_cancelled_cleanup_bounds_provider_kill(
             assert task in done, "provider kill exceeded the cleanup timeout"
             with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
-            assert cancelled.value.args == ("first cancellation",)
+            assert original_cancellation(cancelled.value).args == ("first cancellation",)
             handle.disconnect.assert_awaited_once()
         finally:
             release_kill.set()

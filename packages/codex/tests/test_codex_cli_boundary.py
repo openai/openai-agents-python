@@ -9,9 +9,9 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
-from typing import get_overloads
 
 import pytest
+from typing_extensions import get_overloads
 
 from agents import Agent
 from agents.codex import codex_tool

@@ -4827,6 +4827,7 @@ mod graph_tests {
                     RolloutItem::Compacted(CompactedItem {
                         message: "CHILD_CURRENT_WINDOW".into(),
                         replacement_history: Some(vec![message("CHILD_CURRENT_WINDOW").into()]),
+                        sdk_originals: None,
                         guardian_history: None,
                         retained_context: None,
                         mcp_resource_origins: None,

@@ -109,6 +109,8 @@ pub struct EnvironmentOptions {
     cwd: PathUri,
     #[serde(default)]
     headers: HashMap<String, String>,
+    #[serde(default, rename = "env_json", deserialize_with = "deserialize_env")]
+    env: HashMap<String, String>,
     connect_timeout: Option<f64>,
     capability_directories: Option<Vec<PathUri>>,
     writable_roots: Option<Vec<PathUri>>,
@@ -130,6 +132,81 @@ struct LocalStorageMount {
     strategy: String,
     #[serde(default = "mount_read_only")]
     read_only: bool,
+}
+
+fn deserialize_env<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    let encoded = String::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("invalid environment variables"))?;
+    let values: HashMap<String, String> = serde_json::from_str(&encoded)
+        .map_err(|_| serde::de::Error::custom("invalid environment variables"))?;
+    if values.iter().any(|(name, value)| {
+        name.is_empty()
+            || codex_protocol::shell_environment::is_non_inheritable_env_var(name)
+            || [
+                "CODEX_SDK_BWRAP_SEARCH_PATH",
+                "CARGO_BIN_EXE_bwrap",
+                "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
+            ]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            || name
+                .get(.."CODEX_SANDBOX_COMMAND_ENV_JSON_".len())
+                .is_some_and(|prefix| {
+                    prefix.eq_ignore_ascii_case("CODEX_SANDBOX_COMMAND_ENV_JSON_")
+                })
+            || name.contains(['\0', '='])
+            || value.contains('\0')
+    }) {
+        return Err(serde::de::Error::custom("invalid environment variables"));
+    }
+    Ok(values)
+}
+
+fn environment_target_name_validation_required(
+    platform: Option<&str>,
+    supported: bool,
+) -> Result<bool> {
+    ensure!(
+        platform.is_some(),
+        "explicit environment variables require the executor platform"
+    );
+    if platform == Some("windows") {
+        ensure!(
+            supported,
+            "explicit environment variables require native name validation on this Windows executor"
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+async fn validate_environment_target_names(
+    environment: &Environment,
+    values: &HashMap<String, String>,
+    info: &EnvironmentInfo,
+) -> Result<()> {
+    if values.is_empty()
+        || !environment_target_name_validation_required(
+            info.platform_os.as_deref(),
+            info.capabilities.environment_variable_name_validation,
+        )?
+    {
+        return Ok(());
+    }
+    environment
+        .validate_environment_variable_names(values.keys().cloned().collect())
+        .await
+        .map_err(|_| anyhow::anyhow!("invalid explicit environment names for this executor"))
 }
 
 fn deserialize_mounts<'de, D: Deserializer<'de>>(
@@ -670,11 +747,13 @@ impl EnvironmentOptions {
         let environment = manager
             .get_environment(self.id())
             .context("selected executor was not registered")?;
-        let needs_info = self.strict_writes()
+        let needs_info = !self.env.is_empty()
+            || self.strict_writes()
             || self.network.is_some()
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
         let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
+            validate_environment_target_names(&environment, &self.env, &info).await?;
             let (profile, workspace_root, writes) = self
                 .profile(&environment, &info, config, private_paths)
                 .await?;
@@ -708,7 +787,7 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![workspace_root];
-        let shell_environment_policy = if self.local {
+        let mut shell_environment_policy = if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
                 r#set: local_shell_env(),
@@ -717,6 +796,7 @@ impl EnvironmentOptions {
         } else {
             permissions.shell_environment_policy.clone()
         };
+        shell_environment_policy.set_sdk_environment_overrides(self.env.clone());
         let selection = TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
@@ -1907,6 +1987,99 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn explicit_environment_names_match_receiver_restrictions() {
+        for name in codex_protocol::shell_environment::NON_INHERITABLE_ENV_VARS
+            .iter()
+            .copied()
+            .chain([
+                "CODEX_SDK_BWRAP_SEARCH_PATH",
+                "CARGO_BIN_EXE_bwrap",
+                "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON",
+                "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_VERSION",
+                "CODEX_PERMISSION_PROFILE",
+                "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+                "CODEX_PLUGIN_METRICS_OUTPUT",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON_0",
+                "CODEX_SANDBOX_COMMAND_ENV_JSON_é",
+            ])
+        {
+            for variant in [name.to_owned(), name.to_ascii_lowercase()] {
+                let values =
+                    std::collections::HashMap::from([(variant, "private-environment-value")]);
+                let result = serde_json::from_value::<super::EnvironmentOptions>(json!({
+                    "cwd": "file:///workspace", "env_json": serde_json::to_string(&values).unwrap()
+                }));
+                let error = result
+                    .err()
+                    .expect("receiver-reserved environment name")
+                    .to_string();
+                assert!(!error.contains("private-environment-value"));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_environment_name_identity_is_owned_by_the_receiver() {
+        assert!(super::environment_target_name_validation_required(Some("windows"), true).unwrap());
+        assert!(
+            super::environment_target_name_validation_required(Some("windows"), false).is_err()
+        );
+        assert!(!super::environment_target_name_validation_required(Some("linux"), false).unwrap());
+        assert!(!super::environment_target_name_validation_required(Some("macos"), false).unwrap());
+        assert!(super::environment_target_name_validation_required(None, false).is_err());
+    }
+
+    #[test]
+    fn explicit_environment_values_validate_before_native_selection() {
+        let valid: super::EnvironmentOptions = serde_json::from_value(json!({
+            "cwd": "file:///workspace",
+            "env_json": r#"{"VALUE":"private-environment-value","EMPTY":"","__proto__":"literal"}"#
+        }))
+        .unwrap();
+        assert_eq!(valid.env["EMPTY"], "");
+        assert_eq!(valid.env["__proto__"], "literal");
+        for (name, value) in [
+            ("$serde_json::private::Number", "7301592846"),
+            (
+                "$serde_json::private::RawValue",
+                r#"{"APP_MODE":"injected-env-marker"}"#,
+            ),
+        ] {
+            let values = std::collections::HashMap::from([(name, value)]);
+            let options: super::EnvironmentOptions = serde_json::from_value(json!({
+                "cwd": "file:///workspace",
+                "env_json": serde_json::to_string(&values).unwrap()
+            }))
+            .unwrap();
+            assert_eq!(options.env.len(), 1);
+            assert_eq!(options.env[name], value);
+        }
+        for values in [
+            json!({"": "private-environment-value"}),
+            json!({"BAD=NAME": "private-environment-value"}),
+            json!({"BAD\0NAME": "private-environment-value"}),
+            json!({"CODEX_SDK_BWRAP_SEARCH_PATH": "private-environment-value"}),
+            json!({"CARGO_BIN_EXE_bwrap": "private-environment-value"}),
+            json!({"NAME": "private-environment-value\0"}),
+            json!({"NAME": 3}),
+            json!(["private-environment-value"]),
+        ] {
+            let result = serde_json::from_value::<super::EnvironmentOptions>(json!({
+                "cwd": "file:///workspace", "env_json": values.to_string()
+            }));
+            let error = match result {
+                Ok(_) => panic!("invalid environment values were accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("environment"));
+            assert!(!error.contains("private-environment-value"));
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

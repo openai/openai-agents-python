@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -135,7 +136,9 @@ async def test_read_codex_plan_usage_before_dispatch(plan_endpoint, monkeypatch,
         assert isinstance(usage, CodexPlanUsage)
         assert usage.account_id == ACCOUNT
         assert usage.identity_verified
-        assert start <= usage.observed_at <= datetime.now(timezone.utc)
+        # Python 3.10 Windows has been using a coarser wall clock than native Rust.
+        resolution = timedelta(seconds=max(time.get_clock_info("time").resolution, 1e-6))
+        assert start - resolution <= usage.observed_at <= datetime.now(timezone.utc) + resolution
         assert usage.observed_at.utcoffset() == timezone.utc.utcoffset(None)
         assert usage.plan_type == "team"
         assert usage.ordinary_usage_allowed is True

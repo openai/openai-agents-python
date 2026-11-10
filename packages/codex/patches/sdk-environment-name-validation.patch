@@ -1,0 +1,221 @@
+diff --git a/codex-rs/exec-server-protocol/src/protocol.rs b/codex-rs/exec-server-protocol/src/protocol.rs
+index d6134a8..23dd3bc 100644
+--- a/codex-rs/exec-server-protocol/src/protocol.rs
++++ b/codex-rs/exec-server-protocol/src/protocol.rs
+@@ -140,6 +140,33 @@ pub struct EnvironmentInfo {
+     pub capabilities: EnvironmentCapabilities,
+ }
+ 
++/// Optional names-only preflight on the existing metadata request.
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
++pub struct EnvironmentInfoParams {
++    pub environment_variable_names: Option<Vec<String>>,
++}
++
++impl EnvironmentInfoParams {
++    pub fn environment_variable_names_are_distinct(&self) -> bool {
++        let Some(names) = &self.environment_variable_names else {
++            return true;
++        };
++        if names
++            .iter()
++            .any(|name| name.is_empty() || name.contains(['\0', '=']))
++        {
++            return false;
++        }
++        let variables: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> = names
++            .iter()
++            .map(|name| (name.into(), std::ffi::OsString::new()))
++            .collect();
++        variables.len() == names.len()
++            && codex_protocol::shell_environment::env_override_names_are_distinct(&variables)
++    }
++}
++
+ fn unknown_executor_version() -> String {
+     "0.0.0".to_string()
+ }
+@@ -148,6 +175,9 @@ fn unknown_executor_version() -> String {
+ #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct EnvironmentCapabilities {
++    /// Whether `environment/info` accepts names-only native-key validation.
++    #[serde(default)]
++    pub environment_variable_name_validation: bool,
+     /// Actual per-call read caps and component-safe, bounded nofollow walks.
+     /// Clients must check before sending the additive filesystem options.
+     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+@@ -281,6 +311,7 @@ impl EnvironmentInfo {
+             temporary_directories: Some(temporary_directories),
+             temp_dir,
+             capabilities: EnvironmentCapabilities {
++                environment_variable_name_validation: true,
+                 bounded_nofollow_search: true,
+                 network_proxy_launch: true,
+                 capability_discovery_sandbox: true,
+@@ -1462,6 +1493,31 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn environment_name_preflight_uses_native_receiver_identity() {
++        for names in [["PATH", "Path"], ["Ä", "ä"]] {
++            let params = super::EnvironmentInfoParams {
++                environment_variable_names: Some(names.into_iter().map(str::to_owned).collect()),
++            };
++            assert_eq!(
++                params.environment_variable_names_are_distinct(),
++                !cfg!(windows)
++            );
++        }
++        let duplicate = super::EnvironmentInfoParams {
++            environment_variable_names: Some(vec!["SAME".into(), "SAME".into()]),
++        };
++        assert!(!duplicate.environment_variable_names_are_distinct());
++        let omitted: Option<super::EnvironmentInfoParams> = serde_json::from_str("null").unwrap();
++        assert!(omitted.is_none());
++        assert!(!super::EnvironmentCapabilities::default().environment_variable_name_validation);
++        assert!(
++            super::EnvironmentInfo::local()
++                .capabilities
++                .environment_variable_name_validation
++        );
++    }
++
+     #[test]
+     fn environment_capabilities_accept_legacy_response_without_environment_config_read() {
+         let capabilities: EnvironmentCapabilities = serde_json::from_value(serde_json::json!({
+@@ -1473,6 +1529,7 @@ mod tests {
+         assert_eq!(
+             capabilities,
+             EnvironmentCapabilities {
++                environment_variable_name_validation: false,
+                 bounded_nofollow_search: false,
+                 network_proxy_launch: true,
+                 capability_discovery_sandbox: true,
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 2f09241..eea4e9f 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -845,11 +845,39 @@ impl ExecServerClient {
+     /// Fetches executor metadata over RPC without reading or updating the cache.
+     // TODO: Remove after app-server migrates off this call.
+     pub async fn force_environment_info(&self) -> Result<EnvironmentInfo, ExecServerError> {
++        self.environment_info_with_params(None).await
++    }
++
++    pub async fn validate_environment_variable_names(
++        &self,
++        names: Vec<String>,
++    ) -> Result<(), ExecServerError> {
++        if !self
++            .environment_info()
++            .await?
++            .capabilities
++            .environment_variable_name_validation
++        {
++            return Err(ExecServerError::Protocol(
++                "executor does not support native environment-name validation".into(),
++            ));
++        }
++        self.environment_info_with_params(Some(crate::protocol::EnvironmentInfoParams {
++            environment_variable_names: Some(names),
++        }))
++        .await
++        .map(|_| ())
++    }
++
++    async fn environment_info_with_params(
++        &self,
++        params: Option<crate::protocol::EnvironmentInfoParams>,
++    ) -> Result<EnvironmentInfo, ExecServerError> {
+         let rpc_client = self.rpc_client().await?;
+         // Bound sending as well as receiving: a stuck transport can fill the outbound queue.
+         let result = timeout(
+             ENVIRONMENT_INFO_TIMEOUT,
+-            rpc_client.call(ENVIRONMENT_INFO_METHOD, &()),
++            rpc_client.call(ENVIRONMENT_INFO_METHOD, &params),
+         )
+         .await;
+         match result {
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index d0e5796..ddbe65d 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -950,6 +950,34 @@ impl Environment {
+         }
+     }
+ 
++    /// Validates names at the actual executor without sending values or launching a process.
++    pub async fn validate_environment_variable_names(
++        &self,
++        names: Vec<String>,
++    ) -> Result<(), ExecServerError> {
++        match &self.remote_client {
++            Some(client) => {
++                client
++                    .get()
++                    .await?
++                    .validate_environment_variable_names(names)
++                    .await
++            }
++            None => {
++                let params = crate::protocol::EnvironmentInfoParams {
++                    environment_variable_names: Some(names),
++                };
++                if params.environment_variable_names_are_distinct() {
++                    Ok(())
++                } else {
++                    Err(ExecServerError::Protocol(
++                        "invalid explicit environment names for this executor".into(),
++                    ))
++                }
++            }
++        }
++    }
++
+     /// Registration on the installed Noise session, without connecting or refreshing it.
+     ///
+     /// Returns `None` before a session is installed and for non-Noise environments.
+diff --git a/codex-rs/exec-server/src/server/handler.rs b/codex-rs/exec-server/src/server/handler.rs
+index e80c8cc..9ee61d6 100644
+--- a/codex-rs/exec-server/src/server/handler.rs
++++ b/codex-rs/exec-server/src/server/handler.rs
+@@ -199,8 +199,19 @@ impl ExecServerHandler {
+             .await
+     }
+ 
+-    pub(crate) fn environment_info(&self) -> Result<EnvironmentInfo, JSONRPCErrorError> {
++    pub(crate) fn environment_info(
++        &self,
++        params: Option<crate::protocol::EnvironmentInfoParams>,
++    ) -> Result<EnvironmentInfo, JSONRPCErrorError> {
+         self.require_initialized_for("environment info")?;
++        if params
++            .as_ref()
++            .is_some_and(|params| !params.environment_variable_names_are_distinct())
++        {
++            return Err(invalid_params(
++                "invalid explicit environment names for this executor".into(),
++            ));
++        }
+         Ok(local_environment_info())
+     }
+ 
+diff --git a/codex-rs/exec-server/src/server/registry.rs b/codex-rs/exec-server/src/server/registry.rs
+index 609a3a7..45043ab 100644
+--- a/codex-rs/exec-server/src/server/registry.rs
++++ b/codex-rs/exec-server/src/server/registry.rs
+@@ -90,7 +90,10 @@ pub(crate) fn build_router() -> RpcRouter<ExecServerHandler> {
+     );
+     router.request(
+         ENVIRONMENT_INFO_METHOD,
+-        |handler: Arc<ExecServerHandler>, _params: ()| async move { handler.environment_info() },
++        |handler: Arc<ExecServerHandler>,
++         params: Option<crate::protocol::EnvironmentInfoParams>| async move {
++            handler.environment_info(params)
++        },
+     );
+     router.request(
+         ENVIRONMENT_CONFIG_READ_METHOD,

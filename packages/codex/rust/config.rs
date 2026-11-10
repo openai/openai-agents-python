@@ -45,6 +45,9 @@ pub(crate) struct RuntimeOptions {
     // The facade owns this signal on its live runtime; checkpoint runtime is ignored.
     #[serde(rename = "_sdk_native_config")]
     sdk_native_config: bool,
+    // Project guidance reads only host-authorized trust and discovery settings.
+    #[serde(rename = "_sdk_project_guidance_config")]
+    sdk_project_guidance_config: bool,
     #[serde(rename = "_sdk_discover_agents_md")]
     pub(crate) sdk_discover_agents_md: bool,
     #[serde(rename = "_sdk_codex_login")]
@@ -362,7 +365,7 @@ pub async fn load(
     let ambient_provider = options.sdk_native_config
         && options.model_provider.is_none()
         && !values.contains_key("model_provider");
-    if options.sdk_native_config {
+    if options.sdk_native_config || options.sdk_project_guidance_config {
         let source_home = match codex_core::config::find_codex_home() {
             Ok(home) => home,
             // A fresh SDK persistent store may not have created its home yet.
@@ -401,7 +404,9 @@ pub async fn load(
         .map_err(|_| anyhow::anyhow!("Unable to load native user configuration"))?;
         let effective = source.effective_config();
         // Keep the facade's historical default when no user selection is configured.
-        overrides.push(("model".into(), toml::Value::String("gpt-5.1-codex".into())));
+        if options.sdk_native_config {
+            overrides.push(("model".into(), toml::Value::String("gpt-5.1-codex".into())));
+        }
         for key in ["projects", "project_root_markers"] {
             if let Some(value) = effective.get(key) {
                 overrides.push((key.into(), value.clone()));

@@ -17,6 +17,7 @@ import pytest
 
 from agents import Agent, telemetry
 from agents.testing import ScriptedResponses, text
+from tests._asyncio import original_cancellation
 
 
 @contextmanager
@@ -283,7 +284,7 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
-            assert failure.value.args == ("synthetic caller cancellation",)
+            assert original_cancellation(failure.value).args == ("synthetic caller cancellation",)
             assert_sanitized_failure(failure.value, secret)
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
@@ -529,7 +530,7 @@ async def native_batch_case():
         started = time.monotonic()
         result = await telemetry.force_flush()
         elapsed = time.monotonic() - started
-        assert result.status == "success"
+        assert result.status == "success", result
         records = [record for request in received for record in request["payload"]["data"]]
         spans = [record for record in records if record["object"] == "trace.span"]
         assert len(spans) == 21

@@ -1,6 +1,7 @@
 """MongoDB adapter checks use a real local server when mongod is available."""
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -40,20 +41,33 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
         pytest.skip("mongod is required for real MongoDB adapter checks")
     directory = tmp_path / "mongodb"
     directory.mkdir(mode=0o700)
-    process = subprocess.Popen(
-        [
-            executable,
-            "--bind_ip",
-            "127.0.0.1",
-            "--port",
-            str(unused_tcp_port),
-            "--dbpath",
-            str(directory),
-            "--quiet",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    log_path = tmp_path / "mongod.log"
+
+    def fail_startup(message: str) -> None:
+        try:
+            with log_path.open("rb") as log:
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - 8192))
+                tail = log.read(8192).decode("utf-8", errors="replace")
+        except OSError as error:
+            tail = f"Unable to read MongoDB startup log: {error}"
+        pytest.fail(f"{message}\nMongoDB log tail ({log_path}):\n{tail}")
+
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [
+                executable,
+                "--bind_ip",
+                "127.0.0.1",
+                "--port",
+                str(unused_tcp_port),
+                "--dbpath",
+                str(directory),
+                "--quiet",
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     client = MongoClient(
         f"mongodb://127.0.0.1:{unused_tcp_port}",
         serverSelectionTimeoutMS=100,
@@ -61,14 +75,17 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
         connectTimeoutMS=1000,
     )
     try:
-        deadline = time.monotonic() + 5
+        # Startup allowance for slower CI workers.
+        deadline = time.monotonic() + 30
         while True:
             try:
                 client.admin.command("ping")
                 break
             except PyMongoError:
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    pytest.fail("Local MongoDB did not become ready")
+                if process.poll() is not None:
+                    fail_startup(f"Local MongoDB exited with status {process.returncode}")
+                if time.monotonic() >= deadline:
+                    fail_startup("Local MongoDB did not become ready within 30 seconds")
                 time.sleep(0.01)
         yield client
     finally:

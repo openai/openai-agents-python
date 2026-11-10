@@ -13,6 +13,7 @@ import pytest
 
 from agents import telemetry
 from agents.testing import ScriptedResponses, text
+from tests._asyncio import original_cancellation
 from tests.test_testing import request
 
 
@@ -56,7 +57,7 @@ async def test_fixture_preserves_primary_body_error_and_callback_context(cancell
         await task
     assert task.cancelled() is cancelled
     if cancelled:
-        assert raised.value.args == ("synthetic-primary-cancellation",)
+        assert original_cancellation(raised.value).args == ("synthetic-primary-cancellation",)
     else:
         assert raised.value is primary
     contexts = []

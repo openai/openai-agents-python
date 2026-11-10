@@ -35,7 +35,7 @@ pub async fn snapshot(state: &ThreadState, limit: Option<usize>) -> anyhow::Resu
         .try_lock()
         .context("native mutation is in progress")?;
     idle(&state).await?;
-    let (revision, total, items) = state.thread.sdk_history_snapshot(limit).await;
+    let (revision, total, items) = state.thread.sdk_history_snapshot(limit).await?;
     Ok(json!({"revision": revision, "total": total, "items": items}))
 }
 
@@ -43,7 +43,7 @@ pub async fn replace(
     state: &ThreadState,
     expected: String,
     keep: usize,
-    items: Vec<ResponseItem>,
+    items: Vec<String>,
 ) -> anyhow::Result<Value> {
     let _operation = state
         .engine
@@ -87,18 +87,26 @@ pub async fn replace(
     // Validate before durability: neither retained nor appended history may split
     // a client tool call/result pair. Provider-hosted records keep their existing
     // context-validator treatment, including server-side tool-search output.
-    let (current_revision, _, originals) = state.thread.sdk_history_snapshot(None).await;
+    let (current_revision, total, _) = state.thread.sdk_history_snapshot(Some(0)).await?;
     ensure!(
         current_revision == expected,
         "canonical history revision conflict"
     );
-    ensure!(
-        keep <= originals.len(),
-        "history keep exceeds snapshot length"
-    );
-    crate::context::check_pairs(&originals, &(0..keep).collect::<Vec<_>>())
+    ensure!(keep <= total, "history keep exceeds snapshot length");
+    // Eligibility is fixed at admission. Never reinterpret old audit-only JSON.
+    let projected = state.thread.sdk_history_projection(None).await?;
+    let retained = state.thread.sdk_history_projection(Some(keep)).await?;
+    crate::context::check_pairs(&projected, &(0..retained.len()).collect::<Vec<_>>())
         .context("canonical history requires complete tool call/result pairs")?;
-    crate::context::check_pairs(&items, &(0..items.len()).collect::<Vec<_>>())
+    let appended: Vec<ResponseItem> = items
+        .iter()
+        .map(|item| codex_history::sdk_originals::input_projection(item))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
+        .into_iter()
+        .flatten()
+        .collect();
+    crate::context::check_pairs(&appended, &(0..appended.len()).collect::<Vec<_>>())
         .context("canonical history requires complete tool call/result pairs")?;
     match state
         .thread
