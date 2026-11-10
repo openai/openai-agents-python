@@ -265,6 +265,56 @@ async def test_run_rejects_provider_receipt_and_joins_unanswered_handler_and_aut
         release.set()
 
 
+async def test_sealed_checkpoint_remains_detached_during_and_after_close(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Look up a key", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "A"}, "call-A"))
+    native_provider = provider(responses)
+    agent = Agent(instructions="Look up A.", tools=[lookup], provider=native_provider)
+    closing = asyncio.Event()
+    release_close = asyncio.Event()
+    async with timeout(8), agent.session() as session:
+        await session.submit("Read A")
+        await next_request(session.interactions(), lookup)
+        first = await session.suspend()
+        raw = first.to_json()
+        repeated = await session.suspend()
+        assert repeated is not first
+        assert repeated.to_json() == raw
+        first.history.clear()
+        assert repeated.to_json() == raw
+
+        close_session = session._close_session
+
+        async def held_close() -> None:
+            closing.set()
+            await release_close.wait()
+            await close_session()
+
+        monkeypatch.setattr(session, "_close_session", held_close)
+        close_task = asyncio.create_task(session.aclose())
+        try:
+            await closing.wait()
+            during_close = await session.suspend()
+            assert during_close is not repeated
+            assert during_close.to_json() == raw
+        finally:
+            release_close.set()
+            await close_task
+        after_close = await session.suspend()
+        assert after_close is not during_close
+        assert after_close.to_json() == raw
+        repeated.history.clear()
+        assert (await session.suspend()).to_json() == raw
+        with pytest.raises(RuntimeError, match="event loop"):
+            await asyncio.to_thread(lambda: asyncio.run(session.suspend()))
+    assert (await session.suspend()).to_json() == raw
+    await native_provider.aclose()
+
+
 @pytest.mark.parametrize("namespace", [None, "", "functions"])
 async def test_manual_checkpoint_restores_core_default_namespace(
     responses: ResponsesFixture, namespace: str | None
