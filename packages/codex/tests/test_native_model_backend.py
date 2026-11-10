@@ -909,11 +909,6 @@ async def test_chat_effective_request_controls(control: str) -> None:
             model_settings=settings,
             provider=provider,
         )
-        if control == "unknown":
-            with pytest.raises(ValueError, match="unsupported request controls"):
-                await agent.run("Answer.")
-            assert seen == []
-            return
         result = await agent.run(
             "Answer.", **({"prepare_request": edit} if control == "instructions" else {})
         )
@@ -935,6 +930,8 @@ async def test_chat_effective_request_controls(control: str) -> None:
         ]
         assert prepared[0] not in content
         assert any("Original instructions." in text for text in content)
+    elif control == "unknown":
+        assert seen[0]["unsupported_chat_control"] == "synthetic"
     else:
         assert all(seen[0][key] == value for key, value in extras.items())
 

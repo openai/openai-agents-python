@@ -36,6 +36,7 @@ class ModelResponse:
 
     def _capture(self) -> str:
         usage: Any = None
+        rendered: str | None = None
         try:
             if not isinstance(self.response_id, str) or not self.response_id.strip():
                 raise ValueError("ModelResponse needs a nonempty response_id")
@@ -58,13 +59,20 @@ class ModelResponse:
                 usage = {key: self.usage.get(key, 0) for key in fields}
                 if "total_tokens" not in self.usage:
                     usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-            return json.dumps(
-                {"response_id": self.response_id, "output": self.output, "usage": usage},
-                allow_nan=False,
-            )
+            try:
+                rendered = json.dumps(
+                    {"response_id": self.response_id, "output": self.output, "usage": usage},
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError, OverflowError, RecursionError):
+                pass
+            # Raise outside the encoder's exception scope, releasing its payload frames.
+            if rendered is None:
+                raise ValueError("ModelResponse output must contain valid JSON")
+            return rendered
         finally:
             # Invalid provider counters must not retain output through this frame.
-            del self, usage
+            del self, usage, rendered
 
 
 class NativeModel(Protocol):
@@ -109,6 +117,7 @@ class ChatCompletionsModel:
         choice: Any = None
         content: Any = None
         declaration: Any = None
+        extra_controls: Any = None
         item: Any = None
         kind: Any = None
         leaves: Any = None
@@ -121,6 +130,8 @@ class ChatCompletionsModel:
         output_format: Any = None
         part: Any = None
         probabilities: Any = None
+        provider_data: Any = None
+        thinking: Any = None
         raw_usage: Any = None
         reason: Any = None
         reasoning: Any = None
@@ -198,8 +209,10 @@ class ChatCompletionsModel:
                             "content": output,
                         }
                     )
-                elif kind in ("reasoning", "configuration_update"):
+                elif kind == "configuration_update":
                     continue
+                elif kind == "reasoning":
+                    raise ValueError("Chat adapters do not support provider reasoning replay")
                 else:
                     raise ValueError(
                         "ChatCompletionsModel received an unsupported native input item"
@@ -255,7 +268,7 @@ class ChatCompletionsModel:
             }
             if self.prompt_cache_key is not None:
                 options["prompt_cache_key"] = self.prompt_cache_key
-            if (
+            extra_controls = (
                 request.body.keys()
                 - options.keys()
                 - {
@@ -275,8 +288,9 @@ class ChatCompletionsModel:
                     "truncation",
                     "context_management",
                 }
-            ):
-                raise ValueError("ChatCompletionsModel received unsupported request controls")
+            )
+            if extra_controls:
+                options["extra_body"] = {key: request.body[key] for key in extra_controls}
             text = request.body.get("text") or {}
             if text.get("verbosity") is not None:
                 options["verbosity"] = text["verbosity"]
@@ -309,6 +323,9 @@ class ChatCompletionsModel:
             else:
                 options.pop("tool_choice", None)
                 options.pop("parallel_tool_calls", None)
+            thinking = (options.get("extra_body") or {}).get("thinking")
+            if thinking is not None and thinking.get("type") != "disabled":
+                raise ValueError("Chat adapters do not support configured provider thinking")
             response = await self._create(
                 model=self.model or request.body["model"],
                 messages=messages,
@@ -320,6 +337,33 @@ class ChatCompletionsModel:
                 raise ValueError("ChatCompletionsModel requires exactly one response choice")
             choice = value["choices"][0]
             message = choice["message"]
+            if (
+                choice.get("finish_reason") == "content_filter"
+                and not message.get("content")
+                and not message.get("tool_calls")
+                and message.get("refusal") is None
+            ):
+                message = {
+                    **message,
+                    "refusal": "Response withheld by the provider's content filter.",
+                }
+            if message.get("refusal") is None:
+                if (
+                    message.get("reasoning_content") not in (None, "")
+                    or message.get("thinking_blocks")
+                    or message.get("reasoning")
+                ):
+                    raise ValueError("Chat adapters do not support provider reasoning replay")
+                for call in message.get("tool_calls") or []:
+                    provider_data = call.get("provider_specific_fields") or {}
+                    if (
+                        provider_data.get("thought_signature") is not None
+                        or ((call.get("extra_content") or {}).get("google") or {}).get(
+                            "thought_signature"
+                        )
+                        is not None
+                    ):
+                        raise ValueError("Chat adapters do not support provider reasoning replay")
             if (
                 choice.get("finish_reason") not in ("stop", "tool_calls")
                 and message.get("refusal") is None
@@ -371,6 +415,8 @@ class ChatCompletionsModel:
                     ).get("reasoning_tokens", 0),
                 }
             )
+            if usage is not None:
+                usage = {key: 0 if counter is None else counter for key, counter in usage.items()}
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
@@ -380,6 +426,7 @@ class ChatCompletionsModel:
                 choice,
                 content,
                 declaration,
+                extra_controls,
                 item,
                 kind,
                 leaves,
@@ -392,6 +439,8 @@ class ChatCompletionsModel:
                 output_format,
                 part,
                 probabilities,
+                provider_data,
+                thinking,
                 raw_usage,
                 reason,
                 reasoning,
@@ -421,6 +470,7 @@ class LitellmModel(ChatCompletionsModel):
 
     Construct the client with its credentials, routing and transport settings.
     Core owns tools and history; the application owns and closes the client.
+    Completed text/function responses only; provider reasoning replay unsupported.
     """
 
     async def _create(self, **options: Any) -> Any:
@@ -431,7 +481,10 @@ class LitellmModel(ChatCompletionsModel):
         value: Any = None
         try:
             if self.prompt_cache_key is not None:
-                options["extra_body"] = {"prompt_cache_key": options.pop("prompt_cache_key")}
+                options["extra_body"] = {
+                    **options.get("extra_body", {}),
+                    "prompt_cache_key": options.pop("prompt_cache_key"),
+                }
             response = await self.client.acompletion(**options)
             value = response.model_dump()
             for choice in value["choices"]:
@@ -451,10 +504,24 @@ class AnyLLMModel(ChatCompletionsModel):
 
     Pass an application-created ``AnyLLM.create(...)`` provider. Optional provider
     packages are not imported by the native root; credentials remain with it.
+    Inherited native cache hints are omitted for providers declaring them unsupported.
+    Explicit adapter cache overrides, including empty strings, remain provider-validated.
+    Generic completion requests omit the native ``store=False`` default.
     """
 
     async def _create(self, **options: Any) -> Any:
         try:
+            if "max_completion_tokens" in options:
+                options["max_tokens"] = options.pop("max_completion_tokens")
+            if (
+                self.prompt_cache_key is None
+                and getattr(self.client, "PROMPT_CACHE_KEY_SUPPORT", None) == "unsupported"
+            ):
+                # Native settings cannot override inherited Core cache hints.
+                options.pop("prompt_cache_key", None)
+            if options.get("store") is False:
+                # The generic completion interface has no storage control.
+                options.pop("store")
             return await self.client.acompletion(**options)
         finally:
             # Release SDK-owned payloads before exposing any callback failure.
@@ -528,6 +595,8 @@ class ResponsesModel:
                     ),
                 }
             )
+            if usage is not None:
+                usage = {key: 0 if counter is None else counter for key, counter in usage.items()}
             return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
 
         finally:
