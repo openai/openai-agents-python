@@ -303,6 +303,62 @@ async def test_backend_sync_joins_before_concurrent_voice_agent_update(realtime_
             assert "Updated backend instructions" in json.dumps(peer.responses.requests[-1])
 
 
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_close_cancels_voice_agent_configuration(realtime_peer, cancel_waiter):
+    peer = realtime_peer
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def resolve_instructions(_context):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "Replacement voice instructions"
+
+    target = Agent(
+        instructions="Replacement backend instructions",
+        realtime=RealtimeAgentConfig(instructions=resolve_instructions),
+    )
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        source = Agent(instructions="Backend instructions", provider=provider)
+        async with (
+            source.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            update = asyncio.create_task(voice.update_agent(target))
+            closing = None
+            try:
+                await entered.wait()
+                if cancel_waiter:
+                    update.cancel()
+                    await asyncio.sleep(0)
+                    assert not update.done()
+                    assert not cancelled.is_set()
+
+                closing = asyncio.create_task(voice.aclose())
+                done, _ = await asyncio.wait((closing,), timeout=5)
+                assert closing in done, "Voice close waited for the Agent configuration callback"
+                await closing
+                assert cancelled.is_set()
+                with pytest.raises(asyncio.CancelledError):
+                    await update
+                assert await session.get_active_agent() is source
+            finally:
+                release.set()
+                await asyncio.gather(update, return_exceptions=True)
+                if closing is not None:
+                    await asyncio.gather(closing, return_exceptions=True)
+
+
 @pytest.mark.parametrize("close_voice", [False, True])
 async def test_replaced_voice_agent_preserves_backend_tool_replacement(realtime_peer, close_voice):
     peer = realtime_peer

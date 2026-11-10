@@ -1426,7 +1426,8 @@ class RealtimeSession:
         The background_agent bridge continues using the caller-owned Session
         and its original backend tool selection, including acknowledged Session
         updates. This operation does not change those attached backend defaults.
-        Closing voice releases its transient graph before checkpointing resumes.
+        Closing voice cancels pending configuration callbacks and releases its
+        transient graph before checkpointing resumes.
         """
         self._session._check_callback_operation("change its own Realtime Agent")
         self._check_live()
@@ -1446,7 +1447,7 @@ class RealtimeSession:
                     )
                     expected = snapshot["profile_receipt"]
 
-                async def admit() -> None:
+                async def admit() -> dict[str, Any]:
                     async with self._session._catalog_publication_lock:
                         self._session._start_readers(
                             tuple(runtime.profile.declaration for runtime in runtimes.values())
@@ -1503,10 +1504,13 @@ class RealtimeSession:
                                 captured.profile.declaration.tools
                             )
                             self._voice_profile_ids.add(key)
-                    self._check_live()
-                    await self._apply_profile(None, active, unpublished_profiles=tuple(runtimes))
+                        return active
 
-                await _join(asyncio.create_task(admit()))
+                # Record native admission before teardown. Owner shutdown can
+                # then cancel the configuration callbacks in this publish task.
+                active = await _join(asyncio.create_task(admit()))
+                self._check_live()
+                await self._apply_profile(None, active, unpublished_profiles=tuple(runtimes))
 
         task = asyncio.create_task(publish())
         self._profile_updates.add(task)
