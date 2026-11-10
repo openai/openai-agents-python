@@ -96,6 +96,9 @@ async def test_git_repo_copies_selected_directory(
         assert (
             output / "directory with spaces/nested/selected.txt"
         ).read_text() == "selected fixture\n"
+        link = output / "selected-link"
+        assert link.is_symlink()
+        assert link.readlink() == Path("directory with spaces/nested")
     else:
         assert (output / "selected.txt").read_text() == "selected fixture\n"
         assert not (output / "root.txt").exists()

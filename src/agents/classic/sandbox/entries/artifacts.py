@@ -836,7 +836,7 @@ case "$source_root" in
     "$repo_root"|"$repo_root"/*) ;;
     *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
 esac
-exec "$copy_program" -R -- . "$destination/"
+exec "$copy_program" -R -P -- . "$destination/"
 """,
                 "sandbox-git-copy",
                 tmp_dir,
