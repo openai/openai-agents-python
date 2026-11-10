@@ -53,7 +53,11 @@ jobs:
       - name: Select Windows test coverage
         id: release-windows
         env:
-          V1_QUALIFICATION: ${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || github.base_ref == 'feat/codex-harness' || github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
+          V1_QUALIFICATION: >-
+            ${{ inputs.native_only || github.ref_name == 'feat/codex-harness' ||
+            github.base_ref == 'feat/codex-harness' ||
+            github.event.pull_request.stack.base.ref == 'feat/codex-harness' ||
+            github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
           DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}

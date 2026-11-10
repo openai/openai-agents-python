@@ -696,6 +696,7 @@ def test_committed_version_controls_windows_scheduling(
         "V1_QUALIFICATION": (
             "${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || "
             "github.base_ref == 'feat/codex-harness' || "
+            "github.event.pull_request.stack.base.ref == 'feat/codex-harness' || "
             "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
         ),
         "DEFAULT_BRANCH_PUSH": (
