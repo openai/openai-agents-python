@@ -22,7 +22,7 @@ from agents.testing import ScriptedResponses, text
 
 @contextmanager
 def collector(
-    statuses: list[int] | None = None, *, delay: float = 0
+    statuses: list[int] | None = None,
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
@@ -38,10 +38,6 @@ def collector(
                     "payload": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
                 }
             )
-            if delay:
-                import time
-
-                time.sleep(delay)
             self.send_response(replies.pop(0) if replies else 200)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -547,7 +543,7 @@ async def native_outcome_privacy_case():
 async def native_batch_case():
     import time
 
-    with collector(delay=0.5) as (endpoint, received):
+    with collector() as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
         await telemetry.configure(processors=[exporter])
         with telemetry.trace("batched-workflow"):
