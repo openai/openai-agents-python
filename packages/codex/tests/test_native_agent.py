@@ -48,6 +48,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "transact_history",
         "turns",
         "rate_limits",
+        "plan_usage",
         "cancel_all",
         "suspend",
         "subagents",

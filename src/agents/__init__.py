@@ -134,6 +134,11 @@ if TYPE_CHECKING:
     from .rate_limits import (
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
+        CodexPlanCredits as CodexPlanCredits,
+        CodexPlanLimit as CodexPlanLimit,
+        CodexPlanSpendLimit as CodexPlanSpendLimit,
+        CodexPlanUsage as CodexPlanUsage,
+        CodexPlanWindow as CodexPlanWindow,
     )
     from .recovery import (
         LocalRecoveryRequired as LocalRecoveryRequired,
@@ -282,6 +287,11 @@ _MODULES = {
     "UncertainCall": ".recovery",
     "ApiRateLimits": ".rate_limits",
     "ApiRateLimitWindow": ".rate_limits",
+    "CodexPlanCredits": ".rate_limits",
+    "CodexPlanLimit": ".rate_limits",
+    "CodexPlanSpendLimit": ".rate_limits",
+    "CodexPlanUsage": ".rate_limits",
+    "CodexPlanWindow": ".rate_limits",
     "AssistantMessage": ".input",
     "InitialMessage": ".input",
     "InputImage": ".input",
