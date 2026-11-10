@@ -105,6 +105,7 @@ pub struct ThreadOptions {
     #[serde(rename = "_sdk_chatgpt_apps")]
     chatgpt_apps: Option<Value>,
     user_instructions: Option<UserInstructions>,
+    user_instructions_appendix: Option<String>,
     tool_policy: Option<Policy>,
 }
 
@@ -336,6 +337,7 @@ impl ThreadOptions {
         options.disabled_plugin_ids = self.disabled_plugin_ids;
         options.client_mcp_extensions =
             codex_protocol::mcp::ClientMcpExtensions::new(self.client_mcp_extensions);
+        options.user_instructions_appendix = self.user_instructions_appendix;
         options.user_instructions = self.user_instructions.map(|user| LoadedUserInstructions {
             instructions: user.instructions.map(|i| Instructions {
                 text: i.text,
