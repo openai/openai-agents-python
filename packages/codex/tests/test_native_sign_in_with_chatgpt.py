@@ -34,6 +34,7 @@ from agents import (
     SignInWithChatGPT,
     SignInWithChatGPTCredentials,
     SQLiteSessionStore,
+    TurnNeedsAttention,
     TurnStoppedError,
     computer_tool,
     function_tool,
@@ -584,6 +585,7 @@ async def test_plan_limit_is_terminal(plan_endpoint):
         (403, "synthetic_rejection", "authentication_error", False),
         (429, "subscription_sharing_usage_limit_exceeded", "usage_limit_exceeded", False),
         (429, "rate_limit_exceeded", "rate_limit_exceeded", False),
+        (429, None, "rate_limit_exceeded", False),
         (503, "subscription_sharing_usage_unavailable", "server_overloaded", False),
         (401, "subscription_sharing_invalid_user", "authentication_error", True),
         (503, "subscription_sharing_usage_unavailable", "server_overloaded", True),
@@ -593,36 +595,54 @@ async def test_http_failure_retains_provider_diagnostics(
     monkeypatch, status, code, category, compact
 ):
     requests = []
+    token = access_token()
+    diagnostic = "Synthetic failure."
+    if category == "rate_limit_exceeded":
+        diagnostic += f" Echoed bearer: {token}"
+    body = {"message": diagnostic}
+    if code is not None:
+        body["code"] = code
+    headers = {"x-request-id": "synthetic-plan-request"}
+    if status == 429:
+        headers["Retry-After"] = "0"
 
     async def responses_handler(request):
-        requests.append((request.path, request.headers.get("Authorization")))
+        requests.append((request.method, request.path, request.headers.get("Authorization")))
         return web.json_response(
-            {"error": {"code": code, "message": "Synthetic failure."}},
+            {"error": body},
             status=status,
-            headers={"x-request-id": "synthetic-plan-request"},
+            headers=headers,
         )
 
     peer = web.Application()
     peer.router.add_post("/responses", responses_handler)
-    token = access_token()
     async with TestServer(peer) as server:
         set_endpoint(monkeypatch, str(server.make_url("/")).rstrip("/"))
         async with timeout(30), plan_agent(token).session() as session:
-            with pytest.raises(NativeError) as caught:
-                if compact:
+            if compact:
+                with pytest.raises(NativeError) as caught:
                     await session.compact()
-                else:
-                    await (await session.submit("Hello.")).get_result()
-    assert caught.value.status_code == status
-    assert caught.value.category == category
-    assert caught.value.request_id == "synthetic-plan-request"
-    if category != "rate_limit_exceeded":
-        assert caught.value.code == code
-        assert "Synthetic failure." in str(caught.value)
+            else:
+                turn = await session.submit("Hello.")
+                with pytest.raises(NativeError) as caught:
+                    await turn.get_result()
+                if category == "rate_limit_exceeded":
+                    attention = await turn.wait_for_attention()
+                    assert isinstance(attention, TurnNeedsAttention)
+                    assert attention.reason == "rate_limited"
+                    assert attention.error is caught.value
+    error = caught.value
+    assert error.status_code == status
+    assert error.category == category
+    assert error.request_id == "synthetic-plan-request"
+    assert error.code == code
+    diagnostics = repr((error, vars(error), error.__cause__, error.__context__))
+    if category == "rate_limit_exceeded":
+        assert "Synthetic failure." not in diagnostics
     else:
-        assert caught.value.code is None
-    assert token not in str(caught.value)
-    assert requests == [("/responses", f"Bearer {token}")]
+        assert diagnostic in str(error)
+    assert token not in diagnostics
+    assert requests == [("POST", "/responses", f"Bearer {token}")]
 
 
 @pytest.mark.parametrize("case", ["admission", "capability", "discarded_parameter"])
