@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "bd7cef2db4efafd1a1a5bdc3aae4165910fa329c",
+  "baseline_commit": "e36cf96d61a54afe4e668dd21dac6d6aa4c7b949",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -145,7 +145,7 @@
       },
       "agents.codex": {
         "declarations": [
-          "def codex_tool(*, codex: Codex | None=None, codex_options: CodexOptions | Mapping[str, Any] | None=None, thread_options: ThreadOptions | Mapping[str, Any] | None=None, turn_options: TurnOptions | Mapping[str, Any] | None=None, name: str='codex', description: str='Run an external Codex CLI task in the configured workspace.', persist_session: bool=False, thread_id: str | None=None, on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None=None, resolve_image: Callable[[str], str | None | Awaitable[str | None]] | None=None) -> _PythonTool[Any, object]:\n    pass"
+          "def codex_tool(*, codex: Codex | None=None, codex_options: CodexOptions | Mapping[str, Any] | None=None, thread_options: ThreadOptions | Mapping[str, Any] | None=None, turn_options: TurnOptions | Mapping[str, Any] | None=None, name: str='codex', description: str='Run an external Codex CLI task in the configured workspace.', persist_session: bool=False, thread_id: str | None=None, on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None=None, resolve_image: Callable[[str], str | None | Awaitable[str | None]] | None=None, parameters: type[BaseModel] | None=None, span_data_max_chars: int | None=8192, resolve_thread: Callable[[ToolContext[object]], str | None | Awaitable[str | None]] | None=None, on_stream: Callable[[ThreadEvent, ToolContext[object]], None | Awaitable[None]] | None=None, is_enabled: bool | Callable[[Any, Any], bool | Awaitable[bool]]=True, failure_error_function: Callable[[ToolContext[object], Exception], str | Awaitable[str]] | None=None, on_thread: Callable[[str, Literal['completed', 'failed', 'cancelled'], ToolContext[object]], None | Awaitable[None]] | None=None) -> _PythonTool[Any, object]:\n    pass"
         ],
         "exports": {
           "Codex": "agents.classic.extensions.experimental.codex.codex.Codex",
@@ -156,19 +156,21 @@
         },
         "imports": [
           "from collections.abc import Awaitable, Callable, Mapping",
-          "from typing import Any",
+          "from typing import Any, Literal",
+          "from pydantic import BaseModel",
           "from _agents_shared.codex_cli.codex import Codex",
           "from _agents_shared.codex_cli.codex_options import CodexOptions",
           "from _agents_shared.codex_cli.events import ThreadEvent",
           "from _agents_shared.codex_cli.thread_options import ThreadOptions",
           "from _agents_shared.codex_cli.turn_options import TurnOptions",
-          "from ._function_tools import _PythonTool"
+          "from ._function_tools import ToolContext, _PythonTool"
         ],
         "references": {
           "Codex": "_agents_shared.codex_cli.codex.Codex",
           "CodexOptions": "_agents_shared.codex_cli.codex_options.CodexOptions",
           "ThreadEvent": "_agents_shared.codex_cli.events.ThreadEvent",
           "ThreadOptions": "_agents_shared.codex_cli.thread_options.ThreadOptions",
+          "ToolContext": "agents._function_tools.ToolContext",
           "TurnOptions": "_agents_shared.codex_cli.turn_options.TurnOptions",
           "_PythonTool": "agents._function_tools._PythonTool"
         }
@@ -1228,7 +1230,7 @@
           "ResponseIntegrityReason: TypeAlias = Literal['undecodable_output_item', 'provider_owned_tool_receipt', 'unfinished_assistant_item', 'missing_supported_terminal_output', 'provider_refusal', 'malformed_probability_facts']",
           "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
-          "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)",
+          "@dataclass(frozen=True)\nclass Completed(Generic[OutputT, TurnT]):\n    turn: TurnT\n    final_output: OutputT\n    thread_usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()\n    tool_call: ToolCallInfo | None = field(default=None, kw_only=True)\n    guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)\n    run_usage: RunUsage = field(init=False)",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
           "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents[_SelectionContextT_contra]] | None | StopTurn]:\n        pass",
           "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True, _start_event_reader: bool=True, max_function_concurrency: int | None=None, observation_retention: Literal['bounded', 'all']='bounded') -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    @property\n    def realtime_usage(self) -> RealtimeUsage | None:\n        pass\n\n    def realtime(self, *, config: RealtimeConfig | None=None) -> RealtimeSession:\n        pass\n\n    async def build_realtime_sip_config(self, *, config: RealtimeConfig | None=None) -> dict[str, Any]:\n        pass\n\n    async def get_active_agent(self) -> Agent[ContextT, OutputT]:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def respond(self, reply: ActionReply[Any]) -> None:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    async def plan_usage(self) -> CodexPlanUsage | None:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None, budget: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None, budget: RunBudget | None=None) -> Turn[Any]:\n        pass\n\n    async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:\n        pass\n\n    async def get_mcp_prompt(self, server: str, name: str, arguments: Mapping[str, str] | None=None) -> MCPGetPromptResult:\n        pass\n\n    async def list_mcp_resources(self, server: str, cursor: str | None=None) -> MCPListResourcesResult:\n        pass\n\n    async def list_mcp_resource_templates(self, server: str, cursor: str | None=None) -> MCPListResourceTemplatesResult:\n        pass\n\n    async def read_mcp_resource(self, server: str, uri: str) -> MCPReadResourceResult:\n        pass\n\n    async def history_snapshot(self, *, limit: int | None=None) -> CanonicalHistorySnapshot:\n        pass\n\n    async def transact_history(self, *, expected_revision: str, keep: int, items: Sequence[Mapping[str, Any]]=()) -> str:\n        pass\n\n    async def model_context(self) -> ModelContextSnapshot:\n        pass\n\n    async def compact(self, *, summary: str | None=None, snapshot: ModelContextSnapshot | None=None, retain: Sequence[int] | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, agent: Agent[ContextT, OutputT], model: None=None, model_settings: None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, agent: Agent[ContextT, OutputT] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents[ContextT]] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def set_paused_goal(self, objective: str, *, token_budget: int | None=None) -> NativeGoal:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
@@ -1279,7 +1281,7 @@
           "from .telemetry import TraceOptions as TraceOptions",
           "from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef, _ToolCatalog as _ToolCatalog",
           "from .turn import Turn as Turn, TurnT as TurnT",
-          "from .usage import RunBudget, TokenUsageInfo as TokenUsageInfo",
+          "from .usage import RunBudget, RunUsage, TokenUsageInfo as TokenUsageInfo",
           "from .realtime import RealtimeConfig, RealtimeSession",
           "from .realtime_usage import RealtimeUsage"
         ],
@@ -1314,6 +1316,7 @@
           "RealtimeUsage": "_agents_codex.realtime_usage.RealtimeUsage",
           "RecordedTurn": "agents.history.RecordedTurn",
           "RunBudget": "agents.usage.RunBudget",
+          "RunUsage": "agents.usage.RunUsage",
           "SessionItem": "agents._events.SessionItem",
           "SessionState": "agents.state.SessionState",
           "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
@@ -1349,7 +1352,7 @@
           "class _PendingManual(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    call_id: str\n    tool: str\n    arguments: str\n    approval_required: bool = False\n    effective_arguments: str | None = None",
           "class _ToolOutcomes(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    response_observation_id: str = Field(min_length=1)\n    call_ids: list[str]\n    outcomes: list[tuple[str, bool]]\n    held_call_ids: list[str] = Field(default_factory=list)",
           "class _ManualContinuation(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    turn_id: str\n    seen_call_ids: list[str]\n    turn_usage: TokenUsage\n    reply_order: list[str]\n    accepted_replies: dict[str, dict[str, Any]]\n    pending_manual: list[_PendingManual]\n    tool_outcomes: _ToolOutcomes | None = None\n    output_schema: dict[str, Any] | None = None",
-          "class SessionState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    format_version: Literal[2, 3, 4, 5, 6, 7]\n    codex_revision: str\n    source_session_id: str\n    history: list[dict[str, Any]]\n    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)\n    root_metadata: dict[str, Any] | None = None\n    root_memory_mode: Literal['enabled', 'disabled'] | None = None\n    root_checklist: ChecklistState | None = None\n    root_goal: GoalState | None = None\n    root_code_mode: dict[str, Any] | None = None\n    descendants: list[CheckpointThread] = Field(default_factory=list)\n    interrupted_thread_ids: list[str] = Field(default_factory=list)\n    pending_actions: list[RequiredAction] = Field(default_factory=list)\n    agent_options: dict[str, Any] = Field(default_factory=dict)\n    recovery: CheckpointRecovery | None = None\n    managed_tool_specs: list[dict[str, Any]] | None = None\n    root_tool_origins: dict[str, _RootToolOrigin] = Field(default_factory=dict)\n    step_mcp_tools: list[_StepMcpTool] | None = None\n    native_continuation: _ManualContinuation | None = None\n    output_version: Literal[1] | None = None\n    output_fingerprint: str | None = None\n    operation_tools: list[ToolRef] | None = None\n    repair_turns: list[RecordedTurn] = Field(default_factory=list)\n    repair_items: list[SessionItem] = Field(default_factory=list)\n    network_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_read_only: bool = False\n    codex_login_binding: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n\n    @model_validator(mode='after')\n    def validate_tree(self) -> 'SessionState':\n        pass\n\n    @property\n    def instructions(self) -> str:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, value: str) -> 'SessionState':\n        pass"
+          "class SessionState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    format_version: Literal[2, 3, 4, 5, 6, 7]\n    codex_revision: str\n    source_session_id: str\n    history: list[dict[str, Any]]\n    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)\n    root_metadata: dict[str, Any] | None = None\n    root_memory_mode: Literal['enabled', 'disabled'] | None = None\n    root_checklist: ChecklistState | None = None\n    root_goal: GoalState | None = None\n    root_code_mode: dict[str, Any] | None = None\n    descendants: list[CheckpointThread] = Field(default_factory=list)\n    interrupted_thread_ids: list[str] = Field(default_factory=list)\n    pending_actions: list[RequiredAction] = Field(default_factory=list)\n    agent_options: dict[str, Any] = Field(default_factory=dict)\n    recovery: CheckpointRecovery | None = None\n    managed_tool_specs: list[dict[str, Any]] | None = None\n    root_tool_origins: dict[str, _RootToolOrigin] = Field(default_factory=dict)\n    step_mcp_tools: list[_StepMcpTool] | None = None\n    native_continuation: _ManualContinuation | None = None\n    run_usage: RunUsage | None = None\n    output_version: Literal[1] | None = None\n    output_fingerprint: str | None = None\n    operation_tools: list[ToolRef] | None = None\n    repair_turns: list[RecordedTurn] = Field(default_factory=list)\n    repair_items: list[SessionItem] = Field(default_factory=list)\n    network_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_read_only: bool = False\n    codex_login_binding: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n\n    @model_validator(mode='after')\n    def validate_tree(self) -> 'SessionState':\n        pass\n\n    @property\n    def instructions(self) -> str:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, value: str) -> 'SessionState':\n        pass"
         ],
         "exports": {
           "ChecklistState": "agents.state.ChecklistState",
@@ -1372,11 +1375,12 @@
           "from .history import RecordedTurn as RecordedTurn",
           "from .subagents import SubagentConfig as SubagentConfig",
           "from .tools import ToolRef as ToolRef",
-          "from .usage import TokenUsage as TokenUsage"
+          "from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage"
         ],
         "references": {
           "RecordedTurn": "agents.history.RecordedTurn",
           "RequiredAction": "agents._events.RequiredAction",
+          "RunUsage": "agents.usage.RunUsage",
           "SessionItem": "agents._events.SessionItem",
           "SubagentConfig": "agents.subagents.SubagentConfig",
           "TokenUsage": "agents.usage.TokenUsage",
@@ -1607,8 +1611,8 @@
           "@dataclass(frozen=True)\nclass PendingRequests(Generic[OutputT, TurnT]):\n    turn: TurnT\n    requests: tuple[Interaction, ...] = field(repr=False)",
           "@dataclass(frozen=True, slots=True)\nclass SteeringReceipt:\n    session_id: str\n    turn_id: str\n    submission_id: str\n    input_id: str",
           "@dataclass(frozen=True, slots=True)\nclass TurnNeedsAttention:\n    reason: Literal['interrupted', 'connection_lost', 'quota_blocked', 'rate_limited', 'budget_exceeded']\n    error: NativeError | TurnStoppedError\n    rate_limits: ApiRateLimits",
-          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n    _observation_after: int = field(repr=False, compare=False)\n    _guardrail_results: list[Any] = field(repr=False, compare=False)\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass",
-          "class ChildTurn(Protocol):\n\n    @property\n    def session_id(self) -> str:\n        pass\n\n    @property\n    def turn_id(self) -> str | None:\n        pass\n\n    @property\n    def submission_id(self) -> str:\n        pass\n\n    @property\n    def child_id(self) -> str | None:\n        pass\n\n    @property\n    def instance_id(self) -> int | None:\n        pass\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    async def get_result(self) -> Completed[str, ChildTurn]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass"
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] | _CompletedTurnOwner = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _run_usage: _UsageCollector = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n    _observation_after: int = field(repr=False, compare=False)\n    _guardrail_results: list[Any] = field(repr=False, compare=False)\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    @property\n    def run_usage(self) -> RunUsage:\n        pass\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass",
+          "class ChildTurn(Protocol):\n\n    @property\n    def session_id(self) -> str:\n        pass\n\n    @property\n    def turn_id(self) -> str | None:\n        pass\n\n    @property\n    def submission_id(self) -> str:\n        pass\n\n    @property\n    def child_id(self) -> str | None:\n        pass\n\n    @property\n    def instance_id(self) -> int | None:\n        pass\n\n    @property\n    def guardrail_results(self) -> tuple[Any, ...]:\n        pass\n\n    @property\n    def run_usage(self) -> RunUsage:\n        pass\n\n    async def get_result(self) -> Completed[str, ChildTurn]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[str, ChildTurn] | PendingRequests[str, ChildTurn] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass"
         ],
         "exports": {
           "ChildTurn": "agents.turn.ChildTurn",
@@ -1625,6 +1629,7 @@
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Generic as Generic, Literal as Literal, Protocol as Protocol, overload as overload",
           "from typing_extensions import TypeVar as TypeVar",
+          "from .usage import RunUsage, _UsageCollector",
           "from ._completed_turn_owner import _CompletedTurnOwner",
           "from .decisions import DecisionInput, DecisionProvider",
           "from .input import UserInput",
@@ -1641,10 +1646,12 @@
           "EventStream": "agents.observation.EventStream",
           "Interaction": "agents.manual.Interaction",
           "NativeError": "agents.session.NativeError",
+          "RunUsage": "agents.usage.RunUsage",
           "Session": "agents.session.Session",
           "TurnStoppedError": "agents.session.TurnStoppedError",
           "UserInput": "agents.input.UserInput",
-          "_CompletedTurnOwner": "_agents_codex._completed_turn_owner._CompletedTurnOwner"
+          "_CompletedTurnOwner": "_agents_codex._completed_turn_owner._CompletedTurnOwner",
+          "_UsageCollector": "agents.usage._UsageCollector"
         }
       },
       "agents.turn_receipt": {
@@ -1687,18 +1694,21 @@
       "agents.usage": {
         "declarations": [
           "@dataclass(frozen=True, slots=True)\nclass TokenUsage:\n    input_tokens: int\n    cached_input_tokens: int\n    cache_write_input_tokens: int\n    output_tokens: int\n    reasoning_output_tokens: int\n    total_tokens: int",
+          "@dataclass(frozen=True, slots=True)\nclass RunUsage(TokenUsage):\n    requests: int\n    missing_usage_requests: int",
+          "class _UsageCollector:\n\n    def __init__(self, initial: RunUsage | None=None) -> None:\n        pass\n\n    @staticmethod\n    def capture(usage: TokenUsage | None, requests: int=1) -> RunUsage:\n        pass\n\n    def add(self, delta: RunUsage) -> None:\n        pass\n\n    def report(self, usage: TokenUsage | None, requests: int=1) -> None:\n        pass\n\n    def observe(self, raw: dict[str, Any] | None) -> None:\n        pass\n\n    def attach(self, child: _UsageCollector) -> None:\n        pass\n\n    def snapshot(self) -> RunUsage:\n        pass",
           "@dataclass(frozen=True, slots=True)\nclass RunBudget:\n    max_requests: int | None = None\n    max_tokens: int | None = None\n    max_estimated_cost_micros: int | None = None\n    estimate_cost_micros: Callable[[TokenUsage], int | None] | None = None\n    missing_usage: Literal['stop', 'continue'] = 'stop'",
           "@dataclass(frozen=True, slots=True)\nclass TokenUsageInfo:\n    total_token_usage: TokenUsage\n    last_token_usage: TokenUsage\n    model_context_window: int | None"
         ],
         "exports": {
           "RunBudget": "agents.usage.RunBudget",
+          "RunUsage": "agents.usage.RunUsage",
           "TokenUsage": "agents.usage.TokenUsage",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo"
         },
         "imports": [
           "from collections.abc import Callable as Callable",
           "from dataclasses import dataclass as dataclass",
-          "from typing import Literal as Literal"
+          "from typing import Any as Any, Literal as Literal"
         ],
         "references": {}
       },
@@ -1841,6 +1851,7 @@
       "ResponseIntegrityReason": "agents.session.ResponseIntegrityReason",
       "ResponsesModel": "agents.models.ResponsesModel",
       "RunBudget": "agents.usage.RunBudget",
+      "RunUsage": "agents.usage.RunUsage",
       "SQLAlchemySessionStore": "agents.canonical_storage.SQLAlchemySessionStore",
       "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
       "Session": "agents.session.Session",
@@ -1884,13 +1895,14 @@
     "root_definitions": {
       "_agents_codex._completed_turn_owner": {
         "declarations": [
-          "class _CompletedTurnOwner:\n\n    def __init__(self, *, opening_agent: Agent[Any, str], session_id: str, turn_id: str, submission_id: str, output: str, usage: TokenUsageInfo | None, observations: Callable[[], _ObservationBuffer]) -> None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass"
+          "class _CompletedTurnOwner:\n\n    def __init__(self, *, opening_agent: Agent[Any, str], session_id: str, turn_id: str, submission_id: str, output: str, usage: TokenUsageInfo | None, observations: Callable[[], _ObservationBuffer], run_usage: RunUsage | None=None) -> None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass"
         ],
         "exports": {},
         "imports": [
           "from collections.abc import Callable",
           "from typing import Any",
           "from .rate_limits import ApiRateLimits",
+          "from .usage import RunUsage",
           "from .agent import Agent",
           "from .observation import _ObservationBuffer",
           "from .usage import TokenUsageInfo"
@@ -1898,6 +1910,7 @@
         "references": {
           "Agent": "agents.agent.Agent",
           "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
+          "RunUsage": "agents.usage.RunUsage",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
           "_ObservationBuffer": "agents.observation._ObservationBuffer"
         }
@@ -2434,7 +2447,7 @@
           "ParametersT = ParamSpec('ParametersT')",
           "ToolTimeoutBehavior: TypeAlias = Literal['raise_exception', 'error_as_result']",
           "class ToolTimeoutError(TimeoutError):\n\n    def __init__(self, tool_name: str, timeout_seconds: float):\n        pass",
-          "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)\n    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass",
+          "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)\n    realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)\n    _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(default=None, init=False, repr=False, compare=False)\n\n    def report_usage(self, usage: TokenUsage | None, *, requests: int=1) -> None:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: None=None, output_type: None=None) -> bool:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[_DecisionT], output_type: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: type[_DecisionT], choices: None=None) -> _DecisionT:\n        pass\n\n    @overload\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, output_type: Any, choices: None=None) -> Any:\n        pass\n\n    async def decide(self, question: str, *, input: DecisionInput, provider: DecisionProvider | None=None, choices: Sequence[Any] | None=None, output_type: Any=None) -> Any:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | BackgroundResult[ToolOutput] | Awaitable[ToolOutput | BackgroundResult[ToolOutput]]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n    timeout_behavior: ToolTimeoutBehavior = 'raise_exception'\n    timeout_error_function: Callable[[ToolContext[Any], ToolTimeoutError], str | Awaitable[str]] | None = field(default=None, repr=False)\n    namespace: str | None = None\n    namespace_description: str | None = None\n    finish_turn: bool = False\n    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False\n    run_before_approval: bool = False\n    is_enabled: bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
           "_PythonTool: TypeAlias = FunctionTool[Any, Any, Callable[[ToolContextT, PolicyContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]]",
           "Tool: TypeAlias = _PythonTool[ToolContextT, ToolContextT] | _PythonTool[ToolContextT, object] | _PythonTool[object, ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | FileSearch | CodeInterpreter | ImageGeneration | NativeAgents[ToolContextT]",
@@ -2469,7 +2482,8 @@
           "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
           "from .decisions import DecisionInput, DecisionProvider",
           "from .native_agents import ChildStepContext",
-          "from .turn import Turn"
+          "from .turn import Turn",
+          "from .usage import TokenUsage"
         ],
         "references": {
           "ActionRequested": "agents.manual.ActionRequested",
@@ -2492,6 +2506,7 @@
           "ReplaceArguments": "agents.native_interception.ReplaceArguments",
           "ResultT": "agents.manual.ResultT",
           "StdioMCP": "agents.mcp.StdioMCP",
+          "TokenUsage": "agents.usage.TokenUsage",
           "ToolCallInfo": "agents.tools.ToolCallInfo",
           "ToolOutput": "agents.tools.ToolOutput",
           "ToolRef": "agents.tools.ToolRef",
@@ -4514,6 +4529,7 @@
       "ResponseIntegrityReason",
       "ResponsesModel",
       "RunBudget",
+      "RunUsage",
       "SQLAlchemySessionStore",
       "SQLiteSessionStore",
       "Session",
@@ -4582,7 +4598,7 @@
       "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, WebSearch as WebSearch",
       "from .turn import ChildTurn as ChildTurn, PendingRequests as PendingRequests, SteeringReceipt as SteeringReceipt, Turn as Turn, TurnNeedsAttention as TurnNeedsAttention",
       "from .turn_receipt import ExecutorNetworkReceipt as ExecutorNetworkReceipt, ExecutorPolicyReceipt as ExecutorPolicyReceipt, InstructionFileReceipt as InstructionFileReceipt, TurnReceipt as TurnReceipt",
-      "from .usage import RunBudget as RunBudget"
+      "from .usage import RunBudget as RunBudget, RunUsage as RunUsage"
     ]
   }
 }

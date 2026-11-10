@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from agents import Agent, ToolContext, function_tool
+from agents import Agent, RunUsage, ToolContext, function_tool
 from agents.usage import TokenUsage
 
 from .native_fixtures import assistant_output, function_call
@@ -39,6 +39,7 @@ async def test_run_usage_captures_reports_and_ignores_result_json(responses):
     ).session() as session:
         turn = await session.submit("Run")
         result = await turn.get_result()
+        assert isinstance(result.run_usage, RunUsage)
         assert result.run_usage.requests == 3
         assert result.run_usage.input_tokens == 25
         assert result.run_usage.output_tokens == 8
