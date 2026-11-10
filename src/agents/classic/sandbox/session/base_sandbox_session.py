@@ -238,6 +238,7 @@ class BaseSandboxSession(abc.ABC):
             self.state.manifest,
             provider_backend_id=self.state.type,
         )
+        self.state.manifest._validate_git_repo_hosts()
         try:
             await self._ensure_backend_started()
             self._start_workspace_root_ready = self.state.workspace_root_ready
@@ -1450,10 +1451,12 @@ class BaseSandboxSession(abc.ABC):
         _ = (only_ephemeral, session_running)
         from .._mount_security import validate_manifest_mount_credential_boundaries
 
+        resolved_manifest = manifest or self.state.manifest
         validate_manifest_mount_credential_boundaries(
-            manifest or self.state.manifest,
+            resolved_manifest,
             provider_backend_id=self.state.type,
         )
+        resolved_manifest._validate_git_repo_hosts()
 
     @redact_mount_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:

@@ -3,16 +3,18 @@ from __future__ import annotations
 import errno
 import hashlib
 import io
+import ipaddress
 import os
 import re
 import stat
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_serializer, field_validator
 
+from ...exceptions import _detach_source_exception_traceback, _raise_data_redacted_error
 from ..errors import (
     GitCloneError,
     GitCopyError,
@@ -21,6 +23,8 @@ from ..errors import (
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
+    _InvalidGitHostError,
+    _redact_git_host_error_data,
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
@@ -31,6 +35,8 @@ if TYPE_CHECKING:
     from ..session.base_sandbox_session import BaseSandboxSession
 
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+_GIT_AUTHORITY_RE = re.compile(r"(?:([^:\[\]]+)|\[([0-9a-fA-F:.]+)\])(?::([0-9]+))?")
+_GIT_REG_NAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+")
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
@@ -47,6 +53,14 @@ def _sha256_handle(handle: io.BufferedReader) -> str:
             break
         digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_git_repo_entry_hosts(entries: Iterable[BaseEntry]) -> None:
+    for entry in entries:
+        if isinstance(entry, Dir):
+            _validate_git_repo_entry_hosts(entry.children.values())
+        elif isinstance(entry, GitRepo) and entry._validated_host() is None:
+            raise _InvalidGitHostError()
 
 
 class Dir(BaseEntry):
@@ -81,12 +95,19 @@ class Dir(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        await session.mkdir(dest, parents=True)
-        await self._apply_metadata(session, dest)
-        return await session._apply_entry_batch(
-            [(dest / Path(rel_dest), artifact) for rel_dest, artifact in self.children.items()],
-            base_dir=base_dir,
-        )
+        try:
+            _validate_git_repo_entry_hosts(self.children.values())
+            await session.mkdir(dest, parents=True)
+            await self._apply_metadata(session, dest)
+            return await session._apply_entry_batch(
+                [(dest / Path(rel_dest), artifact) for rel_dest, artifact in self.children.items()],
+                base_dir=base_dir,
+            )
+        except _InvalidGitHostError as error:
+            _detach_source_exception_traceback(error)
+
+        del self, session, dest, base_dir
+        _raise_data_redacted_error(_InvalidGitHostError())
 
 
 class File(BaseEntry):
@@ -739,7 +760,7 @@ class LocalDir(BaseEntry):
 class GitRepo(BaseEntry):
     type: Literal["git_repo"] = "git_repo"
     is_dir: bool = True
-    host: str = "github.com"
+    host: str = Field(default="github.com", repr=False)
     repo: str  # "owner/name" (or any host-specific path)
     ref: str  # tag/branch/sha
     subpath: str | None = None
@@ -748,12 +769,16 @@ class GitRepo(BaseEntry):
         _ = context
         self.permissions.directory = True
 
+    @_redact_git_host_error_data
     async def apply(
         self,
         session: BaseSandboxSession,
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        host = self._validated_host()
+        if host is None:
+            raise _InvalidGitHostError()
         git_subpath = self._validate_subpath()
 
         # Ensure git exists in the container.
@@ -766,7 +791,7 @@ class GitRepo(BaseEntry):
             raise GitMissingInImageError(context=context)
 
         tmp_dir = f"/tmp/sandbox-git-{session.state.session_id.hex}-{uuid.uuid4().hex}"
-        url = f"https://{self.host}/{self.repo}.git"
+        url = f"https://{host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
         try:
@@ -810,6 +835,25 @@ class GitRepo(BaseEntry):
         # Receipt: leave checksums empty for now. (Computing them would
         # require reading each file back out of the container.)
         return []
+
+    def _validated_host(self) -> str | None:
+        host = self.host
+        authority = _GIT_AUTHORITY_RE.fullmatch(host)
+        if authority is None:
+            return None
+        name, ipv6, port = authority.groups()
+        port = (port or "").lstrip("0")
+        if len(port) > 5 or (port and int(port) > 65535):
+            return None
+        try:
+            if ipv6 is not None:
+                ipaddress.IPv6Address(ipv6)
+                return host
+            if not name.isascii():
+                name = name.encode("idna").decode("ascii")
+            return host if _GIT_REG_NAME_RE.fullmatch(name) is not None else None
+        except ValueError:
+            return None
 
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:
