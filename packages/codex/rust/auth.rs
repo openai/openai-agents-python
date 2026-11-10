@@ -131,6 +131,10 @@ impl ExternalAuth for ApiKey {
         !self.app_managed_oauth
     }
 
+    fn terminal_auto_compaction_limit_errors(&self) -> bool {
+        self.app_managed_oauth
+    }
+
     fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
         if self.app_managed_oauth {
             return Box::pin(async {
