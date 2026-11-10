@@ -467,7 +467,11 @@
     {
       "path": "sdk-realtime-provider-events-and-scopes.patch",
       "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
+    },
+    {
+      "path": "sdk-realtime-application-update-rejections.patch",
+      "sha256": "7371166d4fd71f8ea0aeb1d15746da37618e8cb5583bceb209ce2c4a1061368b"
     }
   ],
-  "result_tree": "8b94daf19ae842d7c487252536a659445e60be41"
+  "result_tree": "15107b3cd800c3d17da98d76293cb3589d408437"
 }

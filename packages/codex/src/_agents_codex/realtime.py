@@ -856,6 +856,7 @@ class RealtimeSession:
         self._prompt_settings = (
             {"prompt": deepcopy(self._settings["prompt"])} if "prompt" in self._settings else {}
         )
+        self._instructions_override = config.instructions
         if config.adapter is not None:
             if not callable(getattr(config.adapter, "connect", None)):
                 raise TypeError("adapter must provide an async connect method")
@@ -908,6 +909,7 @@ class RealtimeSession:
         self._function_roots: dict[str, asyncio.Task[None]] = {}
         self._profile_updates: set[asyncio.Task[None]] = set()
         self._agent_update_lock = asyncio.Lock()
+        self._configuration_lock = asyncio.Lock()
         self._voice_profile_ids: set[str] = set()
         self._voice_target: dict[str, Any] | None = None
         self._agent_admissions = 0
@@ -1227,18 +1229,17 @@ class RealtimeSession:
 
                 async def send(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                     try:
+                        if snapshot.get("type") == "session.update":
+                            await self._publish_settings_update(
+                                snapshot.get("session", {}), event=snapshot
+                            )
+                            return None
                         if serialized:
                             async with self._input_lock:
                                 self._check_live()
                                 result = await self._call("send_event", event=snapshot)
                         else:
                             result = await self._call("send_event", event=snapshot)
-                        if snapshot.get("type") == "session.update" and "prompt" in snapshot.get(
-                            "session", {}
-                        ):
-                            self._prompt_settings = {
-                                "prompt": deepcopy(snapshot["session"]["prompt"])
-                            }
                         if snapshot.get("type") == "response.cancel":
                             try:
                                 await self._apply_interrupt_receipt(
@@ -1374,8 +1375,24 @@ class RealtimeSession:
                 raise RuntimeError(f"A Realtime adapter callback cannot {operation}")
             scope = scope.parent
 
+    async def _publish_settings_update(
+        self, update: dict[str, Any], *, event: dict[str, Any] | None = None
+    ) -> None:
+        async with self._configuration_lock:
+            self._check_live()
+            # Both native operations await this revision's provider receipt.
+            if event is None:
+                await self._call("update", update=update)
+            else:
+                await self._call("send_event", event=event)
+            instructions = update.get("instructions")
+            if isinstance(instructions, str):
+                self._instructions_override = instructions
+            if "prompt" in update:
+                self._prompt_settings = {"prompt": deepcopy(update["prompt"])}
+
     async def update(self, update: NativeRealtimeSessionUpdate) -> None:
-        """Submit sparse settings; remote confirmation arrives through events.
+        """Apply sparse settings and wait for provider confirmation.
 
         Omitted fields preserve existing values. Explicit nulls remain null;
         the provider decides which settings can change during a live session.
@@ -1388,12 +1405,7 @@ class RealtimeSession:
             self._check_adapter_operation("update its own Realtime session")
             payload = _serialize_update(update)
 
-            async def publish(captured: dict[str, Any]) -> None:
-                await self._call("update", update=captured)
-                if "prompt" in captured:
-                    self._prompt_settings = {"prompt": deepcopy(captured["prompt"])}
-
-            await _join(asyncio.create_task(publish(payload)))
+            await _join(asyncio.create_task(self._publish_settings_update(payload)))
         except BaseException as error:
             _clear_adapter_error_frames(error)
             raise
@@ -2597,7 +2609,7 @@ class RealtimeSession:
             )
         instructions, update, definitions, selection_id = await _resolve_realtime_configuration(
             self._session,
-            self._config.instructions,
+            self._instructions_override,
             self._prompt_settings,
             self._direct_tools,
             target=target,
@@ -2606,28 +2618,31 @@ class RealtimeSession:
             source_snapshot=source_snapshot,
             source_profile=source_profile,
         )
-        if not self._live:
-            return
-        # Core validates this exact committed target and captures its settings.
-        # Await the provider ACK outside the sole native event reader.
-        acknowledgement = await self._call(
-            "update",
-            update={
-                **update,
-                **({"instructions": instructions} if instructions is not None else {}),
-            },
-            profile={
-                "response_id": response_id,
-                "delegation_id": delegation_id,
-                "target": target,
-                "function_tools": definitions,
-                "expected_selection_id": selection_id,
-            },
-        )
-        if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
-            return
-        if source_profile is not None and target is not None:
-            self._voice_target = dict(target)
+        async with self._configuration_lock:
+            if not self._live:
+                return
+            # Settings can settle while the Agent's configuration callbacks run.
+            update.update(self._prompt_settings)
+            if self._instructions_override is not None:
+                instructions = self._instructions_override
+            if instructions is not None:
+                update["instructions"] = instructions
+            # Core validates this exact committed target and waits for its receipt.
+            acknowledgement = await self._call(
+                "update",
+                update=update,
+                profile={
+                    "response_id": response_id,
+                    "delegation_id": delegation_id,
+                    "target": target,
+                    "function_tools": definitions,
+                    "expected_selection_id": selection_id,
+                },
+            )
+            if isinstance(acknowledgement, dict) and acknowledgement.get("applied") is False:
+                return
+            if source_profile is not None and target is not None:
+                self._voice_target = dict(target)
 
     def _start_function_batch(self, value: dict[str, Any]) -> None:
         call_ids: tuple[str, ...] = tuple(value.get("function_call_ids") or ())

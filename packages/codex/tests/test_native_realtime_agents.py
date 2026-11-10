@@ -232,3 +232,97 @@ async def test_live_voice_graph_keeps_issued_callback_and_root_checkpoint(realti
         async with original.session(state=saved) as restored:
             assert await restored.get_active_agent() is original
             assert not restored._voice_profiles
+
+
+@pytest.mark.parametrize("raw", [False, True])
+async def test_acknowledged_session_overrides_survive_voice_agent_change(realtime_peer, raw):
+    peer = realtime_peer
+    target = Agent(
+        name="Target",
+        instructions="Target backend",
+        realtime=RealtimeAgentConfig(
+            instructions="Target instructions", prompt={"id": "target-prompt"}
+        ),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-overrides-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="Opening", instructions="Opening backend", provider=provider
+        ).session() as session,
+        session.realtime(
+            config=RealtimeConfig(
+                model="fixture-realtime",
+                instructions="Opening instructions",
+                settings={"prompt": {"id": "opening-prompt"}},
+            )
+        ) as voice,
+    ):
+        instructions = "" if raw else "Accepted voice instructions"
+        prompt = None if raw else {"id": "accepted-prompt"}
+        peer.auto_ack_updates = False
+        start = len(peer.frames)
+        updating = asyncio.create_task(
+            voice.send_event(
+                {
+                    "type": "session.update",
+                    "session": {"instructions": instructions, "prompt": prompt},
+                }
+            )
+            if raw
+            else voice.update({"instructions": instructions, "prompt": prompt})
+        )
+        submitted = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        pending_before_ack = not updating.done()
+        await peer.ack_next_update()
+        await updating
+        assert submitted["session"]["instructions"] == instructions
+        assert submitted["session"]["prompt"] == prompt
+        assert pending_before_ack
+        peer.auto_ack_updates = True
+        start = len(peer.frames)
+        await voice.update_agent(target)
+        refreshed = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        assert refreshed["session"]["instructions"] == instructions
+        assert refreshed["session"]["prompt"] == prompt
+        assert await voice.get_active_agent() is target
+
+
+async def test_agent_configuration_uses_override_accepted_during_callback(realtime_peer):
+    peer = realtime_peer
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def resolve(_):
+        entered.set()
+        await release.wait()
+        return "Resolved instructions"
+
+    target = Agent(
+        name="Target",
+        instructions="Target backend",
+        realtime=RealtimeAgentConfig(instructions=resolve),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-overlap-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Opening backend", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        refreshing = asyncio.create_task(voice.update_agent(target))
+        try:
+            await entered.wait()
+            await voice.update({"instructions": "Accepted during callback"})
+            start = len(peer.frames)
+        finally:
+            release.set()
+        await refreshing
+        refreshed = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        assert refreshed["session"]["instructions"] == "Accepted during callback"

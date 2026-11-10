@@ -10,6 +10,7 @@ import pytest
 
 from agents import Agent, NativeProvider, function_tool
 from agents.realtime import (
+    RealtimeAgentConfig,
     RealtimeConfig,
     RealtimeConversationItemObserved,
     RealtimeDelegation,
@@ -124,6 +125,91 @@ async def test_provider_rejection_releases_only_the_matching_response_create(
         else:
             pytest.fail("the queued response did not finish")
         assert peer.connections == 1
+
+
+async def test_rejected_raw_session_update_preserves_accepted_prompt_and_live_voice(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    accepted_prompt = {"id": "accepted-explicit-prompt"}
+    event_id = "rejected-raw-prompt-update"
+    target = Agent(
+        name="Target",
+        instructions="Target backend instructions.",
+        realtime=RealtimeAgentConfig(prompt={"id": "target-agent-prompt"}),
+    )
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-rejected-session-update",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Opening instructions.", provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", settings={"prompt": accepted_prompt})
+        ) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        peer.auto_ack_updates = False
+        cursor = len(peer.frames)
+        updating = asyncio.create_task(
+            voice.send_event(
+                {
+                    "type": "session.update",
+                    "event_id": event_id,
+                    "session": {"prompt": {"id": "rejected-prompt"}},
+                }
+            )
+        )
+        try:
+            submitted = await peer.frame(
+                lambda frame: frame.get("event_id") == event_id, after=cursor
+            )
+            assert submitted["type"] == "session.update"
+            assert submitted["session"]["prompt"] == {"id": "rejected-prompt"}
+            assert not updating.done()
+            assert peer.socket is not None
+            await peer.socket.send_json(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_prompt",
+                        "event_id": event_id,
+                        "message": "Synthetic prompt rejection.",
+                    },
+                }
+            )
+            with pytest.raises(RuntimeError, match="reject"):
+                await updating
+            async for event in events:
+                if isinstance(event, RealtimeProviderRequestError):
+                    assert event == RealtimeProviderRequestError("invalid_prompt", event_id)
+                    break
+            else:
+                pytest.fail("the correlated session-update rejection was not observed")
+            peer.auto_ack_updates = True
+            cursor = peer.frames.index(submitted, cursor) + 1
+            await voice.update_agent(target)
+            refreshed = await peer.frame(
+                lambda frame: frame["type"] == "session.update", after=cursor
+            )
+            assert refreshed["session"]["prompt"] == accepted_prompt
+            assert await voice.get_active_agent() is target
+            await voice.request_response()
+            async for event in events:
+                if isinstance(event, RealtimeResponse) and event.status == "done":
+                    assert event.response_id == "voice-response-1"
+                    break
+            else:
+                pytest.fail("the recovered voice response did not complete")
+            assert peer.connections == 1
+            assert not peer.disconnected.is_set()
+        finally:
+            if not updating.done():
+                await voice.aclose()
+            await asyncio.gather(updating, return_exceptions=True)
 
 
 async def test_raw_item_create_at_known_predecessor_and_retrieve(
