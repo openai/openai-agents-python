@@ -19,6 +19,7 @@ pub(crate) struct SavedCodexLogin {
     pub codex_home: Option<PathBuf>,
     pub account_id: Option<String>,
     pub expected_binding: Option<String>,
+    pub credential_directory: Option<PathBuf>,
 }
 
 pub(crate) struct CodexAccount {
@@ -26,6 +27,7 @@ pub(crate) struct CodexAccount {
     pub plan_type: String,
     pub binding: String,
     pub auth_file: PathBuf,
+    pub credential_directory: Option<PathBuf>,
 }
 
 impl SavedCodexLogin {
@@ -39,10 +41,38 @@ impl SavedCodexLogin {
         .canonicalize()
         .context("Cannot open the Codex login directory")?;
         let auth_file = codex_home.join("auth.json");
-        let manager = AuthManager::shared_saved_chatgpt(codex_home, config.auth_route_config())
-            .map_err(|_| anyhow::anyhow!(
+        let credential_directory = self
+            .credential_directory
+            .map(|directory| {
+                ensure!(
+                    directory.is_absolute(),
+                    "CodexLogin.credential_directory must be an absolute path"
+                );
+                let directory = directory
+                    .canonicalize()
+                    .context("Cannot open the Codex credential directory")?;
+                ensure!(
+                    directory.parent().is_some() && directory.is_dir(),
+                    "CodexLogin.credential_directory must be a directory below the filesystem root"
+                );
+                let target = auth_file
+                    .canonicalize()
+                    .context("Cannot resolve the saved Codex login")?;
+                ensure!(
+                    target == directory.join("auth.json"),
+                    "The saved Codex login must resolve to auth.json in CodexLogin.credential_directory"
+                );
+                Ok(directory)
+            })
+            .transpose()?;
+        // Reload and refresh use the same directory as the executor's deny.
+        let storage_home = credential_directory.clone().unwrap_or(codex_home);
+        let manager = AuthManager::shared_saved_chatgpt(storage_home, config.auth_route_config())
+            .map_err(|_| {
+            anyhow::anyhow!(
                 "No usable saved Codex OAuth login. Sign in with ChatGPT using codex login first."
-            ))?;
+            )
+        })?;
         let auth = manager
             .auth_cached()
             .context("Saved Codex OAuth login is unavailable")?;
@@ -79,6 +109,7 @@ impl SavedCodexLogin {
                 plan_type,
                 binding,
                 auth_file,
+                credential_directory,
             },
         ))
     }

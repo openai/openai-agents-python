@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from agents import (
     CodexLogin,
     Environment,
     LocalStorage,
+    LocalStorageMount,
     NativeError,
     NativeProvider,
     PromptedOutput,
@@ -106,11 +108,13 @@ def codex_endpoint(responses, monkeypatch):
     return responses
 
 
-def codex_agent(home: Path | None, **kwargs):
+def codex_agent(home: Path | None, *, credential_directory: Path | None = None, **kwargs):
     return Agent(
         instructions=INSTRUCTIONS,
         model="gpt-5.1-codex",
-        provider=NativeProvider(auth=CodexLogin(codex_home=home)),
+        provider=NativeProvider(
+            auth=CodexLogin(codex_home=home, credential_directory=credential_directory)
+        ),
         **kwargs,
     )
 
@@ -120,7 +124,19 @@ async def submit(session, prompt: str):
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("overlap", ["cwd", "additional", "symlink_target", "hard_link"])
+@pytest.mark.parametrize(
+    "overlap",
+    [
+        "cwd",
+        "additional",
+        "symlink_target",
+        "hard_link",
+        pytest.param(
+            "trusted_read_alias",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
+        ),
+    ],
+)
 async def test_local_executor_rejects_saved_login_overlap(
     codex_endpoint: ResponsesFixture,
     tmp_path: Path,
@@ -145,15 +161,120 @@ async def test_local_executor_rejects_saved_login_overlap(
     elif overlap == "hard_link":
         (workspace / "ordinary-name").hardlink_to(auth_file)
         reason = "writable roots contain a hard link"
+    elif overlap == "trusted_read_alias":
+        agent = codex_agent(home, credential_directory=home)
+        (tmp_path / "readable-alias").hardlink_to(auth_file)
+        reason = "requires a saved Codex login file without hard links"
 
     with pytest.raises(RuntimeError, match=reason):
         async with agent.session(
             environment=Environment.local(
-                cwd=workspace, writable_roots=roots, tools=["exec_command"]
+                cwd=workspace,
+                writable_roots=roots,
+                tools=["exec_command"],
+                write_policy=(
+                    "trusted_workspace_write" if overlap == "trusted_read_alias" else "strict"
+                ),
             ),
         ):
             pytest.fail("A local executor opened with access to the saved login")
     assert codex_endpoint.requests == []
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_trusted_local_executor_denies_selected_saved_login_reads(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = saved_login(tmp_path / "login")
+    auth_file = home / "auth.json"
+    credential_directory = tmp_path / "credentials"
+    credential_directory.mkdir()
+    staging = credential_directory / "staging"
+    staging.mkdir()
+    target = credential_directory / "auth.json"
+    auth_file.rename(target)
+    auth_file.symlink_to(target)
+    readable = home / "public"
+    readable.write_text("readable")
+
+    command = f'set -eu; test "$(cat {shlex.quote(str(readable))})" = readable; '
+    for path in (auth_file, target):
+        command += f"if ( : < {shlex.quote(str(path))} ) 2>/dev/null; then exit 17; fi; "
+    codex_endpoint.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 20_000}, "read"
+        )
+    )
+    codex_endpoint.respond(assistant_output("done"))
+    selected = Environment.local(
+        cwd=workspace, tools=["exec_command"], write_policy="trusted_workspace_write"
+    )
+    agent = codex_agent(home, credential_directory=credential_directory)
+    async with timeout(40), agent.session(environment=selected) as session:
+        grant = await session.submit("Reject this grant.", writable_roots=[staging.resolve()])
+        with pytest.raises(
+            NativeError, match="writable roots must stay outside the Codex credential directory"
+        ) as refused:
+            await grant.get_result()
+        assert refused.value.effects == "not_started"
+        assert codex_endpoint.requests == []
+        assert (await submit(session, "Check the file read boundaries.")).final_output == "done"
+    output = tool_output(codex_endpoint.requests[-1], "read")
+    assert "Process exited with code 0" in output, output
+    assert len(codex_endpoint.request_headers) == 2
+    assert all(
+        headers["authorization"] == "Bearer saved-token"
+        for headers in codex_endpoint.request_headers
+    )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux storage mounts")
+@pytest.mark.requires_native_linux_sandbox
+async def test_mixed_saved_login_remains_usable_with_strict_execution(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = saved_login(tmp_path / "mixed")
+    ordinary = home / "ordinary"
+    ordinary.mkdir()
+    readable = ordinary / "note"
+    readable.write_text("readable")
+    auth_file = home / "auth.json"
+    original = auth_file.read_bytes()
+    agent = codex_agent(home)
+
+    with pytest.raises(
+        RuntimeError, match=r"CodexLogin\.credential_directory or strict write policy"
+    ):
+        async with agent.session(
+            environment=Environment.local(cwd=workspace, write_policy="trusted_workspace_write")
+        ):
+            pytest.fail("Trusted execution opened a mixed credential directory")
+    assert codex_endpoint.requests == []
+
+    command = (
+        f'set -eu; test "$(cat {shlex.quote(str(readable))})" = readable; '
+        f"if ( : < {shlex.quote(str(auth_file))} ) 2>/dev/null; then exit 17; fi; "
+        "printf scoped > result"
+    )
+    codex_endpoint.respond(function_call("exec_command", {"cmd": command, "login": False}, "read"))
+    codex_endpoint.respond(assistant_output("done"))
+    environment = Environment.local(
+        cwd=workspace,
+        tools=["exec_command"],
+        mounts=[LocalStorageMount(ordinary, ordinary, strategy="local_bind", read_only=True)],
+    )
+    async with timeout(40), agent.session(environment=environment) as session:
+        assert (await submit(session, "Read the ordinary note.")).final_output == "done"
+    output = tool_output(codex_endpoint.requests[-1], "read")
+    assert "Process exited with code 0" in output, output
+    assert (workspace / "result").read_text() == "scoped"
+    assert auth_file.read_bytes() == original
+    assert readable.read_text() == "readable"
+    assert codex_endpoint.request_headers[0]["authorization"] == "Bearer saved-token"
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
