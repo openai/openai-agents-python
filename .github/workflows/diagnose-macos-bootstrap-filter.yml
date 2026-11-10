@@ -24,7 +24,9 @@ jobs:
           scratch=$(cd "$scratch" && pwd -P)
           work="$scratch/work"
           outside="$scratch/outside"
-          mkdir "$work" "$outside"
+          capture="$work/capture"
+          mkdir -p "$capture" "$outside"
+          cd "$work"
           owned_service=
           cleanup() {
             if [[ -n "$owned_service" ]] && /bin/launchctl print "$owned_service" >/dev/null 2>&1; then
@@ -38,68 +40,173 @@ jobs:
           }
           trap cleanup EXIT
 
-          clean=(/usr/bin/env -i PATH=/usr/bin:/bin "HOME=$work" "TMPDIR=$work")
+          clean=(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/sh "HOME=$work" "TMPDIR=$work")
           ssh=(/usr/bin/ssh -G -F /dev/null -o CanonicalizeHostname=no 127.0.0.1)
           record() {
             local name=$1 status=0
             shift
-            "$@" >"$scratch/$name.out" 2>"$scratch/$name.err" &
+            "$@" >"$capture/$name.out" 2>"$capture/$name.err" &
             probe_pid=$!
             wait "$probe_pid" || status=$?
             printf '%s exit %d pid %d\n' "$name" "$status" "$probe_pid"
-            if [[ -s "$scratch/$name.err" ]]; then
-              /usr/bin/head -n 8 "$scratch/$name.err"
+            if [[ -s "$capture/$name.err" ]]; then
+              /usr/bin/head -n 8 "$capture/$name.err"
             fi
             return "$status"
           }
 
           record host-id "${clean[@]}" /usr/bin/id -F
           record host-ssh "${clean[@]}" "${ssh[@]}"
-          [[ -s "$scratch/host-id.out" ]]
-          /usr/bin/grep -q '^hostname 127\.0\.0\.1$' "$scratch/host-ssh.out"
+          [[ -s "$capture/host-id.out" ]]
+          /usr/bin/grep -q '^hostname 127\.0\.0\.1$' "$capture/host-ssh.out"
 
-          cat >"$scratch/base.sb" <<'SBPL'
+          # This is the exact Core base used by the prior workspace-write control.
+          cat >"$scratch/sdk-base.sb" <<'SBPL'
           (version 1)
+
+          ; inspired by Chrome's sandbox policy:
+          ; https://source.chromium.org/chromium/chromium/src/+/main:sandbox/policy/mac/common.sb;l=273-319;drc=7b3962fe2e5fc9e2ee58000dc8fbf3429d84d3bd
+          ; https://source.chromium.org/chromium/chromium/src/+/main:sandbox/policy/mac/renderer.sb;l=64;drc=7b3962fe2e5fc9e2ee58000dc8fbf3429d84d3bd
+
+          ; start with closed-by-default
           (deny default)
-          (allow file-read-metadata)
-          (allow file-read* file-map-executable
-              (subpath "/System")
-              (subpath "/usr/lib")
-              (subpath "/usr/share")
-              (subpath "/usr/bin")
-              (subpath "/bin")
-              (literal "/dev/null")
-              (literal "/private/etc/passwd")
-              (literal "/private/etc/group")
-              (subpath (param "WORK")))
-          (allow process-exec process-fork)
-          (allow sysctl-read)
+
+          ; child processes inherit the policy of their parent
+          (allow process-exec)
+          (allow process-fork)
+          (allow signal (target same-sandbox))
+
+          ; process-info
+          (allow process-info* (target same-sandbox))
+
+          (allow file-write-data
+            (require-all
+              (path "/dev/null")
+              (vnode-type CHARACTER-DEVICE)))
+
+          ; sysctls permitted.
+          (allow sysctl-read
+            (sysctl-name "hw.activecpu")
+            (sysctl-name "hw.busfrequency_compat")
+            (sysctl-name "hw.byteorder")
+            (sysctl-name "hw.cacheconfig")
+            (sysctl-name "hw.cachelinesize_compat")
+            (sysctl-name "hw.cpufamily")
+            (sysctl-name "hw.cpufrequency_compat")
+            (sysctl-name "hw.cputype")
+            (sysctl-name "hw.l1dcachesize_compat")
+            (sysctl-name "hw.l1icachesize_compat")
+            (sysctl-name "hw.l2cachesize_compat")
+            (sysctl-name "hw.l3cachesize_compat")
+            (sysctl-name "hw.logicalcpu_max")
+            (sysctl-name "hw.machine")
+            (sysctl-name "hw.model")
+            (sysctl-name "hw.memsize")
+            (sysctl-name "hw.ncpu")
+            (sysctl-name "hw.nperflevels")
+            ; Chrome locks these CPU feature detection down a bit more tightly,
+            ; but mostly for fingerprinting concerns which isn't an issue for codex.
+            (sysctl-name-prefix "hw.optional.arm.")
+            (sysctl-name-prefix "hw.optional.armv8_")
+            (sysctl-name "hw.packages")
+            (sysctl-name "hw.pagesize_compat")
+            (sysctl-name "hw.pagesize")
+            (sysctl-name "hw.physicalcpu")
+            (sysctl-name "hw.physicalcpu_max")
+            (sysctl-name "hw.logicalcpu")
+            (sysctl-name "hw.cpufrequency")
+            (sysctl-name "hw.tbfrequency_compat")
+            (sysctl-name "hw.vectorunit")
+            (sysctl-name "machdep.cpu.brand_string")
+            (sysctl-name "kern.argmax")
+            (sysctl-name "kern.hostname")
+            (sysctl-name "kern.maxfilesperproc")
+            (sysctl-name "kern.maxproc")
+            (sysctl-name "kern.osproductversion")
+            (sysctl-name "kern.osrelease")
+            (sysctl-name "kern.ostype")
+            (sysctl-name "kern.osvariant_status")
+            (sysctl-name "kern.osversion")
+            (sysctl-name "kern.secure_kernel")
+            ; Python's ProcessPoolExecutor queries this through sysconf(_SC_SEM_NSEMS_MAX).
+            (sysctl-name "kern.sysv.semmns")
+            (sysctl-name "kern.usrstack64")
+            (sysctl-name "kern.version")
+            (sysctl-name "sysctl.proc_cputype")
+            (sysctl-name "vm.loadavg")
+            (sysctl-name-prefix "hw.perflevel")
+            (sysctl-name-prefix "kern.proc.pgrp.")
+            (sysctl-name-prefix "kern.proc.pid.")
+            (sysctl-name-prefix "net.routetable.")
+          )
+
+          ; Allow Java to read some CPU info. This is misclassified as a "write" because
+          ; userspace passes a memory buffer to the sysctl, but conceptually it is a read.
+          (allow sysctl-write
+            (sysctl-name "kern.grade_cputype"))
+
+          ; IOKit
+          (allow iokit-open
+            (iokit-registry-entry-class "RootDomainUserClient")
+          )
+
+          ; needed to look up user info, see https://crbug.com/792228
+          (allow mach-lookup
+            (global-name "com.apple.system.opendirectoryd.libinfo")
+          )
+
+          ; Needed for python multiprocessing on MacOS for the SemLock
+          (allow ipc-posix-sem)
+
+          ; Needed for PyTorch/libomp on macOS to register OpenMP runtimes.
+          (allow ipc-posix-shm-read-data
+            ipc-posix-shm-write-create
+            ipc-posix-shm-write-unlink
+            (ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$"))
+
+          (allow mach-lookup
+            (global-name "com.apple.PowerManagement.control")
+          )
+
+          ; allow openpty()
+          (allow pseudo-tty)
+          (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+          (allow file-read* file-write*
+            (require-all
+              (regex #"^/dev/ttys[0-9]+")
+              (extension "com.apple.sandbox.pty")))
+          ; PTYs created before entering seatbelt may lack the extension; allow ioctl
+          ; on those slave ttys so interactive shells detect a TTY and remain functional.
+          (allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
+          SBPL
+          printf '%s  %s\n' '5103332ddb8885ee5e1926de6c0ef23a61f4e55e31297506ae05fa4e0b24ba74' "$scratch/sdk-base.sb" | /usr/bin/shasum -a 256 -c
+          cp "$scratch/sdk-base.sb" "$scratch/base.sb"
+          cat >>"$scratch/base.sb" <<'SBPL'
+          (allow file-read*)
           (allow file-write* (subpath (param "WORK")))
+          (deny mach-lookup (xpc-service-name-prefix ""))
+          (deny system-fcntl (fcntl-command 80 110))
           SBPL
           probe() {
             local name=$1 profile=$2
             shift 2
-            record "$name" "${clean[@]}" /usr/bin/sandbox-exec -D "WORK=$work" -f "$scratch/$profile.sb" "$@"
+            record "$name" "${clean[@]}" /usr/bin/sandbox-exec -p "$(/bin/cat "$scratch/$profile.sb")" "-DWORK=$work" -- "$@"
           }
-          probe base base /usr/bin/true
+          probe sdk-base base /usr/bin/true
 
-          cp "$scratch/base.sb" "$scratch/predicate.sb"
-          cat >>"$scratch/predicate.sb" <<'SBPL'
+          cp "$scratch/base.sb" "$scratch/deny-if-enabled.sb"
+          cat >>"$scratch/deny-if-enabled.sb" <<'SBPL'
           (if have_message_filtering?
-              (deny file-write* (literal (string-append (param "WORK") "/feature-off")))
-              (deny file-write* (literal (string-append (param "WORK") "/feature-on"))))
+              (deny process-exec (literal "/usr/bin/true")))
           SBPL
-          if probe predicate predicate /usr/bin/true; then
-            probe predicate-on predicate /bin/sh -c 'printf on > "$1"' sh "$work/feature-on" || true
-            probe predicate-off predicate /bin/sh -c 'printf off > "$1"' sh "$work/feature-off" || true
-            if [[ -f "$work/feature-on" && ! -e "$work/feature-off" ]]; then
-              printf 'have_message_filtering? true\n'
-            elif [[ -f "$work/feature-off" && ! -e "$work/feature-on" ]]; then
-              printf 'have_message_filtering? false\n'
-            else
-              printf 'have_message_filtering? indeterminate\n'
-            fi
-          fi
+          probe predicate-deny-if-enabled deny-if-enabled /usr/bin/true || true
+
+          cp "$scratch/base.sb" "$scratch/deny-if-disabled.sb"
+          cat >>"$scratch/deny-if-disabled.sb" <<'SBPL'
+          (if (not have_message_filtering?)
+              (deny process-exec (literal "/usr/bin/true")))
+          SBPL
+          probe predicate-deny-if-disabled deny-if-disabled /usr/bin/true || true
 
           cp "$scratch/base.sb" "$scratch/bootstrap-operation.sb"
           printf '(deny mach-bootstrap)\n' >>"$scratch/bootstrap-operation.sb"
@@ -115,14 +222,13 @@ jobs:
 
           cp "$scratch/base.sb" "$scratch/deny-all.sb"
           cat >>"$scratch/deny-all.sb" <<'SBPL'
-          (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
           (allow mach-bootstrap (apply-message-filter (deny mach-message-send)))
           SBPL
-          if ! probe bootstrap-deny-all deny-all /bin/sh -c 'printf "payload entered\n"'; then
-            printf 'result bootstrap filter rejected during compile or activation\n'
+          if ! probe bootstrap-deny-all deny-all /usr/bin/true; then
+            printf 'result deny-all profile did not launch the stock true control\n'
             exit 0
           fi
-          /usr/bin/grep -Fxq 'payload entered' "$scratch/bootstrap-deny-all.out"
+          printf 'result deny-all profile loaded and stock true exited zero\n'
 
           record host-outside-write "${clean[@]}" /bin/sh -c 'printf allowed > "$1"' sh "$outside/write"
           [[ -f "$outside/write" ]]
