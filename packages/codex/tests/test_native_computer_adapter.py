@@ -440,3 +440,33 @@ async def test_borrowed_device_gate_does_not_retain_a_released_device():
     del driver, tool, resources
     gc.collect()
     assert reference() is None
+
+
+@pytest.mark.parametrize("policy_kind", ["approve", "on_safety_check"])
+@pytest.mark.parametrize("first_allowed", [False, True])
+async def test_borrowed_factory_authorizes_creation_then_resolved_effects(
+    policy_kind, first_allowed
+):
+    created, decisions = [], []
+    driver = Driver()
+
+    def policy(*_):
+        decisions.append(True)
+        return first_allowed and len(decisions) == 1
+
+    tool = computer_tool(
+        ComputerProvider(lambda _: created.append(True) or driver), **{policy_kind: policy}
+    )
+    resources = _ComputerResources()
+    call = {
+        "action": {"type": "wait"},
+        "pending_safety_checks": [{"id": "screen"}] if policy_kind == "on_safety_check" else [],
+    }
+    try:
+        with pytest.raises(ComputerSafetyError):
+            await invoke(tool, resources, call)
+        assert len(created) == int(first_allowed)
+        assert len(decisions) == (2 if first_allowed else 1)
+        assert driver.calls == []
+    finally:
+        await resources.close()

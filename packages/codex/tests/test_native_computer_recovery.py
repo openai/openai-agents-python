@@ -284,6 +284,71 @@ async def test_shared_borrowed_device_serializes_policy_across_sessions(
     assert driver.calls == [("screenshot",)]
 
 
+@pytest.mark.parametrize("second_source", ["factory", "direct"])
+@pytest.mark.parametrize("policy_kind", ["approve", "on_safety_check"])
+async def test_borrowed_factory_resolves_shared_device_before_effect_authorization(
+    responses, second_source, policy_kind
+):
+    entered, release = asyncio.Event(), asyncio.Event()
+    screen = 0
+    observed = {"first": [], "second": []}
+    effects = []
+
+    class SharedDriver(Driver):
+        async def wait(self):
+            nonlocal screen
+            entered.set()
+            await release.wait()
+            effects.append(screen)
+            screen += 1
+
+    driver = SharedDriver()
+
+    async def policy(context, *_):
+        observed[context.context].append(screen)
+        return screen == 0
+
+    options = {policy_kind: policy}
+    one_tool = computer_tool(ComputerProvider(lambda _: driver), **options)
+    two_tool = computer_tool(
+        ComputerProvider(lambda _: driver) if second_source == "factory" else driver, **options
+    )
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic")
+    checks = CHECKS if policy_kind == "on_safety_check" else []
+    responses.respond(computer_call(action={"type": "wait"}, pending_safety_checks=checks))
+    responses.respond(computer_call(action={"type": "wait"}, pending_safety_checks=checks))
+    from tests.native_fixtures import assistant_output
+
+    responses.respond(assistant_output("done"))
+    responses.respond(assistant_output("done"))
+    try:
+        first = Agent(instructions="Use computer.", provider=provider, tools=[one_tool])
+        second = Agent(instructions="Use computer.", provider=provider, tools=[two_tool])
+        async with first.session(context="first") as a, second.session(context="second") as b:
+            try:
+                one = await a.submit("first")
+                await asyncio.wait_for(entered.wait(), 5)
+                two = await b.submit("second")
+                async for event in two.events():
+                    if event.type == "tool_started":
+                        break
+                await asyncio.sleep(0.05)
+                assert effects == []
+                release.set()
+                assert (await one.get_result()).final_output == "done"
+                with pytest.raises(
+                    ComputerSafetyError, match="not approved|require acknowledgment"
+                ):
+                    await two.get_result()
+                assert observed["first"] == [0, 0]
+                assert observed["second"] == ([0, 1] if second_source == "factory" else [1])
+                assert effects == [0]
+            finally:
+                release.set()
+    finally:
+        await provider.aclose()
+
+
 async def test_computer_compaction_rejects_orphan_pair_before_publication(responses):
     from tests.native_fixtures import assistant_output
 

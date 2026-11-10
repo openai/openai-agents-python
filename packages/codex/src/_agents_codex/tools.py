@@ -239,14 +239,6 @@ def _capture_hosted_tools(tools: Sequence[Any]) -> list[dict[str, Any]]:
     for tool in tools:
         if not isinstance(tool, _HOSTED_TOOLS):
             continue
-        if isinstance(tool, FileSearch):
-            value = tool.max_num_results
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 50
-            ):
-                raise ValueError(
-                    "FileSearch max_num_results must be zero or an integer from 1 to 50"
-                )
         fields = asdict(tool)
         provider_data = fields.pop("provider_data") or {}
         if not isinstance(provider_data, dict):

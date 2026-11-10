@@ -12,7 +12,7 @@ from collections.abc import (
     Awaitable as Awaitable,
     Callable as Callable,
 )
-from contextlib import asynccontextmanager as asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager as asynccontextmanager
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import Any as Any, Literal as Literal, Protocol as Protocol
@@ -59,6 +59,8 @@ class ComputerProvider:
     ``dispose`` is invoked once for each successfully acquired driver, including
     after driver failure or cancellation. Omit it for a borrowed factory result.
     Disposal receives the driver, without retaining expired invocation authority.
+    On first use of a borrowed factory result, policies authorize creation and
+    run again under the resolved device gate before any action or screenshot.
     """
 
     create: Callable[[ToolContext[Any]], Computer | Awaitable[Computer]] = field(repr=False)
@@ -309,7 +311,8 @@ class _CapturedComputer(_CapturedFunction):
         actions = _actions(call)
         pending = deepcopy(call.pending_safety_checks)
         lease = resources.lease(self.computer)
-        async with lease.lock.hold():
+
+        async def authorize() -> None:
             if not admit():
                 raise asyncio.CancelledError
             if self.computer.approve is not None:
@@ -321,8 +324,15 @@ class _CapturedComputer(_CapturedFunction):
                     raise ComputerSafetyError(
                         "Pending computer safety checks require acknowledgment"
                     )
+
+        source = self.computer.source
+        borrowed_factory = isinstance(source, ComputerProvider) and source.dispose is None
+        async with lease.lock.hold(), AsyncExitStack() as device:
+            resolving = borrowed_factory and lease.driver is None
+            if borrowed_factory and lease.driver is not None:
+                await device.enter_async_context(_borrowed_gate(lease.driver).hold())
+            await authorize()
             if lease.driver is None:
-                source = self.computer.source
                 if isinstance(source, ComputerProvider):
                     # Retain an acquired driver before rechecking admission: a
                     # canceled sync creator can still return an owned resource.
@@ -339,6 +349,9 @@ class _CapturedComputer(_CapturedFunction):
             driver = lease.driver
             if driver is None:
                 raise TypeError("ComputerProvider.create must return a driver")
+            if resolving:
+                await device.enter_async_context(_borrowed_gate(driver).hold())
+                await authorize()
             screenshot: str | None = None
             result: Any = None
             for action in actions:
