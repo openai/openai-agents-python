@@ -288,22 +288,40 @@ async def test_provider_never_shares_generated_session_history() -> None:
 async def test_concurrent_plain_runs_retire_sockets_before_provider_close() -> None:
     async with timeout(20), peer() as server:
         agent = Agent(instructions="Answer.", provider=server.provider())
-        server.respond(assistant_output("answer-0"))
-        server.respond(assistant_output("answer-1"))
-        runs = [asyncio.create_task(agent.run(f"prompt-{index}")) for index in range(2)]
+        responses = [assistant_output(f"answer-{index}") for index in range(2)]
+        arrivals = [asyncio.Event(), asyncio.Event()]
+        release = asyncio.Event()
+
+        async def hold_response(event: dict[str, Any]) -> None:
+            for index, response in enumerate(responses):
+                if event is response:
+                    arrivals[index].set()
+                    await release.wait()
+
+        server.before_event = hold_response
+        for response in responses:
+            server.respond(response)
+        runs = []
         try:
+            for index, arrival in enumerate(arrivals):
+                runs.append(asyncio.create_task(agent.run(f"prompt-{index}")))
+                await arrival.wait()
+            assert len(server.requests) == 2
+            assert all(not run.done() for run in runs)
+            release.set()
             results = await asyncio.gather(*runs)
         finally:
+            release.set()
             for run in runs:
                 if not run.done():
                     run.cancel()
             await asyncio.gather(*runs, return_exceptions=True)
-        assert {result.final_output for result in results} == {"answer-0", "answer-1"}
+        assert [result.final_output for result in results] == ["answer-0", "answer-1"]
         assert len({result.turn.session_id for result in results}) == 2
-        assert {tuple(message_text(request["input"], "user")) for request in server.requests} == {
-            ("prompt-0",),
-            ("prompt-1",),
-        }
+        assert [message_text(request["input"], "user") for request in server.requests] == [
+            ["prompt-0"],
+            ["prompt-1"],
+        ]
         assert all(not message_text(request["input"], "assistant") for request in server.requests)
         await server.disconnected.wait()
         assert not server.sockets and server.handlers == 0
