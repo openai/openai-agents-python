@@ -3147,6 +3147,11 @@ class Session(Generic[ContextT, OutputT]):
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
                         **provider._routing_config(),
+                        **{
+                            name: getattr(provider, name)
+                            for name in ("request_max_retries", "stream_max_retries")
+                            if getattr(provider, name) is not None
+                        },
                         # Both native web protocols require a compatible Responses
                         # provider. The declaration admits that provider capability.
                         "supports_standalone_web_search": (

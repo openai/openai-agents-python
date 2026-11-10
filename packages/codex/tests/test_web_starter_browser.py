@@ -18,6 +18,11 @@ from examples.codex.web_starter.app import create_app
 CLIENT = Path(__file__).resolve().parents[3] / "examples" / "codex" / "web_starter"
 
 
+@pytest.mark.skipif(
+    os.environ.get("OPENAI_AGENTS_BROWSER_TESTS") != "1"
+    and os.environ.get("AGENTS_REQUIRE_WEB_BROWSER") != "1",
+    reason="Set OPENAI_AGENTS_BROWSER_TESTS=1 to run the real browser witness",
+)
 async def test_browser_client_over_real_http(tmp_path):
     node = shutil.which("node")
     if (
@@ -25,12 +30,10 @@ async def test_browser_client_over_real_http(tmp_path):
         or not (CLIENT / "client.js").exists()
         or not (CLIENT / "node_modules/playwright").exists()
     ):
-        if os.environ.get("AGENTS_REQUIRE_WEB_BROWSER") == "1":
-            pytest.fail(
-                "In examples/codex/web_starter run npm ci, npm run build, "
-                "and npx playwright install chromium"
-            )
-        pytest.skip("optional: install web starter browser dependencies and Chromium")
+        pytest.fail(
+            "In examples/codex/web_starter run npm ci, npm run build, "
+            "and npx playwright install chromium"
+        )
     async with TestServer(create_app(tmp_path)) as server:
         process = await asyncio.create_subprocess_exec(
             node,
