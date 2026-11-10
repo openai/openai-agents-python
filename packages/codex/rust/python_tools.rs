@@ -2709,7 +2709,7 @@ impl PythonTools {
             return Ok(id);
         }
         ensure!(
-            Some(id) == self.snapshot().id.checked_add(1),
+            Some(id) == self.generation_high_water().checked_add(1),
             "Python tool generation is out of sequence"
         );
         let mut candidate = self.prepare(id, specs)?;

@@ -1,6 +1,7 @@
 """Contextual configuration and structured handoffs through native receipts."""
 
 import asyncio
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -16,6 +17,7 @@ from agents import (
 )
 from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession, realtime_handoff
 from tests._asyncio import timeout
+from tests.native_fixtures import function_call, text_response
 from tests.test_native_realtime import realtime_peer as realtime_peer
 
 
@@ -208,6 +210,72 @@ async def test_voice_agent_change_uses_destination_instructions(
         updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
         assert updated["session"]["instructions"] == target_instructions
         assert await voice.get_active_agent() is target
+
+
+@pytest.mark.parametrize("setting", ["instructions", "model"])
+async def test_replaced_voice_agent_preserves_backend_settings_updates(realtime_peer, setting):
+    peer = realtime_peer
+    peer.responses.respond(*text_response("backend-updated", "Updated backend"))
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        source = Agent(instructions="Opening backend instructions", provider=provider)
+        target = Agent(instructions="Voice instructions")
+        async with (
+            source.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            await voice.update_agent(target)
+            if setting == "instructions":
+                await session.update(instructions="Updated backend instructions")
+            else:
+                await session.update(model="gpt-5.5")
+            assert await voice.get_active_agent() is target
+            assert await session.get_active_agent() is source
+
+            turn = await session.submit("Use the updated backend settings")
+            assert (await turn.get_result()).final_output == "Updated backend"
+            request = peer.responses.requests[-1]
+            if setting == "instructions":
+                assert "Updated backend instructions" in json.dumps(request)
+            else:
+                assert request["model"] == "gpt-5.5"
+
+
+@pytest.mark.parametrize("close_voice", [False, True])
+async def test_replaced_voice_agent_preserves_backend_tool_replacement(realtime_peer, close_voice):
+    peer = realtime_peer
+
+    @function_tool(name="lookup")
+    def original() -> str:
+        raise AssertionError("The original backend tool should have been replaced")
+
+    @function_tool(name="lookup")
+    def replacement() -> str:
+        return "updated backend tool"
+
+    peer.responses.respond(function_call("lookup", {}, "updated-lookup"))
+    peer.responses.respond(*text_response("backend-tool-updated", "Updated backend"))
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+        Agent(
+            instructions="Opening backend", tools=[original], provider=provider
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        await voice.update_agent(Agent(instructions="Voice instructions"))
+        if close_voice:
+            await voice.aclose()
+        await session.update(tools=[replacement])
+        turn = await session.submit("Call the updated backend tool")
+        assert (await turn.get_result()).final_output == "Updated backend"
+        assert "updated backend tool" in json.dumps(peer.responses.requests[-1]["input"])
 
 
 @pytest.mark.parametrize("with_provider", [False, True])

@@ -1118,11 +1118,11 @@ pub(crate) async fn update_active(
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(false);
     };
+    // Voice-only graphs can populate the registry without a backend profile.
+    let Some(captured) = thread.captured_agent_profile().await? else {
+        return Ok(false);
+    };
     profiles.tools.check_idle(thread).await?;
-    let captured = thread
-        .captured_agent_profile()
-        .await?
-        .context("Managed Agent update has no committed source")?;
     let mut target = (*captured.profile).clone();
     if let Some(settings) = settings {
         if let Some(model) = &settings.model {
@@ -1220,11 +1220,10 @@ pub(crate) async fn replace_tools(
     let Some(profiles) = thread.thread_extension_data().get::<Arc<AgentProfiles>>() else {
         return Ok(None);
     };
+    let Some(captured) = thread.captured_agent_profile().await? else {
+        return Ok(None);
+    };
     profiles.tools.check_idle(thread).await?;
-    let captured = thread
-        .captured_agent_profile()
-        .await?
-        .context("Managed Agent replacement has no committed source")?;
     let previous = captured
         .profile
         .data
