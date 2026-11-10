@@ -1,4 +1,4 @@
-"""Rate limits reported by the API-key model provider."""
+"""API-key rate limits and Codex plan usage."""
 
 from __future__ import annotations
 
@@ -37,6 +37,117 @@ class ApiRateLimits:
     project_tokens: ApiRateLimitWindow | None = None
     retry_after_seconds: int | None = None
     retry_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPlanWindow:
+    """Provider-reported consumption and reset for one plan window.
+
+    ``resets_at`` is in Unix seconds. Missing values are unknown.
+    """
+
+    used_percent: float
+    window_minutes: int | None
+    resets_at: int | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPlanCredits:
+    """Reported plan credits, with the provider's balance string when available."""
+
+    has_credits: bool
+    unlimited: bool
+    balance: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPlanSpendLimit:
+    """A reported monthly credit limit for an individual workspace member.
+
+    The provider supplies the limit and usage as strings. The reset time is in
+    Unix seconds.
+    """
+
+    limit: str
+    used: str
+    remaining_percent: int
+    resets_at: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPlanLimit:
+    """One provider usage bucket, including the windows available for that bucket."""
+
+    limit_id: str | None
+    limit_name: str | None
+    normal_model_slug: str | None
+    primary: CodexPlanWindow | None
+    secondary: CodexPlanWindow | None
+    credits: CodexPlanCredits | None
+    spend_control_reached: bool | None
+    rate_limit_reached_type: str | None
+    individual_limit: CodexPlanSpendLimit | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CodexPlanUsage:
+    """An account usage read from the Codex backend.
+
+    ``observed_at`` is the UTC time the SDK received the snapshot. The caller
+    decides how long to use it. ``account_id`` names the Session's saved account
+    when available. ``identity_verified`` means the response identified both
+    the same account and user. An omitted account or user leaves identity
+    unverified. ``reset_credits_available`` counts available window resets.
+    ``ordinary_usage_allowed`` is provider evidence for included usage at that
+    time and is available only for a verified identity. A snapshot can guide
+    scheduling. The provider decides admission for each submitted turn.
+    """
+
+    account_id: str | None
+    identity_verified: bool
+    observed_at: datetime
+    plan_type: str | None
+    limits: tuple[CodexPlanLimit, ...]
+    ordinary_usage_allowed: bool | None
+    reset_credits_available: int | None
+
+
+def _codex_plan_usage(value: dict[str, Any]) -> CodexPlanUsage:
+    limits = value["limits"]
+    return CodexPlanUsage(
+        account_id=value["account_id"],
+        identity_verified=value["identity_verified"],
+        observed_at=datetime.fromisoformat(value["observed_at"]),
+        plan_type=limits[0]["plan_type"] if limits else None,
+        limits=tuple(
+            CodexPlanLimit(
+                limit_id=limit["limit_id"],
+                limit_name=limit["limit_name"],
+                normal_model_slug=limit.get("normal_model_slug"),
+                primary=(
+                    CodexPlanWindow(**limit["primary"]) if limit["primary"] is not None else None
+                ),
+                secondary=(
+                    CodexPlanWindow(**limit["secondary"])
+                    if limit["secondary"] is not None
+                    else None
+                ),
+                credits=(
+                    CodexPlanCredits(**limit["credits"]) if limit["credits"] is not None else None
+                ),
+                spend_control_reached=limit["spend_control_reached"],
+                rate_limit_reached_type=limit["rate_limit_reached_type"],
+                individual_limit=(
+                    CodexPlanSpendLimit(**limit["individual_limit"])
+                    if limit["individual_limit"] is not None
+                    else None
+                ),
+            )
+            for limit in limits
+        ),
+        ordinary_usage_allowed=value["ordinary_usage_allowed"],
+        reset_credits_available=value["reset_credits_available"],
+    )
 
 
 _DURATION_UNIT_SECONDS = {

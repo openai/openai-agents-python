@@ -40,6 +40,7 @@ url = "=2.5.8"
 anyhow = "1"
 codex-agent-graph-store = { path = ".upstream/codex/codex-rs/agent-graph-store" }
 codex-app-server-protocol = { path = ".upstream/codex/codex-rs/app-server-protocol" }
+codex-backend-client = { path = ".upstream/codex/codex-rs/backend-client" }
 codex-core-api = { path = ".upstream/codex/codex-rs/core-api" }
 codex-exec-server = { path = ".upstream/codex/codex-rs/exec-server" }
 codex-file-system = { path = ".upstream/codex/codex-rs/file-system" }

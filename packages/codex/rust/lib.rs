@@ -28,6 +28,7 @@ mod native_agents;
 mod native_interception;
 mod ops;
 mod options;
+mod plan_usage;
 mod project_search;
 mod provider_owner;
 mod python_tools;
@@ -298,6 +299,42 @@ impl Engine {
                 account.binding.clone(),
             )
         }))
+    }
+
+    fn _read_codex_plan_usage<'py>(
+        &self,
+        py: Python<'py>,
+        base_url: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::cancel_first_future_into_py(py, async move {
+            let (manager, client, account_id) = {
+                let account = inner
+                    .codex_account
+                    .as_ref()
+                    .ok_or_else(|| py_error("Codex plan usage requires a saved login"))?;
+                let _operation = inner.operation(false).map_err(py_error)?;
+                // A Core config requirement may override the account service.
+                // Only the SDK-selected endpoint receives this read's credentials.
+                if inner.service_config.chatgpt_base_url.trim_end_matches('/')
+                    != base_url.trim_end_matches('/')
+                {
+                    return Err(py_error(
+                        "Codex plan usage requires the first-party account endpoint",
+                    ));
+                }
+                let manager = inner.manager.auth_manager();
+                let client = inner
+                    .plan_usage_client
+                    .get_or_init(|| plan_usage::client(&manager, base_url))
+                    .clone();
+                (manager, client, account.account_id.clone())
+            };
+            drop(inner);
+            plan_usage::read(&manager, client, account_id)
+                .await
+                .map_err(py_error)
+        })
     }
 
     #[getter]
