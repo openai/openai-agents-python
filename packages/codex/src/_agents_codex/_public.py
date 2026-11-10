@@ -1,11 +1,12 @@
 """Retain import and pickle identities while implementations live privately."""
 
-import sys
 from collections.abc import Callable
 from types import FunctionType
 from typing import Any
 
-from typing_extensions import TypeAliasType, is_typeddict
+from typing_extensions import TypeAliasType
+
+from _agents_shared._identity import _resolve_typeddict_annotations
 
 
 def _new_type_alias(name: str, value: Any, constructor: Callable[[str, Any], Any]) -> Any:
@@ -33,25 +34,7 @@ def preserve_module_identity(namespace: dict[str, Any], public_module: str) -> N
             for accessor in (value.fget, value.fset, value.fdel):
                 restore(accessor)
         elif getattr(value, "__module__", None) == implementation_module:
-            # Deferred TypedDict annotations must keep their definition namespace.
-            # FORWARDREF resolves known names without forcing valid later bindings.
-            if sys.version_info >= (3, 14) and is_typeddict(value):
-                from typing import evaluate_forward_ref
-
-                from annotationlib import Format, ForwardRef, get_annotations
-
-                value.__annotations__.update(
-                    {
-                        name: evaluate_forward_ref(
-                            annotation, globals=namespace, format=Format.FORWARDREF
-                        )
-                        if isinstance(annotation, ForwardRef)
-                        else annotation
-                        for name, annotation in get_annotations(
-                            value, format=Format.FORWARDREF
-                        ).items()
-                    }
-                )
+            _resolve_typeddict_annotations(value, namespace)
             value.__module__ = public_module
             if isinstance(value, type):
                 for member in vars(value).values():

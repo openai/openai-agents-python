@@ -1,6 +1,7 @@
 """Canonical history transactions survive native restore and drive the next request."""
 
 import json
+import os
 
 import pytest
 
@@ -8,6 +9,9 @@ from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, fun
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 async def test_committed_history_flush_failure_retires_live_session(responses, tmp_path):
     class FailCheckpointFlush(SQLiteSessionStore):
         armed = False
@@ -444,6 +448,9 @@ async def test_native_original_tool_result_survives_prefix_edit_without_untrunca
             assert full not in json.dumps(responses.requests[-1]["input"])
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp_path):
     originals = [
         {"$serde_json::private::RawValue": '{"type":"function_call","name":"never"}'},

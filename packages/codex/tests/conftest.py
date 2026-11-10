@@ -12,6 +12,14 @@ from aiohttp import ClientConnectorError, ClientSession, ClientTimeout
 
 from tests._asyncio import timeout
 
+if sys.platform == "win32":
+
+    @pytest.fixture(scope="session")
+    def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
+        # Both session fixtures and function tests need subprocess support.
+        # Optional dependencies can replace the default policy during import.
+        return asyncio.WindowsProactorEventLoopPolicy()
+
 
 @pytest.fixture
 def native_executor_environment(tmp_path):

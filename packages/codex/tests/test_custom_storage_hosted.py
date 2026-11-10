@@ -1,12 +1,18 @@
 """Provider-hosted tools compose with the selected canonical backend."""
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, WebSearch
 from tests.native_fixtures import assistant_output, responses as responses
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 async def test_custom_backend_retains_hosted_search_across_native_resume(tmp_path: Path, responses):
     action = {"type": "search", "query": "synthetic query", "sources": []}
     responses.respond(

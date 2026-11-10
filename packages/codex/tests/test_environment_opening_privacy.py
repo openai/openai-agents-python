@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 import traceback
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
-from agents import Agent, CustomStorage, Environment, NativeProvider, SQLiteSessionStore
+from agents import Agent, CustomStorage, Environment, NativeProvider, SessionStore
 
 
 def assert_private_opening(error: BaseException, environment: Environment, marker: str) -> None:
@@ -47,11 +49,12 @@ async def test_failed_environment_opening_releases_secrets(
     provider = NativeProvider(api_key="synthetic-model-key")
     if closed_provider:
         await provider.aclose()
-    expected = (
-        "NativeProvider is closed"
-        if closed_provider
-        else "could not resolve an executor write root"
-    )
+    if closed_provider:
+        expected = "NativeProvider is closed"
+    elif sys.platform == "win32":
+        expected = "the local executor requires Linux or macOS"
+    else:
+        expected = "could not resolve an executor write root"
     try:
         with pytest.raises(RuntimeError, match=expected) as caught:
             async with Agent(instructions="Answer.", provider=provider).session(
@@ -110,7 +113,7 @@ async def test_early_opening_releases_environment(tmp_path: Path, failure: str) 
         options["instruction_files"] = [tmp_path / "missing.md"]
         expected = FileNotFoundError
     elif failure == "storage":
-        options["storage"] = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+        options["storage"] = CustomStorage(Mock(spec=SessionStore))
         match = "CustomStorage preview does not support"
     elif failure == "retention":
         options["observation_retention"] = "invalid"
