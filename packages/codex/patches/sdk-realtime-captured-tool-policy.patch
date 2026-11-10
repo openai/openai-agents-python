@@ -1,0 +1,85 @@
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+index fef8f024..5a62254b 100644
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -45,6 +45,7 @@ struct RealtimeToolSource {
+ pub(crate) struct RealtimeToolExecutionSource {
+     pub(crate) data: codex_extension_api::ExtensionDataInit,
+     pub(crate) mcp: Option<Arc<codex_mcp::McpBinding>>,
++    pub(crate) tool_policy: Option<Arc<codex_extension_api::ToolPolicy>>,
+ }
+ 
+ pub(crate) fn uses_retained_mcp_binding(step: &StepContext) -> bool {
+@@ -224,6 +225,7 @@ pub(super) async fn finish_realtime_native_source(
+         execution: RealtimeToolExecutionSource {
+             data: captured.execution_data,
+             mcp,
++            tool_policy: None,
+         },
+     }))
+ }
+@@ -857,13 +859,28 @@ impl RealtimeToolTask {
+         dispatch
+     }
+ 
+-    fn execution_source(&self) -> Result<RealtimeToolExecutionSource, CodexErr> {
+-        self.configuration
++    fn execution_source(&self, session: &Session) -> Result<RealtimeToolExecutionSource, CodexErr> {
++        let source = self
++            .configuration
+             .as_ref()
+             .and_then(|configuration| configuration.native_source.as_ref())
+             .and_then(|source| source.as_any().downcast_ref::<RealtimeToolSource>())
+-            .map(|source| source.execution.clone())
+-            .ok_or_else(|| CodexErr::InvalidRequest("Unknown native Realtime source".into()))
++            .ok_or_else(|| CodexErr::InvalidRequest("Unknown native Realtime source".into()))?;
++        let mut execution = source.execution.clone();
++        if source.application_instructions.is_some() {
++            // The SDK contributor has already admitted these calls against this
++            // response's exact source. Preserve the opening policy for other steps.
++            execution.tool_policy = Some(Arc::new(codex_extension_api::ToolPolicy {
++                allowed_tools: Some(
++                    self.calls
++                        .iter()
++                        .map(|call| call.native_name.clone())
++                        .collect(),
++                ),
++                ..session.tool_policy.as_ref().clone()
++            }));
++        }
++        Ok(execution)
+     }
+ 
+     async fn execute_work(
+@@ -1072,7 +1089,11 @@ impl RealtimeToolTask {
+         cancellation: CancellationToken,
+     ) -> SessionTaskResult {
+         let step = session
+-            .capture_realtime_tool_step(Arc::clone(&ctx), self.execution_source()?, &cancellation)
++            .capture_realtime_tool_step(
++                Arc::clone(&ctx),
++                self.execution_source(&session)?,
++                &cancellation,
++            )
+             .await?;
+         let runtime = ToolCallRuntime::new(
+             Arc::clone(&session),
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index b3d53f51..14074f65 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -139,7 +139,13 @@ pub(crate) async fn build_tool_router(
+         .get::<crate::WaitForEnvironmentToolConfig>();
+     // This exact binding owns both admission and the SDK's per-step projection.
+     step_store.insert(Arc::clone(mcp));
+-    let mut resolved_policy = session.tool_policy.as_ref().clone();
++    let realtime_source =
++        step_store.get::<crate::realtime_conversation::RealtimeToolExecutionSource>();
++    let tool_policy = realtime_source
++        .as_ref()
++        .and_then(|source| source.tool_policy.as_ref())
++        .unwrap_or(&session.tool_policy);
++    let mut resolved_policy = tool_policy.as_ref().clone();
+     if let Some(selectors) = &resolved_policy.allowed_mcp_tools {
+         let named_ceiling = resolved_policy.allowed_tools.clone();
+         if let Some(allowed) = &mut resolved_policy.allowed_tools {
