@@ -7,7 +7,9 @@ import contextlib
 import json
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +19,27 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.test_native_agent import provider
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Synthetic executable uses a Unix shebang")
+
+
+async def _run_in_native_session(
+    responses: Any, callback: Callable[[ToolContext[object]], Awaitable[Any]]
+) -> Any:
+    result: Any = None
+
+    @function_tool
+    async def invoke(context: ToolContext[object]) -> str:
+        nonlocal result
+        result = await callback(context)
+        return "CLI callback completed"
+
+    responses.replies.extend(
+        [[function_call("invoke", {}, "cli-callback")], [assistant_output("done")]]
+    )
+    async with Agent(
+        instructions="Run the callback.", provider=provider(responses), tools=[invoke]
+    ).session() as session:
+        assert (await (await session.submit("Run")).get_result()).final_output == "done"
+    return result
 
 
 def cli(tmp_path: Path) -> Path:
@@ -55,16 +78,21 @@ def cli(tmp_path: Path) -> Path:
 async def test_cli_tool_uses_native_binding_and_real_cli_stream(
     tmp_path: Path,
     thread_id: str | None,
+    responses,
 ) -> None:
     events = []
     declaration = codex_tool(
         codex_options=CodexOptions(codex_path_override=str(cli(tmp_path))),
         turn_options=TurnOptions(idle_timeout_seconds=5),
+        thread_id=thread_id,
         on_event=events.append,
     )
     assert isinstance(declaration, FunctionTool)
     binding = declaration._bind(None, None, declaration)
-    result = await binding.callback(None, prompt="Do the task", thread_id=thread_id)
+    result = await _run_in_native_session(
+        responses,
+        lambda context: binding.callback(context, prompt="Do the task", thread_id=thread_id),
+    )
     assert result == {
         "thread_id": "synthetic-thread",
         "response": "CLI completed",
@@ -102,7 +130,7 @@ async def test_native_agent_delegates_to_external_cli(tmp_path: Path, responses,
     assert "CLI completed" in json.dumps(responses.requests[1])
 
 
-async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path) -> None:
+async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path, responses) -> None:
     path = tmp_path / "idle-codex"
     pid_path = tmp_path / "pid"
     path.write_text(
@@ -116,13 +144,17 @@ async def test_cli_idle_timeout_closes_the_subprocess(tmp_path: Path) -> None:
         turn_options={"idle_timeout_seconds": 0.1},
     )
     binding = declaration._bind(None, None, declaration)
-    with pytest.raises(RuntimeError, match="idle"):
-        await binding.callback(None, prompt="Do the task", thread_id=None)
+
+    async def invoke(context: ToolContext[object]) -> None:
+        with pytest.raises(RuntimeError, match="idle"):
+            await binding.callback(context, prompt="Do the task", thread_id=None)
+
+    await _run_in_native_session(responses, invoke)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_path.read_text()), 0)
 
 
-async def test_cli_callback_cancellation_joins_the_subprocess(tmp_path: Path) -> None:
+async def test_cli_callback_cancellation_joins_the_subprocess(tmp_path: Path, responses) -> None:
     path = tmp_path / "blocking-codex"
     pid_path = tmp_path / "pid"
     path.write_text(
@@ -138,11 +170,15 @@ async def test_cli_callback_cancellation_joins_the_subprocess(tmp_path: Path) ->
         on_event=lambda event: started.set(),
     )
     binding = declaration._bind(None, None, declaration)
-    task = asyncio.create_task(binding.callback(None, prompt="Do the task", thread_id=None))
-    await asyncio.wait_for(started.wait(), 5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+
+    async def invoke(context: ToolContext[object]) -> None:
+        task = asyncio.create_task(binding.callback(context, prompt="Do the task", thread_id=None))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await _run_in_native_session(responses, invoke)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_path.read_text()), 0)
 
@@ -372,7 +408,9 @@ async def test_cancelled_admission_releases_its_simultaneously_acquired_lock(cau
     assert not lock.locked()
 
 
-async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(tmp_path: Path) -> None:
+async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(
+    tmp_path: Path, responses
+) -> None:
     pid_path = tmp_path / "pid"
     path = tmp_path / "blocked-stdin-codex"
     path.write_text(
@@ -386,34 +424,40 @@ async def test_cancelling_prompt_backpressure_joins_cli_and_stderr(tmp_path: Pat
         turn_options=TurnOptions(signal=asyncio.Event()),
     )
     binding = declaration._bind(None, None, declaration)
-    previous_tasks = asyncio.all_tasks()
-    task = asyncio.create_task(binding.callback(None, prompt="x" * (512 * 1024), thread_id=None))
-    pid = None
-    try:
 
-        async def started() -> None:
-            while not pid_path.exists() or not pid_path.read_text().strip():
-                await asyncio.sleep(0.01)
+    async def invoke(context: ToolContext[object]) -> None:
+        previous_tasks = asyncio.all_tasks()
+        task = asyncio.create_task(
+            binding.callback(context, prompt="x" * (512 * 1024), thread_id=None)
+        )
+        pid = None
+        try:
 
-        await asyncio.wait_for(started(), 5)
-        pid = int(pid_path.read_text())
-        # The child never reads stdin, so this prompt cannot pass the pipe's drain.
-        assert not task.done()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-        assert not (asyncio.all_tasks() - previous_tasks)
-    finally:
-        if not task.done():
+            async def started() -> None:
+                while not pid_path.exists() or not pid_path.read_text().strip():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(started(), 5)
+            pid = int(pid_path.read_text())
+            # The child never reads stdin, so this prompt cannot pass the pipe's drain.
+            assert not task.done()
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
                 await task
-        if pid is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, 9)
-        # Also contain the failed pre-fix regression's orphaned stderr reader.
-        remaining = asyncio.all_tasks() - previous_tasks
-        if remaining:
-            await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), 5)
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+            assert not (asyncio.all_tasks() - previous_tasks)
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if pid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, 9)
+            # Also contain the failed pre-fix regression's orphaned stderr reader.
+            remaining = asyncio.all_tasks() - previous_tasks
+            if remaining:
+                await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), 5)
+
+    await _run_in_native_session(responses, invoke)

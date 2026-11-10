@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "7410b477cdad97ede275171226bd19d2c50c1709",
+  "baseline_commit": "66c71e7fc53ff88e053b35ea3234c0fd7245df9d",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -126,7 +126,7 @@
       },
       "agents.codex": {
         "declarations": [
-          "def codex_tool(*, codex: Codex | None=None, codex_options: CodexOptions | Mapping[str, Any] | None=None, thread_options: ThreadOptions | Mapping[str, Any] | None=None, turn_options: TurnOptions | Mapping[str, Any] | None=None, name: str='codex', description: str='Run an external Codex CLI task in the configured workspace.', persist_session: bool=False, on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None=None) -> _PythonTool[Any, object]:\n    pass"
+          "def codex_tool(*, codex: Codex | None=None, codex_options: CodexOptions | Mapping[str, Any] | None=None, thread_options: ThreadOptions | Mapping[str, Any] | None=None, turn_options: TurnOptions | Mapping[str, Any] | None=None, name: str='codex', description: str='Run an external Codex CLI task in the configured workspace.', persist_session: bool=False, thread_id: str | None=None, on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None=None) -> _PythonTool[Any, object]:\n    pass"
         ],
         "exports": {
           "Codex": "agents.classic.extensions.experimental.codex.codex.Codex",

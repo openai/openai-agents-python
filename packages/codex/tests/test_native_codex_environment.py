@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from agents.codex import Codex, CodexOptions, codex_tool
+from tests.native_fixtures import responses as responses
+from tests.test_native_codex_cli import _run_in_native_session
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Synthetic executable uses a Unix shebang")
@@ -17,7 +19,7 @@ from agents.codex import Codex, CodexOptions, codex_tool
     "configuration", ["default", "mapping", "empty", "explicit", "inherited", "provided"]
 )
 async def test_native_cli_environment_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configuration: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configuration: str, responses
 ) -> None:
     selected = {
         "SDK_UNRELATED_TOKEN": "synthetic-unrelated-token",
@@ -62,8 +64,11 @@ async def test_native_cli_environment_boundary(
     else:
         declaration = codex_tool(codex_options=options)
     binding = declaration._bind(None, None, declaration)
-    result = await binding.callback(
-        None, prompt="Inspect the selected test variables", thread_id=None
+    result = await _run_in_native_session(
+        responses,
+        lambda context: binding.callback(
+            context, prompt="Inspect the selected test variables", thread_id=None
+        ),
     )
     observed = json.loads(result["response"])
     if configuration == "empty":

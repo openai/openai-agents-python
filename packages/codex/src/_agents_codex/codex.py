@@ -85,6 +85,17 @@ _CLI_ENVIRONMENT_NAMES = frozenset(
 class _SessionThread:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     thread: Thread | None = None
+    issued_ids: set[str] = field(default_factory=set)
+
+
+def _thread_id(value: str | None) -> str | None:
+    if value is not None:
+        if not isinstance(value, str):
+            raise TypeError("thread_id must be a string or None")
+        value = value.strip()
+        if not value or value.startswith("-"):
+            raise ValueError("thread_id must be nonempty and cannot start with a dash")
+    return value
 
 
 @asynccontextmanager
@@ -127,6 +138,7 @@ def codex_tool(
     name: str = "codex",
     description: str = "Run an external Codex CLI task in the configured workspace.",
     persist_session: bool = False,
+    thread_id: str | None = None,
     on_event: Callable[[ThreadEvent], None | Awaitable[None]] | None = None,
 ) -> _PythonTool[Any, object]:
     """Declare external CLI delegation without starting a subprocess.
@@ -145,10 +157,14 @@ def codex_tool(
     inheritance, pass CodexOptions(env=dict(os.environ)).
 
     persist_session reuses the most recently completed CLI thread within the
-    invoking native Session and serializes that Session's calls. Separate native
-    Sessions never implicitly share a thread. Model-supplied thread_id explicitly
-    selects a CLI thread; omit it to start a fresh thread or reuse this Session's
-    thread. Thread IDs must be nonempty and cannot start with a dash.
+    invoking native Session and serializes that Session's calls.
+    Model thread_id values have been selecting only IDs issued by successful
+    calls in the invoking Session or the trusted application initial ID.
+    The application thread_id option has been
+    authorizing an initial existing CLI thread for this declaration's Sessions.
+    Omitted model IDs have been reusing the persistent Session thread, then the
+    configured initial thread, or starting fresh. IDs have been requiring
+    nonempty values without a leading dash.
     """
     if codex is not None and codex_options is not None:
         raise ValueError("supply codex or codex_options, not both")
@@ -156,6 +172,7 @@ def codex_tool(
         raise TypeError("persist_session must be a bool")
     if on_event is not None and not callable(on_event):
         raise TypeError("on_event must be callable or None")
+    initial_thread_id = _thread_id(thread_id)
     client = codex
     captured_codex_options = deepcopy(coerce_codex_options(codex_options))
     if client is None and (captured_codex_options is None or captured_codex_options.env is None):
@@ -183,27 +200,34 @@ def codex_tool(
     async def execute(
         prompt: str,
         thread_id: str | None,
-        state: _SessionThread | None = None,
+        state: _SessionThread,
+        check: Callable[[], None],
     ) -> dict[str, Any]:
         nonlocal client
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
-        if thread_id is not None:
-            thread_id = thread_id.strip()
-            if not thread_id or thread_id.startswith("-"):
-                raise ValueError("thread_id must be nonempty and cannot start with a dash")
+        check()
+        if (
+            thread_id is not None
+            and thread_id != initial_thread_id
+            and thread_id not in state.issued_ids
+        ):
+            raise ValueError("thread_id was not issued to this native Session")
         if client is None:
             client = Codex(captured_codex_options)
         thread = (
             client.resume_thread(thread_id, captured_thread_options)
             if thread_id is not None
             else state.thread
-            if state is not None and state.thread is not None
+            if persist_session and state.thread is not None
+            else client.resume_thread(initial_thread_id, captured_thread_options)
+            if initial_thread_id is not None
             else client.start_thread(captured_thread_options)
         )
         stream = await thread.run_streamed(prompt, captured_turn_options)
         response = ""
         usage = None
+        completed = False
         async with aclosing(stream.events):
             async for event in stream.events:
                 if on_event is not None:
@@ -217,14 +241,21 @@ def codex_tool(
                 if isinstance(event, ItemCompletedEvent) and is_agent_message_item(event.item):
                     response = event.item.text
                 elif isinstance(event, TurnCompletedEvent):
+                    completed = True
                     usage = event.usage.as_dict() if event.usage is not None else None
                 elif isinstance(event, TurnFailedEvent):
                     raise RuntimeError(event.error.message)
                 elif isinstance(event, ThreadErrorEvent):
                     raise RuntimeError(event.message)
-        if state is not None:
+        check()
+        if not completed:
+            raise RuntimeError("Codex CLI stream ended before successful completion")
+        completed_thread_id = thread.id
+        if completed_thread_id is not None:
+            state.issued_ids.add(completed_thread_id)
+        if persist_session:
             state.thread = thread
-        return {"thread_id": thread.id, "response": response, "usage": usage}
+        return {"thread_id": completed_thread_id, "response": response, "usage": usage}
 
     @function_tool(name=name, description=description)
     async def invoke(
@@ -232,26 +263,43 @@ def codex_tool(
         prompt: str,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
-        if persist_session:
-            from .session import Session, _invocation
+        from .session import Session, _Invocation, _invocation, _native_callback_cancelled
 
-            invocation = _invocation.get()
-            if (
-                invocation is None
-                or not invocation.active
-                or not isinstance(invocation.session, Session)
-                or invocation.session.id != context.submission.session_id
-            ):
-                raise RuntimeError(
-                    "persistent Codex tools require an active native Session callback"
-                )
-            # Values contain only a CLI thread and lock; neither retains this key.
-            state = sessions.setdefault(invocation.session, _SessionThread())
+        thread_id = _thread_id(thread_id)
+        invocation = _invocation.get()
+        if (
+            invocation is None
+            or not invocation.active
+            or not isinstance(invocation.session, Session)
+            or invocation.session.id != context.submission.session_id
+        ):
+            raise RuntimeError("Codex tools require an active native Session callback")
+
+        def check() -> None:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
+            if captured_turn_options is not None and captured_turn_options.signal is not None:
+                if captured_turn_options.signal.is_set():
+                    raise RuntimeError("Codex CLI call cancelled before execution")
+            owner: _Invocation | None = invocation
+            while owner is not None:
+                if not owner.active:
+                    raise RuntimeError("Codex CLI callback is no longer active")
+                if owner.native_callback is not None and _native_callback_cancelled(
+                    owner.native_callback[0]
+                ):
+                    raise asyncio.CancelledError
+                owner = owner.parent
+
+        # Values retain CLI state only, never the weakly held native Session key.
+        state = sessions.setdefault(invocation.session, _SessionThread())
+        if persist_session:
             async with _session_slot(
                 state.lock, captured_turn_options.signal if captured_turn_options else None
             ):
-                return await execute(prompt, thread_id, state)
-        return await execute(prompt, thread_id)
+                return await execute(prompt, thread_id, state, check)
+        return await execute(prompt, thread_id, state, check)
 
     return invoke
 
