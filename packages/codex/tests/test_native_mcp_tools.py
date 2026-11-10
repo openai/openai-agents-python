@@ -910,3 +910,57 @@ def test_raw_mcp_reference_selection_uses_captured_identity() -> None:
     assert selected[0].tools == ("a.b",)
     with pytest.raises(CapabilityError):
         _split_tools((complete.tool("a_b"),), available=(partial,), ceiling=(partial,))
+
+
+@pytest.mark.parametrize("phase", ["before", "approval"])
+async def test_partial_mcp_graph_policy_survives_accepted_update(
+    responses: ResponsesFixture, phase: str
+) -> None:
+    from agents import CapabilityError, StopTurn
+
+    peer = Peer(names=("a.b", "a_b"))
+    calls: list[str] = []
+
+    def stop(request: MCPCallContext[Any], call: Any) -> StopTurn:
+        assert request.tool_name == "a.b"
+        calls.append(phase)
+        return StopTurn("private-policy-stop")
+
+    async with timeout(30), peer.serve() as url:
+        complete = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        actual = complete.tool("a.b")
+        partial = HttpMCP(
+            name="docs",
+            url=url,
+            tools=["a.b"],
+            **{phase: stop},
+        )
+        native_provider = provider(responses)
+        unused = Agent(name="unused", instructions="Unused target", provider=native_provider)
+        responses.respond(assistant_output("ready"))
+        responses.respond(mcp_call(actual.name, actual.namespace, "after-update"))
+        responses.respond(assistant_output("must not continue"))
+        async with Agent(
+            instructions="Use only the selected record tool.",
+            tools=[partial],
+            handoffs=[unused],
+            provider=native_provider,
+        ).session() as session:
+            assert (await (await session.submit("warm")).get_result()).final_output == "ready"
+            await session.update(tools=[partial])
+            handle = await session.submit(
+                "after update",
+                tools=[partial.tool("a.b")],
+                before_step=lambda turn, step_index: [partial.tool("a.b")],
+            )
+            with pytest.raises((TurnStoppedError, NativeError)):
+                await handle.get_result()
+            assert calls == [phase]
+            assert peer.calls == []
+            assert len(responses.requests) == 2
+            denied = await session.submit(
+                "deny sibling", before_step=lambda turn, step_index: [complete.tool("a_b")]
+            )
+            with pytest.raises(CapabilityError):
+                await denied.get_result()
+            assert len(responses.requests) == 2
