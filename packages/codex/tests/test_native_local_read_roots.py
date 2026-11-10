@@ -6,7 +6,7 @@ import json
 import os
 import shlex
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
 import pytest
@@ -262,7 +262,7 @@ def test_read_roots_follow_executor_path_conventions(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(sys, "platform", "darwin")
     declaration = Environment.local(
         cwd="/workspace",
-        read_only_roots=["file://localhost/z", Path("/a"), "/z"],
+        read_only_roots=["file://localhost/z", PurePosixPath("/a"), "/z"],
         writable_roots=["/write"],
     )
     assert declaration._to_native()["read_only_roots"] == ["file:///a", "file:///z"]
