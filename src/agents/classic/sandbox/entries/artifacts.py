@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _GIT_AUTHORITY_RE = re.compile(r"(?:([^:\[\]]+)|\[([0-9a-fA-F:.]+)\])(?::([0-9]+))?")
 _GIT_REG_NAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+")
+_GIT_HOST_ERROR = "GitRepo host must be an HTTPS authority without userinfo"
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
@@ -50,6 +51,15 @@ def _sha256_handle(handle: io.BufferedReader) -> str:
             break
         digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_git_repo_entry_hosts(entries: Iterable[BaseEntry]) -> None:
+    for entry in entries:
+        if isinstance(entry, Dir):
+            _validate_git_repo_entry_hosts(entry.children.values())
+        elif isinstance(entry, GitRepo) and entry._validated_host() is None:
+            del entry, entries
+            raise ValueError(_GIT_HOST_ERROR)
 
 
 class Dir(BaseEntry):
@@ -84,6 +94,7 @@ class Dir(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
+        _validate_git_repo_entry_hosts(self.children.values())
         await session.mkdir(dest, parents=True)
         await self._apply_metadata(session, dest)
         return await session._apply_entry_batch(
@@ -757,10 +768,11 @@ class GitRepo(BaseEntry):
         dest: Path,
         base_dir: Path,
     ) -> list[MaterializedFile]:
-        if not self._valid_host(self.host):
+        host = self._validated_host()
+        if host is None:
             # Keep the rejected configuration out of this exception's frame locals.
             del self
-            raise ValueError("GitRepo host must be an HTTPS authority without userinfo")
+            raise ValueError(_GIT_HOST_ERROR)
         git_subpath = self._validate_subpath()
 
         # Ensure git exists in the container.
@@ -773,7 +785,7 @@ class GitRepo(BaseEntry):
             raise GitMissingInImageError(context=context)
 
         tmp_dir = f"/tmp/sandbox-git-{session.state.session_id.hex}-{uuid.uuid4().hex}"
-        url = f"https://{self.host}/{self.repo}.git"
+        url = f"https://{host}/{self.repo}.git"
 
         _ = await session.exec("rm", "-rf", "--", tmp_dir, shell=False)
         try:
@@ -818,24 +830,24 @@ class GitRepo(BaseEntry):
         # require reading each file back out of the container.)
         return []
 
-    @staticmethod
-    def _valid_host(host: str) -> bool:
+    def _validated_host(self) -> str | None:
+        host = self.host
         authority = _GIT_AUTHORITY_RE.fullmatch(host)
         if authority is None:
-            return False
+            return None
         name, ipv6, port = authority.groups()
         port = (port or "").lstrip("0")
         if len(port) > 5 or (port and int(port) > 65535):
-            return False
+            return None
         try:
             if ipv6 is not None:
                 ipaddress.IPv6Address(ipv6)
-                return True
+                return host
             if not name.isascii():
                 name = name.encode("idna").decode("ascii")
-            return _GIT_REG_NAME_RE.fullmatch(name) is not None
+            return host if _GIT_REG_NAME_RE.fullmatch(name) is not None else None
         except ValueError:
-            return False
+            return None
 
     @staticmethod
     def _looks_like_commit_ref(ref: str) -> bool:

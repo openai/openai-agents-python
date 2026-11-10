@@ -1794,7 +1794,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         _validate_docker_path_grants(state.manifest)
         configured_authority = _manifest_has_configured_mount_authority(state.manifest)
         requires_fresh_resource = state.mount_authority_rebound or configured_authority
