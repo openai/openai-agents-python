@@ -15,7 +15,7 @@ from agents import telemetry
 from tests.test_native_trace_exporter import collector
 
 
-async def native_loss_case(long_names: bool):
+async def native_loss_case(long_names: bool, forwarded=False, retained_after_recovery=False):
     entered, release, phase = Event(), Event(), Event()
     observed = []
     mixed_batches = []
@@ -39,7 +39,15 @@ async def native_loss_case(long_names: bool):
 
     with collector() as (endpoint, requests):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic", endpoint=endpoint)
-        await telemetry.configure(processors=[exporter, Observer()])
+
+        class Forwarder:
+            def on_trace_event(self, event):
+                return exporter.on_trace_event(event)
+
+            def on_trace_events(self, events):
+                return exporter.on_trace_events(events)
+
+        await telemetry.configure(processors=[Forwarder() if forwarded else exporter, Observer()])
         roots = [telemetry.trace(f"active-{i}", options={"detached": True}) for i in range(1024)]
         for root in roots:
             root.__enter__()
@@ -76,6 +84,66 @@ async def native_loss_case(long_names: bool):
             fresh = [row for row in records if row.get("workflow_name") == "post-loss-fresh-root"]
             assert len(fresh) == 1 and fresh[0]["group_id"] == "fresh-group"
             assert any(row.get("trace_id") == fresh[0]["id"] for row in records)
+            if forwarded:
+                recovered_roots = [
+                    telemetry.trace(f"recovered-active-{i}", options={"detached": True})
+                    for i in range(1024)
+                ]
+                for recovered in recovered_roots:
+                    recovered.__enter__()
+                active = await telemetry.force_flush(timeout_ms=15000)
+                assert active.failed_deliveries == result.failed_deliveries, (
+                    "forwarding kept lost roots pinned"
+                )
+                for recovered in reversed(recovered_roots):
+                    recovered.__exit__(None, None, None)
+                completed = await telemetry.force_flush(timeout_ms=15000)
+                assert completed.failed_deliveries == result.failed_deliveries
+                assert completed.dropped_records == result.dropped_records
+            if retained_after_recovery:
+                failures = result.failed_deliveries
+                with telemetry.trace(
+                    "post-recovery-retained",
+                    options={
+                        "detached": True,
+                        "group_id": "recovered-group",
+                        "metadata": {"tenant": "recovered-tenant"},
+                    },
+                ) as recovered:
+                    parent = recovered.context
+                await telemetry.force_flush(timeout_ms=15000)
+                for i in range(1024):
+                    with telemetry.trace(f"recovered-churn-{i}", options={"detached": True}):
+                        pass
+                    if i % 32 == 31:
+                        await telemetry.force_flush(timeout_ms=15000)
+                with telemetry.span(
+                    "post-recovery-late-child", options={"parent": parent}
+                ) as child:
+                    child.set_outcome(status="ok", data={"private": "recovered-private-sentinel"})
+                late_result = await telemetry.force_flush(timeout_ms=15000)
+                assert late_result.failed_deliveries == failures, (
+                    "post-recovery retained child rejected"
+                )
+                records = [row for request in requests for row in request["payload"]["data"]]
+                descriptors = [
+                    row
+                    for row in records
+                    if row.get("object") == "trace" and row.get("id") == "trace_" + parent.trace_id
+                ]
+                assert len(descriptors) == 2
+                assert descriptors[-1]["workflow_name"] == "post-recovery-retained"
+                assert descriptors[-1]["group_id"] == "recovered-group"
+                assert descriptors[-1]["metadata"]["tenant"] == "recovered-tenant"
+                late = [
+                    row
+                    for row in records
+                    if row.get("span_data", {}).get("name") == "post-recovery-late-child"
+                ]
+                assert len(late) == 1 and late[0]["parent_id"] == "span_" + parent.span_id.rjust(
+                    24, "0"
+                )
+                assert "recovered-private-sentinel" not in str(records)
             old = [event["sequence"] for event in observed if event["name"].startswith("burst-")]
             new = [
                 event["sequence"] for event in observed if event["name"] == "post-loss-fresh-root"
@@ -106,6 +174,24 @@ def test_native_loss_recovers_after_record_or_byte_bound(long_names):
         capture_output=True,
         text=True,
         timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS native loss recovery" in result.stdout
+
+
+@pytest.mark.parametrize("forwarded", [False, True])
+def test_native_loss_preserves_forwarding_and_recovered_retained_context(forwarded):
+    script = (
+        f"import asyncio,runpy; m=runpy.run_path({str(Path(__file__).resolve())!r}); "
+        f"asyncio.run(m['native_loss_case'](False, forwarded={forwarded!r}, "
+        f"retained_after_recovery={not forwarded!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS native loss recovery" in result.stdout
