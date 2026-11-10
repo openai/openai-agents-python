@@ -48,7 +48,15 @@ def _strip_mcp_frames(error: BaseException) -> None:
             pending.extend(child for child in children if isinstance(child, BaseException))
 
 
-def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Declarations) -> bool:
+def _uses_mcp(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    declarations: _Declarations | None,
+    owner_keywords: tuple[str, ...] = (),
+) -> bool:
+    if declarations is None:
+        # Intrinsically MCP boundaries need protection before an owner exists.
+        return True
     from .agent import Agent
     from .mcp import _MCP
 
@@ -61,37 +69,64 @@ def _uses_mcp(args: tuple[Any, ...], kwargs: dict[str, Any], declarations: _Decl
         values = list.__iter__(tools) if isinstance(tools, list) else tuple.__iter__(tools)
         if any(isinstance(tool, _MCP) for tool in values):
             return True
-    owner = args[0] if args else kwargs.get("self")
-    try:
-        # A lazy handoff can capture MCP declarations outside the opening tools.
-        # Protect that graph without evaluating its application-owned resolvers.
-        return any(
-            isinstance(value, _MCP) or isinstance(value, Agent) and bool(value.handoffs)
-            for value in declarations(owner)
-        )
-    except (AttributeError, TypeError):
-        # Preserve the ordinary error for an invalid or partially initialized owner.
-        return False
+    owners = (
+        args[0] if args else kwargs.get("self"),
+        *(kwargs[name] for name in owner_keywords if name in kwargs),
+    )
+    for owner in owners:
+        try:
+            # A lazy handoff can capture MCP declarations outside the opening tools.
+            # Protect that graph without evaluating its application-owned resolvers.
+            if any(
+                isinstance(value, _MCP) or isinstance(value, Agent) and bool(value.handoffs)
+                for value in declarations(owner)
+            ):
+                return True
+        except (AttributeError, TypeError):
+            # Another explicitly supplied owner may still carry MCP credentials.
+            continue
+    return False
 
 
-def _protect_method(function: _Function, declarations: _Declarations) -> _Function:
+def _protect_method(
+    function: _Function,
+    declarations: _Declarations | None,
+    *,
+    owner_keywords: tuple[str, ...] = (),
+    preserve_generator_protocol: bool = False,
+) -> _Function:
     if inspect.isasyncgenfunction(function):
 
         @wraps(function)
         async def iterator(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            source, item = None, None
+            source, item, sent = None, None, None
             try:
                 source = function(*args, **kwargs)
                 async with aclosing(source):
-                    async for item in source:
-                        yield item
+                    if preserve_generator_protocol:
+                        try:
+                            item = await source.asend(None)
+                            while True:
+                                try:
+                                    sent = yield item
+                                except GeneratorExit:
+                                    raise
+                                except BaseException as error:
+                                    item = await source.athrow(error)
+                                else:
+                                    item = await source.asend(sent)
+                        except StopAsyncIteration:
+                            return
+                    else:
+                        async for item in source:
+                            yield item
             except BaseException as error:
-                if _uses_mcp(args, kwargs, declarations):
+                if _uses_mcp(args, kwargs, declarations, owner_keywords):
                     _strip_mcp_frames(error)
                     raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
                 raise
             finally:
-                del args, kwargs, source, item
+                del args, kwargs, source, item, sent
 
         return cast(_Function, iterator)
 
@@ -104,12 +139,12 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
             value = None
             # The manager captures declarations when it opens. Caller-owned
             # override lists can change while that captured Session is live.
-            protected = _uses_mcp(args, kwargs, declarations)
+            protected = _uses_mcp(args, kwargs, declarations, owner_keywords)
             try:
                 async with manager as value:
                     yield value
             except BaseException as error:
-                if protected or _uses_mcp(args, kwargs, declarations):
+                if protected or _uses_mcp(args, kwargs, declarations, owner_keywords):
                     _strip_mcp_frames(error)
                     raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
                 raise
@@ -122,7 +157,7 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
                 # Preserve argument validation at the original factory call.
                 return protected_context(function(*args, **kwargs), args, kwargs)
             except BaseException as error:
-                if _uses_mcp(args, kwargs, declarations):
+                if _uses_mcp(args, kwargs, declarations, owner_keywords):
                     _strip_mcp_frames(error)
                     raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
                 raise
@@ -138,7 +173,7 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
             try:
                 return await function(*args, **kwargs)
             except BaseException as error:
-                if _uses_mcp(args, kwargs, declarations):
+                if _uses_mcp(args, kwargs, declarations, owner_keywords):
                     _strip_mcp_frames(error)
                     raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
                 raise
@@ -152,7 +187,7 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
         try:
             return function(*args, **kwargs)
         except BaseException as error:
-            if _uses_mcp(args, kwargs, declarations):
+            if _uses_mcp(args, kwargs, declarations, owner_keywords):
                 _strip_mcp_frames(error)
                 raise error  # noqa: TRY201 - Python 3.10 must use the edited traceback.
             raise
@@ -162,7 +197,7 @@ def _protect_method(function: _Function, declarations: _Declarations) -> _Functi
     return cast(_Function, synchronous)
 
 
-def _protect_mcp_methods(owner: type[Any], declarations: _Declarations) -> None:
+def _protect_mcp_methods(owner: type[Any], declarations: _Declarations | None) -> None:
     for name, function in tuple(vars(owner).items()):
         if name.startswith("_") and name not in {
             "__init__",
@@ -190,5 +225,7 @@ def _protect_mcp_methods(owner: type[Any], declarations: _Declarations) -> None:
                     function.__doc__,
                 ),
             )
+        elif isinstance(function, classmethod) and declarations is None:
+            setattr(owner, name, classmethod(_protect_method(function.__func__, declarations)))
         elif inspect.isfunction(function):
             setattr(owner, name, _protect_method(function, declarations))
