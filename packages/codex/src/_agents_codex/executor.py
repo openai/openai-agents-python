@@ -389,7 +389,8 @@ class Environment(Generic[ContextT_contra]):
         Commands can read files accessible to the application user and inherit
         the application process environment, including ambient credentials,
         subject to native sandbox and network rules. The launcher excludes
-        ``LD_*`` and ``DYLD_*`` overrides. Commands can write to the
+        ``OPENAI_API_KEY``, ``CODEX_API_KEY``, and ``LD_*`` and ``DYLD_*`` overrides.
+        Commands can write to the
         workspace and explicit writable roots, subject to native metadata
         protections. Set ``temp_dir`` to an absolute path to override ``TMPDIR`` for
         commands. For a writable job temp directory, place it in the workspace

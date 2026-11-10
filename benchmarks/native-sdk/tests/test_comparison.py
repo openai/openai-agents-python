@@ -390,6 +390,60 @@ class BufferedQualificationTests(unittest.TestCase):
             )
 
 
+class NativeReferenceWebSocketTests(unittest.TestCase):
+    def native_records(self):
+        value = records()
+        for sides in value.values():
+            for rows in sides.values():
+                for item in rows:
+                    item.update(
+                        engine="v1",
+                        response_mode="streaming",
+                        native_transport="websocket",
+                        wire_transport="websocket",
+                    )
+                    item["versions"]["openai-agents"] = VERSIONS["v1"]
+                    server = item["server"]
+                    server.update(
+                        websocket_connections=server["requests"], websocket_open_connections=0
+                    )
+                    for receipt in server["receipts"]:
+                        receipt.update(
+                            stream=True,
+                            text_chunks=item["workload"]["chunks"],
+                            wire_transport="websocket",
+                        )
+                    server["emitted_text_chunks"] = server["requests"] * item["workload"]["chunks"]
+        return value
+
+    def summarize(self, value):
+        return compare.summarize(
+            value,
+            expected_versions={"v0": VERSIONS["v1"], "v1": VERSIONS["v1"]},
+            reference_engine="v1",
+            native_transport="websocket",
+        )
+
+    def test_native_reference_keeps_pairing_and_labels(self):
+        result = self.summarize(self.native_records())["oneshot_text"]
+        self.assertEqual(result["reference_engine"], "v1")
+        self.assertIn("ratio_target_over_reference", result["primary"])
+        self.assertNotIn("ratio_native_over_stable", result["primary"])
+        self.assertEqual(result["primary"]["sample_count_per_side"], [5, 5])
+
+    def test_http_fallback_cannot_qualify_as_websocket(self):
+        value = self.native_records()
+        value["oneshot_text"]["v0"][0]["server"]["receipts"][0]["wire_transport"] = "sse"
+        with self.assertRaisesRegex(ValueError, "scheduled transport"):
+            self.summarize(value)
+
+    def test_live_socket_cannot_qualify(self):
+        value = self.native_records()
+        value["oneshot_text"]["v1"][0]["server"]["websocket_open_connections"] = 1
+        with self.assertRaisesRegex(ValueError, "retiring"):
+            self.summarize(value)
+
+
 class FullOwnerBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_clocks_include_construction_prefill_and_joined_exit(self):
         import worker

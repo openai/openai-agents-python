@@ -135,9 +135,15 @@ class Peer:
         self.receipts: deque[dict[str, Any]] = deque(maxlen=RECEIPT_LIMIT)
         self.requests = self.errors = self.body_bytes = self.response_bytes = 0
         self.verified_tool_outputs = self.emitted_text_chunks = 0
+        self.websocket_connections = self.websocket_open_connections = self.websocket_warmups = 0
+        self.websockets_retired = asyncio.Event()
+        self.websockets_retired.set()
 
     def snapshot(self, *, summary: bool = False) -> dict[str, Any]:
         counters = {
+            "websocket_connections": self.websocket_connections,
+            "websocket_open_connections": self.websocket_open_connections,
+            "websocket_warmups": self.websocket_warmups,
             "requests": self.requests,
             "errors": self.errors,
             "body_bytes": self.body_bytes,
@@ -288,7 +294,66 @@ class Peer:
             event["sequence_number"] = sequence
         return events
 
-    async def handle(self, request):
+    async def websocket(self, request):
+        from aiohttp import WSMsgType, web
+
+        socket = web.WebSocketResponse()
+        await socket.prepare(request)
+        self.websocket_connections += 1
+        self.websocket_open_connections += 1
+        self.websockets_retired.clear()
+        warmup_id, warmup_input = None, []
+        generated = False
+        try:
+            async for message in socket:
+                if message.type != WSMsgType.TEXT:
+                    raise ValueError("Expected a text response.create frame")
+                body = json.loads(message.data)
+                if body.get("type") != "response.create" or body.get("store") is not False:
+                    raise ValueError("Expected a non-stored response.create")
+                items = body.get("input", [])
+                if not isinstance(items, list):
+                    raise ValueError("Expected an input list")
+                previous = body.get("previous_response_id")
+                if previous is not None and previous != warmup_id:
+                    raise ValueError("Fresh conversation references another response")
+                items = (warmup_input if previous is not None else []) + items
+                if body.get("generate") is False:
+                    self.websocket_warmups += 1
+                    warmup_id = f"resp_warmup_{self.websocket_warmups}"
+                    warmup_input = items
+                    response = self.response(warmup_id, [], "completed", body["model"])
+                    for name, value in response["usage"].items():
+                        if isinstance(value, dict):
+                            for detail in value:
+                                value[detail] = 0
+                        else:
+                            response["usage"][name] = 0
+                    for event in self.events(response, []):
+                        await socket.send_json(event)
+                    continue
+                if generated or self.args.tool_rounds:
+                    raise ValueError("WebSocket benchmark supports one no-tool turn per socket")
+                generated = True
+                await self.handle(
+                    request, websocket=socket, raw_body=message.data.encode(), resolved_input=items
+                )
+        except Exception as error:
+            self.errors += 1
+            await socket.send_json(
+                {
+                    "type": "error",
+                    "error": {"message": str(error), "type": "benchmark_protocol_error"},
+                }
+            )
+        finally:
+            await socket.close()
+            self.websocket_open_connections -= 1
+            if not self.websocket_open_connections:
+                self.websockets_retired.set()
+        return socket
+
+    async def handle(self, request, *, websocket=None, raw_body=None, resolved_input=None):
         from aiohttp import web
 
         self.requests += 1
@@ -305,7 +370,7 @@ class Peer:
         self.receipts.append(receipt)
         op = None
         try:
-            raw = await request.read()
+            raw = await request.read() if raw_body is None else raw_body
             self.body_bytes += len(raw)
             receipt["body_bytes"] = len(raw)
             receipt["request_body_sha256"] = hashlib.sha256(raw).hexdigest()
@@ -314,7 +379,7 @@ class Peer:
             receipt["body_parse_ns"] = time.monotonic_ns() - parse_start
             if not isinstance(body, dict):
                 raise ValueError("body must be an object")
-            items = body.get("input")
+            items = body.get("input") if resolved_input is None else resolved_input
             if isinstance(items, str):
                 items = [{"role": "user", "content": items}]
             if not isinstance(items, list) or not all(isinstance(x, dict) for x in items):
@@ -422,12 +487,20 @@ class Peer:
                     }
                 ]
             response = self.response(response_id, output, "completed", body["model"])
-            streaming = body.get("stream", False)
+            streaming = websocket is not None or body.get("stream", False)
             if not isinstance(streaming, bool):
                 raise ValueError("stream must be boolean")
             if self.args.delay_ms:
                 await asyncio.sleep(self.args.delay_ms / 1000)
-            if streaming:
+            if websocket is not None:
+                result = None
+                for event in self.events(response, chunks):
+                    payload = encode(event)
+                    await websocket.send_str(payload.decode())
+                    self.response_bytes += len(payload)
+                    if event["type"] == "response.output_text.delta":
+                        self.emitted_text_chunks += 1
+            elif streaming:
                 result = web.StreamResponse(
                     headers={
                         "Content-Type": "text/event-stream",
@@ -452,6 +525,9 @@ class Peer:
             if round_number == self.args.tool_rounds:
                 op.status = "completed"
             receipt["status"] = "ok"
+            receipt["wire_transport"] = (
+                "websocket" if websocket is not None else ("sse" if streaming else "json")
+            )
             receipt["stream"] = streaming
             receipt["text_chunks"] = len(chunks) if streaming else 0
             return result
@@ -469,6 +545,9 @@ class Peer:
                 }
             )
             self.response_bytes += len(payload)
+            if websocket is not None:
+                await websocket.send_str(payload.decode())
+                return None
             return web.Response(status=400, body=payload, content_type="application/json")
         finally:
             receipt["end_ns"] = time.monotonic_ns()
@@ -480,8 +559,11 @@ async def serve(args: argparse.Namespace) -> None:
     peer = Peer(args)
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_post("/v1/responses", peer.handle)
+    app.router.add_get("/v1/responses", peer.websocket)
 
     async def stats(request):
+        if request.query.get("retired") == "1":
+            await asyncio.wait_for(peer.websockets_retired.wait(), timeout=10)
         return web.json_response(peer.snapshot(summary=request.query.get("summary") == "1"))
 
     async def health(request):

@@ -11,12 +11,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import pytest
@@ -798,6 +799,8 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
     monkeypatch.setenv("GH_TOKEN", "synthetic-gh-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+    monkeypatch.setenv("CODEX_API_KEY", "synthetic-codex-key")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
@@ -839,26 +842,29 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     selected = Environment.local(
         cwd=linked,
         writable_roots=[gitdir, origin / ".git", job_temp],
-        tools=["exec_command"],
+        tools=["exec_command", "write_stdin"],
         capability_directories=[str(capabilities)],
         write_policy="trusted_workspace_write",
         temp_dir=job_temp,
     )
     # Darwin's id -F fails when getpwuid cannot resolve the real UID.
     macos_uid_lookup = ("/usr/bin/id", "-F")
-    ssh_command = "ssh -G -T -F /dev/null credential.example.invalid"
+    ssh = "/usr/bin/ssh" if sys.platform == "darwin" else "ssh"
+    ssh_command = f"{ssh} -G -T -F /dev/null credential.example.invalid"
     if sys.platform == "darwin":
         identity_probe = _macos_identity_probe(linked)
         ssh_probe = (
             f"ssh_config=$({ssh_command} & ssh_pid=$!; "
             'if ! wait "$ssh_pid"; then '
-            f"uid_status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || uid_status=$?; "
             'printf "trusted SSH pid=%s, UID lookup exit=%s\\n" "$ssh_pid" "$uid_status" >&2; '
             "exit 1; fi) && printf '%s\\n' \"$ssh_config\" | grep -q '^user '; "
         )
         # Keep checking Git and write grants after recording the real SSH exit.
         ssh_probe = (
-            f"{identity_probe}; ssh_status=0; ({ssh_probe}) || ssh_status=$?; "
+            f"{identity_probe}; "
+            f"uid_status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || uid_status=$?; "
+            'printf "trusted UID lookup exit=%s\\n" "$uid_status"; '
+            f"ssh_status=0; ({ssh_probe}) || ssh_status=$?; "
             'printf "trusted SSH config exit=%s\\n" "$ssh_status"; '
         )
     else:
@@ -867,7 +873,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         'set -eu; test "$(fixture-tool)" = "fixture tool"; '
         f'test "$HOME" = {shlex.quote(str(home))}; '
         'test "$GH_TOKEN" = synthetic-gh-token; '
-        'test -z "${LD_LIBRARY_PATH+x}"; '
+        'test -z "${OPENAI_API_KEY+x}${CODEX_API_KEY+x}${LD_LIBRARY_PATH+x}"; '
         f"{ssh_probe}"
         "printf 'protocol=https\\nhost=credential.example.invalid\\n\\n' "
         "| git credential fill | grep -qx password=synthetic-git-password; "
@@ -888,8 +894,37 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         "git -c user.name=Fixture -c user.email=fixture@example.invalid -c gc.auto=0 "
         "commit -qm local-change"
     )
-    responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "trusted"))
-    responses.respond(assistant_output("done"))
+    responses.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "trusted"
+        )
+    )
+    command_outputs: list[str] = []
+    completion_id = "trusted"
+
+    class UntilCommandDone(deque[list[dict[str, Any]]]):
+        def __bool__(self) -> bool:
+            return True
+
+        def popleft(self) -> list[dict[str, Any]]:
+            nonlocal completion_id
+            if len(self):
+                return super().popleft()
+            output = tool_output(responses.requests[-1], completion_id)
+            command_outputs.append(output)
+            running = re.search(r"(?m)^Process running with session ID (-?\d+)\r?$", output)
+            if running:
+                completion_id = f"trusted-poll-{len(command_outputs)}"
+                return [
+                    function_call(
+                        "write_stdin",
+                        {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
+                        completion_id,
+                    )
+                ]
+            return [assistant_output("done")]
+
+    responses.replies = UntilCommandDone(responses.replies)
     agent = Agent(
         instructions="Use the selected tools.",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
@@ -897,7 +932,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     async with timeout(40), agent.session(environment=selected) as session:
         turn = await session.submit("Create and commit the artifact.")
         assert (await turn.get_result()).final_output == "done"
-    output = tool_output(responses.requests[-1], "trusted")
+    output = "\n".join(command_outputs)
     failure = output
     if sys.platform == "darwin" and (
         probe := re.search(r"^trusted SSH pid=([0-9]+), UID lookup exit=[0-9]+\r?$", output, re.M)
@@ -927,7 +962,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         control = (
             f"status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || status=$?; "
             'printf "UID lookup exit=%s\\n" "$status"; '
-            f"status=0; /usr/bin/{ssh_command} >/dev/null 2>&1 || status=$?; "
+            f"status=0; {ssh_command} >/dev/null 2>&1 || status=$?; "
             'printf "SSH config exit=%s\\n" "$status"; '
             f"{identity_probe}"
         )
@@ -974,6 +1009,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         assert "trusted SSH config exit=0" in output.splitlines(), (
             f"{failure}\nTrusted Git, job temp, and write-fence assertions passed."
         )
+        assert "trusted UID lookup exit=0" in output.splitlines(), failure
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Xcode and Homebrew")
@@ -1026,8 +1062,12 @@ async def test_trusted_local_runs_xcode_shims_and_homebrew(
     else pytest.mark.requires_native_macos_sandbox
 )
 @pytest.mark.usefixtures("isolated_github_cli")
+@pytest.mark.parametrize("explicit_network", [False, True], ids=["default-deny", "explicit-allow"])
 async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_network: bool,
 ) -> None:
     ca_dir, workspace = tmp_path / "certificates", tmp_path / "workspace"
     ca_dir.mkdir()
@@ -1035,9 +1075,12 @@ async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
     ca, context = await create_certificate(ca_dir, "IP:127.0.0.1")
     monkeypatch.setenv("CURL_CA_BUNDLE", str(ca))
     app = web.Application()
+    request_count = 0
 
     async def peer(request: web.Request) -> web.Response:
+        nonlocal request_count
         assert request.secure
+        request_count += 1
         return web.Response(text="verified local TLS")
 
     app.router.add_get("/", peer)
@@ -1051,13 +1094,22 @@ async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
             allowed_domains=["127.0.0.1"],
             allow_all_unix_sockets=True,
             allow_local_binding=True,
-        ),
+        )
+        if explicit_network
+        else None,
+    )
+    proxy_args = (
+        "--proxy \"$HTTPS_PROXY\" --noproxy ''" if explicit_network else "--proxy '' --noproxy '*'"
     )
     command = (
-        'curl -q --fail --silent --show-error --max-time 10 --proxy "$HTTPS_PROXY" '
-        f"--noproxy '' {shlex.quote(str(server.make_url('/')))}"
+        f"curl -q --fail --silent --show-error --max-time 10 {proxy_args} "
+        f"{shlex.quote(str(server.make_url('/')))}"
     )
-    responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "tls"))
+    responses.respond(
+        function_call(
+            "exec_command", {"cmd": command, "login": False, "yield_time_ms": 20_000}, "tls"
+        )
+    )
     responses.respond(assistant_output("done"))
     agent = Agent(
         instructions="Use the selected tools.",
@@ -1067,8 +1119,13 @@ async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
         turn = await session.submit("Read the local TLS peer.")
         assert (await turn.get_result()).final_output == "done"
     output = tool_output(responses.requests[-1], "tls")
-    assert "Process exited with code 0" in output
-    assert "verified local TLS" in output
+    if explicit_network:
+        assert "Process exited with code 0" in output, output
+        assert "verified local TLS" in output
+        assert request_count == 1
+    else:
+        assert re.search(r"Process exited with code (?:7|28)\b", output), output
+        assert request_count == 0
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
@@ -1516,8 +1573,11 @@ async def test_cancel_joins_local_process_before_its_result_is_accepted(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
 @pytest.mark.requires_native_macos_sandbox
+@pytest.mark.parametrize("write_policy", ["strict", "trusted_workspace_write"])
 async def test_macos_session_close_stops_child_after_command_exit(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    write_policy: Literal["strict", "trusted_workspace_write"],
 ) -> None:
     cwd, extra = tmp_path / "cwd", tmp_path / "extra"
     cwd.mkdir()
@@ -1552,7 +1612,9 @@ async def test_macos_session_close_stops_child_after_command_exit(
     responses.respond(assistant_output("parent exited"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     agent = Agent(instructions="Use the selected tools.", provider=provider)
-    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+    environment = Environment.local(
+        cwd=cwd, writable_roots=[extra], tools=["exec_command"], write_policy=write_policy
+    )
     # The fixture's 30-second self-exit must never satisfy this test.
     async with timeout(25), provider:
         try:

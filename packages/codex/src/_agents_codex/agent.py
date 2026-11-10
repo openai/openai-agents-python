@@ -274,14 +274,27 @@ class CodexLogin:
     Set ``account_id`` to require a specific ChatGPT account or workspace.
     The SDK checks the saved login when it opens a Session.
 
+    Linux trusted workspace execution requires ``credential_directory``, an
+    absolute path to an application-owned directory dedicated to credentials.
+    The selected ``codex_home/auth.json`` must resolve to ``auth.json`` in that
+    directory. Keep the directory and its ancestors in place while Sessions
+    use it. The executor cannot read that directory. Use strict execution
+    for an existing login whose auth file shares a directory with ordinary data.
+
     This experimental mode may change or be absent from the public beta or
     general availability of the Agents SDK.
     """
 
     codex_home: str | Path | None = field(default=None, repr=False)
     account_id: str | None = field(default=None, repr=False)
+    credential_directory: str | Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.credential_directory is not None and (
+            not isinstance(self.credential_directory, (str, Path))
+            or not Path(self.credential_directory).is_absolute()
+        ):
+            raise ValueError("credential_directory must be an absolute path")
         if self.codex_home is not None and (
             not isinstance(self.codex_home, (str, Path)) or not str(self.codex_home).strip()
         ):
@@ -681,28 +694,30 @@ class NativeProvider:
                         else:
                             await release()
 
-                async def close_with_openings() -> None:
+                async def close_with_openings() -> bool:
                     try:
-                        await native_closing
+                        rotation_save_failed = await native_closing
                     except BaseException as error:
                         # A home removal error alone must not strand a manager.
                         # fail_environment separately proves its resource join.
                         await _close_after_error(error, release_openings)
                         raise
                     await release_openings()
+                    return bool(rotation_save_failed)
 
                 operation = close_with_openings()
             else:
                 operation = native_closing
 
-        pending = asyncio.ensure_future(operation)
-        try:
-            await _join(pending)
-        finally:
-            if pending.done() and not pending.cancelled() and pending.exception() is None:
-                with _PROVIDER_LOCK:
-                    object.__setattr__(self, "_closed", True)
-                    object.__setattr__(self, "_transport", None)
+        async def retire() -> None:
+            rotation_save_failed = await operation
+            with _PROVIDER_LOCK:
+                object.__setattr__(self, "_closed", True)
+                object.__setattr__(self, "_transport", None)
+            if rotation_save_failed:
+                raise RuntimeError("Could not save the refreshed Codex login")
+
+        await _join(asyncio.create_task(retire()))
 
     async def __aenter__(self) -> NativeProvider:
         with _PROVIDER_LOCK:

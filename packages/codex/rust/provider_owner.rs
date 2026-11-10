@@ -31,6 +31,7 @@ struct State {
     leases: Vec<Arc<Lease>>,
     closed: bool,
     closing: Option<Closing>,
+    saved_login_rotation_save_failed: bool,
 }
 struct ProviderResource {
     state: Mutex<State>,
@@ -107,6 +108,13 @@ impl Lease {
             .ok_or_else(|| py_error("Provider disappeared"))?;
         let mut state = resource.state.lock().map_err(py_error)?;
         let mut record = self.record.lock().map_err(py_error)?;
+        // A Session can release the final lease before the public Provider closes.
+        for engine in &record.engines {
+            state.saved_login_rotation_save_failed |= engine
+                .lock()
+                .map_err(py_error)?
+                .saved_login_rotation_save_failed;
+        }
         record.phase = Phase::Retired;
         record.engines.clear();
         record.threads.clear();
@@ -335,7 +343,8 @@ impl NativeProviderOwner {
                 return Err(py_error("NativeProvider has open or opening Sessions"));
             }
             if state.closed {
-                return async_bridge::future_into_py(py, async { Ok(()) });
+                let rotation_save_failed = state.saved_login_rotation_save_failed;
+                return async_bridge::future_into_py(py, async move { Ok(rotation_save_failed) });
             }
             if let Some(pending) = &state.closing {
                 (state.generation, pending.clone())
@@ -380,7 +389,9 @@ impl NativeProviderOwner {
                     state.closed = true;
                 }
             }
-            result.map_err(py_error)
+            result
+                .map(|()| state.saved_login_rotation_save_failed)
+                .map_err(py_error)
         })
     }
 }

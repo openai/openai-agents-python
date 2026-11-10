@@ -337,6 +337,9 @@ impl EngineState {
             saved_login_file: codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            credential_directory: codex_account
+                .as_ref()
+                .and_then(|account| account.credential_directory.as_deref()),
         };
         let environment_options = runtime_options.environment()?;
         if let Some(environment) = &environment_options {
@@ -1429,6 +1432,11 @@ impl EngineState {
             }
             return Ok(());
         }
+        let saved_login = self.codex_account.as_ref().map(|_| {
+            let auth = self.manager.auth_manager();
+            auth.seal_saved_chatgpt_refresh();
+            (auth, tokio::time::Instant::now() + CLOSE_TIMEOUT)
+        });
         let report = self
             .manager
             .shutdown_all_threads_bounded(CLOSE_TIMEOUT)
@@ -1439,6 +1447,11 @@ impl EngineState {
             report.timed_out.len(),
             report.submit_failed.len()
         );
+        if let Some((auth, deadline)) = saved_login {
+            tokio::time::timeout_at(deadline, auth.wait_for_saved_chatgpt_refresh())
+                .await
+                .context("Codex shutdown incomplete: saved login refresh timed out")?;
+        }
         self.interception.check_code_import_cleanup()?;
         if let Some(goals) = &self.goals {
             goals.state_db.close().await;
@@ -1499,6 +1512,10 @@ impl EngineState {
                 .codex_account
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
+            credential_directory: self
+                .codex_account
+                .as_ref()
+                .and_then(|account| account.credential_directory.as_deref()),
         }
     }
 

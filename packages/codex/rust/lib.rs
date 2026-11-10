@@ -157,6 +157,7 @@ struct Engine {
 
 struct EngineOwner {
     live: Option<RuntimeOwned<engine::EngineState>>,
+    saved_login_rotation_save_failed: bool,
     // A receiver holds no Environment/Engine. Keep it across cancelled or timed
     // out closes so retry cannot report completion before the senders drop.
     remote_drain:
@@ -175,6 +176,10 @@ async fn close_engine_owner(owner: Arc<std::sync::Mutex<EngineOwner>>) -> PyResu
         inner.release_native_threads();
         let mut state = owner.lock().map_err(py_error)?;
         if state.live.is_some() {
+            state.saved_login_rotation_save_failed = inner
+                .manager
+                .auth_manager()
+                .saved_chatgpt_rotation_save_failed();
             if inner.owns_runtime_services() {
                 state.remote_drain =
                     environment::selected_executor(&inner.manager.environment_manager())
@@ -210,6 +215,7 @@ impl Engine {
         Self {
             inner: Arc::new(std::sync::Mutex::new(EngineOwner {
                 live: Some(RuntimeOwned(Some(Arc::new(state)))),
+                saved_login_rotation_save_failed: false,
                 remote_drain: None,
             })),
             startup_warnings,
@@ -524,6 +530,10 @@ impl Engine {
                 inner.release_native_threads();
                 let mut state = owner.lock().map_err(py_error)?;
                 if state.live.is_some() {
+                    state.saved_login_rotation_save_failed = inner
+                        .manager
+                        .auth_manager()
+                        .saved_chatgpt_rotation_save_failed();
                     if inner.owns_runtime_services() {
                         state.remote_drain =
                             environment::selected_executor(&inner.manager.environment_manager())

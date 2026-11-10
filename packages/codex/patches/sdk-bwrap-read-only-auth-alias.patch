@@ -1,0 +1,97 @@
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -587,7 +587,8 @@
+
+         args
+     };
+-    if args[0] == "--ro-bind" {
++    let binds_readable_root = args[0] == "--ro-bind";
++    if binds_readable_root {
+         append_daemon_socket_masks(&mut args, Path::new("/"), &daemon_directories)?;
+     }
+     let mut bwrap_args = BwrapArgs {
+@@ -784,8 +785,26 @@
+         .cloned()
+         .collect();
+     rootless_unreadable_roots.sort_by_key(|path| path_depth(path));
+-    for unreadable_root in rootless_unreadable_roots {
+-        append_unreadable_root_args(&mut bwrap_args, &unreadable_root, &allowed_write_paths)?;
++    for unreadable_root in &rootless_unreadable_roots {
++        // An absolute symlink cannot resolve inside Bubblewrap's staging root.
++        // With no other symlinks in the path, the target mask also covers the alias.
++        if binds_readable_root
++            && let Ok(target) = fs::read_link(unreadable_root)
++            && target.is_absolute()
++            && rootless_unreadable_roots.contains(&target)
++            && unreadable_root.parent().is_some_and(|parent| {
++                parent
++                    .canonicalize()
++                    .is_ok_and(|canonical| canonical == parent)
++            })
++            && target
++                .canonicalize()
++                .is_ok_and(|canonical| canonical == target)
++            && target.is_file()
++        {
++            continue;
++        }
++        append_unreadable_root_args(&mut bwrap_args, unreadable_root, &allowed_write_paths)?;
+     }
+
+     if options.mask_wslg_distro
+@@ -2901,6 +2920,54 @@
+         }
+     }
+
++    #[test]
++    fn root_read_file_deny_coalesces_only_direct_absolute_symlinks() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let workspace = temp_dir.path().join("workspace");
++        fs::create_dir(&workspace).expect("create workspace");
++        let target = temp_dir.path().join("target");
++        fs::write(&target, "").expect("create target");
++        let alias_parent = temp_dir.path().join("alias-parent");
++        std::os::unix::fs::symlink(&workspace, &alias_parent).expect("create parent symlink");
++
++        for (parent, masks_alias) in [(temp_dir.path(), false), (alias_parent.as_path(), true)] {
++            let alias = parent.join("alias");
++            std::os::unix::fs::symlink(&target, &alias).expect("create absolute symlink");
++
++            let policy = FileSystemSandboxPolicy::restricted(vec![
++                FileSystemSandboxEntry::new(
++                    FileSystemPath::Special {
++                        value: FileSystemSpecialPath::Root,
++                    },
++                    FileSystemAccessMode::Read,
++                ),
++                FileSystemSandboxEntry::new(
++                    AbsolutePathBuf::from_absolute_path(&workspace)
++                        .expect("absolute workspace")
++                        .into(),
++                    FileSystemAccessMode::Write,
++                ),
++                FileSystemSandboxEntry::new(
++                    AbsolutePathBuf::from_absolute_path(&alias)
++                        .expect("absolute alias")
++                        .into(),
++                    FileSystemAccessMode::Deny,
++                ),
++                FileSystemSandboxEntry::new(
++                    AbsolutePathBuf::from_absolute_path(&target)
++                        .expect("absolute target")
++                        .into(),
++                    FileSystemAccessMode::Deny,
++                ),
++            ]);
++            let args = create_filesystem_args(&policy, &workspace, BwrapOptions::default())
++                .expect("filesystem args");
++
++            assert_file_masked(&args.args, &target);
++            assert_eq!(args.args.contains(&path_to_string(&alias)), masks_alias);
++        }
++    }
++
+     fn assert_bind_data_uses_distinct_preserved_fds(args: &BwrapArgs) {
+         let mount_fds = args
+             .args
