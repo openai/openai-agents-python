@@ -13,7 +13,6 @@ import pytest
 
 from agents import telemetry
 from agents.testing import ScriptedResponses, text
-from tests._asyncio import capture_cancellation
 from tests.test_testing import request
 
 
@@ -35,34 +34,37 @@ def test_rejected_key_rotation_drops_exporter_from_library_traceback():
 async def test_fixture_preserves_primary_body_error_and_callback_context(cancelled):
     callback = ValueError("synthetic-callback-failure")
     primary = RuntimeError("synthetic-primary-body-failure")
+    cancellation_message = "synthetic-primary-cancellation"
     ready = asyncio.Event()
 
     def broken(_body):
         raise callback
 
     async def run():
-        async with ScriptedResponses(broken) as peer:
-            status, _, _ = await request(peer.provider, "POST", "/v1/responses", {"input": []})
-            assert status == 400
-            ready.set()
-            if cancelled:
-                await asyncio.Event().wait()
-            raise primary
+        try:
+            async with ScriptedResponses(broken) as peer:
+                status, _, _ = await request(peer.provider, "POST", "/v1/responses", {"input": []})
+                assert status == 400
+                ready.set()
+                if cancelled:
+                    await asyncio.Event().wait()
+                raise primary
+        except asyncio.CancelledError as error:
+            # Inspect the cancellation before asyncio forwards it to the awaiter.
+            assert error.args == (cancellation_message,)
+            raise
 
-    cancellations: list[asyncio.CancelledError] = []
-    task = asyncio.create_task(capture_cancellation(run(), cancellations))
+    task = asyncio.create_task(run())
     await asyncio.wait_for(ready.wait(), 2)
     if cancelled:
-        task.cancel("synthetic-primary-cancellation")
+        task.cancel(cancellation_message)
     with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError) as raised:
         await task
     assert task.cancelled() is cancelled
-    if cancelled:
-        assert [error.args for error in cancellations] == [("synthetic-primary-cancellation",)]
-    else:
+    if not cancelled:
         assert raised.value is primary
     contexts = []
-    current = (cancellations[0] if cancelled else raised.value).__context__
+    current = raised.value.__context__
     while current is not None and current not in contexts:
         contexts.append(current)
         current = current.__context__

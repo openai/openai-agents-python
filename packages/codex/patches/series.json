@@ -461,6 +461,10 @@
       "sha256": "19e180d0db741accea2e1beb68457deba7d7a3f09081be25572bc80fa15434ea"
     },
     {
+      "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
+      "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
       "path": "sdk-linux-protected-metadata-mount-race.patch",
       "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
     },
@@ -469,5 +473,5 @@
       "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
     }
   ],
-  "result_tree": "8eb120b20cfeb2a4caaa0aab96e5189c5675a62a"
+  "result_tree": "a37815d822a135d3a1f779a3719f33aaac0ef83a"
 }

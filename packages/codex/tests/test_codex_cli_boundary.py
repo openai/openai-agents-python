@@ -8,6 +8,7 @@ import os
 import pickle
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 import pytest
@@ -91,14 +92,16 @@ def test_classic_cli_patch_targets_and_exception_identities(monkeypatch) -> None
     assert error.run_data is None
 
 
-def test_instruction_options_are_appended_to_public_session_signature() -> None:
-    parameters = list(inspect.signature(Agent.session).parameters)
-    assert parameters[-4:] == [
-        "max_function_concurrency",
-        "observation_retention",
-        "project_guidance",
-        "discover_agents_md",
-    ]
+def test_instruction_options_are_appended_to_public_session_signatures() -> None:
+    overloads = typing.get_overloads(Agent.session) if sys.version_info >= (3, 11) else ()
+    for declaration in [Agent.session, *overloads]:
+        parameters = list(inspect.signature(declaration).parameters)
+        assert parameters[-4:] == [
+            "max_function_concurrency",
+            "observation_retention",
+            "project_guidance",
+            "discover_agents_md",
+        ]
 
 
 @pytest.mark.parametrize(
