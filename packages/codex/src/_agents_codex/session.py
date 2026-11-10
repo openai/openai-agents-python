@@ -12330,7 +12330,7 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_loop()
         self._check_callback_operation("suspend its own Session")
-        if self._sealed_checkpoint is not None and not self._closing and not self._closed:
+        if self._sealed_checkpoint is not None:
             return SessionState.from_json(self._sealed_checkpoint)
         return await self._suspend()
 
