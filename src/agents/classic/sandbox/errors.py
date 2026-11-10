@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, ParamSpec, TypeVar
 
+from ..exceptions import (
+    _detach_source_exception_traceback,
+    _mark_error_data_redacted,
+    _raise_data_redacted_error,
+)
 from .types import ExecResult
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class ErrorCode(str, Enum):
@@ -668,6 +677,30 @@ class LocalChecksumError(LocalArtifactError):
 
 class GitArtifactError(ArtifactError):
     """Base class for errors while materializing git_repo artifacts."""
+
+
+class _InvalidGitHostError(ValueError):
+    def __init__(self, *_args: object) -> None:
+        super().__init__("GitRepo host must be an HTTPS authority without userinfo")
+        _mark_error_data_redacted(self)
+
+
+def _redact_git_host_error_data(
+    function: Callable[_P, Coroutine[Any, Any, _T]],
+) -> Callable[_P, Coroutine[Any, Any, _T]]:
+    """Raise a payload-free error at an entry point that accepts GitRepo configuration."""
+
+    @wraps(function)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        try:
+            return await function(*args, **kwargs)
+        except _InvalidGitHostError as error:
+            _detach_source_exception_traceback(error)
+
+        del args, kwargs
+        _raise_data_redacted_error(_InvalidGitHostError())
+
+    return wrapper
 
 
 class GitMissingInImageError(GitArtifactError):

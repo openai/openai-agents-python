@@ -18,6 +18,18 @@ if sys.platform == "win32":
     def pytest_asyncio_loop_factories(config, item):
         return {"proactor": asyncio.ProactorEventLoop}
 
+    @pytest.fixture(scope="session", autouse=True)
+    def event_loop_policy():
+        # Modal imports have been selecting Selector, which lacks subprocess support.
+        # Both pytest runners and synchronous tests have been needing Proactor here.
+        previous = asyncio.get_event_loop_policy()
+        policy = asyncio.WindowsProactorEventLoopPolicy()
+        asyncio.set_event_loop_policy(policy)
+        try:
+            yield policy
+        finally:
+            asyncio.set_event_loop_policy(previous)
+
 
 @pytest.fixture
 def native_executor_environment(tmp_path):

@@ -2386,7 +2386,7 @@ class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions]):
     ) -> SandboxSession:
         if not isinstance(state, ModalSandboxSessionState):
             raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
-        state.assert_path_grants_rebound()
+        self._validate_manifest_for_resume(state)
         if _manifest_has_configured_mount_authority(state.manifest) and not (
             state.mount_authority_rebound
         ):
