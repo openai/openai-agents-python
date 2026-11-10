@@ -432,6 +432,8 @@ fn check_pairs(
             ResponseItem::FunctionCallOutput { call_id, .. } => {
                 ("function", call_id.as_ref(), false)
             }
+            ResponseItem::ComputerCall { call_id, .. } => ("computer", Some(call_id), true),
+            ResponseItem::ComputerCallOutput { call_id, .. } => ("computer", Some(call_id), false),
             ResponseItem::CustomToolCall { call_id, .. } => ("custom", Some(call_id), true),
             ResponseItem::CustomToolCallOutput { call_id, .. } => ("custom", Some(call_id), false),
             ResponseItem::ToolSearchCall {
@@ -534,5 +536,51 @@ mod tests {
         assert!(check_pairs(&[search.clone()], &[0]).is_err());
         assert!(check_pairs(&[search.clone(), output.clone()], &[1]).is_err());
         assert!(check_pairs(&[search, output], &[0, 1]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod computer_pair_tests {
+    use super::check_pairs;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    fn pair() -> Vec<ResponseItem> {
+        vec![
+            serde_json::from_value(json!({"type":"computer_call","id":"cu","call_id":"device","actions":[{"type":"wait"}]})).unwrap(),
+            serde_json::from_value(json!({"type":"computer_call_output","call_id":"device","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,aA=="},"acknowledged_safety_checks":[]})).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn computer_compaction_retains_both_original_items_or_neither() {
+        let items = pair();
+        check_pairs(&items, &[]).unwrap();
+        check_pairs(&items, &[0, 1]).unwrap();
+        for indices in [&[0][..], &[1][..]] {
+            assert!(
+                check_pairs(&items, indices)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("retain both original")
+            );
+        }
+    }
+
+    #[test]
+    fn computer_compaction_requires_original_identity_and_family() {
+        let mut items = pair();
+        assert!(check_pairs(&items[1..], &[0]).is_err());
+        assert!(check_pairs(&items[..1], &[]).is_err());
+        items[1] = serde_json::from_value(
+            json!({"type":"function_call_output","call_id":"device","output":"not a screenshot"}),
+        )
+        .unwrap();
+        assert!(
+            check_pairs(&items, &[0, 1])
+                .unwrap_err()
+                .to_string()
+                .contains("original family")
+        );
     }
 }

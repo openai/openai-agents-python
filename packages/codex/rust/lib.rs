@@ -2481,6 +2481,17 @@ impl NativeThread {
                             )
                             .await
                             .map_err(py_error)?;
+                        let receipt = if inner.engine.local_checklist_store.is_some() {
+                            let Some(receipt) = child_tools
+                                .response_receipt(&request, response.clone())
+                                .map_err(py_error)?
+                            else {
+                                return Ok(false);
+                            };
+                            Some(receipt)
+                        } else {
+                            None
+                        };
                         let Some(sender) = child_tools
                             .take_reply(&request.reply.thread, &request)
                             .map_err(py_error)?
@@ -2492,8 +2503,7 @@ impl NativeThread {
                         if inner.engine.local_checklist_store.is_some() {
                             let id = codex_protocol::ThreadId::from_string(&request.reply.thread)
                                 .map_err(py_error)?;
-                            let item =
-                                python_tools::PythonOutput(response.clone()).receipt(&request);
+                            let item = receipt.expect("selected durable callback receipt");
                             return async_bridge::retain_writer_operation(async move {
                                 let _operation = _context_operation;
                                 let _mutation = _mutation;
@@ -2544,6 +2554,23 @@ impl NativeThread {
                         )
                         .await
                         .map_err(py_error)?;
+                    let receipt = if inner
+                        .engine
+                        .store
+                        .as_any()
+                        .is::<canonical_storage::CanonicalStore>()
+                        || inner.engine.local_checklist_store.is_some()
+                    {
+                        let Some(receipt) = tools
+                            .response_receipt(&request, response.clone())
+                            .map_err(py_error)?
+                        else {
+                            return Ok(false);
+                        };
+                        Some(receipt)
+                    } else {
+                        None
+                    };
                     let Some(sender) = tools
                         .take_reply(&inner.id.to_string(), &request)
                         .map_err(py_error)?
@@ -2556,7 +2583,7 @@ impl NativeThread {
                         .as_any()
                         .is::<canonical_storage::CanonicalStore>()
                     {
-                        let item = python_tools::PythonOutput(response.clone()).receipt(&request);
+                        let item = receipt.expect("selected durable callback receipt");
                         return async_bridge::retain_writer_operation(async move {
                             let _operation = _context_operation;
                             let _mutation = _mutation;
@@ -2580,7 +2607,7 @@ impl NativeThread {
                         .await;
                     }
                     if inner.engine.local_checklist_store.is_some() {
-                        let item = python_tools::PythonOutput(response.clone()).receipt(&request);
+                        let item = receipt.expect("selected durable callback receipt");
                         return async_bridge::retain_writer_operation(async move {
                             // Both leases move with the real result. Python
                             // cancellation cannot open the suspension race.

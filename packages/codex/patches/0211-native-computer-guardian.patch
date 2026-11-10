@@ -1,0 +1,37 @@
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+index c373ea1a..80fc064e 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+@@ -22,7 +22,7 @@ pub(super) enum ActionRenderError {
+ impl GuardianAction {
+     pub(super) fn render(self, max_action_tokens: usize) -> Result<String, ActionRenderError> {
+         let arguments = match self.payload {
+-            ToolPayload::Function { arguments } => {
++            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } => {
+                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::String(arguments))
+             }
+             ToolPayload::Custom { input } => serde_json::Value::String(input),
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/action_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/action_tests.rs
+index d49e6d3b..7b9d61a8 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/action_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/action_tests.rs
+@@ -35,3 +35,19 @@ fn guardian_action_preserves_complete_arguments_at_budget_boundary() -> Result<(
+     ));
+     Ok(())
+ }
++
++#[test]
++fn guardian_renders_original_native_computer_actions() -> Result<()> {
++    let original = json!({"type":"computer_call","call_id":"computer-1","actions":[{"type":"click","x":1,"y":2,"button":"left"}],"pending_safety_checks":[{"id":"s1","message":"confirm"}]});
++    let rendered = GuardianAction {
++        tool_name: ToolName::plain("computer"),
++        payload: ToolPayload::Computer {
++            arguments: original.to_string(),
++        },
++    }
++    .render(4096)?;
++    let mut expected = original;
++    expected["tool"] = json!("computer");
++    assert_eq!(serde_json::from_str::<Value>(&rendered)?, expected);
++    Ok(())
++}

@@ -108,6 +108,7 @@ from .canonical_storage import (
 )
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
+from .computer import _CapturedComputer, _ComputerCall, _ComputerResources
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -2148,6 +2149,8 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "computer":
+        return ToolRef("computer")
     if spec.get("type") == "namespace":
         tools = spec.get("tools")
         if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
@@ -3815,6 +3818,7 @@ class Session(Generic[ContextT, OutputT]):
             (None, catalog.generation): catalog
         }
         self._catalog_bindings: dict[tuple[str | None, int], Sequence[Tool[Any]]] = {}
+        self._computer_resources = _ComputerResources()
         self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
         self._model_api_key: str | None = None
         self._parent_trace: TraceContext | None = None
@@ -10774,7 +10778,15 @@ class Session(Generic[ContextT, OutputT]):
                 return
             timeout_output: ToolOutput | None = None
             duration = entry.callback_timeout
-            if duration is None:
+            if isinstance(entry, _CapturedComputer):
+                assert context is not None and isinstance(parsed, _ComputerCall)
+                value = await entry.invoke(
+                    self._computer_resources,
+                    lambda: self._admit_tool(state, request),
+                    context,
+                    parsed,
+                )
+            elif duration is None:
                 value = await _call_callback(
                     entry.callback,
                     lambda: self._admit_tool(state, request),
@@ -11894,6 +11906,13 @@ class Session(Generic[ContextT, OutputT]):
                             if engine_closed:
                                 if self._realtime is not None:
                                     await self._realtime._native_shutdown()
+                                computer_scope = _Invocation(self)
+                                computer_token = _invocation.set(computer_scope)
+                                try:
+                                    await self._computer_resources.close()
+                                finally:
+                                    computer_scope.active = False
+                                    _invocation.reset(computer_token)
                                 if self._home is not None:
                                     await _finish_native_home_cleanup(self._home.cleanup)
                                 self._resources_retired = (
