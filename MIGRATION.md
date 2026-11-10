@@ -33,7 +33,7 @@ Classify each required contract before editing imports. Port a whole workflow on
 | Required contract | Decision before native cutover |
 | --- | --- |
 | Business functions, typed application context, structured output | **Port** declarations and validation, then test actual tool inputs, outputs, and effects. |
-| Custom Python models/clients or non-Responses endpoints | **Port** provider settings only after checking Responses compatibility. Otherwise **stay on v0 or classic** for that workflow. |
+| Custom Python models/clients or non-Responses endpoints | Matching source builds have been supporting [application-owned model clients](docs/sdk/configuration.md#use-an-application-owned-model-client), including Chat Completions. Applications have been checking adapter limits and required behavior before native cutover. The published alpha.7 wheel has been requiring Responses support. |
 | Handoffs, guardrails, hooks, or specialized agent settings | **Redesign and test** routing, policy timing, context transfer, and next-turn ownership. A specialist that returns a result is not a handoff. Keep the original engine until those contracts are verified. |
 | Existing sessions, serialized runs, or pending approvals | **Keep existing work on its owning engine.** Start native conversations separately from reviewed business facts; do not convert execution state. |
 | Streaming, cancellation, tracing, and effect recovery | **Port and verify** consumers and resource cleanup. A completed effect is not rolled back by a later failure or cancellation. |
