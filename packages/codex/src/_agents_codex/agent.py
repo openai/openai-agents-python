@@ -969,6 +969,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -993,6 +994,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -1017,6 +1019,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
+        discover_agents_md: bool = False,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -1041,6 +1044,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        discover_agents_md: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -1143,6 +1147,19 @@ class Agent(Generic[ContextT, OutputT]):
         Pass instruction_files to load trusted UTF-8 files as application
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
+
+        Set discover_agents_md=True to trust Codex instruction files on the
+        application host and in the selected Environment. Core loads user
+        guidance from CODEX_HOME (default ~/.codex), followed by project
+        guidance from the nearest Git root through the Environment's working
+        directory, within the executor's read policy. Without a Git root,
+        Core checks only the working directory. Without an Environment,
+        Core loads only user guidance. Core checks AGENTS.override.md before
+        AGENTS.md at each location. More specific files take precedence over
+        broader guidance. Application instructions, including instruction_files,
+        have developer priority. This option loads instruction files only.
+        Pass it again to discover files when restoring or resuming. Previously
+        supplied instructions can still appear in the conversation history.
         """
         try:
             initial_messages = _capture_initial_messages(
@@ -1167,6 +1184,7 @@ class Agent(Generic[ContextT, OutputT]):
                 on_interaction=on_interaction,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                discover_agents_md=discover_agents_md,
             ) as session:
                 from .session import Session
 
@@ -1197,6 +1215,7 @@ class Agent(Generic[ContextT, OutputT]):
         on_interaction: _InteractionHandler | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
         _completed_input: str | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
@@ -1229,6 +1248,7 @@ class Agent(Generic[ContextT, OutputT]):
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
+                discover_agents_md=discover_agents_md,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
                 _completed_input=_completed_input,
