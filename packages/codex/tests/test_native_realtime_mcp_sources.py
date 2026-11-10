@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
-from agents import Agent, HttpMCP, MCPResultContext, NativeProvider, Turn
+from agents import Agent, HttpMCP, MCPResultContext, NativeProvider, Turn, function_tool
 from agents.realtime import RealtimeConfig
 from tests._asyncio import timeout
+from tests.native_fixtures import function_call, text_response
 from tests.test_native_mcp_tools import Peer
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
 
@@ -81,3 +83,59 @@ async def test_live_mcp_selection_can_be_cleared_and_restored(
             assert isinstance(accepted[-1].submission, Turn)
             await accepted[-1].submission.get_result()
             await owner.update({"instructions": "Keep listening."})
+
+
+@pytest.mark.parametrize("reject", [True, False], ids=["rejected", "concurrent"])
+async def test_native_voice_graph_admission_preserves_backend_tool_replacement(
+    realtime_peer: RealtimePeer,
+    reject: bool,
+) -> None:
+    @function_tool(name="backend")
+    def original() -> str:
+        raise AssertionError("The original backend tool should have been replaced")
+
+    @function_tool(name="backend")
+    def replacement() -> str:
+        return "updated backend tool"
+
+    responses = realtime_peer.responses
+    responses.respond(function_call("backend", {}, "backend-after-rejection"))
+    responses.respond(*text_response("backend-after-rejection", "Backend complete"))
+    release = None if reject else asyncio.Event()
+    mcp = Peer(denied=reject, release_ready=release)
+    async with (
+        timeout(20),
+        mcp.serve() as url,
+        NativeProvider(
+            base_url=responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        opening = Agent(instructions="Backend", tools=[original], provider=provider)
+        target = Agent(
+            instructions="Voice Agent with MCP",
+            tools=[HttpMCP(name="records", url=url, tools=["search"], startup_timeout=3)],
+        )
+        async with (
+            opening.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            if release is None:
+                for _ in range(2):
+                    with pytest.raises(RuntimeError, match="records"):
+                        await voice.update_agent(target)
+                assert await voice.get_active_agent() is opening
+                await session.update(tools=[replacement])
+            else:
+                admission = asyncio.create_task(voice.update_agent(target))
+                try:
+                    await mcp.ready_entered.wait()
+                    replacing = asyncio.create_task(session.update(tools=[replacement]))
+                    await asyncio.wait((replacing,), timeout=0.05)
+                finally:
+                    release.set()
+                await asyncio.gather(admission, replacing)
+                assert await voice.get_active_agent() is target
+            assert await session.get_active_agent() is opening
+            turn = await session.submit("Call the updated backend tool")
+            assert (await turn.get_result()).final_output == "Backend complete"
+            assert "updated backend tool" in str(responses.requests[-1]["input"])

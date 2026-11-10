@@ -1447,46 +1447,59 @@ class RealtimeSession:
                     expected = snapshot["profile_receipt"]
 
                 async def admit() -> None:
-                    self._voice_registry_used = True
-                    receipt = json.loads(
-                        await self._session._native._admit_realtime_agent_graph(
-                            self._generation,
-                            json.dumps(roster),
-                            next(iter(runtimes)),
-                            json.dumps(expected),
+                    async with self._session._catalog_publication_lock:
+                        self._voice_registry_used = True
+                        receipt = json.loads(
+                            await self._session._native._admit_realtime_agent_graph(
+                                self._generation,
+                                json.dumps(roster),
+                                next(iter(runtimes)),
+                                json.dumps(expected),
+                            )
                         )
-                    )
-                    catalogs = receipt.get("catalogs")
-                    active = receipt.get("active")
-                    if (
-                        not isinstance(catalogs, dict)
-                        or catalogs.keys() != runtimes.keys()
-                        or len(set(catalogs.values())) != len(catalogs)
-                        or any(type(value) is not int or value < 0 for value in catalogs.values())
-                        or not isinstance(active, dict)
-                        or active.get("profile_id") not in runtimes
-                        or type(active.get("epoch")) is not int
-                        or active["epoch"] < 0
-                    ):
-                        self._finish(
-                            RuntimeError("Native voice graph returned an invalid source receipt")
+                        invalid_receipt = "Native voice graph returned an invalid source receipt"
+                        high_water = receipt.get("generation_high_water")
+                        if type(high_water) is not int or high_water < 0:
+                            self._finish(RuntimeError(invalid_receipt))
+                            raise RuntimeError(invalid_receipt)
+                        self._session._profile_generation_high_water = max(
+                            self._session._profile_generation_high_water, high_water
                         )
-                        raise RuntimeError("Native voice graph returned an invalid source receipt")
-                    for key, runtime in runtimes.items():
-                        if key in self._session._profiles or key in self._session._voice_profiles:
-                            raise RuntimeError("Native voice graph reused a captured identity")
-                        captured = replace(
-                            runtime, catalog=replace(runtime.catalog, generation=catalogs[key])
-                        )
-                        self._session._voice_profiles[key] = captured
-                        self._session._profile_catalogs[(key, catalogs[key])] = captured.catalog
-                        self._session._catalog_bindings[(key, catalogs[key])] = (
-                            captured.profile.declaration.tools
-                        )
-                        self._voice_profile_ids.add(key)
-                    self._session._profile_generation_high_water = max(
-                        self._session._profile_generation_high_water, *catalogs.values()
-                    )
+                        error = receipt.get("error")
+                        if isinstance(error, str):
+                            raise RuntimeError(error)
+                        catalogs = receipt.get("catalogs")
+                        active = receipt.get("active")
+                        if (
+                            not isinstance(catalogs, dict)
+                            or catalogs.keys() != runtimes.keys()
+                            or len(set(catalogs.values())) != len(catalogs)
+                            or any(
+                                type(value) is not int or not 0 <= value <= high_water
+                                for value in catalogs.values()
+                            )
+                            or not isinstance(active, dict)
+                            or active.get("profile_id") not in runtimes
+                            or type(active.get("epoch")) is not int
+                            or active["epoch"] < 0
+                        ):
+                            self._finish(RuntimeError(invalid_receipt))
+                            raise RuntimeError(invalid_receipt)
+                        for key, runtime in runtimes.items():
+                            if (
+                                key in self._session._profiles
+                                or key in self._session._voice_profiles
+                            ):
+                                raise RuntimeError("Native voice graph reused a captured identity")
+                            captured = replace(
+                                runtime, catalog=replace(runtime.catalog, generation=catalogs[key])
+                            )
+                            self._session._voice_profiles[key] = captured
+                            self._session._profile_catalogs[(key, catalogs[key])] = captured.catalog
+                            self._session._catalog_bindings[(key, catalogs[key])] = (
+                                captured.profile.declaration.tools
+                            )
+                            self._voice_profile_ids.add(key)
                     self._check_live()
                     await self._apply_profile(None, active, unpublished_profiles=tuple(runtimes))
 

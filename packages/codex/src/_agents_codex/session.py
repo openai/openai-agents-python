@@ -4178,6 +4178,7 @@ class Session(Generic[ContextT, OutputT]):
         self._voice_profiles: dict[str, _ProfileRuntime] = {}
         self._agent_profile_fingerprint: str | None = None
         self._profile_generation_high_water = catalog.generation
+        self._catalog_publication_lock = asyncio.Lock()
         self._profile_current: tuple[str, int] | None = None
         self._profile_catalogs: dict[tuple[str | None, int], _ToolCatalog] = {
             (None, catalog.generation): catalog
@@ -7740,120 +7741,125 @@ class Session(Generic[ContextT, OutputT]):
         default_slots: list[int] | None = None,
         default_handoffs: list[str] | None = None,
     ) -> None:
-        if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
-            raise ValueError("CustomStorage preview does not support manual tools")
-        assert self._opening_agent is not None
-        if self._native_agents is not None:
-            children = json.loads(await self._native.call("list_subagents"))
-            if self._child_admissions or any(
-                child.busy for child in self._child_callbacks.values()
-            ):
-                raise RuntimeError("Cannot replace tools while native children remain open")
-            for child in children:
-                if child["status"] == "active" and (
-                    candidate.tools != self._catalog.tools or child["runtime_loaded"]
+        async with self._catalog_publication_lock:
+            # A voice admission may have allocated catalogs while this replacement waited.
+            generation = max(self._catalog.generation, self._profile_generation_high_water) + 1
+            if candidate.generation != generation:
+                candidate = replace(candidate, generation=generation)
+            if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
+                raise ValueError("CustomStorage preview does not support manual tools")
+            assert self._opening_agent is not None
+            if self._native_agents is not None:
+                children = json.loads(await self._native.call("list_subagents"))
+                if self._child_admissions or any(
+                    child.busy for child in self._child_callbacks.values()
                 ):
-                    # Native startup copies the catalog before the event reader
-                    # registers an incarnation. Only actually cold records have
-                    # no native catalog, even if Python bindings still match.
                     raise RuntimeError("Cannot replace tools while native children remain open")
-        mcp_published = False
-        if allowed_mcp:
+                for child in children:
+                    if child["status"] == "active" and (
+                        candidate.tools != self._catalog.tools or child["runtime_loaded"]
+                    ):
+                        # Native startup copies the catalog before the event reader
+                        # registers an incarnation. Only actually cold records have
+                        # no native catalog, even if Python bindings still match.
+                        raise RuntimeError("Cannot replace tools while native children remain open")
+            mcp_published = False
+            if allowed_mcp:
+                try:
+                    receipt = await self._publish_startup(
+                        self._native._replace_mcp_servers(
+                            _mcp_config(
+                                mcp_tools,
+                                self._executor,
+                                allowed_mcp,
+                                programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                            ),
+                            _result_policies(mcp_tools, candidate.generation),
+                        )
+                    )
+                except BaseException as error:
+                    # MCP ValueErrors reject before publication. Other failures can
+                    # hide an accepted roster, unlike Python's RuntimeError contract.
+                    if not isinstance(error, ValueError):
+                        self._broken = True
+                    raise
+                try:
+                    _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
+                except NativeError:
+                    self._broken = True
+                    raise
+                mcp_published = True
             try:
-                receipt = await self._publish_startup(
-                    self._native._replace_mcp_servers(
-                        _mcp_config(
-                            mcp_tools,
-                            self._executor,
-                            allowed_mcp,
-                            programmatic_tool_calling=self._effective_agent().programmatic_tool_calling,
+                manual_slots = candidate.manual_slots()
+                if default_handoffs is None:
+                    default_handoffs = _handoff_default_names(
+                        self._default_tools, self._effective_handoffs()
+                    )
+                acknowledgement = await (
+                    self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        json.dumps(
+                            {
+                                "mcp_tools": _mcp_profile_declarations(mcp_tools),
+                                "default_handoffs": default_handoffs,
+                            }
                         ),
-                        _result_policies(mcp_tools, candidate.generation),
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if self._profiles
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        default_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if default_slots is not None
+                    else self._native._replace_tools(
+                        candidate.generation,
+                        specs,
+                        manual_slots,
+                        terminal_slots=candidate.finish_slots(),
+                    )
+                    if manual_slots
+                    else self._native._replace_tools(
+                        candidate.generation, specs, terminal_slots=candidate.finish_slots()
                     )
                 )
             except BaseException as error:
-                # MCP ValueErrors reject before publication. Other failures can
-                # hide an accepted roster, unlike Python's RuntimeError contract.
-                if not isinstance(error, ValueError):
+                # Binding RuntimeErrors reject before publication. Transport failures
+                # and cancellation can hide an accepted generation, so fence those.
+                if (
+                    mcp_published
+                    or not isinstance(error, RuntimeError)
+                    or isinstance(error, _NativeCompletionError)
+                ):
                     self._broken = True
                 raise
-            try:
-                _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, candidate.generation)
-            except NativeError:
+            if type(acknowledgement) is not int or acknowledgement != candidate.generation:
                 self._broken = True
-                raise
-            mcp_published = True
-        try:
-            manual_slots = candidate.manual_slots()
-            if default_handoffs is None:
-                default_handoffs = _handoff_default_names(
-                    self._default_tools, self._effective_handoffs()
-                )
-            acknowledgement = await (
-                self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    json.dumps(
-                        {
-                            "mcp_tools": _mcp_profile_declarations(mcp_tools),
-                            "default_handoffs": default_handoffs,
-                        }
-                    ),
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if self._profiles
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    default_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if default_slots is not None
-                else self._native._replace_tools(
-                    candidate.generation,
-                    specs,
-                    manual_slots,
-                    terminal_slots=candidate.finish_slots(),
-                )
-                if manual_slots
-                else self._native._replace_tools(
-                    candidate.generation, specs, terminal_slots=candidate.finish_slots()
-                )
+                raise NativeError("Native tool replacement acknowledgement did not match")
+            # The binding publishes only after validation and its native idle check.
+            # Keep Python definitions unchanged until that exact generation is accepted.
+            self._catalog = candidate
+            profile_id = self._profile_current[0] if self._profile_current is not None else None
+            self._profile_catalogs[(profile_id, candidate.generation)] = candidate
+            # An admitted opening leaf can be absent from a narrowed current descriptor.
+            # Capture the effective MCP roster published for this generation.
+            self._catalog_bindings[(profile_id, candidate.generation)] = (
+                *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
+                *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
+                *(binding for binding in self._bindings if isinstance(binding, _MCP)),
             )
-        except BaseException as error:
-            # Binding RuntimeErrors reject before publication. Transport failures
-            # and cancellation can hide an accepted generation, so fence those.
-            if (
-                mcp_published
-                or not isinstance(error, RuntimeError)
-                or isinstance(error, _NativeCompletionError)
+            self._mcp_tools = mcp_tools
+            self._start_interception()
+            if self._mcp_reader is None and any(
+                s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
             ):
-                self._broken = True
-            raise
-        if type(acknowledgement) is not int or acknowledgement != candidate.generation:
-            self._broken = True
-            raise NativeError("Native tool replacement acknowledgement did not match")
-        # The binding publishes only after validation and its native idle check.
-        # Keep Python definitions unchanged until that exact generation is accepted.
-        self._catalog = candidate
-        profile_id = self._profile_current[0] if self._profile_current is not None else None
-        self._profile_catalogs[(profile_id, candidate.generation)] = candidate
-        # An admitted opening leaf can be absent from a narrowed current descriptor.
-        # Capture the effective MCP roster published for this generation.
-        self._catalog_bindings[(profile_id, candidate.generation)] = (
-            *(binding for binding in self._bindings if not isinstance(binding, _MCP)),
-            *cast(tuple[HttpMCP[Any] | StdioMCP[Any], ...], mcp_tools),
-            *(binding for binding in self._bindings if isinstance(binding, _MCP)),
-        )
-        self._mcp_tools = mcp_tools
-        self._start_interception()
-        if self._mcp_reader is None and any(
-            s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
-        ):
-            self._mcp_reader = _create_task(self._read_mcp_results())
+                self._mcp_reader = _create_task(self._read_mcp_results())
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
         """Find only the active native owner or admission reserved by this Turn."""

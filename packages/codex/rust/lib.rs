@@ -2002,8 +2002,23 @@ impl NativeThread {
                 &root_id,
                 expected,
             )
-            .await
-            .map_err(py_error)?;
+            .await;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let Some(tools) = inner
+                        .thread
+                        .thread_extension_data()
+                        .get::<python_tools::PythonTools>()
+                    else {
+                        return Err(py_error(error));
+                    };
+                    serde_json::json!({
+                        "error": error.to_string(),
+                        "generation_high_water": tools.generation_high_water(),
+                    })
+                }
+            };
             serde_json::to_string(&receipt).map_err(py_error)
         })
     }
