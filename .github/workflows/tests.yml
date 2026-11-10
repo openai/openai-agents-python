@@ -267,7 +267,7 @@ jobs:
                       return False
               with tempfile.TemporaryDirectory(prefix='agents-native-inputs-') as directory:
                   with tempfile.TemporaryFile() as archive:
-                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'LICENSE', '.gitignore'],
+                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'uv.lock', 'LICENSE', '.gitignore'],
                                               stdout=archive)
                       if result.returncode:
                           return False
