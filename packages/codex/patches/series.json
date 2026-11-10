@@ -254,7 +254,7 @@
     },
     {
       "path": "0057-reuse-model-http-clients.patch",
-      "sha256": "3567b1bbaade420cc8702f4a389913733cebaf08e6226f1745d21a76d0f12550"
+      "sha256": "62d8fdbdfabf270d62eb46320efdeaa1523dcd48908c35c0cc144700d62ef29d"
     },
     {
       "path": "0058-reuse-bundled-model-catalog.patch",
@@ -463,7 +463,15 @@
     {
       "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
       "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-mount-race.patch",
+      "sha256": "22137e6318edf060270e1fd558005d6fadb4c04297bdad1ba46dad141ddc2b7b"
+    },
+    {
+      "path": "sdk-linux-protected-metadata-bootstrap.patch",
+      "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
     }
   ],
-  "result_tree": "11014728e875a71a36b864cde61955278d7192c6"
+  "result_tree": "de7542571125f81959b525f5edee97c278e8b64b"
 }

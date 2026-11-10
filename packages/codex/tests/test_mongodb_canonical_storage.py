@@ -1,10 +1,11 @@
 """MongoDB adapter checks use a real local server when mongod is available."""
 
 import json
-import os
 import shutil
 import subprocess
+import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from pymongo.errors import PyMongoError
 
 from agents import Agent, CustomStorage, MongoDBSessionStore, NativeProvider
 from tests.native_fixtures import assistant_output, responses as responses
+
+# Run the local database tests after the Windows pytest workers exit.
+pytestmark = pytest.mark.serial if sys.platform == "win32" else []
 
 
 def test_mongodb_adapter_accepts_sync_client_without_connecting_and_rejects_async() -> None:
@@ -42,18 +46,7 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
     directory = tmp_path / "mongodb"
     directory.mkdir(mode=0o700)
     log_path = tmp_path / "mongod.log"
-
-    def fail_startup(message: str) -> None:
-        try:
-            with log_path.open("rb") as log:
-                log.seek(0, os.SEEK_END)
-                log.seek(max(0, log.tell() - 8192))
-                tail = log.read(8192).decode("utf-8", errors="replace")
-        except OSError as error:
-            tail = f"Unable to read MongoDB startup log: {error}"
-        pytest.fail(f"{message}\nMongoDB log tail ({log_path}):\n{tail}")
-
-    with log_path.open("wb") as log:
+    with log_path.open("wb") as output:
         process = subprocess.Popen(
             [
                 executable,
@@ -65,37 +58,55 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
                 str(directory),
                 "--quiet",
             ],
-            stdout=log,
+            stdout=output,
             stderr=subprocess.STDOUT,
         )
-    client = MongoClient(
-        f"mongodb://127.0.0.1:{unused_tcp_port}",
-        serverSelectionTimeoutMS=100,
-        socketTimeoutMS=1000,
-        connectTimeoutMS=1000,
-    )
+    uri = f"mongodb://127.0.0.1:{unused_tcp_port}"
     try:
-        # Startup allowance for slower CI workers.
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                client.admin.command("ping")
-                break
-            except PyMongoError:
-                if process.poll() is not None:
-                    fail_startup(f"Local MongoDB exited with status {process.returncode}")
-                if time.monotonic() >= deadline:
-                    fail_startup("Local MongoDB did not become ready within 30 seconds")
-                time.sleep(0.01)
-        yield client
+        with MongoClient(
+            uri,
+            serverSelectionTimeoutMS=100,
+            socketTimeoutMS=1000,
+            connectTimeoutMS=1000,
+        ) as probe:
+            started = time.monotonic()
+            startup_timeout = 20
+            while process.poll() is None and time.monotonic() - started < startup_timeout:
+                try:
+                    probe.admin.command("ping")
+                    break
+                except PyMongoError:
+                    time.sleep(0.05)
+            else:
+                exit_code = process.poll()
+                if exit_code is None:
+                    reason = f"Local MongoDB not ready after {startup_timeout}s (still running)"
+                else:
+                    reason = f"Local MongoDB exited with code {exit_code} before readiness"
+                with log_path.open("rb") as output:
+                    output.seek(max(0, log_path.stat().st_size - 4096))
+                    tail = output.read(4096).decode("utf-8", errors="replace").strip()
+                pytest.fail(f"{reason}\nMongoDB log tail:\n{tail or '(empty)'}", pytrace=False)
+            elapsed = time.monotonic() - started
+            if elapsed > 5:
+                # Identify runs that would have hit the original five-second limit.
+                warnings.warn(f"Local MongoDB became ready after {elapsed:.1f}s", stacklevel=1)
+        # Durable reads and writes need a separate budget from readiness probes.
+        with MongoClient(
+            uri,
+            serverSelectionTimeoutMS=5000,
+            socketTimeoutMS=5000,
+            connectTimeoutMS=5000,
+        ) as client:
+            yield client
     finally:
-        client.close()
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def snapshot(revision=1, write_id="one"):

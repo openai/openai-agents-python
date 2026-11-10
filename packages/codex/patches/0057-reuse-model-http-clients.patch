@@ -1504,3 +1504,138 @@ index 58d43f7af9e4a3a29dd410436b5f3295249bd4ce..cf7ca828dd3a0be54ee54e671f1dff28
      #[tokio::test]
      #[expect(
          clippy::await_holding_invalid_type,
+diff --git a/codex-rs/websocket-client/src/dialer_tests.rs b/codex-rs/websocket-client/src/dialer_tests.rs
+index e965915ee596af8333941b74d09fdbcf134f39f5..5737726353a4ddbe3f0ed63d01748da3f8b70840 100644
+--- a/codex-rs/websocket-client/src/dialer_tests.rs
++++ b/codex-rs/websocket-client/src/dialer_tests.rs
+@@ -216,3 +216,130 @@
++#[tokio::test]
++async fn tls_none_rejects_untrusted_https_proxy() {
++    const CHILD: &str = "CODEX_WEBSOCKET_TLS_NONE_PROXY_CHILD";
++    if std::env::var(CHILD).as_deref() != Ok("1") {
++        struct OwnedChild(std::process::Child);
++        impl Drop for OwnedChild {
++            fn drop(&mut self) {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++        let mut child = OwnedChild(
++            Command::new(std::env::current_exe().expect("test executable should exist"))
++                .args([
++                    "--exact",
++                    "dialer::tests::tls_none_rejects_untrusted_https_proxy",
++                    "--nocapture",
++                ])
++                .env(CHILD, "1")
++                .env_remove("CODEX_CA_CERTIFICATE")
++                .env_remove("SSL_CERT_FILE")
++                .env_remove("SSL_CERT_DIR")
++                .spawn()
++                .expect("isolated TLS probe should start"),
++        );
++        let status = tokio::time::timeout(Duration::from_secs(30), async {
++            loop {
++                if let Some(status) = child.0.try_wait().expect("TLS probe should be waitable") {
++                    break status;
++                }
++                tokio::time::sleep(Duration::from_millis(20)).await;
++            }
++        })
++        .await;
++        drop(child);
++        assert!(
++            status
++                .expect("TLS probe should finish within 30 seconds")
++                .success()
++        );
++        return;
++    }
++
++    let (_, acceptor, _) = test_tls_configs();
++    let target = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("target listener should bind");
++    let target_addr = target.local_addr().expect("target address should exist");
++    let proxy = TcpListener::bind("127.0.0.1:0")
++        .await
++        .expect("proxy listener should bind");
++    let proxy_addr = proxy.local_addr().expect("proxy address should exist");
++    let mut proxy_task = tokio::spawn(async move {
++        let (stream, _) = proxy.accept().await.expect("proxy should accept");
++        let mut prefix = [0_u8; 1];
++        assert_eq!(
++            stream.peek(&mut prefix).await.expect("proxy should peek"),
++            1
++        );
++        if prefix[0] != 0x16 {
++            return (false, false, Vec::new());
++        }
++        match acceptor.accept(stream).await {
++            Ok(mut secured) => {
++                let mut data = [0_u8; 8];
++                let count = secured.read(&mut data).await.unwrap_or(0);
++                (true, true, data[..count].to_vec())
++            }
++            Err(_) => (true, false, Vec::new()),
++        }
++    });
++    let request = format!("ws://{target_addr}/v1/responses")
++        .into_client_request()
++        .expect("plain websocket request should build");
++    let result = tokio::time::timeout(
++        Duration::from_secs(5),
++        connect(
++            request,
++            WebSocketConfig::default(),
++            None,
++            OutboundProxyRoute::Proxy {
++                url: format!("https://localhost:{}", proxy_addr.port()),
++                no_proxy: None,
++            },
++            TcpNodelay::Enabled,
++            /*loopback_direct*/ false,
++        ),
++    )
++    .await;
++    let (client_hello, tls_succeeded, decrypted) =
++        match tokio::time::timeout(Duration::from_secs(5), &mut proxy_task).await {
++            Ok(result) => result.expect("proxy task should join"),
++            Err(_) => {
++                proxy_task.abort();
++                let _ = proxy_task.await;
++                panic!("proxy task should join within five seconds");
++            }
++        };
++    assert!(client_hello, "HTTPS proxy must receive a TLS ClientHello");
++    assert!(!tls_succeeded, "untrusted proxy must not finish TLS");
++    assert!(
++        decrypted.is_empty(),
++        "untrusted proxy must not receive CONNECT"
++    );
++    let error = match result {
++        Ok(Err(WebSocketError::Io(error))) => error,
++        _ => panic!("client should reject the proxy certificate before CONNECT"),
++    };
++    assert!(
++        matches!(
++            error
++                .get_ref()
++                .and_then(|error| error.downcast_ref::<rustls::Error>()),
++            Some(rustls::Error::InvalidCertificate(
++                rustls::CertificateError::UnknownIssuer
++            ))
++        ),
++        "client should reject the untrusted issuer: {error:?}"
++    );
++    assert!(
++        tokio::time::timeout(Duration::from_millis(10), target.accept())
++            .await
++            .is_err(),
++        "destination must not receive a connection"
++    );
++}
++
+ #[tokio::test]
+ async fn environment_proxy_route_honors_no_proxy_in_a_subprocess() {
+     assert_no_proxy_subprocess(

@@ -865,11 +865,13 @@ async def test_executor_transform_without_asyncio_timeout_keeps_reentrancy_and_d
     entered = asyncio.Event()
     cleaned = asyncio.Event()
     seen = []
+    # Allow more than one monotonic clock tick on Windows Python 3.10.
+    policy_timeout = 0.1
 
     async def approval(ctx, original):
         seen.append(("approval", original["chars"]))
         # Approval time is independent of the short transform deadline.
-        await asyncio.sleep(0.025)
+        await asyncio.sleep(2 * policy_timeout)
         return True
 
     async def transform(ctx, supplied):
@@ -892,7 +894,7 @@ async def test_executor_transform_without_asyncio_timeout_keeps_reentrancy_and_d
             executor,
             approval=approval,
             transform_arguments=transform,
-            policy_timeout=0.01,
+            policy_timeout=policy_timeout,
         )
         # An absent process exercises the same native transform without needing
         # the client platform to launch a sandboxed remote shell.

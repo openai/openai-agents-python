@@ -1029,9 +1029,12 @@ async def test_plain_websocket_rechecks_custom_ca_before_fresh_connections(
 
 
 @pytest.mark.serial
-async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+@pytest.mark.parametrize("trust_proxy", [True, False])
+async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, trust_proxy: bool
 ) -> None:
+    from urllib.parse import urlsplit
+
     from tests.test_sdk_session_tls import TLS_FIXTURES
 
     for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
@@ -1040,6 +1043,10 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
     for name in ("server-A.pem", "server-A.key"):
         (tmp_path / name).write_text(TLS_FIXTURES[name])
     context.load_cert_chain(tmp_path / "server-A.pem", tmp_path / "server-A.key")
+    if trust_proxy:
+        ca = tmp_path / "ca-A.pem"
+        ca.write_text(TLS_FIXTURES[ca.name])
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca))
     prefixes: list[bytes] = []
     handshake_failures: list[str] = []
     handshake_successes: list[bool] = []
@@ -1047,7 +1054,7 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
     loop = asyncio.get_running_loop()
     attempt_observed = asyncio.Event()
 
-    class UntrustedProxy(socketserver.BaseRequestHandler):
+    class Proxy(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             self.request.settimeout(5)
             # Peek without consuming ClientHello before the real TLS handshake.
@@ -1065,14 +1072,21 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
                 loop.call_soon_threadsafe(attempt_observed.set)
                 return
             handshake_successes.append(True)
-            loop.call_soon_threadsafe(attempt_observed.set)
             with secured:
                 try:
-                    accepted_data.append(secured.recv(8))
+                    data = b""
+                    while b"\r\n" not in data and len(data) < 1024:
+                        chunk = secured.recv(min(256, 1024 - len(data)))
+                        if not chunk:
+                            break
+                        data += chunk
+                    accepted_data.append(data.split(b"\r\n", 1)[0])
                 except OSError:
                     pass
+                finally:
+                    loop.call_soon_threadsafe(attempt_observed.set)
 
-    proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), UntrustedProxy)
+    proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Proxy)
     serving = asyncio.create_task(asyncio.to_thread(proxy.serve_forever, poll_interval=0.01))
     proxy_url = f"https://127.0.0.1:{proxy.server_address[1]}"
     for name in (
@@ -1124,6 +1138,22 @@ async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
             await asyncio.to_thread(proxy.server_close)
     assert any(prefix == b"\x16" for prefix in prefixes)
     assert all(prefix in (b"", b"\x16") for prefix in prefixes), "plaintext reached the HTTPS proxy"
-    assert "TLSV1_ALERT_UNKNOWN_CA" in handshake_failures, handshake_failures
-    assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
-    assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"
+    if trust_proxy:
+        assert handshake_successes, "the trusted proxy never completed TLS negotiation"
+        # Proxy policy can select WebSocket CONNECT or the existing HTTP fallback.
+        # Both routes must verify proxy TLS before sending application data.
+        authority = urlsplit(destination.url).netloc
+        expected = {
+            f"CONNECT {authority} HTTP/1.1".encode(),
+            f"POST {destination.url}/responses HTTP/1.1".encode(),
+        }
+        assert accepted_data and all(line in expected for line in accepted_data), accepted_data
+    else:
+        # Platform verifiers can close the stream without sending an unknown-CA alert.
+        assert handshake_failures
+        assert all(
+            reason in {"TLSV1_ALERT_UNKNOWN_CA", "UNEXPECTED_EOF_WHILE_READING"}
+            for reason in handshake_failures
+        ), handshake_failures
+        assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
+        assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"
