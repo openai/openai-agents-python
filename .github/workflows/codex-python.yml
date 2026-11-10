@@ -66,6 +66,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: "1"
+      MATURIN_PGO: ${{ inputs.runner == 'ubuntu-24.04' && 'true' || 'false' }}
       # PEP 517 frontends may copy only the wheel out of the backend directory.
       OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
     steps:

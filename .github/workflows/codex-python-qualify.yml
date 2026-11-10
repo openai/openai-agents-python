@@ -272,6 +272,34 @@ jobs:
               "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
               packages/codex/tests/test_native_storage_mounts.py
           fi
+      - name: Set up Node for native browser qualification
+        if: runner.os == 'macOS'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Qualify native browser interactions, audio, and MCP Apps with the installed wheel
+        if: runner.os == 'macOS'
+        env:
+          OPENAI_AGENTS_BROWSER_TESTS: '1'
+        run: |
+          uv venv --seed --python 3.12 "$RUNNER_TEMP/native-browser-venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$RUNNER_TEMP/native-browser-constraints.txt"
+          browser_python="$RUNNER_TEMP/native-browser-venv/bin/python"
+          "$browser_python" -m pip install \
+            --constraint "$RUNNER_TEMP/native-browser-constraints.txt" \
+            dist/*.whl aiohttp pytest pytest-asyncio
+          npm ci --prefix examples/codex/web_starter --ignore-scripts
+          npm run build --prefix examples/codex/web_starter
+          npm ci --prefix examples/codex/mcp_ui --ignore-scripts
+          npm run build --prefix examples/codex/mcp_ui
+          node examples/codex/web_starter/node_modules/playwright/cli.js install chromium
+          env -u OPENAI_API_KEY "$browser_python" -I -B -m pytest -q \
+            -o "pythonpath=$GITHUB_WORKSPACE $GITHUB_WORKSPACE/packages/codex" \
+            -o asyncio_mode=auto \
+            packages/codex/tests/test_web_starter_browser.py \
+            packages/codex/tests/test_native_realtime_browser.py \
+            packages/codex/tests/test_mcp_ui_browser.py
       - name: Qualify offline Unix sockets with the installed Linux wheel
         if: runner.os == 'Linux'
         run: |

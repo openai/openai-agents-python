@@ -267,7 +267,7 @@ jobs:
                       return False
               with tempfile.TemporaryDirectory(prefix='agents-native-inputs-') as directory:
                   with tempfile.TemporaryFile() as archive:
-                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'LICENSE', '.gitignore'],
+                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'uv.lock', 'LICENSE', '.gitignore'],
                                               stdout=archive)
                       if result.returncode:
                           return False
@@ -789,15 +789,6 @@ jobs:
         run: |
           npm ci --prefix packages/codex/tests/vercel-client --ignore-scripts
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_vercel_client.py
-      - name: Verify the complete browser starter with ai 6.0.315
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
-        env:
-          AGENTS_REQUIRE_WEB_BROWSER: '1'
-        run: |
-          npm ci --prefix examples/codex/web_starter --ignore-scripts
-          npm run build --prefix examples/codex/web_starter
-          npm exec --prefix examples/codex/web_starter -- playwright install --with-deps chromium
-          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_web_starter_browser.py
       - name: Verify the optional AG-UI example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
@@ -848,7 +839,7 @@ jobs:
         run: make sync
       - name: Run native SDK tests on macOS
         if: steps.changes.outputs.run == 'true'
-        timeout-minutes: 20
+        timeout-minutes: 30
         env:
           PYTEST_ADDOPTS: "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
           PYTHONUNBUFFERED: "1"

@@ -269,6 +269,11 @@ class NativeProvider:
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
 
+    ``request_max_retries`` controls retries of failed HTTP requests;
+    ``stream_max_retries`` controls reconnections of dropped response streams.
+    Omission uses native defaults (4 and 5 respectively). Zero disables retries
+    at that layer. The native runtime caps each configured count at 100.
+
     Set ``response_mode="buffered"`` to request complete JSON responses from an
     endpoint that supports nonstreaming Responses. Model output events become
     available after the full response arrives, without token-level progress.
@@ -320,8 +325,16 @@ class NativeProvider:
     env_headers: Mapping[str, str] | None = field(default=None, repr=False, hash=False)
     organization: str | None = field(default=None, repr=False)
     project: str | None = field(default=None, repr=False)
+    request_max_retries: int | None = None
+    stream_max_retries: int | None = None
 
     def __post_init__(self) -> None:
+        for name in ("request_max_retries", "stream_max_retries"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1
+            ):
+                raise ValueError(f"{name} must be a non-negative signed 64-bit integer or None")
         for name in ("base_url", "api_key"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -1368,8 +1381,8 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
-        max_function_concurrency: int | None = None,
-        observation_retention: Literal["bounded", "all"] = "bounded",
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -1542,9 +1555,9 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model"] = model
             if model_settings is not None:
                 options["model_settings"] = model_settings
-            if observation_retention != "bounded":
+            if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                 options["observation_retention"] = observation_retention
-            if max_function_concurrency is not None:
+            if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
@@ -1791,8 +1804,8 @@ class Agent(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
         budget: RunBudget | None = None,
-        max_function_concurrency: int | None = None,
-        observation_retention: Literal["bounded", "all"] = "bounded",
+        max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
+        observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1831,9 +1844,9 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model"] = model
                 if model_settings is not None:
                     options["model_settings"] = model_settings
-                if observation_retention != "bounded":
+                if observation_retention is not _OBSERVATION_RETENTION_UNSET:
                     options["observation_retention"] = observation_retention
-                if max_function_concurrency is not None:
+                if max_function_concurrency is not _MAX_FUNCTION_CONCURRENCY_UNSET:
                     options["max_function_concurrency"] = max_function_concurrency
                 if environment is not None:
                     options["environment"] = environment

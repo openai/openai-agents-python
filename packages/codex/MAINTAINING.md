@@ -55,6 +55,23 @@ Preparation verifies the pinned source. To use an authorized Codex checkout:
 
 On Python 3.11 or later, the same route without Make is `python3 packages/codex/scripts/prepare_codex.py`, followed by `uv build --wheel`. On Python 3.10, use the uv preparation command above, followed by `uv build --wheel`. If you need a source distribution for release qualification, build it explicitly with `uv build --sdist`.
 
+### Build with profile-guided optimization
+
+Linux x86-64 release-wheel CI enables profile-guided optimization (PGO). Maturin records execution counts from synthetic SDK calls, then uses those counts to optimize the native extension. This compiles the extension twice and needs temporary disk space for the instrumented build. The execution helpers use the normal release build.
+
+To use the same mode locally, prepare the source as above, then run:
+
+```sh
+rustup component add llvm-tools --toolchain 1.95.0
+MATURIN_PGO=true make build
+```
+
+PGO requires the native `x86_64-unknown-linux-gnu` target, `uv`, and Maturin 1.16 or later. The declared build dependencies supply Maturin. Leave `MATURIN_PGO` unset for development, other platforms, or cross-compilation. Supply PGO through this setting rather than through compiler profile flags.
+
+The trainer uses a local synthetic Responses server and dependencies pinned in `uv.lock`. Maturin keeps the training wheel and profiles temporary; only the optimized wheel reaches the normal integrity and size checks. The adjacent `.whl.pristine.json` receipt records the compiler, Maturin version, target, PGO mode, and a hash of the Python training source in `native_build`.
+
+CI excludes the PGO target directory from dependency archives and reuses qualified final wheels through the existing snapshot checks. Changes to the trainer, fixture, or lockfile require a new native build. Python-only repacking preserves the original native build and its training-source hash.
+
 ### Install outside the checkout
 
 Install the wheel in a fresh virtual environment outside the source checkout. The commands below start from the repository root after `make build`. Choose the exact wheel produced by this build; do not select an older wheel from `dist/`.
@@ -111,7 +128,7 @@ A donor is a push run that supplies a reusable native artifact for Linux x86_64,
 
 A branch producer also records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 
-Tests searches artifacts by the exact native input hash, so later docs-only runs do not hide a retained snapshot. The hash covers native sources, pins, patches, build scripts and settings, copied licenses, the test executor and executable CI controls. Python sources and dependencies can change without a native rebuild; qualification repacks and tests the current SDK. Snapshots and their captured producer identity are retained for 90 days.
+Tests searches artifacts by the exact native input hash, so later docs-only runs do not hide a retained snapshot. The hash covers native sources, pins, patches, build scripts and settings, training inputs and the lockfile, copied licenses, the test executor and executable CI controls. Python source-only changes can reuse the native build; qualification repacks and tests the current SDK. Snapshots and their captured producer identity are retained for 90 days.
 
 If no eligible snapshot exists, Tests checks the latest 20 successful push runs per source for reusable Rust dependencies, then starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 

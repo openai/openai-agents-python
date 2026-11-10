@@ -79,6 +79,8 @@ def identity():
         "ImageVersion",
         "RUSTUP_TOOLCHAIN",
         "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "MATURIN_PGO",
         "RUSTDOCFLAGS",
         "CARGO_BUILD_TARGET",
         "MACOSX_DEPLOYMENT_TARGET",
@@ -131,7 +133,9 @@ def pack():
                 archive.add(
                     path,
                     arcname=name,
-                    filter=lambda member: None if member.name == "target/cargo-timings" else member,
+                    filter=lambda member: (
+                        None if member.name in {"target/cargo-timings", "target/pgo"} else member
+                    ),
                 )
     (dist / "native-dependencies.json").write_text(json.dumps(identity(), sort_keys=True))
 

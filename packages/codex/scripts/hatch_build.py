@@ -66,6 +66,14 @@ def _qualified_source(native, qualification):
         raise ValueError("native wheel qualification differs from the pinned Codex base")
     if qualification["native_inputs"] != _native_inputs(native):
         raise ValueError("Native build inputs differ; run a fresh native build")
+    build = qualification["native_build"]
+    if (
+        not isinstance(build, dict)
+        or type(build.get("pgo")) is not bool
+        or build.get("profile") not in {"release", "dev"}
+        or (build["pgo"] and build["profile"] != "release")
+    ):
+        raise ValueError("Native wheel has an invalid build mode")
     series = patch_series(native)
     base_tree = commit.split(b"\n", 1)[0].removeprefix(b"tree ").decode("ascii")
     if not series["patches"] and series["result_tree"] != base_tree:
@@ -89,7 +97,14 @@ def _qualified_source(native, qualification):
         verify_rmcp_source(native)
     return {
         key: qualification[key]
-        for key in ("format", "codex_commit", "native_inputs", "patch_series", "rmcp_source")
+        for key in (
+            "format",
+            "codex_commit",
+            "native_inputs",
+            "native_build",
+            "patch_series",
+            "rmcp_source",
+        )
     }
 
 
@@ -157,6 +172,7 @@ class NativeBuildHook(BuildHookInterface):
                     "format": "reviewed-codex-rmcp-v4",
                     "codex_commit": source["codex_commit"],
                     "native_inputs": native_inputs,
+                    "native_build": json.loads((stage / "native-build.json").read_text()),
                     "patch_series": source["patch_series"],
                     "rmcp_source": {
                         "identity": rmcp_source["source"],
