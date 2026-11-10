@@ -377,6 +377,7 @@ class Environment(Generic[ContextT_contra]):
     # Captured command overrides; current declarations only, excluded from saved state.
     env: Mapping[str, str] | None = field(default=None, repr=False)
     temp_dir: str | PathLike[str] | None = None
+    read_only_roots: Sequence[str | PathLike[str]] = ()
 
     @classmethod
     def local(
@@ -406,6 +407,7 @@ class Environment(Generic[ContextT_contra]):
         read_only: bool = False,
         env: Mapping[str, str] | None = None,
         temp_dir: str | PathLike[str] | None = None,
+        read_only_roots: Sequence[str | PathLike[str]] = (),
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -435,6 +437,11 @@ class Environment(Generic[ContextT_contra]):
         On Linux, ``mounts`` adds read-only access to canonical same-path
         directories. Supply each source; destination and ``local_bind`` strategy
         default to the supported same-path bind. Mounts require strict mode.
+        On macOS, ``read_only_roots`` grants reads at existing canonical directory
+        paths. Use directories your application controls and keeps stable for
+        the Session. Keep them separate from the workspace, writable roots and
+        private SDK or credential paths. While these grants are active, writable
+        roots are fixed. Restore with the same grants on the current Environment.
         ``read_only=True`` caps the workspace at read access without expanding
         its readable paths or network policy. It excludes additional writable
         roots, native apply_patch and NativeAgents. Empty root replacement stays read-only.
@@ -459,6 +466,7 @@ class Environment(Generic[ContextT_contra]):
             write_policy=write_policy,
             read_only=read_only,
             temp_dir=temp_dir,
+            read_only_roots=read_only_roots,
         )
 
     def __post_init__(self) -> None:
@@ -498,6 +506,10 @@ class Environment(Generic[ContextT_contra]):
             self._validate_remote_url()
         if self.writable_roots is not None:
             object.__setattr__(self, "writable_roots", _writable_roots(self.writable_roots))
+        read_only_roots = _writable_roots(self.read_only_roots, name="read_only_roots")
+        if read_only_roots and (not self._is_local or sys.platform != "darwin"):
+            raise ValueError("read_only_roots requires Environment.local on macOS")
+        object.__setattr__(self, "read_only_roots", read_only_roots)
         if isinstance(self.mounts, (str, bytes)) or not isinstance(self.mounts, Sequence):
             raise TypeError("mounts must be a sequence of LocalStorageMount declarations")
         mounts = []
@@ -714,6 +726,8 @@ class Environment(Generic[ContextT_contra]):
             result["temp_dir"] = _path_uri(fspath(self.temp_dir))
         if self.writable_roots is not None:
             result["writable_roots"] = [fspath(root) for root in self.writable_roots]
+        if self.read_only_roots:
+            result["read_only_roots"] = [fspath(root) for root in self.read_only_roots]
         if self.mounts:
             native_mounts: list[RuntimeStorageMount] = [
                 {
@@ -764,18 +778,20 @@ def _path_uri(value: str) -> str:
     return prefix + quote_from_bytes(fsencode(encoded_path))
 
 
-def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
+def _writable_roots(
+    values: Sequence[str | PathLike[str]], *, name: str = "writable_roots"
+) -> tuple[str, ...]:
     if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
-        raise TypeError("writable_roots must be a sequence of absolute executor paths")
+        raise TypeError(f"{name} must be a sequence of absolute executor paths")
     roots = set()
     for value in values:
         raw = fspath(value)
         if not isinstance(raw, str):
-            raise TypeError("writable_roots must contain text paths")
+            raise TypeError(f"{name} must contain text paths")
         if raw.startswith("file:") and (
             re.search(r"[\x00-\x20\x7f]", raw) or re.search(r"%(?![0-9a-fA-F]{2})", raw)
         ):
-            raise ValueError("writable_roots must contain valid file URIs")
+            raise ValueError(f"{name} must contain valid file URIs")
         try:
             uri = urlsplit(_path_uri(raw))
             path = PurePosixPath(unquote(uri.path, errors="strict"))
@@ -792,7 +808,7 @@ def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
         except ValueError:
             valid = False
         if not valid:
-            raise ValueError("writable_roots must contain absolute executor directories")
+            raise ValueError(f"{name} must contain absolute executor directories")
         roots.add(_path_uri(str(path)))
     return tuple(sorted(roots))
 
