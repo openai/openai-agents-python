@@ -175,7 +175,10 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository))
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_BRANCH: ${{ (github.base_ref || steps.producer-identity.outputs.base_ref || github.ref_name) == 'feat/codex-harness' && 'feat/codex-harness' || github.event.repository.default_branch }}
+          SOURCE_BRANCH: >-
+            ${{ (github.event.pull_request.stack.base.ref || github.base_ref ||
+            steps.producer-identity.outputs.base_ref || github.ref_name) == 'feat/codex-harness' &&
+            'feat/codex-harness' || github.event.repository.default_branch }}
           CURRENT_PR: ${{ github.event.pull_request.number || steps.producer-identity.outputs.pr_number || '' }}
           CURRENT_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
@@ -300,14 +303,30 @@ jobs:
                            if not (path.startswith('packages/codex/rust/') and path.endswith('.rs'))}
               return before == after
 
+          def native_ready_status(run):
+              return (run['status'] == 'in_progress' or
+                      (run['status'] == 'completed' and run['conclusion'] in ('success', 'failure')))
+
           def qualified(run, dependencies=False):
-              if run['status'] != 'completed' or run['conclusion'] != 'success' or not compatible(run, dependencies):
+              completed = run['status'] == 'completed' and run['conclusion'] == 'success'
+              # Harness PRs re-run the SDK suite on the repacked wheel. Once a canonical
+              # push has qualified all native products, its later SDK results are separate.
+              native_ready = (not dependencies and os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+                              and os.environ['REQUIRE_WINDOWS'] == 'true'
+                              and run['path'] == '.github/workflows/tests.yml'
+                              and run['head_branch'] == 'feat/codex-harness'
+                              and not completed and native_ready_status(run))
+              if not (completed or native_ready) or not compatible(run, dependencies):
                   return None
+              required_attempt = run['run_attempt'] if native_ready else None
               run_api = api + '/runs/' + str(run['id'])
               jobs = records(run_api + '/jobs?filter=all', 'jobs')
               prefix = 'native-only / ' if run['path'].endswith('native-python-push.yml') else ''
               sdk_starts = []
               for job in jobs:
+                  if (required_attempt is not None and job['run_attempt'] == required_attempt
+                          and job.get('conclusion') == 'cancelled'):
+                      return None
                   name = job['name'].removeprefix(prefix)
                   if name.startswith('produce-') or name == 'changes' or job.get('conclusion') == 'skipped':
                       continue
@@ -324,6 +343,9 @@ jobs:
               captures = []
               for job in jobs:
                   if job['name'] != prefix + 'changes':
+                      continue
+                  if required_attempt is not None and (
+                          job['run_attempt'] != required_attempt or job['conclusion'] != 'success'):
                       continue
                   for step in job.get('steps', []):
                       if step['name'] != 'Publish native producer identity' or step.get('conclusion') != 'success':
@@ -366,6 +388,8 @@ jobs:
                   if not qualifiers:
                       return None
                   latest_attempt = max(job['run_attempt'] for job in qualifiers)
+                  if required_attempt is not None and latest_attempt != required_attempt:
+                      return None
                   qualifiers = [job for job in qualifiers if job['run_attempt'] == latest_attempt]
                   if len(qualifiers) != 1 or qualifiers[0]['conclusion'] != 'success':
                       return None
@@ -373,6 +397,8 @@ jobs:
                   for producer in jobs:
                       if (producer['name'] != prefix + f'produce-{platform} / Native snapshot ({runner})'
                               or producer['conclusion'] != 'success'):
+                          continue
+                      if required_attempt is not None and producer['run_attempt'] != required_attempt:
                           continue
                       steps = {step['name']: step for step in producer.get('steps', [])}
                       fresh = (steps.get('Build the SDK and native runtime together', {}).get('conclusion') == 'success'
@@ -401,6 +427,11 @@ jobs:
                   if len(valid) != 1:
                       return None
                   selected[identity] = valid[0]
+              if native_ready:
+                  # Recheck the attempt and status after reading the qualification and artifact records.
+                  current = get(run_api)
+                  if current['run_attempt'] != required_attempt or not native_ready_status(current):
+                      return None
               return selected
 
           # Discover exact matching artifacts, including producers older than recent docs runs.

@@ -927,6 +927,58 @@ def test_native_selection_only_runs_for_trusted_code_events(
 
 
 @pytest.mark.parametrize(
+    ("stack_base", "base", "recorded_base", "ref", "expected_source", "expected_base"),
+    [
+        (
+            "feat/codex-harness",
+            "feature/parent",
+            "",
+            "199/merge",
+            "feat/codex-harness",
+            "feature/parent",
+        ),
+        ("", "feat/codex-harness", "", "199/merge", "feat/codex-harness", "feat/codex-harness"),
+        ("", "", "feat/codex-harness", "feature", "feat/codex-harness", "feat/codex-harness"),
+        ("", "", "", "feat/codex-harness", "feat/codex-harness", ""),
+        ("main", "feature/parent", "", "199/merge", "main", "feature/parent"),
+    ],
+)
+def test_native_selection_routes_stack_sources_and_pr_provenance(
+    stack_base: str,
+    base: str,
+    recorded_base: str,
+    ref: str,
+    expected_source: str,
+    expected_base: str,
+) -> None:
+    import re
+
+    workflow = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
+    selection = next(
+        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "native-source"
+    )
+    values = {
+        "github.event.pull_request.stack.base.ref": stack_base,
+        "github.base_ref": base,
+        "steps.producer-identity.outputs.base_ref": recorded_base,
+        "github.ref_name": ref,
+        "github.event.repository.default_branch": "main",
+    }
+    for name, expected in {
+        "SOURCE_BRANCH": expected_source,
+        "CURRENT_BASE_REF": expected_base,
+    }.items():
+        expression = selection["env"][name].removeprefix("${{").removesuffix("}}").strip()
+        expression = re.sub(
+            r"\b(?:steps|github)(?:\.[a-zA-Z_][a-zA-Z_0-9-]*)+",
+            lambda match: repr(values[match.group()]),
+            expression,
+        )
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        assert eval(expression, {"__builtins__": {}}, {}) == expected
+
+
+@pytest.mark.parametrize(
     "scenario",
     [
         "reuse",
@@ -988,6 +1040,18 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "pending_python_expired",
         "pending_python_missing_artifact",
         "pending_python_release_missing_windows_job",
+        "harness_pr_in_progress",
+        "harness_pr_failed_run",
+        "harness_pr_cancelled_during_selection",
+        "harness_pr_retried_during_selection",
+        "harness_pr_completed_during_selection",
+        "harness_pr_sdk_cancelled",
+        "harness_pr_qualification_failed",
+        "harness_pr_release_missing_windows_job",
+        "harness_pr_different_attempt",
+        "harness_pr_producer_different_attempt",
+        "harness_pr_qualifier_different_attempt",
+        "harness_push_in_progress",
         "current_run",
         "unrelated_source",
         "native_changed",
@@ -1116,7 +1180,14 @@ def test_native_build_selection(
     scenario = scenario.removeprefix("dependencies_")
     if prefer_wheel or missing_cleanup:
         scenario = "reuse"
-    pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
+    harness_pr = scenario.startswith("harness_pr_")
+    harness_push = scenario.startswith("harness_push_")
+    scenario = scenario.removeprefix("harness_pr_").removeprefix("harness_push_")
+    pending_python = (
+        scenario == "in_progress"
+        or scenario.startswith("pending_python_")
+        or (harness_pr and scenario not in {"failed_run", "retried_during_selection"})
+    )
     scenario = scenario.removeprefix("pending_python_")
     repo, initial = change_repo
     # Preserve authored fixture bytes when the selector runs Git archive.
@@ -1559,7 +1630,7 @@ def test_native_build_selection(
         _git(repo, "merge", "--no-ff", "--no-commit", head)
         _commit(repo)
     source = {
-        "run_attempt": 1,
+        "run_attempt": 2 if scenario == "different_attempt" else 1,
         "id": 456 if scenario == "current_run" else 123,
         "head_sha": donor,
         "repository": {"full_name": repository, "id": 10},
@@ -1585,14 +1656,14 @@ def test_native_build_selection(
             "feature"
             if pr_donor or branch_push or scenario == "wrong_branch"
             else "feat/codex-harness"
-            if scenario.startswith("feature_push")
+            if scenario.startswith("feature_push") or harness_pr or harness_push
             else "main"
         ),
         "status": "in_progress" if pending_python else "completed",
         "conclusion": None
         if pending_python
         else "failure"
-        if scenario == "failed_run"
+        if scenario in {"failed_run", "retried_during_selection"}
         else "success",
     }
     source["referenced_workflows"] = [
@@ -1749,6 +1820,9 @@ def test_native_build_selection(
             "name": f"produce-{name} / Native snapshot ({runner})",
             "status": "completed",
             "conclusion": "success",
+            "run_attempt": 2
+            if scenario == "producer_different_attempt" and name == "windows"
+            else 1,
             "steps": [
                 {
                     "name": "Build the SDK and native runtime together",
@@ -1855,22 +1929,27 @@ def test_native_build_selection(
             for _ in range(100)
         ]
         artifacts[:0] = [{"name": "other", "expired": False} for _ in range(100)]
-    if pending_python or scenario == "failed_run":
+    if pending_python or scenario in {"failed_run", "retried_during_selection"}:
         jobs.append(
             {
                 "name": "tests (3.14)",
                 "started_at": "2026-11-04T01:00:20Z",
                 "status": "in_progress" if pending_python else "completed",
                 "conclusion": None if pending_python else "failure",
+                "run_attempt": 1,
             }
         )
+        if scenario == "sdk_cancelled":
+            jobs[-1].update(status="completed", conclusion="cancelled")
 
     jobs.extend(
         {
             "name": f"native-{name} / Native package ({runner})",
             "status": "completed",
             "conclusion": "success",
-            "run_attempt": 1,
+            "run_attempt": 2
+            if scenario == "qualifier_different_attempt" and name == "windows"
+            else 1,
             "started_at": "2026-11-04T01:00:20Z",
             "steps": [],
         }
@@ -2109,6 +2188,13 @@ def test_native_build_selection(
             }
         elif url.endswith("/runs/123"):
             response = source
+            if requests.count(url) == 2:
+                if scenario == "cancelled_during_selection":
+                    response = {**source, "status": "completed", "conclusion": "cancelled"}
+                elif scenario == "retried_during_selection":
+                    response = {**source, "run_attempt": 2, "status": "queued", "conclusion": None}
+                elif scenario == "completed_during_selection":
+                    response = {**source, "status": "completed", "conclusion": "success"}
         elif "/runs/" in url and url.rsplit("/", 1)[1].isdigit():
             assert scenario in {"snapshot_index_run_bound", "snapshot_index_duplicate_runs"}
             response = {
@@ -2164,6 +2250,7 @@ def test_native_build_selection(
         "CURRENT_PR": (
             "199"
             if current_pr
+            or harness_pr
             or scenario in {"trusted_push_to_pr", "feature_push_to_pr"}
             or scenario.startswith("stacked_pr")
             else ""
@@ -2171,10 +2258,15 @@ def test_native_build_selection(
         "CURRENT_PR_HEAD": head,
         "GITHUB_BASE_REF": "feature/parent" if scenario.startswith("stacked_pr") else "main",
         "GITHUB_OUTPUT": str(output),
-        "SOURCE_BRANCH": "feat/codex-harness" if scenario.startswith("feature_push") else "main",
+        "SOURCE_BRANCH": (
+            "feat/codex-harness"
+            if scenario.startswith("feature_push") or harness_pr or harness_push
+            else "main"
+        ),
         "GITHUB_EVENT_NAME": (
             "pull_request"
             if current_pr
+            or harness_pr
             or scenario in {"trusted_push_to_pr", "feature_push_to_pr"}
             or scenario.startswith("stacked_pr")
             else "push"
@@ -2184,7 +2276,10 @@ def test_native_build_selection(
             ""
             if scenario.startswith("unknown_")
             else "true"
-            if scenario.startswith("release_") or scenario == "version_and_docs"
+            if scenario.startswith("release_")
+            or scenario == "version_and_docs"
+            or harness_pr
+            or harness_push
             else "false"
         ),
     }.items():
@@ -2253,34 +2348,38 @@ def test_native_build_selection(
         + "\n"
         if not missing_cleanup
         and not (dependency_cache and scenario == "branch_copied")
-        and scenario
-        in {
-            "reuse",
-            "python_dependencies_changed",
-            "build_bytecode_noise",
-            "python_fixture_changed",
-            "old_snapshot_after_docs",
-            "snapshot_index_filtered",
-            "snapshot_index_duplicate_runs",
-            "push_package_demos",
-            "trusted_push_to_pr",
-            "stacked_pr",
-            "queued_sdk",
-            "branch_same",
-            "branch_merge_python",
-            "branch_nullable_association",
-            "branch_copied",
-            "branch_completed_precedence",
-            "feature_push",
-            "feature_push_to_pr",
-            "paginated",
-            "push_native_config",
-            "push_external_environments",
-            "push_native_examples",
-            "routine_two_platforms",
-            "release_complete",
-            "unknown_complete",
-        }
+        and (
+            harness_pr
+            and scenario in {"in_progress", "failed_run", "completed_during_selection"}
+            or scenario
+            in {
+                "reuse",
+                "python_dependencies_changed",
+                "build_bytecode_noise",
+                "python_fixture_changed",
+                "old_snapshot_after_docs",
+                "snapshot_index_filtered",
+                "snapshot_index_duplicate_runs",
+                "push_package_demos",
+                "trusted_push_to_pr",
+                "stacked_pr",
+                "queued_sdk",
+                "branch_same",
+                "branch_merge_python",
+                "branch_nullable_association",
+                "branch_copied",
+                "branch_completed_precedence",
+                "feature_push",
+                "feature_push_to_pr",
+                "paginated",
+                "push_native_config",
+                "push_external_environments",
+                "push_native_examples",
+                "routine_two_platforms",
+                "release_complete",
+                "unknown_complete",
+            }
+        )
         else ""
     )
 
