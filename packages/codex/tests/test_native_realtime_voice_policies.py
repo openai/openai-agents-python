@@ -367,7 +367,7 @@ async def test_native_remembered_rejection_preserves_formatter_omission(
                 if reason == "implicit"
                 else "Tool execution was rejected"
             )
-            await owner.update({"instructions": f"Completed {index}."})
+        await owner.update({"instructions": "Completed remembered calls."})
         assert formatted == (["remembered-0", "remembered-1"] if reason == "implicit" else [])
         assert effects == []
         assert await session.pending_interactions() == ()
