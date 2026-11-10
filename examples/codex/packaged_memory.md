@@ -6,10 +6,10 @@ Use `agents.memory.SQLiteMemory` to save named string values between separate na
 
 Use Python 3.10 through 3.14 and an SDK environment from this checkout with its matching native extension. Follow the [source setup](../../packages/codex/MAINTAINING.md#build-from-this-source) if you have not prepared that environment. The example uses Python's built-in SQLite module and needs no extra database package or provider key.
 
-From the repository root, run:
+With that SDK environment active, run from the repository root:
 
 ```sh
-PYTHONPATH=. uv run --no-sync python -m examples.codex.packaged_memory
+python examples/codex/packaged_memory.py
 ```
 
 The [complete example](packaged_memory.py) creates a temporary database and uses a local synthetic Responses endpoint with the real native engine. Each request opens a fresh Agent, store, and Session. The example closes the Session and store after saving, then opens them again to recall the fact. A second scope cannot read the first scope's value. Finally, the example deletes the value and checks another fresh store.
