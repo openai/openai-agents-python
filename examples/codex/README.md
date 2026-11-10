@@ -49,12 +49,15 @@ These programs use the current SDK and model credentials:
 | Task | Guide | Prerequisites and limits |
 | --- | --- | --- |
 | Own native Session storage | [Application-owned storage](canonical_storage/README.md) | A persistent POSIX reference adapter, writer ownership, and verified tool-result recovery. |
+| Store application memory across Sessions | [Packaged memory](packaged_memory.md) | The packaged `SQLiteMemory` store and tools, trusted scope selection, and deletion. Uses scripted responses. |
+| Check and repair a JSON artifact | [Packaged artifact validation](packaged_artifact.md) | The packaged `json_artifact_tool` checks a concrete file candidate, returns an error, and accepts a corrected retry from the same agent. Uses scripted responses. |
 | Test application behavior | [Task recipe chooser](../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
 | Read or revise selected text files | [Selected documents](selected_documents.md) | Bounded pages and search, application-selected writable aliases, and serialized revision checks. The application extracts PDF text. |
 | Discover and read selected collection sources | [Selective collection](selective_collection.md) | Application-authorized metadata search and on-demand UTF-8 staging; includes a local 10,000-file fixture and scripted benchmark. |
 | Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires alpha.7 or later. Follow [matching-release setup](../../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../../docs/sdk/configuration.md#edit-the-next-sampling-request). |
 | Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
 | Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
+| Render an MCP App and send an action | [MCP App browser](mcp_ui/README.md) | The packaged Vercel stream and MCP App host with a browser, a local MCP peer, and scripted model responses. |
 | Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |
 | Record voice or run a speech pipeline | [Native voice](native_voice.md) | Development-only examples, model credentials, and the `voice` extra where noted. Covers Session-owned Realtime, connection credentials, and custom adapters. |
 | Resume an external job | [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. Requires private POSIX storage and a local Responses endpoint. |

@@ -477,12 +477,13 @@ async def test_omitted_operation_tools_inherits_a_subset_then_b_declared_default
     responses.respond(function_call("distinct_b", {}, "distinct-B"))
     responses.respond(assistant_output("B accepted"))
     async with timeout(20), source.session() as session:
-        await session.update(tools=[allowed_a])
+        await session.update(tools=[allowed_a, ToolRef("transfer_to_b")])
         turn = await session.submit("Continue with B")
         assert (await turn.get_result()).final_output == "B accepted"
         assert calls == ["B"]
         initial = {tool["name"] for tool in function_declarations(responses.requests[0])}
         assert "allowed_a" in initial
+        assert "transfer_to_b" in initial
         assert "excluded_a" not in initial
         assert "distinct_b" in {
             tool["name"] for tool in function_declarations(responses.requests[1])

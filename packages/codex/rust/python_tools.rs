@@ -8690,6 +8690,7 @@ pub fn check_raw_operation(operation: &str) -> Result<()> {
                 | "realtime_tool_selection_sdk"
                 | "realtime_conversation_config_sdk"
                 | "realtime_conversation_update_history_sdk"
+                | "realtime_conversation_send_event_sdk"
                 | "realtime_conversation_retrieve_item_sdk"
                 | "realtime_conversation_retrieve_history_sdk"
                 | "realtime_conversation_prepare_sdk"

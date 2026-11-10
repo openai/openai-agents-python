@@ -175,7 +175,7 @@ dev = [
     "aiohttp>=3.14.3,<4",
     "packaging>=25",
     "hatchling",
-    "maturin>=1.9.4,<2",
+    "maturin>=1.16.0,<2",
     "tomli==2.2.1; python_version < '3.11'",
     "pyright==1.1.408",
     "coverage>=7.6.12",
@@ -185,9 +185,10 @@ dev = [
     "pygments>=2.20.0",
     "pyyaml>=6",
 ]
+pgo = ["aiohttp>=3.14.3,<4", "pytest>=9.0.3", "pytest-asyncio"]
 
 [build-system]
-requires = ["hatchling", "maturin>=1.9.4,<2", "patchelf>=0.19.1; sys_platform == 'linux'", "tomli==2.2.1; python_version < '3.11'"]
+requires = ["hatchling", "maturin>=1.16.0,<2", "patchelf>=0.19.1; sys_platform == 'linux'", "tomli==2.2.1; python_version < '3.11'"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
@@ -213,6 +214,8 @@ only-include = [
     "packages/codex/rmcp-patches",
     "packages/codex/rust",
     "packages/codex/scripts",
+    "packages/codex/tests/native_fixtures.py",
+    "uv.lock",
 ]
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
 
@@ -231,6 +234,8 @@ path = "packages/codex/scripts/hatch_build.py"
 manifest-path = "packages/codex/Cargo.toml"
 python-source = "src"
 module-name = "agents._native"
+pgo-command = "python packages/codex/scripts/pgo_train.py"
+pgo-dependency-group = "pgo"
 include = [
     { path = "src/agents/bin/*", format = "wheel" },
     { path = "src/agents/licenses/*", format = "wheel" },
