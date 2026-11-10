@@ -76,13 +76,15 @@ This script demonstrates closing and reopening within one application process. T
 
 ### Recover after interruption
 
-A process can stop after a tool applies an effect and before the SDK records its result. If a retained root tool call has an unknown outcome, an ordinary reopen raises `LocalRecoveryRequired` before any new model request. Inspect `error.calls`, `error.turns`, and `error.items`. Each uncertain call identifies the original thread, turn, and call, along with its name and arguments.
+A process can stop after a tool applies an effect and before the SDK records its result. When reopening raises `LocalRecoveryRequired`, inspect `error.calls`, `error.turns`, and `error.items`. Each entry in `error.calls` identifies the original thread, turn, and call, along with the tool name and arguments. The SDK reports these calls before making a new model request.
 
-Check each effect against trusted application records or the system that owns the effect. Keep the conversation closed if you cannot confirm an outcome. The SDK supports explicit reconciliation of retained root calls with a missing result. An unresolved child call or an active child whose runtime cannot be restored causes a `RuntimeError` on reopen.
+The published `0.24.0-alpha.7` wheel supports reconciliation of retained root calls only. An unresolved descendant call causes `RuntimeError` when you reopen with that wheel. Development builds that include descendant recovery can also report retained child and grandchild calls in `LocalRecoveryRequired.calls`.
 
-Local history supports root recovery and inspection of settled child history. It does not automatically recover an active child graph or reconcile uncertain child effects. Your application owns external-effect reconciliation and decides whether to start new work. Preserve the refusal when a child outcome remains unknown; do not edit saved history to force reopening.
+Check each outcome against trusted application records or the system that owns the effect. Use each call's `reconcile()` method to create a confirmation with its original IDs. Open the original root conversation with the same `LocalStorage` profile and execution policy, and pass the confirmations as `reconciled_calls`. Keep the conversation closed while an outcome remains unknown or a writer is active.
 
-Suppose `call` is the only unresolved root call. Your application journal confirms that the tool recorded a handoff. Reopen the original profile with a matching result.
+The SDK records each confirmed result in the call's original thread. Recovery reopens the root conversation and leaves interrupted child runtimes stopped. If the SDK cannot account for an active descendant's unfinished work, it refuses to reopen. Keep the original history intact for recovery.
+
+In this example, `call` is the only unresolved root call. Your application journal confirms that the tool recorded a handoff. Reopen the original profile with a matching result.
 
 ```python
 confirmation = call.reconcile(
