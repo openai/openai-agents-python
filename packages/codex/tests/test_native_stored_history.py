@@ -175,7 +175,7 @@ async def test_stored_revert_delete_join_close_and_preserve_identity(responses, 
                 await session.delete_stored()
 
         if delete:
-            with pytest.raises(Exception, match="not found|not exist"):
+            with pytest.raises(Exception, match="not found|not exist|no rollout found"):
                 async with agent.session(storage=storage, resume=identity):
                     pytest.fail("Deleted conversation reopened")
         else:

@@ -836,6 +836,9 @@ async def native_auth_case():
         )
 
         class Forwarder:
+            async def on_trace_event(self, event):
+                await self.on_trace_events((event,))
+
             async def on_trace_events(self, events):
                 observed.extend(events)
                 groups.append(events)
