@@ -19,7 +19,8 @@ fn main() -> anyhow::Result<()> {
             {
                 std::process::exit(i32::from(!apparmor_restricts_userns()));
             }
-            // Keep pre-sandbox Bubblewrap lookup separate from the child PATH.
+            // The process and filesystem sandboxes use this alias to find
+            // bubblewrap. Do not search host or workspace PATH entries.
             // SAFETY: this entry point runs before any helper thread starts.
             unsafe {
                 std::env::set_var(

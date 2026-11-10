@@ -274,8 +274,8 @@ class CodexLogin:
     Set ``account_id`` to require a specific ChatGPT account or workspace.
     The SDK checks the saved login when it opens a Session.
 
-    Linux trusted workspace execution requires ``credential_directory``, an
-    absolute path to an application-owned directory dedicated to credentials.
+    Trusted workspace execution requires ``credential_directory``, an absolute
+    path to an application-owned directory dedicated to credentials.
     The selected ``codex_home/auth.json`` must resolve to ``auth.json`` in that
     directory. Keep the directory and its ancestors in place while Sessions
     use it. The executor cannot read that directory. Use strict execution
