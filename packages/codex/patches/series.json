@@ -371,7 +371,11 @@
     {
       "path": "0152-sdk-codex-login-terminal-rate-limits.patch",
       "sha256": "18e553a5981488043c85a1c6c22cb87a436036d647a278bd1a0b0270fa939bf4"
+    },
+    {
+      "path": "sdk-realtime-provider-controls-and-tool-history.patch",
+      "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     }
   ],
-  "result_tree": "e51608a363e9d7b40570a6bb408a6de632cc674d"
+  "result_tree": "3a7d23cca3035ef8ecb104591cd92cef3e9b410e"
 }
