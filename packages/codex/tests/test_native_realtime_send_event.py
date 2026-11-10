@@ -8,12 +8,15 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, NativeProvider
+from agents import Agent, NativeProvider, function_tool
 from agents.realtime import (
     RealtimeConfig,
     RealtimeConversationItemObserved,
+    RealtimeDelegation,
     RealtimeHostedMcpToolsListed,
     RealtimeResponse,
+    RealtimeText,
+    RealtimeToolCall,
 )
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -470,3 +473,134 @@ async def test_raw_detached_responses_keep_explicit_inputs_and_observed_history(
             ("voice-response-2", "created"),
             ("voice-response-2", "done"),
         ]
+
+
+async def test_detached_output_cannot_dispatch_tools_or_handoffs(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    effects: list[str] = []
+
+    @function_tool
+    async def lookup(key: str) -> str:
+        effects.append(key)
+        return "Local tool output must not be produced."
+
+    seen: list[Any] = []
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-detached-tool-boundary",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", tools=[lookup], provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def provider_response(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("type") not in ("response.created", "response.done"):
+                await send_json(data, *args, **kwargs)
+                return
+            response = data["response"]
+            response_id = response["id"]
+            detached = response_id == "voice-response-1"
+            if detached:
+                # The local detached reservation still owns tool admission.
+                response = {**response, "conversation_id": "default-conversation"}
+            if data["type"] == "response.done":
+                calls = (
+                    [
+                        {
+                            "id": "detached-function-item",
+                            "type": "function_call",
+                            "name": "lookup",
+                            "call_id": "detached-function",
+                            "arguments": '{"key":"detached"}',
+                        },
+                        {
+                            "id": "detached-handoff-item",
+                            "type": "function_call",
+                            "name": "background_agent",
+                            "call_id": "detached-handoff",
+                            "arguments": '{"input_transcript":"Detached delegation must not run."}',
+                        },
+                    ]
+                    if detached
+                    else []
+                )
+                for index, item in enumerate(calls):
+                    for kind in ("response.output_item.added", "response.output_item.done"):
+                        await send_json(
+                            {
+                                "type": kind,
+                                "response_id": response_id,
+                                "output_index": index,
+                                "item": item,
+                            }
+                        )
+                    await send_json(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "response_id": response_id,
+                            "item_id": item["id"],
+                            "output_index": index,
+                            "call_id": item["call_id"],
+                            "name": item["name"],
+                            "arguments": item["arguments"],
+                        }
+                    )
+                    await send_json({"type": "conversation.item.done", "item": item})
+                text = (
+                    "Detached text remains observable."
+                    if detached
+                    else "Normal response continues."
+                )
+                await send_json(
+                    {
+                        "type": "response.output_text.done",
+                        "response_id": response_id,
+                        "item_id": f"text-{response_id}",
+                        "output_index": len(calls),
+                        "content_index": 0,
+                        "text": text,
+                    }
+                )
+                response = {**response, "output": calls}
+            await send_json({**data, "response": response}, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", provider_response)
+        await voice.send_event(
+            {
+                "type": "response.create",
+                "response": {"conversation": "none", "input": [], "output_modalities": ["text"]},
+            }
+        )
+        for response_id, expected_text in (
+            ("voice-response-1", "Detached text remains observable."),
+            ("voice-response-2", "Normal response continues."),
+        ):
+            if response_id == "voice-response-2":
+                await voice.send_text("Continue the normal conversation.")
+            texts = []
+            async for event in events:
+                seen.append(event)
+                if isinstance(event, RealtimeText) and event.final:
+                    texts.append(event.text)
+                if (
+                    isinstance(event, RealtimeResponse)
+                    and event.status == "done"
+                    and event.response_id == response_id
+                ):
+                    break
+            assert texts == [expected_text]
+        assert not any(isinstance(event, (RealtimeToolCall, RealtimeDelegation)) for event in seen)
+    assert effects == []
+    assert peer.responses.requests == []
+    assert not any(
+        frame.get("item", {}).get("type") == "function_call_output" for frame in peer.frames
+    )
+    assert len([frame for frame in peer.frames if frame["type"] == "response.create"]) == 2

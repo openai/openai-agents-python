@@ -366,8 +366,8 @@
     },
     {
       "path": "sdk-realtime-response-context-and-history.patch",
-      "sha256": "aa5bfd686b3ee9ef383e2b08b5a20a144bd0140f2eb36fc081a01f2cb01c7798"
+      "sha256": "c63b869586bce016995d99f7f4d64328833e850ade390580902aa0432bbef4bf"
     }
   ],
-  "result_tree": "e5ea1ad23771fbc1ad8b1e3a9617434080d07ffe"
+  "result_tree": "d5db606e8fd9b6d5a51ed1919020b000496fdb6a"
 }

@@ -104,7 +104,7 @@ index 14f647d87a06a9a85239f21740b4b56f45cdf9e2..42da41746815689572a4d23663c4fa30
              item["reason"] = Value::String(reason.to_owned());
          }
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab..815aad39acb874bd7b4fb1cc0ba119f164f33bf2 100644
+index 3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab..644bf370a055cf272984c562bdc6c5ef4d5a3637 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 @@ -90,6 +90,7 @@ struct QueuedWireMessage {
@@ -218,33 +218,41 @@ index 3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab..815aad39acb874bd7b4fb1cc0ba119f1
                          configuration,
                          output_guard,
 +                        out_of_band,
-                         hosted_mcp_events,
-                         _permit,
--                    }) => (msg, configuration, output_guard, hosted_mcp_events, _permit),
++                        hosted_mcp_events,
++                        _permit,
 +                    }) => (
 +                        msg,
 +                        configuration,
 +                        output_guard,
 +                        out_of_band,
-+                        hosted_mcp_events,
-+                        _permit,
+                         hosted_mcp_events,
+                         _permit,
+-                    }) => (msg, configuration, output_guard, hosted_mcp_events, _permit),
 +                    ),
                      Ok(QueuedWireMessage {
                          message: Err(err), ..
                      }) => {
-@@ -1334,6 +1383,11 @@ impl RealtimeWebsocketEvents {
+@@ -1334,6 +1383,19 @@ impl RealtimeWebsocketEvents {
                          trace!(target: REALTIME_WIRE_LOG_TARGET, "realtime websocket event: {diagnostic}");
                      }
                      if let Some(mut event) = parse_realtime_event(&text, self.event_parser) {
-+                        if out_of_band
-+                            && matches!(&event, RealtimeEvent::ConversationItemDone { .. })
-+                        {
-+                            continue;
++                        if out_of_band {
++                            match &mut event {
++                                RealtimeEvent::ConversationItemAdded { .. }
++                                | RealtimeEvent::ConversationItemDone { .. }
++                                | RealtimeEvent::FunctionCallRequested(_)
++                                | RealtimeEvent::HandoffRequested(_)
++                                | RealtimeEvent::NoopRequested(_) => continue,
++                                RealtimeEvent::ResponseDone(response) => {
++                                    response.function_call_ids.clear();
++                                }
++                                _ => {}
++                            }
 +                        }
                          if matches!(&event, RealtimeEvent::InputAudioSpeechStarted(_))
                              && output_guard.is_retired()
                          {
-@@ -1380,7 +1434,9 @@ impl RealtimeWebsocketEvents {
+@@ -1380,7 +1442,9 @@ impl RealtimeWebsocketEvents {
                              frame.sample_rate = format.sample_rate();
                              frame.num_channels = 1;
                          }
@@ -256,7 +264,7 @@ index 3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab..815aad39acb874bd7b4fb1cc0ba119f1
                          {
                              continue;
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
-index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20bfc71d724 100644
+index 7ba5b2907191e116b146e1a126e46e424c7bdd53..57c2777f0043dbda38f41731675603bdc0a697b8 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
 @@ -166,6 +166,7 @@ impl RealtimeConfigurationReceipt {
@@ -291,7 +299,22 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          }
      }
      fn suppressed() -> Self {
-@@ -241,6 +245,7 @@ struct ConfigurationState {
+@@ -200,13 +204,12 @@ impl FrameObservation {
+     }
+ }
+ struct ReceivedAudio {
+-    response_id: Arc<str>,
++    response: Arc<ActiveResponse>,
+     item_id: String,
+     content_index: u32,
+     output_index: u32,
+     samples: u64,
+     truncated: bool,
+-    configuration: Arc<RealtimeAcceptedConfiguration>,
+ }
+
+ #[derive(Debug)]
+@@ -241,6 +244,7 @@ struct ConfigurationState {
      cancelled_response_id: Option<Arc<str>>,
      feedback_response_id: Option<Arc<str>>,
      response_create_pending: bool,
@@ -299,7 +322,36 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
      received_audio: VecDeque<ReceivedAudio>,
      audio_input_sources: VecDeque<(String, AudioInputSource)>,
      failure: Option<ReadyState>,
-@@ -706,6 +711,32 @@ impl RealtimeConfiguration {
+@@ -486,7 +490,7 @@ impl RealtimeConfiguration {
+             .received_audio
+             .iter()
+             .find(|record| {
+-                record.response_id.as_ref() == position.response_id
++                record.response.id.as_ref() == position.response_id
+                     && record.item_id == position.item_id
+                     && record.content_index == position.content_index
+             })
+@@ -494,6 +498,7 @@ impl RealtimeConfiguration {
+                 invalid("Playback item is unknown or outside the retained media window")
+             })?;
+         let rate = record
++            .response
+             .configuration
+             .output_format
+             .ok_or_else(|| invalid("Playback format is unknown"))?
+@@ -545,7 +550,11 @@ impl RealtimeConfiguration {
+                     .ok_or_else(|| {
+                         invalid("Playback item is unknown or outside the retained media window")
+                     })?;
++                if record.response.out_of_band {
++                    return Err(invalid("Detached response audio cannot be truncated"));
++                }
+                 let rate = record
++                    .response
+                     .configuration
+                     .output_format
+                     .ok_or_else(|| invalid("Playback format is unknown"))?
+@@ -706,6 +715,32 @@ impl RealtimeConfiguration {
          }
          ready
      }
@@ -332,7 +384,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
      pub(super) fn decide_hosted_mcp(
          &self,
          token: &str,
-@@ -723,7 +754,7 @@ impl RealtimeConfiguration {
+@@ -723,7 +758,7 @@ impl RealtimeConfiguration {
      pub(super) fn observe_user_input(&self) {
          self.inner.state.lock().unwrap().request_owner = Arc::new(());
      }
@@ -341,7 +393,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          let mut state = self.inner.state.lock().unwrap();
          // Never overwrite the owner of a create already written to the socket.
          if state.response_create_pending {
-@@ -733,6 +764,7 @@ impl RealtimeConfiguration {
+@@ -733,6 +768,7 @@ impl RealtimeConfiguration {
          state.pending_create_owner = Some(Arc::clone(&state.request_owner));
          state.pending_create_guard = Some(state.output_owner.new_response());
          state.response_create_pending = true;
@@ -349,7 +401,55 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          true
      }
 
-@@ -1105,6 +1137,7 @@ impl SessionReadiness {
+@@ -809,24 +845,34 @@ impl RealtimeConfiguration {
+         }
+         if let Some(position) = playback {
+             if let Some(record) = state.received_audio.iter_mut().find(|record| {
+-                record.response_id.as_ref() == position.response_id
++                record.response.id.as_ref() == position.response_id
+                     && record.item_id == position.item_id
+                     && record.content_index == position.content_index
+             }) {
+-                let rate = record.configuration.output_format.unwrap().sample_rate();
++                let rate = record
++                    .response
++                    .configuration
++                    .output_format
++                    .unwrap()
++                    .sample_rate();
+                 record.samples = record
+                     .samples
+                     .min(u64::from(position.audio_end_ms) * u64::from(rate) / 1000);
+                 record.truncated = true;
++                if !record.response.out_of_band {
++                    payloads.push(serde_json::json!({
++                        "type": "conversation.item.truncate", "item_id": position.item_id,
++                        "content_index": position.content_index, "audio_end_ms": position.audio_end_ms
++                    }));
++                }
+             }
+-            payloads.push(serde_json::json!({"type": "conversation.item.truncate", "item_id": position.item_id,
+-                "content_index": position.content_index, "audio_end_ms": position.audio_end_ms}));
+         }
+         let feedback_accepted = feedback.is_some()
+             && response_id.is_some_and(|id| {
+                 state.latest_response_id.as_deref() == Some(id)
+                     && state.response_contexts.iter().any(|response| {
+                         response.id.as_ref() == id
++                            && !response.out_of_band
+                             && Arc::ptr_eq(&response.request_owner, &state.request_owner)
+                     })
+                     && state.feedback_response_id.as_deref() != Some(id)
+@@ -980,7 +1026,7 @@ fn evict_completed_context(state: &mut ConfigurationState, protected: Option<&st
+     let expired = state.response_contexts.remove(index).unwrap();
+     state
+         .received_audio
+-        .retain(|record| record.response_id != expired.id);
++        .retain(|record| record.response.id != expired.id);
+     state.hosted_mcp.remove_response(&expired.id);
+     true
+ }
+@@ -1105,6 +1151,7 @@ impl SessionReadiness {
                          cancelled_response_id: None,
                          feedback_response_id: None,
                          response_create_pending: false,
@@ -357,14 +457,48 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
                          received_audio: VecDeque::new(),
                          audio_input_sources: VecDeque::new(),
                          failure: None,
-@@ -1370,9 +1403,14 @@ impl SessionReadiness {
+@@ -1148,7 +1195,7 @@ impl SessionReadiness {
+         if let Some(accepted) = state.accepted.clone() {
+             state.hosted_mcp.invalidate(&accepted);
+         }
+-        if !media {
++        if !media || observation.out_of_band {
+             return observation;
+         }
+         let Ok(event) = serde_json::from_str::<Value>(text) else {
+@@ -1231,7 +1278,7 @@ impl SessionReadiness {
+                     for record in state.received_audio.iter_mut().filter(|record| {
+                         record.item_id == item && u64::from(record.content_index) == index
+                     }) {
+-                        if let Some(format) = record.configuration.output_format {
++                        if let Some(format) = record.response.configuration.output_format {
+                             record.samples = record
+                                 .samples
+                                 .min(end_ms.saturating_mul(u64::from(format.sample_rate())) / 1000);
+@@ -1318,7 +1365,13 @@ impl SessionReadiness {
+         let response_id = event
+             .get("response_id")
+             .and_then(Value::as_str)
+-            .or_else(|| event["response"]["id"].as_str());
++            .or_else(|| event["response"]["id"].as_str())
++            .or_else(|| event["item"]["response_id"].as_str());
++        let detached_in_progress = state.out_of_band_response_pending
++            || state
++                .active_response
++                .as_ref()
++                .is_some_and(|response| response.out_of_band);
+         match kind {
+             // Interrupting speech and committed audio start a new user request.
+             // Provider echoes of our owned outgoing items do not change ownership.
+@@ -1370,9 +1423,15 @@ impl SessionReadiness {
                              state.cancelled_response_id = None;
                              state.feedback_response_id = None;
                              state.response_create_pending = false;
-+                            let out_of_band = event["response"].get("conversation_id").map_or(
-+                                std::mem::take(&mut state.out_of_band_response_pending),
-+                                Value::is_null,
-+                            );
++                            let out_of_band =
++                                std::mem::take(&mut state.out_of_band_response_pending)
++                                    || event["response"]
++                                        .get("conversation_id")
++                                        .is_some_and(Value::is_null);
                              let response = Arc::new(ActiveResponse {
                                  id: Arc::from(id),
                                  configuration: accepted,
@@ -372,7 +506,76 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
                                  request_owner: state
                                      .pending_create_owner
                                      .take()
-@@ -2183,7 +2221,7 @@ mod tests {
+@@ -1438,7 +1497,7 @@ impl SessionReadiness {
+                         };
+                         if bytes.len() % sample_bytes == 0 {
+                             if let Some(record) = state.received_audio.iter_mut().find(|record| {
+-                                record.response_id == response.id
++                                record.response.id == response.id
+                                     && record.item_id == item_id
+                                     && record.content_index == content
+                             }) {
+@@ -1451,13 +1510,12 @@ impl SessionReadiness {
+                                 }
+                             } else if retain_metadata_room(&mut state, item_id.len(), false) {
+                                 state.received_audio.push_back(ReceivedAudio {
+-                                    response_id: response.id.clone(),
++                                    response: Arc::clone(&response),
+                                     item_id: item_id.to_owned(),
+                                     content_index: content,
+                                     output_index: output,
+                                     samples: (bytes.len() / sample_bytes) as u64,
+                                     truncated: false,
+-                                    configuration: Arc::clone(&response.configuration),
+                                 });
+                             } else {
+                                 state.failure = Some(ReadyState::Mismatch);
+@@ -1488,15 +1546,43 @@ impl SessionReadiness {
+                         .map(|active| FrameObservation::response(&active))
+                         .unwrap_or_default();
+                 }
+-                return FrameObservation::default();
++                return state
++                    .response_contexts
++                    .iter()
++                    .find(|response| response_id == Some(response.id.as_ref()))
++                    .map(|response| FrameObservation::response(response))
++                    .unwrap_or_else(|| FrameObservation {
++                        out_of_band: detached_in_progress,
++                        ..FrameObservation::default()
++                    });
+             }
+             _ => {
++                let is_function_item = event["item"]["type"] == "function_call";
++                let retained_response_id =
++                    if detached_in_progress && response_id.is_none() && is_function_item {
++                        event["item"]["call_id"]
++                            .as_str()
++                            .and_then(|call_id| state.hosted_mcp.tool_response_id(call_id))
++                    } else {
++                        None
++                    };
++                let response_id = response_id.or(retained_response_id.as_deref());
+                 return state
+                     .response_contexts
+                     .iter()
+                     .find(|response| response_id == Some(response.id.as_ref()))
+                     .map(|response| FrameObservation::response(response))
+                     .unwrap_or_else(|| match kind {
++                        Some(
++                            "conversation.item.added"
++                            | "conversation.item.created"
++                            | "conversation.item.done"
++                            | "response.output_item.added"
++                            | "response.output_item.done",
++                        ) if detached_in_progress && is_function_item => FrameObservation {
++                            out_of_band: true,
++                            ..FrameObservation::default()
++                        },
+                         Some(
+                             "response.output_audio_transcript.delta"
+                             | "response.output_audio_transcript.done"
+@@ -2183,7 +2269,7 @@ mod tests {
              done(&observer, "a");
              match boundary {
                  "user" => configuration.observe_user_input(),
@@ -381,7 +584,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
                  "speech" => {
                      observer.observe_frame(
                          r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
-@@ -2227,7 +2265,7 @@ mod tests {
+@@ -2227,7 +2313,7 @@ mod tests {
              );
              match boundary {
                  "user" => configuration.observe_user_input(),
@@ -390,7 +593,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
                  "speech" => {
                      observer.observe_frame(
                          r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
-@@ -2259,7 +2297,7 @@ mod tests {
+@@ -2259,7 +2345,7 @@ mod tests {
              .unwrap();
          assert!(repeated.payloads.is_empty());
          done(&observer, "a");
@@ -399,7 +602,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          assert!(!configuration.response_create_for("a"));
          assert!(
              !configuration
-@@ -2495,7 +2533,7 @@ mod tests {
+@@ -2495,7 +2581,7 @@ mod tests {
      fn pending_response_create_guard_is_retired_before_its_id_is_observed() {
          let observer = accepted_observer();
          let configuration = observer.configuration();
@@ -408,7 +611,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          configuration
              .prepare_interrupt(None, None, None, false)
              .unwrap();
-@@ -2732,6 +2770,81 @@ mod tests {
+@@ -2732,6 +2818,81 @@ mod tests {
          };
          request
      }
@@ -490,7 +693,25 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
      #[test]
      fn hosted_receipt_uses_actual_membership_survives_done_and_is_single_use() {
          let observer = accepted_hosted_observer();
-@@ -3327,7 +3440,7 @@ mod tests {
+@@ -3201,7 +3362,17 @@ mod tests {
+             let observer = accepted_hosted_observer();
+             let request = issue_hosted(&observer);
+             done(&observer, "r");
++            assert!(observer.configuration().observe_response_create(true));
+             created(&observer, "b");
++            assert!(
++                hosted_event(
++                    &observer,
++                    "conversation.item.done",
++                    Some("b"),
++                    json!({"type":"mcp_approval_request","id":"detached-approval","server_label":"docs","name":"search","arguments":"{}"}),
++                )
++                .is_empty()
++            );
+             let events = hosted_event(
+                 &observer,
+                 "conversation.item.done",
+@@ -3327,7 +3498,7 @@ mod tests {
              match boundary {
                  "user" => config.observe_user_input(),
                  "manual" => {
@@ -499,7 +720,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
                  }
                  "speech" => {
                      observer.observe_frame(
-@@ -3352,7 +3465,7 @@ mod tests {
+@@ -3352,7 +3523,7 @@ mod tests {
          assert!(config.function_response_create("a", "one"));
          config.observe_user_input();
          assert!(
@@ -508,7 +729,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
              "do not overwrite outstanding automatic create"
          );
          created(&observer, "b");
-@@ -3366,7 +3479,7 @@ mod tests {
+@@ -3366,7 +3537,7 @@ mod tests {
              !config.function_response_create("b", "b-call"),
              "late automatic B must not gain newer user owner"
          );
@@ -517,7 +738,7 @@ index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20b
          created(&observer, "new-user");
          done(&observer, "new-user");
          assert!(!observer.mismatched());
-@@ -3376,7 +3489,7 @@ mod tests {
+@@ -3376,7 +3547,7 @@ mod tests {
          let observer = accepted_hosted_observer();
          let config = observer.configuration();
          config.observe_user_input();
