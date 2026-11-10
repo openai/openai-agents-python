@@ -3,6 +3,7 @@
 import json
 import shutil
 import subprocess
+import sys
 import time
 import warnings
 from datetime import datetime, timezone
@@ -15,6 +16,9 @@ from pymongo.errors import PyMongoError
 
 from agents import Agent, CustomStorage, MongoDBSessionStore, NativeProvider
 from tests.native_fixtures import assistant_output, responses as responses
+
+# Run the local database tests after the Windows pytest workers exit.
+pytestmark = pytest.mark.serial if sys.platform == "win32" else []
 
 
 def test_mongodb_adapter_accepts_sync_client_without_connecting_and_rejects_async() -> None:
@@ -57,18 +61,19 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
             stdout=output,
             stderr=subprocess.STDOUT,
         )
+    uri = f"mongodb://127.0.0.1:{unused_tcp_port}"
     try:
         with MongoClient(
-            f"mongodb://127.0.0.1:{unused_tcp_port}",
+            uri,
             serverSelectionTimeoutMS=100,
             socketTimeoutMS=1000,
             connectTimeoutMS=1000,
-        ) as client:
+        ) as probe:
             started = time.monotonic()
             startup_timeout = 20
             while process.poll() is None and time.monotonic() - started < startup_timeout:
                 try:
-                    client.admin.command("ping")
+                    probe.admin.command("ping")
                     break
                 except PyMongoError:
                     time.sleep(0.05)
@@ -86,6 +91,13 @@ def mongodb_client(tmp_path: Path, unused_tcp_port):
             if elapsed > 5:
                 # Identify runs that would have hit the original five-second limit.
                 warnings.warn(f"Local MongoDB became ready after {elapsed:.1f}s", stacklevel=1)
+        # Durable reads and writes need a separate budget from readiness probes.
+        with MongoClient(
+            uri,
+            serverSelectionTimeoutMS=5000,
+            socketTimeoutMS=5000,
+            connectTimeoutMS=5000,
+        ) as client:
             yield client
     finally:
         if process.poll() is None:

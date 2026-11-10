@@ -10,6 +10,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from threading import Thread
 from typing import Any
 
@@ -26,6 +27,11 @@ def collector(
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
+
+    class LoopbackHTTPServer(ThreadingHTTPServer):
+        def server_bind(self):
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -46,7 +52,7 @@ def collector(
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     worker = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
     try:
@@ -265,8 +271,20 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
                 eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                if not peer_closed.is_set():
+                    raise
             handler_done.set()
+
+    if not cancelled:
+        with collector() as (warmup_endpoint, requests):
+            warmup = telemetry.OpenAITraceExporter(
+                api_key="synthetic-key", endpoint=warmup_endpoint
+            )
+            await warmup.on_trace_event(completed_event())
+            assert len(requests) == 1
 
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
@@ -341,7 +359,7 @@ async def native_deadline_case():
             )
             requests.append(json.loads(await reader.readexactly(length)))
             writer.write(b"HTTP/1.1 200 OK\r\n")
-            if len(requests) == 1:
+            if len(requests) == 2:
                 eof = asyncio.create_task(reader.read())
                 for _ in range(30):
                     done, _ = await asyncio.wait((eof,), timeout=0.02)
@@ -364,6 +382,10 @@ async def native_deadline_case():
     server = await asyncio.start_server(receive, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
     try:
+        # Warm the lazy HTTP transport before the bounded native request.
+        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+        await warmup.on_trace_event(completed_event())
+        assert len(requests) == 1
         exporter = telemetry.OpenAITraceExporter(
             api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
@@ -529,6 +551,11 @@ async def native_outcome_privacy_case():
 
 async def native_batch_case():
     import time
+
+    with collector() as (warmup_endpoint, warmup_received):
+        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=warmup_endpoint)
+        await warmup.on_trace_event(completed_event())
+        assert len(warmup_received) == 1
 
     with collector(delay=0.5) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
