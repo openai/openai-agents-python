@@ -951,7 +951,7 @@ wheels = [
 
 [[package]]
 name = "dapr"
-version = "1.18.3"
+version = "1.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -962,7 +962,7 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/cf/0e558760eca8db826a95b4ff101cd5b7c24dbd552afc5ac899f1c82f9b3e/dapr-1.18.3-py3-none-any.whl", hash = "sha256:32bd139df4f2ac1824819d41abf3ba66bacca2cd01063b55b5464e3a651a985b", size = 271624, upload-time = "2026-07-15T14:35:09.283Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/c0/b525aa3a4dc8c5031bf80d913b076aab4b5ed808bbd10c1683f20b00c0f5/dapr-1.19.0-py3-none-any.whl", hash = "sha256:255664d362aa6e3fe7ce238d33a61508a16fcb24b4e53cacdf21436d41718241", size = 624708, upload-time = "2026-10-22T16:32:22.49Z" },
 ]
 
 [[package]]
