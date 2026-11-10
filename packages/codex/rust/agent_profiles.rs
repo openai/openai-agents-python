@@ -1421,6 +1421,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HandoffExecutor {
     fn spec(&self) -> ToolSpec {
         self.spec.clone()
     }
+    fn exposure(&self) -> codex_tools::ToolExposure {
+        codex_tools::ToolExposure::DirectModelOnly
+    }
     fn supports_parallel_tool_calls(&self) -> bool {
         true
     }

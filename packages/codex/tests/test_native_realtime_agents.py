@@ -167,6 +167,104 @@ async def test_native_custom_handoff_waits_for_callback_and_configuration_ack(
             assert len(calls) == 1
 
 
+@pytest.mark.parametrize("handoff", [False, True])
+@pytest.mark.parametrize("target_instructions", ["Target backend", ""])
+async def test_voice_agent_change_uses_destination_instructions(
+    realtime_peer, handoff, target_instructions
+):
+    peer = realtime_peer
+    target = Agent(name="Target", instructions=target_instructions)
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-instructions-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="Source",
+            instructions="Source backend",
+            realtime=RealtimeAgentConfig(instructions=lambda _: "Source voice instructions"),
+            provider=provider,
+            handoffs=[realtime_handoff(target, name="switch_agent")],
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        initial = await peer.frame(lambda frame: frame["type"] == "session.update")
+        assert initial["session"]["instructions"] == "Source voice instructions"
+        start = len(peer.frames)
+        if handoff:
+            await peer.function("switch_agent", {}, "clear-voice-instructions")
+            await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+        else:
+            await voice.update_agent(target)
+        updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        assert updated["session"]["instructions"] == target_instructions
+        assert await voice.get_active_agent() is target
+
+
+async def test_conflicting_handoffs_in_one_response_invoke_only_the_first_target(realtime_peer):
+    peer = realtime_peer
+    effects = []
+
+    class Transfer(BaseModel):
+        marker: str
+
+    async def on_handoff(_, payload):
+        effects.append(payload.marker)
+        await asyncio.sleep(0)
+
+    target_a = Agent(
+        name="A",
+        instructions="Backend A",
+        realtime=RealtimeAgentConfig(instructions="Voice target A"),
+    )
+    target_b = Agent(
+        name="B",
+        instructions="Backend B",
+        realtime=RealtimeAgentConfig(instructions="Voice target B"),
+    )
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-handoff-reservation-key",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="Source",
+            instructions="Source backend",
+            provider=provider,
+            handoffs=[
+                realtime_handoff(target_a, name="to_a", input_type=Transfer, on_handoff=on_handoff),
+                realtime_handoff(target_b, name="to_b", input_type=Transfer, on_handoff=on_handoff),
+            ],
+        ).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+    ):
+        await peer.frame(lambda frame: frame["type"] == "session.update")
+        start = len(peer.frames)
+        await peer.functions(
+            [("to_a", {"marker": "A"}, "handoff-a"), ("to_b", {"marker": "B"}, "handoff-b")],
+            response_id="conflicting-handoffs",
+        )
+        outputs = {}
+        for marker in ("a", "b"):
+            call_id = f"handoff-{marker}"
+            result = await peer.frame(
+                lambda frame, call_id=call_id: frame.get("item", {}).get("call_id") == call_id,
+                after=start,
+            )
+            outputs[marker.upper()] = result["item"]["output"]
+        updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
+        await peer.frame(lambda frame: frame["type"] == "response.create", after=start)
+        assert effects == ["A"]
+        assert outputs["A"] == "Handoff reserved."
+        assert outputs["B"] == "Multiple handoffs detected, ignoring this one."
+        assert updated["session"]["instructions"] == "Voice target A"
+        assert await voice.get_active_agent() is target_a
+
+
 async def test_live_voice_graph_keeps_issued_callback_and_root_checkpoint(realtime_peer):
     peer = realtime_peer
     entered, release = asyncio.Event(), asyncio.Event()
