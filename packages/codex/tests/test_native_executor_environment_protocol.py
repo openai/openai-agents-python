@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import ssl
 import sys
 from pathlib import Path
@@ -24,6 +25,10 @@ from tests.native_executor_fixtures import ExecutorPeer
     ],
 )
 async def test_literal_names_reach_real_child(tmp_path: Path, name: str, value: str) -> None:
+    environment = {name: value}
+    if sys.platform == "win32":
+        # CPython 3.10 can need SYSTEMROOT to start with a clean environment.
+        environment["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     async with ExecutorPeer(tmp_path / "remote").serve() as peer:
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tls.load_verify_locations(cafile=str(peer.ca))
@@ -70,7 +75,7 @@ async def test_literal_names_reach_real_child(tmp_path: Path, name: str, value: 
                             "inherit": "none",
                             "ignoreDefaultExcludes": False,
                             "exclude": [],
-                            "set": {name: value},
+                            "set": environment,
                             "includeOnly": [],
                         },
                         "env": {},
