@@ -1,0 +1,439 @@
+name: Nov9 macOS tracing diagnostic
+
+on:
+  push:
+    branches: [codex/nov9-macos-tracing-diagnostic]
+    paths: [.github/workflows/nov9-macos-tracing-diagnostic.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  tracing-diagnostic:
+    if: github.repository == 'openai/openai-agents-python'
+    runs-on: macos-15
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact artifact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7774e90c4b3d9e63fefa417eeabc9d1aca7238de
+          persist-credentials: false
+      - name: Set up pinned uv without cache
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: '0.11.14'
+          python-version: '3.14.10'
+          enable-cache: false
+      - name: Download exact stock artifact
+        env:
+          ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = 7774e90c4b3d9e63fefa417eeabc9d1aca7238de
+          test "$(git rev-parse 'HEAD^{tree}')" = d9806b107b4d1a44f2300382994deaf9270c026c
+          test -z "$(git status --porcelain)"
+          stage="$RUNNER_TEMP/nov9-macos-tracing"
+          mkdir -p "$stage/product"
+          curl --fail --location --silent --show-error --retry 2 --max-time 90 \
+            -H "Authorization: Bearer $ARTIFACT_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/openai/openai-agents-python/actions/artifacts/13762025652/zip' \
+            -o "$stage/13762025652.zip"
+          printf '%s  %s\n' 5c8d57a0f1eca2180078b5bcb744e64ee0f4b4ab4cab5eccd226f604087769df "$stage/13762025652.zip" | shasum -a 256 -c -
+          unzip -q "$stage/13762025652.zip" -d "$stage/product"
+          wheel="$stage/product/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
+          printf '%s  %s\n' 4b1d9a1359d9a742a5be06a5701a6031a3c237e8770699d5a5de9d1b54040252 "$wheel" | shasum -a 256 -c -
+      - name: Stage frozen patch and diagnostic probe
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/nov9-macos-tracing"
+          cat > "$stage/macos-tracing.patch" <<'FROZEN_PATCH'
+          diff --git a/packages/codex/tests/test_native_trace_exporter.py b/packages/codex/tests/test_native_trace_exporter.py
+          index 1f2ef983a803bdbc6fc53b7ae4ff7280d131e630..a8f55c5bc829876e151e4403d8a0ebedf2232729 100644
+          --- a/packages/codex/tests/test_native_trace_exporter.py
+          +++ b/packages/codex/tests/test_native_trace_exporter.py
+          @@ -330,7 +330,7 @@ async def native_deadline_case():
+                       )
+                       requests.append(json.loads(await reader.readexactly(length)))
+                       writer.write(b"HTTP/1.1 200 OK\r\n")
+          -            if len(requests) == 1:
+          +            if len(requests) == 2:
+                           eof = asyncio.create_task(reader.read())
+                           for _ in range(30):
+                               done, _ = await asyncio.wait((eof,), timeout=0.02)
+          @@ -353,6 +353,10 @@ async def native_deadline_case():
+               server = await asyncio.start_server(receive, "127.0.0.1", 0)
+               endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+               try:
+          +        # Warm the lazy HTTP transport before the bounded native request.
+          +        warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
+          +        await warmup.on_trace_event(completed_event())
+          +        assert len(requests) == 1
+                   exporter = telemetry.OpenAITraceExporter(
+                       api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
+                   )
+          diff --git a/packages/codex/tests/test_tracing_native_loss.py b/packages/codex/tests/test_tracing_native_loss.py
+          index bee4641a2507bf426d75988cd9312af17ab75d3c..fe576e4077e0bc6b9ba3657bf010cdd78fd69d4a 100644
+          --- a/packages/codex/tests/test_tracing_native_loss.py
+          +++ b/packages/codex/tests/test_tracing_native_loss.py
+          @@ -173,7 +173,8 @@ def test_native_loss_recovers_after_record_or_byte_bound(long_names):
+                   env=os.environ.copy(),
+                   capture_output=True,
+                   text=True,
+          -        timeout=30,
+          +        # Cover subprocess startup and multiple bounded lifecycle phases.
+          +        timeout=60,
+               )
+               assert result.returncode == 0, result.stdout + result.stderr
+               assert "PASS native loss recovery" in result.stdout
+          diff --git a/packages/codex/tests/test_tracing_review_regressions.py b/packages/codex/tests/test_tracing_review_regressions.py
+          index cf1e81fdd0620ec917894f36d3feba3fe88e1d8d..ebe4b7acb83fb835a51179c998ca6ffe2aa08c22 100644
+          --- a/packages/codex/tests/test_tracing_review_regressions.py
+          +++ b/packages/codex/tests/test_tracing_review_regressions.py
+          @@ -151,7 +151,8 @@ def test_native_active_root_survives_completed_trace_churn():
+                   env=os.environ.copy(),
+                   text=True,
+                   capture_output=True,
+          -        timeout=30,
+          +        # Cover subprocess startup and multiple bounded lifecycle phases.
+          +        timeout=60,
+               )
+               assert result.returncode == 0, result.stdout + result.stderr
+               assert "PASS native active-root churn" in result.stdout
+          FROZEN_PATCH
+          cat > "$stage/trace-watchdog-probe.py" <<'FROZEN_PROBE'
+          """Run one unchanged synthetic native tracing case with installed-wheel diagnostics."""
+
+          import argparse
+          import faulthandler
+          import hashlib
+          import json
+          import platform
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          START = time.monotonic()
+          EXPECTED_NATIVE = {
+              "Darwin": "f77e45e5770955cb4b59faaff1fb73c4b6ab4e2325af2a068b9e1f7898ac55ec",
+              "Linux": "5aae9ffff9f5d3144ad0a1dd976990331841d728f7d75ac40b7da66e1384e710",
+          }
+
+
+          def mark(phase, **details):
+              print(
+                  json.dumps(
+                      {"elapsed_s": round(time.monotonic() - START, 6), "phase": phase, **details},
+                      sort_keys=True,
+                  ),
+                  flush=True,
+              )
+
+
+          def child(args):
+              faulthandler.enable(all_threads=True)
+              faulthandler.dump_traceback_later(30, repeat=False)
+              mark(
+                  "imports_start",
+                  executable=sys.executable,
+                  prefix=sys.prefix,
+                  python=platform.python_version(),
+                  system=platform.system(),
+                  machine=platform.machine(),
+              )
+              import asyncio
+              import functools
+              import runpy
+
+              import _agents_codex
+              import agents
+              import agents._native
+              from agents import telemetry
+
+              modules = (agents, agents._native, _agents_codex, telemetry)
+              locations = {module.__name__: str(Path(module.__file__).resolve()) for module in modules}
+              prefix = Path(sys.prefix).resolve()
+              for name, location in locations.items():
+                  assert Path(location).is_relative_to(prefix), (name, location, str(prefix))
+              mark("imports_complete", installed_modules=locations)
+              with Path(agents._native.__file__).open("rb") as stream:
+                  digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              expected = EXPECTED_NATIVE[platform.system()]
+              assert digest == expected, ("installed native SHA mismatch", digest, expected)
+              if platform.system() == "Darwin":
+                  assert platform.machine() == "arm64", platform.machine()
+                  assert sys.version_info[:3] == (3, 14, 10), sys.version
+              mark("product_verified", native_sha256=digest)
+
+              # This path supplies only the existing tests package, never the SDK runtime.
+              sys.path.insert(0, str(args.source / "packages" / "codex"))
+              filename = (
+                  "test_tracing_review_regressions.py"
+                  if args.case == "churn"
+                  else "test_tracing_native_loss.py"
+              )
+              fixture_path = args.source / "packages" / "codex" / "tests" / filename
+              mark(
+                  "fixture_import_start",
+                  filename=filename,
+                  fixture_sha256=hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
+              )
+              fixture = runpy.run_path(str(fixture_path))
+              mark("fixture_import_complete")
+
+              def instrument(name):
+                  original = getattr(telemetry, name)
+                  calls = 0
+
+                  @functools.wraps(original)
+                  async def timed(*positional, **keywords):
+                      nonlocal calls
+                      calls += 1
+                      call = calls
+                      started = time.monotonic()
+                      mark(name + "_start", call=call, timeout_ms=keywords.get("timeout_ms"))
+                      try:
+                          # Directly await the original: no extra task, timeout, or retry.
+                          result = await original(*positional, **keywords)
+                      except BaseException as error:
+                          mark(
+                              name + "_error",
+                              call=call,
+                              error_type=type(error).__name__,
+                              duration_s=round(time.monotonic() - started, 6),
+                          )
+                          raise
+                      fields = {
+                          key: getattr(result, key)
+                          for key in ("status", "dropped_records", "failed_deliveries")
+                          if hasattr(result, key)
+                      }
+                      mark(
+                          name + "_complete",
+                          call=call,
+                          duration_s=round(time.monotonic() - started, 6),
+                          **fields,
+                      )
+                      return result
+
+                  setattr(telemetry, name, timed)
+
+              for name in ("configure", "force_flush", "shutdown"):
+                  instrument(name)
+              mark("fixture_start", case=args.case)
+              if args.case == "churn":
+                  asyncio.run(fixture["native_churn"]())
+              else:
+                  asyncio.run(fixture["native_loss_case"](args.case == "byte"))
+              mark("fixture_complete", case=args.case)
+              faulthandler.cancel_dump_traceback_later()
+
+
+          def main():
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument("--source", type=Path, required=True)
+              parser.add_argument("--case", choices=("record", "byte", "churn"), required=True)
+              parser.add_argument(
+                  "--out",
+                  type=Path,
+                  required=True,
+                  help="New result directory; existing directories are rejected",
+              )
+              parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+              args = parser.parse_args()
+              args.source = args.source.resolve()
+              args.out = args.out.resolve()
+              if args.child:
+                  child(args)
+                  return 0
+
+              args.out.mkdir(parents=True, exist_ok=False)
+              (args.out / "home").mkdir()
+              environment = {
+                  "PATH": "/usr/bin:/bin",
+                  "HOME": str(args.out / "home"),
+                  "LANG": "en_US.UTF-8" if platform.system() == "Darwin" else "C.UTF-8",
+                  "PYTHONDONTWRITEBYTECODE": "1",
+                  "PYTHONNOUSERSITE": "1",
+                  "PYTHONUNBUFFERED": "1",
+                  "RUST_MIN_STACK": "16777216",
+              }
+              command = [
+                  sys.executable,
+                  "-I",
+                  "-B",
+                  str(Path(__file__).resolve()),
+                  "--child",
+                  "--source",
+                  str(args.source),
+                  "--case",
+                  args.case,
+                  "--out",
+                  str(args.out),
+              ]
+              started = time.monotonic()
+              mark("child_start", case=args.case, watchdog_s=60, command=command)
+              timed_out = False
+              with (
+                  (args.out / "stdout.log").open("wb") as stdout,
+                  (args.out / "stderr.log").open("wb") as stderr,
+              ):
+                  process = subprocess.Popen(
+                      command, cwd=args.out, env=environment, stdout=stdout, stderr=stderr
+                  )
+                  try:
+                      returncode = process.wait(timeout=60)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      process.kill()
+                      process.wait()
+                      returncode = 124
+              result = {
+                  "case": args.case,
+                  "returncode": returncode,
+                  "child_returncode": process.returncode,
+                  "timed_out": timed_out,
+                  "duration_s": round(time.monotonic() - started, 6),
+                  "stdout": str(args.out / "stdout.log"),
+                  "stderr": str(args.out / "stderr.log"),
+              }
+              (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+              mark("child_complete", **result)
+              return returncode
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          FROZEN_PROBE
+          printf '%s  %s\n' c798848c158f0095638de0bf962d35e73cb4530398c1af81b06c76012a631e1b "$stage/macos-tracing.patch" | shasum -a 256 -c -
+          printf '%s  %s\n' fd3791498638774ab344a887cf2235f9afbaa5b249edef64849412259dd207f0 "$stage/trace-watchdog-probe.py" | shasum -a 256 -c -
+      - name: Install stock wheel and locked tracing test dependencies
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/nov9-macos-tracing"
+          uv export --project "$GITHUB_WORKSPACE" --frozen --extra tracing --group dev \
+            --no-emit-project --format requirements-txt --output-file "$stage/requirements.txt"
+          uv venv --python 3.14.10 "$stage/venv"
+          py="$stage/venv/bin/python"
+          uv pip install --python "$py" --require-hashes -r "$stage/requirements.txt"
+          uv pip install --python "$py" --no-deps \
+            "$stage/product/openai_agents-0.24.0a7-cp310-abi3-macosx_11_0_arm64.whl"
+      - name: Run matched before and after acceptance and phase diagnostics
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/nov9-macos-tracing"
+          src="$GITHUB_WORKSPACE"
+          py="$stage/venv/bin/python"
+          patch="$stage/macos-tracing.patch"
+          probe="$stage/trace-watchdog-probe.py"
+
+          run_phase() {
+            phase="$1"
+            out="$stage/$phase"
+            mkdir -p "$out/home"
+            clean=(env -i PATH=/usr/bin:/bin HOME="$out/home" LANG=en_US.UTF-8
+              RUST_MIN_STACK=16777216 PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1
+              PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+              PYTHONPATH="$src/packages/codex")
+            echo "::group::$phase installed product"
+            "${clean[@]}" "$py" -I -B - <<'PRODUCT'
+          import hashlib
+          import pathlib
+          import platform
+          import sys
+          import agents
+          import agents._native
+          import _agents_codex
+          assert platform.system() == "Darwin" and platform.machine() == "arm64"
+          assert sys.version_info[:3] == (3, 14, 10), sys.version
+          for module in (agents, agents._native, _agents_codex):
+              path = pathlib.Path(module.__file__).resolve()
+              assert path.is_relative_to(pathlib.Path(sys.prefix).resolve()), str(path)
+              print(module.__name__, path, flush=True)
+          with pathlib.Path(agents._native.__file__).open("rb") as stream:
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+          assert digest == "f77e45e5770955cb4b59faaff1fb73c4b6ab4e2325af2a068b9e1f7898ac55ec", digest
+          print("installed_native_sha256", digest, flush=True)
+          PRODUCT
+            echo '::endgroup::'
+            echo "::group::$phase eight focused acceptance nodes"
+            set +e
+            "${clean[@]}" "$py" -I -B -m pytest -p pytest_asyncio.plugin -p xdist.plugin \
+              -p no:cacheprovider -n 3 --dist worksteal -vv -rA --durations=0 \
+              --basetemp="$out/pytest" --junitxml="$out/results.xml" \
+              'packages/codex/tests/test_native_trace_exporter.py::test_real_native_capture_policy_and_openai_export[native_deadline_case]' \
+              'packages/codex/tests/test_native_trace_exporter.py::test_export_deadline_and_cancellation_close_trickling_connection' \
+              'packages/codex/tests/test_tracing_native_loss.py' \
+              'packages/codex/tests/test_tracing_review_regressions.py::test_native_active_root_survives_completed_trace_churn' \
+              2>&1 | tee "$out/run.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            printf '%s\n' "$status" > "$out/exit"
+            echo "$phase pytest exit=$status"
+            "$py" -I -B - "$out/results.xml" "$out/node-count" <<'JUNIT'
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+          path = Path(sys.argv[1])
+          if not path.is_file():
+              print("JUNIT_MISSING", path)
+              Path(sys.argv[2]).write_text("0\n")
+          else:
+              nodes = list(ET.parse(path).getroot().iter("testcase"))
+              Path(sys.argv[2]).write_text(str(len(nodes)) + "\n")
+              for node in nodes:
+                  failures = [child for child in node if child.tag in ("failure", "error", "skipped")]
+                  outcome = failures[0].tag if failures else "passed"
+                  print("JUNIT", node.get("classname"), node.get("name"),
+                        "elapsed_s=" + node.get("time", "unknown"), "outcome=" + outcome)
+                  for failure in failures:
+                      print(ET.tostring(failure, encoding="unicode"))
+              print("JUNIT_NODE_COUNT", len(nodes), "EXPECTED", 8)
+          JUNIT
+            echo '::endgroup::'
+            probe_status=0
+            for selected in record byte churn; do
+              echo "::group::$phase $selected phase probe"
+              probe_out="$stage/$phase-$selected-probe"
+              set +e
+              "$py" -I -B "$probe" --source "$src" --case "$selected" --out "$probe_out"
+              status=$?
+              set -e
+              mkdir -p "$probe_out"
+              printf '%s\n' "$status" > "$probe_out/exit"
+              for receipt in result.json stdout.log stderr.log; do
+                if test -f "$probe_out/$receipt"; then
+                  cat "$probe_out/$receipt"
+                else
+                  echo "MISSING_RECEIPT $probe_out/$receipt"
+                fi
+              done
+              if test "$status" -ne 0; then probe_status=1; fi
+              echo '::endgroup::'
+            done
+            printf '%s\n' "$probe_status" > "$out/probe-exit"
+          }
+
+          run_phase before
+          git apply --check "$patch"
+          git apply --index "$patch"
+          test "$(git write-tree)" = 340e82da0bb24ab62ce76eb6b1f9ebd0e6363cbe
+          echo 'candidate_tree=340e82da0bb24ab62ce76eb6b1f9ebd0e6363cbe'
+          run_phase after
+          printf 'before_pytest_exit=%s after_pytest_exit=%s before_probes_exit=%s after_probes_exit=%s\n' \
+            "$(cat "$stage/before/exit")" "$(cat "$stage/after/exit")" \
+            "$(cat "$stage/before/probe-exit")" "$(cat "$stage/after/probe-exit")"
+          test "$(cat "$stage/before/node-count")" -eq 8
+          test "$(cat "$stage/after/node-count")" -eq 8
+          test "$(cat "$stage/after/probe-exit")" -eq 0
+          exit "$(cat "$stage/after/exit")"
