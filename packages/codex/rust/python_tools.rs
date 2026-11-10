@@ -3854,12 +3854,13 @@ impl Drop for PendingReply<'_> {
 }
 
 fn provider_error_metadata(details: &codex_protocol::error::CodexErrorDetails) -> Option<Value> {
+    use codex_protocol::error::CHATGPT_PLAN_UNSUPPORTED_CAPABILITY;
     use codex_protocol::error::CodexErrorDetails;
 
-    let (status, code, request_id) = match details {
+    let (status, body, request_id) = match details {
         CodexErrorDetails::UnexpectedStatus(error) => (
             error.status.as_u16(),
-            provider_error_code(&error.body),
+            Some(error.body.as_str()),
             error.request_id.as_deref(),
         ),
         // Core also constructs RetryLimit with a synthetic 500 for a transport
@@ -3875,27 +3876,41 @@ fn provider_error_metadata(details: &codex_protocol::error::CodexErrorDetails) -
         }
         _ => return None,
     };
-    Some(json!({
+    let body = body
+        .filter(|body| body.len() <= 128 * 1024)
+        .and_then(|body| serde_json::from_str::<Value>(body).ok());
+    let error = body.as_ref().and_then(|body| body.get("error"));
+    let code = error
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 128
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        });
+    let mut metadata = json!({
         "status_code": status,
         "code": code,
         "request_id": request_id.filter(|id| {
             !id.is_empty() && id.len() <= 256 && id.bytes().all(|byte| byte.is_ascii_graphic())
         }),
-    }))
-}
-
-fn provider_error_code(body: &str) -> Option<String> {
-    if body.len() > 128 * 1024 {
-        return None;
-    }
-    let body: Value = serde_json::from_str(body).ok()?;
-    let code = body.get("error")?.get("code")?.as_str()?;
-    (!code.is_empty()
-        && code.len() <= 128
-        && code
+    });
+    if status == http::StatusCode::BAD_REQUEST.as_u16()
+        && code == Some(CHATGPT_PLAN_UNSUPPORTED_CAPABILITY)
+        && let Some(param) = error
+            .and_then(|error| error.get("param"))
+            .and_then(Value::as_str)
+        && !param.is_empty()
+        && param.len() <= 128
+        && param
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte)))
-    .then(|| code.to_owned())
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-[]".contains(&byte))
+    {
+        metadata["param"] = Value::String(param.to_owned());
+    }
+    Some(metadata)
 }
 
 #[derive(Default)]

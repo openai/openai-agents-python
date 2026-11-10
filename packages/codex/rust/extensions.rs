@@ -274,14 +274,24 @@ pub fn build(
     )));
     builder.model_request_contributor(Arc::new(crate::python_tools::PreparedRequestContributor));
     builder.model_request_contributor(recovery);
-    builder.model_request_contributor(interception.clone());
-    builder.model_request_contributor(Arc::new(crate::response_integrity::Contributor(
-        interception,
-    )));
-    // Core wraps streams in registration order. Recovery must see the original
-    // item before any application callback, then response/step control records
-    // precisely the item admitted by interception. Do not collect a second copy
-    // before edits (or publish Completed from a rejected interception stream).
+    let registered_plan = config
+        .model_provider_id
+        .starts_with(crate::engine::SIWC_PROVIDER_PREFIX);
+    let integrity = Arc::new(crate::response_integrity::Contributor {
+        boundary: interception.clone(),
+        registered_plan,
+    });
+    if registered_plan {
+        // A plan-backed tool call must cross the terminal boundary before any
+        // pre-dispatch callback or canonical history insertion can see it.
+        builder.model_request_contributor(integrity);
+        builder.model_request_contributor(interception);
+    } else {
+        // Ordinary providers can need a tool decision while the stream is open.
+        // Validate the item admitted by interception and retain that ordering.
+        builder.model_request_contributor(interception);
+        builder.model_request_contributor(integrity);
+    }
     Arc::new(builder.build())
 }
 
