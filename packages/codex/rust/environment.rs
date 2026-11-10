@@ -70,9 +70,16 @@ pub(crate) struct LocalPrivatePaths<'a> {
     pub credential_directory: Option<&'a Path>,
 }
 
+struct LocalCredentialTargets {
+    saved_login: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    legacy_mcp: Option<PathBuf>,
+}
+
 pub async fn for_unattached_threads(
     config: &Config,
     sdk_local: bool,
+    private_read_deny: Option<AbsolutePathBuf>,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -82,10 +89,11 @@ pub async fn for_unattached_threads(
             Some("no local executor is registered".to_owned()),
         ));
     }
-    let paths = ExecServerRuntimeOptions::from_optional_paths(
+    let mut paths = ExecServerRuntimeOptions::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
+    paths.private_read_deny = private_read_deny;
     let paths = if sdk_local {
         let paths = paths.with_join_unreturned_local_exec_on_interrupt();
         #[cfg(target_os = "macos")]
@@ -503,7 +511,25 @@ impl EnvironmentOptions {
                 "a local executor does not accept connection settings"
             );
             check_local_helpers(config)?;
-            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ true).await?;
+            let private_read_deny = if cfg!(target_os = "linux") && self.trusted_workspace_write {
+                existing_legacy_mcp_file(private_paths)?
+                    .map(|path| {
+                        path.canonicalize()
+                            .context("could not resolve the legacy MCP credential file")
+                    })
+                    .transpose()?
+                    .filter(|target| {
+                        !private_paths
+                            .credential_directory
+                            .is_some_and(|directory| target.starts_with(directory))
+                    })
+                    .map(AbsolutePathBuf::from_absolute_path)
+                    .transpose()?
+            } else {
+                None
+            };
+            let (manager, _) =
+                for_unattached_threads(config, /*sdk_local*/ true, private_read_deny).await?;
             let environment = manager
                 .try_local_environment()
                 .context("local executor requires the native process helper")?;
@@ -533,7 +559,10 @@ impl EnvironmentOptions {
         // SDK selections may publish a host MCP roster after this manager is built.
         // Reserve its lazy local launcher without selecting a host workspace:
         // for_unattached_threads has no default; selection below remains remote.
-        let (manager, _) = for_unattached_threads(config, /*sdk_local*/ false).await?;
+        let (manager, _) = for_unattached_threads(
+            config, /*sdk_local*/ false, /*private_read_deny*/ None,
+        )
+        .await?;
         if needs_local_mcp {
             ensure!(
                 manager.try_local_environment().is_some(),
@@ -1081,10 +1110,10 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        let saved_login_target =
+        let credential_targets =
             check_local_private_write_roots(&roots, codex_home, private_paths)?;
         #[cfg(target_os = "linux")]
-        if trusted_workspace_write && let Some(target) = saved_login_target {
+        if trusted_workspace_write && let Some(target) = credential_targets.saved_login {
             use std::os::unix::fs::MetadataExt;
 
             let metadata = std::fs::symlink_metadata(&target)
@@ -1097,6 +1126,23 @@ async fn strict_write_profile(
                 "trusted local execution with a saved Codex login on Linux requires \
                  CodexLogin.credential_directory or strict write policy",
             )?;
+            if let Some(fallback) = &credential_targets.legacy_mcp {
+                let metadata = fallback
+                    .symlink_metadata()
+                    .context("could not verify the legacy MCP credential file")?;
+                ensure!(
+                    metadata.is_file() && metadata.nlink() == 1,
+                    "trusted local executor requires a legacy MCP credential file without hard links"
+                );
+                ensure!(
+                    fallback.starts_with(directory)
+                        || environment
+                            .local_runtime_paths()
+                            .and_then(|paths| paths.private_read_deny.as_deref())
+                            == Some(fallback.as_path()),
+                    "the legacy MCP credential file changed since executor startup"
+                );
+            }
             filesystem_policy.entries.push(FileSystemSandboxEntry::new(
                 FileSystemPath::Path {
                     path: PathUri::from_host_native_path(directory)?,
@@ -1105,7 +1151,7 @@ async fn strict_write_profile(
             ));
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = saved_login_target;
+        let _ = credential_targets.saved_login;
     }
     if local && !trusted_workspace_write {
         for entry in &mut filesystem_policy.entries {
@@ -1150,7 +1196,7 @@ fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
-) -> Result<Option<PathBuf>> {
+) -> Result<LocalCredentialTargets> {
     let LocalPrivatePaths {
         storage_home,
         saved_login_file,
@@ -1191,6 +1237,19 @@ fn check_local_private_write_roots(
         collect_existing_private_file(target.clone(), &mut protected_files)
             .context("could not inspect the saved Codex login file")?;
     }
+    #[cfg(target_os = "linux")]
+    let legacy_mcp = existing_legacy_mcp_file(private_paths)?
+        .map(|fallback| {
+            let target = check_local_write_root_overlap(
+                &fallback,
+                roots,
+                "local executor roots must stay outside the legacy MCP credential file",
+            )?;
+            collect_existing_private_file(target.clone(), &mut protected_files)
+                .context("could not inspect the legacy MCP credential file")?;
+            Ok::<_, anyhow::Error>(target)
+        })
+        .transpose()?;
     if let Some(home) = storage_home.as_deref() {
         protected_files.extend(relocated_database_files(home, roots)?);
         if persistent_rollouts {
@@ -1211,7 +1270,29 @@ fn check_local_private_write_roots(
         )?,
         "local executor writable roots contain a hard link to a private native SDK file"
     );
-    Ok(saved_login_target)
+    Ok(LocalCredentialTargets {
+        saved_login: saved_login_target,
+        #[cfg(target_os = "linux")]
+        legacy_mcp,
+    })
+}
+
+fn existing_legacy_mcp_file(private_paths: LocalPrivatePaths<'_>) -> Result<Option<PathBuf>> {
+    let (Some(auth_file), Some(directory)) = (
+        private_paths.saved_login_file,
+        private_paths.credential_directory,
+    ) else {
+        return Ok(None);
+    };
+    if auth_file.parent() == Some(directory) {
+        return Ok(None);
+    }
+    let path = auth_file.with_file_name(".credentials.json");
+    match path.symlink_metadata() {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("could not inspect the legacy MCP credential file"),
+    }
 }
 
 fn check_local_helper_write_roots(

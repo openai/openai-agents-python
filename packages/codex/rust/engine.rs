@@ -514,7 +514,10 @@ impl EngineState {
                 None,
             ),
             (None, None) => {
-                crate::environment::for_unattached_threads(&config, /*sdk_local*/ false).await?
+                crate::environment::for_unattached_threads(
+                    &config, /*sdk_local*/ false, /*private_read_deny*/ None,
+                )
+                .await?
             }
         };
         let environment = Arc::new(environment);
