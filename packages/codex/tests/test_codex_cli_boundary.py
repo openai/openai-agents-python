@@ -92,13 +92,14 @@ def test_classic_cli_patch_targets_and_exception_identities(monkeypatch) -> None
     assert error.run_data is None
 
 
-def test_project_guidance_is_appended_to_public_session_signatures() -> None:
+def test_instruction_options_are_appended_to_public_session_signatures() -> None:
     for declaration in [Agent.session, *get_overloads(Agent.session)]:
         parameters = list(inspect.signature(declaration).parameters)
-        assert parameters[-3:] == [
+        assert parameters[-4:] == [
             "max_function_concurrency",
             "observation_retention",
             "project_guidance",
+            "discover_agents_md",
         ]
 
 

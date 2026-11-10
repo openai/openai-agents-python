@@ -7,7 +7,7 @@ import ctypes
 import os
 import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -34,11 +34,13 @@ pytestmark = pytest.mark.serial
 
 
 @asynccontextmanager
-async def connect_proxy(destination: str) -> AsyncIterator[tuple[str, list[bytes]]]:
+async def connect_proxy(
+    destination: str, *, authority: str | None = None
+) -> AsyncIterator[tuple[str, list[bytes]]]:
     """Tunnel only to this test's fixed TLS peer, retaining CONNECT headers."""
     target = urlsplit(destination)
     assert target.hostname == "127.0.0.1" and target.port is not None
-    authority = f"{target.hostname}:{target.port}"
+    authority = authority or f"{target.hostname}:{target.port}"
     requests: list[bytes] = []
     handlers: set[asyncio.Task[None]] = set()
 
@@ -47,7 +49,8 @@ async def connect_proxy(destination: str) -> AsyncIterator[tuple[str, list[bytes
             writer.write(data)
             await writer.drain()
         if not writer.is_closing():
-            writer.write_eof()
+            with suppress(OSError):
+                writer.write_eof()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()

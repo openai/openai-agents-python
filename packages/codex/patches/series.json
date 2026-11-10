@@ -407,7 +407,11 @@
     {
       "path": "sdk-realtime-response-context-and-history.patch",
       "sha256": "c63b869586bce016995d99f7f4d64328833e850ade390580902aa0432bbef4bf"
+    },
+    {
+      "path": "0152-sdk-codex-login-terminal-rate-limits.patch",
+      "sha256": "18e553a5981488043c85a1c6c22cb87a436036d647a278bd1a0b0270fa939bf4"
     }
   ],
-  "result_tree": "6a1be7c4e9cd2754425a54c436827c2317acf935"
+  "result_tree": "c5ce05b89fff8521e8892804b361c5ba46b262a4"
 }
