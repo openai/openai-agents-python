@@ -2408,6 +2408,50 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_manual(&grant.key.reply.thread, grant)))
     }
 
+    #[pyo3(signature = (grant, arguments_json=None))]
+    fn _require_tool_approval(
+        &self,
+        grant: &python_tools::ManualToolGrant,
+        arguments_json: Option<&str>,
+    ) -> PyResult<bool> {
+        let arguments = arguments_json
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(py_error)?;
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        Ok(inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            .is_some_and(|tools| tools.require_approval(&grant.key.reply.thread, grant, arguments)))
+    }
+
+    fn _approve_manual_tool<'py>(
+        &self,
+        py: Python<'py>,
+        grant: &python_tools::ManualToolGrant,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let grant = grant.clone();
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            else {
+                return Ok(false);
+            };
+            tools
+                .approve_manual(&grant.key.reply.thread, &grant)
+                .map_err(py_error)
+        })
+    }
+
     fn _respond_manual_tool<'py>(
         &self,
         py: Python<'py>,
@@ -2691,12 +2735,17 @@ impl NativeThread {
                         })
                         .await;
                     }
-                    Ok(sender
+                    let receipt = response.clone();
+                    let accepted = sender
                         .send(python_tools::ToolReply {
                             response,
                             start_response,
                         })
-                        .is_ok())
+                        .is_ok();
+                    if accepted {
+                        tools.record_approved_result(&request, &receipt);
+                    }
+                    Ok(accepted)
                 }
             }
         })

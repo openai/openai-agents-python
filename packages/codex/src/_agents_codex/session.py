@@ -51,7 +51,7 @@ from typing import (
 )
 from uuid import uuid4 as uuid4
 
-from pydantic import BaseModel as BaseModel
+from pydantic import BaseModel as BaseModel, TypeAdapter as _TypeAdapter
 
 from ._agent_profiles import _AgentProfile, _capture_agent_graph
 from ._compat import cancel_once as cancel_once
@@ -123,11 +123,14 @@ from .manual import (
     _URL_ACCEPT as _URL_ACCEPT,
     ActionReply as ActionReply,
     ActionRequested as ActionRequested,
+    ApprovalDecision as ApprovalDecision,
+    ApprovalRequested as ApprovalRequested,
     ElicitationRequest as ElicitationRequest,
     FormRequest as FormRequest,
     Interaction as Interaction,
     UrlRequest as UrlRequest,
     VerificationRequest as VerificationRequest,
+    _CapturedApproval as _CapturedApproval,
     _CapturedManual as _CapturedManual,
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
@@ -560,7 +563,9 @@ class Capabilities:
                 "Opening and operation ceilings apply to every tool family",
             )
         if feature == "function_policy":
-            if any(isinstance(tool, _CapturedFunction) for tool in s._bound_tools):
+            if any(
+                isinstance(tool, (_CapturedFunction, _CapturedApproval)) for tool in s._bound_tools
+            ):
                 return FeatureSupport(
                     "supported",
                     "Opening Python callbacks support controls",
@@ -2208,7 +2213,9 @@ def _restore_operation_slots(
     available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
     if any(tool.ref not in available for tool in selected):
         raise ValueError("Saved operation names tools outside its native generation")
-    manual_names = {tool.name for tool in selected if tool._bind is None}
+    manual_names = {
+        tool.name for tool in selected if tool._bind is None or tool.needs_approval is not False
+    }
     if any(name not in manual_names for name in pending_names):
         raise ValueError("Saved operation does not admit its pending manual tools")
     return tuple(available[tool.ref] for tool in selected)
@@ -2989,7 +2996,10 @@ class Session(Generic[ContextT, OutputT]):
             and agent.before_compact is None
             and agent.before_complete is None
             and all(
-                isinstance(tool, FunctionTool) and tool._bind is not None and not tool.defer_loading
+                isinstance(tool, FunctionTool)
+                and tool._bind is not None
+                and tool.needs_approval is False
+                and not tool.defer_loading
                 for tool in available
             )
         )
@@ -3907,6 +3917,9 @@ class Session(Generic[ContextT, OutputT]):
         )
         self._home = home
         self._catalog = catalog
+        self._approval_decisions: dict[tuple[str | None, str, int, int], tuple[bool, str]] = {}
+        self._approval_preparations: set[int] = set()
+        self._approval_ready: dict[int, Any] = {}
         self._max_function_concurrency = max_function_concurrency
         # MCP publication keeps this exact captured tuple; rebinding an idle
         # Python catalog creates another. No second set of bindings is made.
@@ -5339,6 +5352,10 @@ class Session(Generic[ContextT, OutputT]):
             pending = self._native._pending_manual_tools()
             live_invocations = {invocation for invocation, _, _ in pending}
             seen.intersection_update(live_invocations)
+            self._approval_preparations.intersection_update(live_invocations)
+            for invocation in tuple(self._approval_ready):
+                if invocation not in live_invocations:
+                    del self._approval_ready[invocation]
             for owner in [self._active, *self._child_callbacks.values()]:
                 if owner is not None:
                     for invocation in tuple(owner.manual_inputs):
@@ -5387,7 +5404,7 @@ class Session(Generic[ContextT, OutputT]):
                 if not self._native._check_manual_tool(grant):
                     state.manual_inputs.pop(invocation, None)
                     continue
-                if self._fail_unhandled_questions:
+                if self._fail_unhandled_questions and not isinstance(entry, _CapturedApproval):
                     state.failure.set_result(
                         InteractionRequired(
                             "Manual tools require on_interaction or Agent.session()"
@@ -5403,7 +5420,7 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     tracing_context = state.tracing.context
                 new_input = invocation not in state.manual_inputs
-                if new_input:
+                if new_input and not isinstance(entry, _CapturedApproval):
                     with (
                         _clear_current(),
                         _owned_span("manual input validation", "validation", tracing_context),
@@ -5419,7 +5436,11 @@ class Session(Generic[ContextT, OutputT]):
                     state.manual_inputs[invocation] = arguments
                 # Cache validation, never grant authority. Every cursor receives
                 # its own value and we check the native grant on every exposure.
-                arguments = deepcopy(state.manual_inputs[invocation])
+                arguments = deepcopy(
+                    state.manual_inputs.get(invocation)
+                    if isinstance(entry, _CapturedApproval)
+                    else state.manual_inputs[invocation]
+                )
                 if (
                     state.stopping
                     or state.failure.done()
@@ -5440,6 +5461,44 @@ class Session(Generic[ContextT, OutputT]):
                     model=message.get("_sdk_model"),
                     tracing_context=tracing_context,
                 )
+                if (
+                    message.get("_sdk_restored_approval")
+                    and message.get("_sdk_approval_required")
+                    and not isinstance(entry, _CapturedApproval)
+                ):
+                    raise NativeError(
+                        "Saved managed approval requires an approval-enabled callback"
+                    )
+                if isinstance(entry, _CapturedApproval):
+                    assert isinstance(request, ApprovalRequested)
+                    if message.get("_sdk_restored_approval") and not message.get(
+                        "_sdk_approval_required"
+                    ):
+                        raise NativeError(
+                            "A saved manual result cannot acquire managed callback authority"
+                        )
+                    if not self._native._require_tool_approval(grant):
+                        continue
+                    object.__setattr__(request, "_approval_source", message.get("profile_id"))
+                    object.__setattr__(
+                        request, "_approval_profile_epoch", message.get("profile_epoch")
+                    )
+                    object.__setattr__(request, "_approval_generation", marker["generation"])
+                    object.__setattr__(
+                        request,
+                        "_effective_arguments",
+                        deepcopy(self._approval_ready.get(invocation, arguments)),
+                    )
+                    if invocation not in self._approval_ready:
+                        if invocation not in self._approval_preparations:
+                            self._approval_preparations.add(invocation)
+                            preparation = _create_task(
+                                self._prepare_managed_approval(
+                                    state, entry, request, deepcopy(message)
+                                )
+                            )
+                            state.add_callback(preparation)
+                        continue
                 if new_input:
                     self._dispatch_interaction(request, state)
                 return request
@@ -5538,6 +5597,195 @@ class Session(Generic[ContextT, OutputT]):
             break
         raise InteractionExpiredError("Manual tool reply belongs to an expired declaration")
 
+    async def _prepare_managed_approval(
+        self,
+        state: _CallbackState,
+        entry: _CapturedApproval,
+        request: ApprovalRequested[Any],
+        message: dict[str, Any],
+    ) -> None:
+        scope = _Invocation(self)
+        token = _invocation.set(scope)
+        permit: asyncio.Semaphore | None = None
+        acquired = False
+
+        def admit() -> bool:
+            return (
+                not state.stopping
+                and not state.failure.done()
+                and not self._closing
+                and self._native._check_manual_tool(request._grant)
+            )
+
+        try:
+            if self._max_function_concurrency is not None:
+                if state.function_admission is None:
+                    state.function_admission = asyncio.Semaphore(self._max_function_concurrency)
+                permit = state.function_admission
+                await permit.acquire()
+                acquired = True
+            if not admit():
+                return
+            if request._invocation not in state.manual_inputs:
+                with (
+                    _clear_current(),
+                    _owned_span("manual input validation", "validation", request._tracing_context),
+                ):
+                    arguments = entry.input_adapter.validate_python(deepcopy(message["arguments"]))
+                if not admit():
+                    return
+                state.manual_inputs[request._invocation] = arguments
+            arguments = deepcopy(state.manual_inputs[request._invocation])
+            object.__setattr__(request, "arguments", arguments)
+            object.__setattr__(request, "_effective_arguments", deepcopy(arguments))
+            function = entry.function
+            if "_sdk_effective_arguments" in message:
+                object.__setattr__(
+                    request,
+                    "_effective_arguments",
+                    function._parse_arguments(message["_sdk_effective_arguments"]),
+                )
+            kwargs = function._arguments(request.effective_arguments)
+            raw_arguments = message["arguments"]
+            if isinstance(raw_arguments, str):
+                raw_arguments = json.loads(raw_arguments)
+            assert state.handle is not None
+            context = ToolContext(
+                function.context,
+                state.handle,
+                request.call_id,
+                MappingProxyType(deepcopy(raw_arguments)),
+                _snapshot_function_arguments(kwargs, function._ref),
+                call=request.call,
+            )
+
+            if not admit():
+                return
+            prepared_input = message.get("_sdk_effective_arguments", message["arguments"])
+            preapproval_complete = message.get("_sdk_restored_approval") and (
+                "_sdk_effective_arguments" in message
+            )
+            if (
+                entry.declaration.run_before_approval
+                and function.before is not None
+                and not preapproval_complete
+            ):
+                decision = await _call_callback(function.before, admit, context)
+                if not admit():
+                    return
+                if isinstance(decision, Deny):
+                    scope.active = False
+                    await self._decide_approval(request, False, reason=decision.reason)
+                    return
+                if isinstance(decision, ReplaceArguments):
+                    prepared_input = deepcopy(decision.arguments)
+                    parsed = function._parse_arguments(prepared_input)
+                    context = replace(
+                        context,
+                        effective_arguments=_snapshot_function_arguments(
+                            function._arguments(parsed), function._ref
+                        ),
+                    )
+                    object.__setattr__(request, "_effective_arguments", deepcopy(parsed))
+                elif not isinstance(decision, Allow):
+                    raise TypeError("Function before must return Allow, Deny or ReplaceArguments")
+            # This raw input snapshot also records completed preparation. It
+            # avoids repeating schema transforms on the approved callback.
+            effective = (
+                prepared_input
+                if isinstance(prepared_input, str)
+                else _TypeAdapter(Any).dump_json(prepared_input).decode()
+            )
+            if not self._native._require_tool_approval(request._grant, effective):
+                return
+            if message.get("_sdk_restored_approval"):
+                required = True
+            else:
+                cached = self._approval_decisions.get(
+                    (
+                        message.get("profile_id"),
+                        str(message.get("profile_epoch")),
+                        request._approval_generation,
+                        id(entry.declaration),
+                    )
+                )
+                if cached is not None:
+                    scope.active = False
+                    await self._decide_approval(request, cached[0], reason=cached[1])
+                    return
+                policy = entry.declaration.needs_approval
+                required = (
+                    policy
+                    if isinstance(policy, bool)
+                    else await _call_callback(policy, admit, context)
+                )
+                if not isinstance(required, bool):
+                    raise TypeError("needs_approval must return a bool")
+            if not admit():
+                return
+            if not required:
+                scope.active = False
+                await self._decide_approval(request, True)
+                return
+            if self._fail_unhandled_questions:
+                state.failure.set_result(
+                    InteractionRequired(
+                        "Managed approval requires on_interaction or Agent.session()"
+                    )
+                )
+                return
+            self._approval_ready[request._invocation] = request.effective_arguments
+            self._dispatch_interaction(request, state)
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            if acquired:
+                assert permit is not None
+                permit.release()
+            scope.active = False
+            _invocation.reset(token)
+            if isinstance(state, _Submission):
+                state.changed.set()
+            self._observations.notify()
+
+    async def _decide_approval(
+        self,
+        request: ApprovalRequested[Any],
+        approve: bool,
+        *,
+        reason: str = "Tool execution was rejected",
+        always: bool = False,
+    ) -> None:
+        self._check_loop()
+        if self._closing or self._closed or self._broken or self._sealed_checkpoint is not None:
+            raise InteractionExpiredError("Managed approval is expired")
+        self._check_open()
+        if not isinstance(always, bool) or not isinstance(reason, str):
+            raise TypeError("Approval always must be a bool and reason must be a string")
+        if (
+            request._session() is not self
+            or request.session_id != self.id
+            or self._sealed_checkpoint is not None
+        ):
+            raise InteractionExpiredError("Managed approval is foreign or expired")
+        key = (
+            getattr(request, "_approval_source", None),
+            str(getattr(request, "_approval_profile_epoch", None)),
+            request._approval_generation,
+            id(request._declaration),
+        )
+        if approve:
+            if not await self._native._approve_manual_tool(request._grant):
+                raise InteractionExpiredError("Managed approval is expired or already decided")
+            self._observations.notify()
+        else:
+            await self._respond(request, reason, _approval_rejection=True)
+        if always:
+            self._approval_decisions[key] = (approve, reason)
+
     async def _respond(
         self,
         request: ActionRequested[Any, Any],
@@ -5545,6 +5793,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         expected_json: str | None = None,
         prepared: _PreparedManualResult | None = None,
+        _approval_rejection: bool = False,
     ) -> Turn[Any]:
         self._check_loop()
         if (
@@ -5558,7 +5807,11 @@ class Session(Generic[ContextT, OutputT]):
                 "Manual tool reply is foreign, expired or already delivered"
             )
         invocation = _invocation.get()
-        if invocation is not None and invocation.active:
+        if (
+            invocation is not None
+            and invocation.active
+            and not isinstance(request, ApprovalRequested)
+        ):
             raise RuntimeError("A callback must return its reply; it cannot respond directly")
         state: _CallbackState | None = (
             self._active
@@ -5634,11 +5887,20 @@ class Session(Generic[ContextT, OutputT]):
         else:
             assert state.handle is not None
             handle = state.handle
+        if isinstance(request, ApprovalRequested) and not _approval_rejection:
+            if not isinstance(result, ApprovalDecision):
+                raise TypeError("A managed function reply requires an approval decision")
+            await self._decide_approval(
+                request, result.approve, reason=result.reason, always=result.always
+            )
+            return handle
         scope = _Invocation(self)
         token = _invocation.set(scope)
         output: str | None = None
         try:
-            if prepared is None:
+            if _approval_rejection:
+                output = json.dumps(ToolOutput.error(result).to_native())
+            elif prepared is None:
                 with (
                     _clear_current(),
                     _owned_span("manual output validation", "validation", request._tracing_context),
@@ -5675,48 +5937,8 @@ class Session(Generic[ContextT, OutputT]):
             if isinstance(state, _Submission) and state.restored_pending:
                 submission = state
                 assert submission.handle is not None
-                observation_route = submission.handle.submission_id
 
-                async def continue_restored_turn() -> None:
-                    try:
-                        # Core may already have queued recovery when this callback
-                        # is cancelled. Retain its mutation ownership through the
-                        # admission acknowledgement before retirement can pass it.
-                        context = (
-                            submission.tracing.context if submission.tracing is not None else None
-                        )
-                        tracing_args = {}
-                        if context is not None:
-                            tracing_args["tracing_context"] = context
-                        if submission.parent_trace is not None:
-                            tracing_args["trace_json"] = json.dumps(
-                                submission.parent_trace.to_headers()
-                            )
-                        if submission.operation_declaration_source is not None:
-                            tracing_args["operation_declaration_source_json"] = json.dumps(
-                                submission.operation_declaration_source
-                            )
-                        operation = self._native._continue_manual(observation_route, **tracing_args)
-                        with _private_task(operation) as (admitting, admitted):
-                            receipt = json.loads(await _join(admitting, outcome=admitted))
-                        if receipt["status"] == "pending":
-                            return
-                        if receipt["status"] == "not_pending":
-                            # A concurrently submitted last reply already recovered
-                            # this frame. Its owned task validates the receipt.
-                            submission.restored_pending = False
-                            return
-                        if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
-                            raise NativeError("Native manual continuation was not resumed")
-                        submission.restored_pending = False
-                    except BaseException as error:
-                        if not submission.stopping and not submission.failure.done():
-                            submission.failure.set_result(error)
-                        raise
-                    finally:
-                        submission.changed.set()
-
-                continuation = _create_task(continue_restored_turn())
+                continuation = _create_task(self._continue_restored_turn(submission))
                 submission.add_callback(continuation)
                 await _join(continuation)
             if isinstance(state, _Submission):
@@ -5726,6 +5948,44 @@ class Session(Generic[ContextT, OutputT]):
         with _clear_current(), _private_task(deliver_and_continue()) as (delivery, delivered):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
+
+    async def _continue_restored_turn(self, submission: _Submission) -> None:
+        assert submission.handle is not None
+        try:
+            # Core may already have queued recovery when this callback
+            # is cancelled. Retain its mutation ownership through the
+            # admission acknowledgement before retirement can pass it.
+            context = submission.tracing.context if submission.tracing is not None else None
+            tracing_args = {}
+            if context is not None:
+                tracing_args["tracing_context"] = context
+            if submission.parent_trace is not None:
+                tracing_args["trace_json"] = json.dumps(submission.parent_trace.to_headers())
+            if submission.operation_declaration_source is not None:
+                tracing_args["operation_declaration_source_json"] = json.dumps(
+                    submission.operation_declaration_source
+                )
+            operation = self._native._continue_manual(
+                submission.handle.submission_id, **tracing_args
+            )
+            with _private_task(operation) as (admitting, admitted):
+                receipt = json.loads(await _join(admitting, outcome=admitted))
+            if receipt["status"] == "pending":
+                return
+            if receipt["status"] == "not_pending":
+                # A concurrently submitted last reply already recovered
+                # this frame. Its owned task validates the receipt.
+                submission.restored_pending = False
+                return
+            if receipt["status"] != "started" or receipt["turn_id"] != submission.handle.turn_id:
+                raise NativeError("Native manual continuation was not resumed")
+            submission.restored_pending = False
+        except BaseException as error:
+            if not submission.stopping and not submission.failure.done():
+                submission.failure.set_result(error)
+            raise
+        finally:
+            submission.changed.set()
 
     async def list_mcp_prompts(self, server: str) -> list[MCPPrompt]:
         """Return all prompts from a selected ordinary MCP server while idle.
@@ -9856,6 +10116,15 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 callback.close()
                 owner.native._release_python_callback(json.dumps(owner.receipt))
+                if (
+                    isinstance(state, _Submission)
+                    and state.restored_pending
+                    and not state.stopping
+                    and not state.failure.done()
+                    and not self._closing
+                ):
+                    continuation = _create_task(self._continue_restored_turn(state))
+                    state.add_callback(continuation)
             except BaseException as error:
                 state.retain_cleanup_error(error)
             finally:
@@ -10901,6 +11170,8 @@ class Session(Generic[ContextT, OutputT]):
                 raise NativeError("Native tool request belongs to a different thread")
             catalog = self._catalog_for_message(message, marker["generation"])
             entry = catalog.tools[marker["slot"]]
+            if isinstance(entry, _CapturedApproval):
+                entry = entry.function
             if not isinstance(entry, _CapturedFunction):
                 raise NativeError("Native callback does not match a function declaration")
             ref = entry._ref
@@ -10929,7 +11200,9 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
-            parsed = entry._parse_arguments(message["arguments"])
+            parsed = entry._parse_arguments(
+                message.get("_sdk_effective_arguments", message["arguments"])
+            )
             kwargs = entry._arguments(parsed)
             raw_arguments = message["arguments"]
             if isinstance(raw_arguments, str):
@@ -11516,7 +11789,8 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         if any(
-            isinstance(tool, _CapturedFunction) and tool._requires_live_manual_session
+            isinstance(tool, (_CapturedFunction, _CapturedApproval))
+            and tool._requires_live_manual_session
             for tool in self._catalog.tools
         ):
             raise CapabilityError(

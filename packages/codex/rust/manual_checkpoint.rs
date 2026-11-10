@@ -622,7 +622,18 @@ fn validate_frame(
             .as_object()
             .context("Invalid manual continuation request")?;
         ensure!(
-            fields.len() == 3
+            fields.keys().all(|key| matches!(
+                key.as_str(),
+                "call_id" | "tool" | "arguments" | "approval_required" | "effective_arguments"
+            )) && fields
+                .get("approval_required")
+                .is_none_or(Value::is_boolean)
+                && fields
+                    .get("effective_arguments")
+                    .is_none_or(|value| value.is_null()
+                        || value
+                            .as_str()
+                            .is_some_and(|text| serde_json::from_str::<Value>(text).is_ok()))
                 && fields.contains_key("call_id")
                 && fields.contains_key("tool")
                 && fields.contains_key("arguments"),
@@ -1022,6 +1033,21 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
                 tools.enqueue_manual_reentry(&thread.id.to_string(), &frame.turn, item, model)?
             });
     }
+    for pending in frame.state["native_continuation"]["pending_manual"]
+        .as_array()
+        .context("Missing captured manual requirements")?
+    {
+        tools.restore_approval_requirement(
+            pending["call_id"]
+                .as_str()
+                .context("Missing pending call identity")?,
+            pending["approval_required"].as_bool().unwrap_or(false),
+            pending["effective_arguments"]
+                .as_str()
+                .map(serde_json::from_str::<Value>)
+                .transpose()?,
+        );
+    }
     tools.bind_manual_restore(Arc::downgrade(owner));
     Ok(())
 }
@@ -1264,6 +1290,12 @@ pub(crate) async fn capture(
         .get::<crate::python_tools::PythonTools>()
         .context("Manual continuation requires current tools")?;
     let pending = tools.pending_manual_keys(&thread.id.to_string())?;
+    // Shutdown revokes live waiter metadata. Preserve its captured requirement
+    // with the exact pending keys before beginning that existing transaction.
+    let approvals: HashMap<_, _> = pending
+        .iter()
+        .map(|key| Ok((key.call.clone(), tools.manual_approval_state(key)?)))
+        .collect::<Result<_>>()?;
     let turn = pending[0].turn.clone();
     ensure!(
         pending.iter().all(|key| key.turn == turn),
@@ -1406,7 +1438,17 @@ pub(crate) async fn capture(
         else {
             anyhow::bail!("A custom call cannot own a manual reply")
         };
-        pending_manual.push(serde_json::json!({"call_id":id,"tool":name,"arguments":arguments}));
+        let (required, effective_arguments) = approvals
+            .get(id)
+            .context("Missing captured manual approval state")?;
+        let mut captured = serde_json::json!({"call_id":id,"tool":name,"arguments":arguments});
+        if *required {
+            captured["approval_required"] = Value::Bool(true);
+        }
+        if let Some(arguments) = effective_arguments {
+            captured["effective_arguments"] = Value::String(serde_json::to_string(&arguments)?);
+        }
+        pending_manual.push(captured);
     }
     ensure!(
         pending_manual.len() == pending.len(),
