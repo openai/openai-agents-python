@@ -471,7 +471,11 @@
     {
       "path": "sdk-linux-protected-metadata-bootstrap.patch",
       "sha256": "76ced00372b6b83f300b3ddc798517b632c92eee5d4e78445d76bb7206bf1130"
+    },
+    {
+      "path": "sdk-local-project-read-cwd.patch",
+      "sha256": "d09e4b30457c438fda6b64c927f9242ff161b9f6c4e6ed1c63438e00a02a1362"
     }
   ],
-  "result_tree": "a37815d822a135d3a1f779a3719f33aaac0ef83a"
+  "result_tree": "2eada2c6e72588dccf890bc784166f08630faf77"
 }
