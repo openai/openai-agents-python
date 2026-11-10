@@ -4,13 +4,13 @@ search:
 ---
 # 高度な SQLite セッション
 
-`AdvancedSQLiteSession` は、基本的な `SQLiteSession` の拡張版であり、会話の分岐、詳細な使用量分析、構造化された会話クエリなど、高度な会話管理機能を提供します。
+`AdvancedSQLiteSession` は、基本的な `SQLiteSession` を拡張したバージョンであり、会話の分岐、詳細な使用量分析、構造化された会話クエリなど、高度な会話管理機能を提供します。
 
 ## 機能 {#features}
 
 - **会話の分岐**: 任意のユーザーメッセージから別の会話経路を作成できます
-- **使用量の追跡**: ターンごとの詳細なトークン使用量分析と、JSON 形式の完全な内訳を提供します
-- **構造化クエリ**: ターンごとの会話、ツール使用統計などを取得できます
+- **使用量の追跡**: ターンごとの詳細なトークン使用量分析と完全な JSON 内訳を確認できます
+- **構造化クエリ**: ターン単位の会話やツール使用統計などを取得できます
 - **ブランチ管理**: ブランチを個別に切り替えて管理できます
 - **メッセージ構造メタデータ**: メッセージタイプ、ツール使用状況、会話フローを追跡できます
 
@@ -28,28 +28,18 @@ agent = Agent(
 
 # Create an advanced session
 session = AdvancedSQLiteSession(
-    session_id="conversation_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="conversation_123", db_path="conversations.db", create_tables=True
 )
 
 # First conversation turn
-result = await Runner.run(
-    agent,
-    "What city is the Golden Gate Bridge in?",
-    session=session
-)
+result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
 print(result.final_output)  # "San Francisco"
 
 # IMPORTANT: Store usage data
 await session.store_run_usage(result)
 
 # Continue conversation
-result = await Runner.run(
-    agent,
-    "What state is it in?",
-    session=session
-)
+result = await Runner.run(agent, "What state is it in?", session=session)
 print(result.final_output)  # "California"
 await session.store_run_usage(result)
 ```
@@ -62,36 +52,31 @@ from agents.extensions.memory import AdvancedSQLiteSession
 # Basic initialization
 session = AdvancedSQLiteSession(
     session_id="my_conversation",
-    create_tables=True  # Auto-create advanced tables
+    create_tables=True,  # Auto-create advanced tables
 )
 
 # With persistent storage
 session = AdvancedSQLiteSession(
-    session_id="user_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="user_123", db_path="conversations.db", create_tables=True
 )
 
 # With custom logger
 import logging
+
 logger = logging.getLogger("my_app")
-session = AdvancedSQLiteSession(
-    session_id="session_456",
-    create_tables=True,
-    logger=logger
-)
+session = AdvancedSQLiteSession(session_id="session_456", create_tables=True, logger=logger)
 ```
 
 ### パラメーター {#parameters}
 
 - `session_id` (str): 会話セッションの一意な識別子
 - `db_path` (str | Path): SQLite データベースファイルへのパス。デフォルトは、インメモリストレージを使用する `:memory:` です
-- `create_tables` (bool): 拡張テーブルを自動的に作成するかどうか。デフォルトは `False` です
-- `logger` (logging.Logger | None): セッション用のカスタムロガー。デフォルトはモジュールロガーです
+- `create_tables` (bool): 高度なテーブルを自動的に作成するかどうか。デフォルトは `False` です
+- `logger` (logging.Logger | None): セッション用のカスタムロガー。デフォルトはモジュールのロガーです
 
 ## 使用量の追跡 {#usage-tracking}
 
-AdvancedSQLiteSession は、会話の各ターンのトークン使用量データを保存することで、詳細な使用量分析を提供します。 **この機能は、各エージェント実行後に `store_run_usage` メソッドが呼び出されることに全面的に依存します。**
+AdvancedSQLiteSession は、会話のターンごとにトークン使用量データを保存することで、詳細な使用量分析を提供します。 **この機能は、各エージェントの実行後に `store_run_usage` メソッドが呼び出されることに全面的に依存します。**
 
 ### 使用量データの保存 {#storing-usage-data}
 
@@ -126,9 +111,9 @@ branch_usage = await session.get_session_usage(branch_id="main")
 turn_usage = await session.get_turn_usage()
 for turn_data in turn_usage:
     print(f"Turn {turn_data['user_turn_number']}: {turn_data['total_tokens']} tokens")
-    if turn_data['input_tokens_details']:
+    if turn_data["input_tokens_details"]:
         print(f"  Input details: {turn_data['input_tokens_details']}")
-    if turn_data['output_tokens_details']:
+    if turn_data["output_tokens_details"]:
         print(f"  Output details: {turn_data['output_tokens_details']}")
 
 # Get usage for specific turn
@@ -137,7 +122,7 @@ turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 
 ## 会話の分岐 {#conversation-branching}
 
-AdvancedSQLiteSession の主要機能の 1 つは、任意のユーザーメッセージから会話のブランチを作成し、別の会話経路を探索できることです。
+AdvancedSQLiteSession の主要な機能の 1 つは、任意のユーザーメッセージから会話ブランチを作成し、別の会話経路を検討できることです。
 
 ### ブランチの作成 {#creating-branches}
 
@@ -153,19 +138,13 @@ branch_id = await session.create_branch_from_turn(2)
 print(f"Created branch: {branch_id}")
 
 # Create a branch with custom name
-branch_id = await session.create_branch_from_turn(
-    2, 
-    branch_name="alternative_path"
-)
+branch_id = await session.create_branch_from_turn(2, branch_name="alternative_path")
 
 # Create branch by searching for content
-branch_id = await session.create_branch_from_content(
-    "weather", 
-    branch_name="weather_focus"
-)
+branch_id = await session.create_branch_from_content("weather", branch_name="weather_focus")
 ```
 
-ブランチ ID は、セッション ID が存続する間、一意です。ブランチを削除したりセッションをクリアしたりすると、その会話データは削除されますが、以前に使用したブランチ ID が再び利用可能になるわけではありません。別のブランチを作成するときは、新しい名前を使用してください。
+ブランチ ID は、セッション ID の存続期間を通じて一意です。ブランチを削除したりセッションをクリアしたりすると、その会話データは削除されますが、以前に使用したブランチ ID が再び使用可能になることはありません。別のブランチを作成する際は、新しい名前を使用してください。
 
 ### ブランチ管理 {#branch-management}
 
@@ -174,7 +153,9 @@ branch_id = await session.create_branch_from_content(
 branches = await session.list_branches()
 for branch in branches:
     current = " (current)" if branch["is_current"] else ""
-    print(f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}")
+    print(
+        f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}"
+    )
 
 # Switch between branches
 await session.switch_to_branch("main")
@@ -184,7 +165,7 @@ await session.switch_to_branch(branch_id)
 await session.delete_branch(branch_id, force=True)  # force=True allows deleting current branch
 ```
 
-### ブランチのワークフロー例 {#branch-workflow-example}
+### ブランチワークフローの例 {#branch-workflow-example}
 
 ```python
 # Original conversation
@@ -198,22 +179,14 @@ await session.store_run_usage(result)
 branch_id = await session.create_branch_from_turn(2, "weather_focus")
 
 # Continue in new branch with different question
-result = await Runner.run(
-    agent, 
-    "What are the main tourist attractions in Paris?", 
-    session=session
-)
+result = await Runner.run(agent, "What are the main tourist attractions in Paris?", session=session)
 await session.store_run_usage(result)
 
 # Switch back to main branch
 await session.switch_to_branch("main")
 
 # Continue original conversation
-result = await Runner.run(
-    agent, 
-    "How expensive is it to visit?", 
-    session=session
-)
+result = await Runner.run(agent, "How expensive is it to visit?", session=session)
 await session.store_run_usage(result)
 ```
 
@@ -247,10 +220,10 @@ for turn in matching_turns:
 
 ### メッセージ構造 {#message-structure}
 
-セッションでは、以下を含むメッセージ構造が自動的に追跡されます。
+セッションは、以下を含むメッセージ構造を自動的に追跡します。
 
 - メッセージタイプの値（`user`、`assistant`、`tool_call` など）
-- ツール呼び出しのツール名
+- ツール呼び出しに使用されたツール名
 - ターン番号とシーケンス番号
 - ブランチとの関連付け
 - タイムスタンプ
@@ -288,7 +261,7 @@ CREATE TABLE branch_reservations (
 );
 ```
 
-このテーブルは、コピーされたプレフィックスが空のブランチも含め、ブランチ ID をアトミックに予約します。予約行は、ブランチが削除された場合もセッションがクリアされた場合も保持されるため、古いセッションインスタンスが、同じ ID を再利用した後続のブランチに履歴をマージすることはできません。
+このテーブルは、コピーされたプレフィックスが空のブランチも含め、ブランチ ID をアトミックに予約します。予約行は、ブランチが削除された場合もセッションがクリアされた場合も保持されるため、古いセッションインスタンスが、同じ ID を再利用した後のブランチへ履歴をマージすることはありません。
 
 ### turn_usage テーブル {#turn_usage-table}
 
@@ -312,10 +285,10 @@ CREATE TABLE turn_usage (
 
 ## 完全なコード例 {#complete-example}
 
-すべての機能を包括的に紹介する[完全なコード例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)をご覧ください。
+すべての機能を包括的に示す[完全なコード例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)をご覧ください。
 
 
 ## API リファレンス {#api-reference}
 
 - [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - メインクラス
-- [`Session`][agents.memory.session.Session] - 基底セッションプロトコル
+- [`Session`][agents.memory.session.Session] - 基本セッションプロトコル
