@@ -150,6 +150,142 @@ async def test_saved_login_limit_returns_attention_without_replaying_the_request
             assert len(peer.requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("saved", "code", "reason", "category"),
+    [
+        (True, "insufficient_quota", "quota_blocked", "usage_limit_exceeded"),
+        (True, "rate_limit_exceeded", "rate_limited", "rate_limit_exceeded"),
+        (True, None, None, None),
+        (False, "rate_limit_exceeded", None, None),
+    ],
+    ids=["saved-quota", "saved-throttle", "saved-healthy", "api-key-retry"],
+)
+async def test_pre_turn_compaction_respects_credential_retry_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    saved: bool,
+    code: str | None,
+    reason: str | None,
+    category: str | None,
+) -> None:
+    native = importlib.import_module("agents._native")
+    create_engine = native.create_engine
+    compact_prompt = "Summarize the synthetic conversation."
+
+    def with_pre_turn_compaction(
+        config_json: str, runtime_json: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        # Set the native budget while retaining the public Session and TurnHandle path.
+        config = json.loads(config_json)
+        config.update(
+            model_auto_compact_token_limit=10_000,
+            model_post_turn_compact_threshold_percent=0,
+        )
+        config[f"model_providers.{config['model_provider']}"]["stream_idle_timeout_ms"] = 1000
+        runtime = json.loads(runtime_json)
+        runtime["compact_prompt"] = compact_prompt
+        return create_engine(json.dumps(config), json.dumps(runtime), *args, **kwargs)
+
+    monkeypatch.setattr(native, "create_engine", with_pre_turn_compaction)
+    peer = ResponsesFixture()
+    requests: list[str] = []
+    stream_release = asyncio.Event()
+
+    async def complete_response(event: dict[str, Any]) -> None:
+        if event["type"] != "response.completed":
+            return
+        if len(requests) == 1:
+            event["response"]["usage"].update(input_tokens=12_000, total_tokens=12_003)
+        elif saved and requests[-1] == "compaction":
+            event["response"]["end_turn"] = False
+
+    peer.before_event = complete_response
+    peer.respond(assistant_output("Seeded history."))
+    peer.respond(
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "compaction", "encrypted_content": "synthetic-summary"},
+        }
+        if saved
+        else assistant_output("Synthetic summary.")
+    )
+    peer.respond(assistant_output("Continued after compaction."))
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        body = await request.json()
+        is_compaction = any(
+            item["type"] == "compaction_trigger"
+            or (
+                item["type"] == "message"
+                and any(content.get("text") == compact_prompt for content in item["content"])
+            )
+            for item in body["input"]
+        )
+        requests.append("compaction" if is_compaction else "sampling")
+        assert request.headers["Authorization"] == (
+            "Bearer saved-token" if saved else "Bearer synthetic-compaction-key"
+        )
+        assert request.headers.get("ChatGPT-Account-Id") == (ACCOUNT if saved else None)
+        if code is None or not is_compaction or (not saved and len(requests) != 2):
+            return await peer.handle(request)
+        payload = {
+            "type": "response.failed",
+            "response": {
+                "id": f"resp_rejected_compaction_{len(requests)}",
+                "status": "failed",
+                "error": {"code": code, "message": "Synthetic compaction rejection"},
+            },
+        }
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        await stream_release.wait()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", handle)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    async with timeout(20), TestServer(app) as server:
+        endpoint = str(server.make_url("/"))
+        if saved:
+            monkeypatch.setattr("_agents_codex.session._CODEX_RESPONSES_BASE_URL", endpoint)
+            agent = codex_agent(saved_login(tmp_path / "login"))
+        else:
+            provider = NativeProvider(
+                api_key="synthetic-compaction-key", base_url=endpoint, supports_websockets=False
+            )
+            agent = Agent(instructions="Reply.", model="gpt-5.1-codex", provider=provider)
+        assert agent.provider is not None
+        async with agent.provider, agent.session() as session:
+            try:
+                initial = await session.submit("Seed the conversation.")
+                assert (await initial.get_result()).final_output == "Seeded history."
+                assert requests == ["sampling"]
+
+                turn = await session.submit("Continue.")
+                if reason is None:
+                    assert (await turn.get_result()).final_output == "Continued after compaction."
+                    expected = ["sampling", "compaction", "sampling"]
+                    if not saved:
+                        expected.insert(1, "compaction")
+                    assert requests == expected
+                else:
+                    try:
+                        attention = await turn.wait_for_attention()
+                    except NativeError as error:
+                        pytest.fail(
+                            f"Expected {reason} attention, got {error.category} after {requests}."
+                        )
+                    assert isinstance(attention, TurnNeedsAttention), requests
+                    assert attention.reason == reason
+                    assert isinstance(attention.error, NativeError)
+                    assert attention.error.category == category
+                    assert requests == ["sampling", "compaction"]
+            finally:
+                stream_release.set()
+
+
 async def test_api_key_can_retry_streamed_throttling(responses: ResponsesFixture) -> None:
     responses.respond(
         {
