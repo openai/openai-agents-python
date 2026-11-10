@@ -936,6 +936,8 @@ class _Submission:
     completion_continuations: int = 0
     calls: set[str] = field(default_factory=set)
     mcp_calls: dict[str, str] = field(default_factory=dict)
+    mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
+    mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
     step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
     stopping: bool = False
     cleanup_error: BaseException | None = None
@@ -1014,6 +1016,9 @@ class _ChildCallbacks:
     tool_completion: _ToolCompletionProposal | None = field(default=None, repr=False)
     completion_continuations: int = 0
     calls: set[str] = field(default_factory=set)
+    mcp_names: dict[tuple[str, str], ToolRef] = field(default_factory=dict, repr=False)
+    mcp_call_names: dict[str, ToolRef] = field(default_factory=dict, repr=False)
+    step_mcp: tuple[_MCP[Any], ...] | None = field(default=None, repr=False)
     terminal: asyncio.Future[Any] = field(default_factory=_future)
     observed: asyncio.Future[Any] = field(default_factory=_future)
     failure: asyncio.Future[Any] = field(default_factory=_future)
@@ -1850,6 +1855,18 @@ def _split_tools(
                 )
             tool = replace(resource_server, tools=())
         elif isinstance(tool, ToolRef):
+            identity = getattr(tool, "_mcp_identity", None)
+            if identity is not None:
+                if identity not in mcp_pairs:
+                    raise CapabilityError("MCP tool identity must have been admitted at opening")
+                declaration = next(
+                    item
+                    for item in opening
+                    if isinstance(item, _MCP)
+                    and item.name == identity[0]
+                    and identity[1] in item.tools
+                )
+                tool = declaration.tool(identity[1])
             if tool in fixed:
                 if tool in retained:
                     raise CapabilityError("Operation tools must select distinct fixed capabilities")
@@ -2233,6 +2250,11 @@ def _install_profile_options(
             for tool in functions
         )
         grants.extend(_tool_names(servers))
+        raw_grants = options["tool_policy"]["allowed_mcp_tools"]
+        for server in servers:
+            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True):
+                if not any(grant[:2] == [server.name, raw] for grant in raw_grants):
+                    raw_grants.append([server.name, raw, ref])
         grants.extend({"name": name, "namespace": "functions"} for name in profile.handoffs)
     options["tool_policy"]["allowed_tools"] = list(
         {tuple(sorted(grant.items())): grant for grant in grants}.values()
@@ -3545,6 +3567,11 @@ class Session(Generic[ContextT, OutputT]):
                         else {}
                     ),
                     "tool_policy": {
+                        "allowed_mcp_tools": [
+                            [server.name, raw, ref]
+                            for server in allowed_mcp
+                            for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+                        ],
                         "allowed_tools": [
                             {
                                 "name": entry.name,
@@ -3925,7 +3952,9 @@ class Session(Generic[ContextT, OutputT]):
                     active.accepted.set_result(handle)
                     session._active = active
                     thread._select_steps(
-                        bool(session._profiles) or restored_operation_refs is not None,
+                        bool(session._profiles)
+                        or bool(session._mcp_tools)
+                        or restored_operation_refs is not None,
                         _native_tool_refs(restored_operation_refs)
                         if restored_operation_refs is not None
                         else None,
@@ -8712,6 +8741,7 @@ class Session(Generic[ContextT, OutputT]):
                             bool(self._profiles)
                             or state.budget is not None
                             or state.before_step is not None
+                            or bool(self._mcp_tools)
                             or state.operation_slots is not None
                         ),
                         _native_tool_refs(state.operation_refs)
@@ -9406,21 +9436,29 @@ class Session(Generic[ContextT, OutputT]):
             return
         assert handle.turn_id is not None
         invocation = message["invocation"]
-        servers = state.step_mcp if isinstance(state, _Submission) else None
+        servers = state.step_mcp
         for server in self._mcp_tools if servers is None else servers:
             if server.name != invocation["server"] or invocation["tool"] not in server.tools:
                 continue
-            selected = _tool_names((server,))[server.tools.index(invocation["tool"])]
+            identity = state.mcp_call_names.get(message["call_id"]) or state.mcp_names.get(
+                (server.name, invocation["tool"])
+            )
+            selected = (
+                {"name": identity.name, "namespace": identity.namespace}
+                if identity
+                else _tool_names((server,))[server.tools.index(invocation["tool"])]
+            )
             if kind == "mcp_tool_call_begin":
                 if isinstance(state, _Submission):
                     state.mcp_calls[message["call_id"]] = server.name
+                state.mcp_call_names[message["call_id"]] = ToolRef(**selected)
                 self._observations.append(
                     ToolStarted(
                         session_id=self.id,
                         submission_id=handle.submission_id,
                         turn_id=handle.turn_id,
                         call_id=message["call_id"],
-                        name=selected["name"],
+                        name=cast(str, selected["name"]),
                         namespace=selected["namespace"],
                         family="mcp",
                     )
@@ -9428,6 +9466,7 @@ class Session(Generic[ContextT, OutputT]):
             else:
                 if isinstance(state, _Submission):
                     state.mcp_calls.pop(message["call_id"], None)
+                state.mcp_call_names.pop(message["call_id"], None)
                 result = message["result"].get("Ok")
                 self._observations.append(
                     ToolFinished(
@@ -9435,7 +9474,7 @@ class Session(Generic[ContextT, OutputT]):
                         submission_id=handle.submission_id,
                         turn_id=handle.turn_id,
                         call_id=message["call_id"],
-                        name=selected["name"],
+                        name=cast(str, selected["name"]),
                         namespace=selected["namespace"],
                         family="mcp",
                         status=(
@@ -10393,6 +10432,29 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 state.output = self._profiles[message["profile_id"]].output
             source_bindings = self._bindings_for_message(message)
+            mcp_names: dict[tuple[str, str], ToolRef] = {}
+            for item in message.get("mcp_names", ()):
+                key = (item["server"], item["tool"])
+                if key in mcp_names:
+                    raise CapabilityError("Ambiguous native MCP tool identity")
+                mcp_names[key] = ToolRef(item["name"], item["namespace"] or "functions")
+            state.mcp_names = mcp_names
+            declaration_names = {
+                ToolRef(**ref): (server.name, raw)
+                for server in source_bindings
+                if isinstance(server, _MCP)
+                for raw, ref in zip(server.tools, _tool_names((server,)), strict=True)
+            }
+
+            def resolve(ref: ToolRef) -> ToolRef:
+                identity = getattr(ref, "_mcp_identity", None) or declaration_names.get(ref)
+                if identity is None:
+                    return ToolRef(ref.name, ref.namespace or "functions")
+                actual = mcp_names.get(identity)
+                if actual is None:
+                    raise CapabilityError("MCP tool identity is outside the captured native step")
+                return actual
+
             source_handoffs = (
                 self._profiles[message["profile_id"]].profile.handoffs if self._profiles else None
             )
@@ -10537,7 +10599,7 @@ class Session(Generic[ContextT, OutputT]):
                         project_guidance=self._project_guidance,
                     )
                 )
-                refs = {ToolRef(ref.name, ref.namespace or "functions") for ref in refs}
+                refs = {resolve(ref) for ref in refs}
                 if not refs <= defaults:
                     raise CapabilityError(
                         "Step tools must select distinct admitted operation tools"
@@ -10547,7 +10609,7 @@ class Session(Generic[ContextT, OutputT]):
                     state, source_agent, source_bindings, source_handoffs
                 )
                 if ceiling is not None:
-                    refs.intersection_update(ceiling)
+                    refs.intersection_update(resolve(ref) for ref in ceiling)
             candidates = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
@@ -10574,21 +10636,20 @@ class Session(Generic[ContextT, OutputT]):
             if refs and search in candidates:
                 refs.add(search)
             selected = refs & candidates
-            if isinstance(state, _Submission):
-                # The native event reader drains the preceding sample before
-                # this selector. Core waits for our reply before the next sample.
-                state.step_mcp = tuple(
-                    replace(
-                        server,
-                        tools=tuple(
-                            name
-                            for name, ref in zip(server.tools, _tool_names((server,)), strict=True)
-                            if ToolRef(**ref) in selected
-                        ),
-                    )
-                    for server in source_bindings
-                    if isinstance(server, _MCP)
+            # The native event reader drains the preceding sample before
+            # this selector. Core waits for our reply before the next sample.
+            state.step_mcp = tuple(
+                replace(
+                    server,
+                    tools=tuple(
+                        name
+                        for name in server.tools
+                        if mcp_names.get((server.name, name)) in selected
+                    ),
                 )
+                for server in source_bindings
+                if isinstance(server, _MCP)
+            )
             selected_json = _native_tool_refs(tuple(selected))
         except BaseException as error:
             if _native_callback_cancelled(state):

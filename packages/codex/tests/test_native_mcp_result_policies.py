@@ -483,3 +483,78 @@ async def test_callback_raised_cancellation_cannot_transport_unaccepted_peer_dat
             assert peer.label not in str([item async for item in session.items()])
             assert peer.label not in json.dumps(responses.requests)
             assert len(peer.calls) == 1
+
+
+async def test_missing_transport_result_reaches_native_result_policy(
+    responses: ResponsesFixture,
+) -> None:
+    from aiohttp import web
+
+    class FailedPeer(Peer):
+        async def handle(self, request: web.Request) -> web.Response:
+            body = await request.json()
+            if body.get("method") == "tools/call":
+                self.calls.append(body["params"])
+                return web.Response(status=503, text="synthetic-private-transport-failure")
+            return await super().handle(request)
+
+    peer = FailedPeer(names=("search",))
+    calls = []
+
+    async def replace_failure(ctx, value):
+        calls.append((ctx.call_id, value))
+        return result("safe-failure-outcome")
+
+    responses.respond(mcp_call("search", "mcp__failure", "failed-call"))
+    responses.respond(assistant_output("complete"))
+    async with timeout(30), peer.serve() as url:
+        agent = Agent(
+            instructions="Use tools.",
+            tools=[
+                HttpMCP(name="failure", url=url, tools=["search"], transform_result=replace_failure)
+            ],
+            model="gpt-5.5",
+            provider=provider(responses),
+        )
+        async with agent.session() as session:
+            handle = await session.submit("read")
+            assert (await handle.get_result()).final_output == "complete"
+            assert len(calls) == 1
+            assert calls[0][0] == "failed-call"
+            assert len(peer.calls) == 1
+            assert "safe-failure-outcome" in json.dumps(responses.requests)
+            assert "synthetic-private-transport-failure" not in json.dumps(responses.requests)
+
+
+@pytest.mark.parametrize("ending", ["cancel", "close"])
+async def test_cancelled_peer_request_does_not_synthesize_result_policy(
+    responses: ResponsesFixture, ending: str
+) -> None:
+    peer = Peer(release_call=asyncio.Event())
+    policy_calls: list[str] = []
+
+    def transform(ctx: MCPResultContext[None], value: dict[str, Any]) -> dict[str, Any]:
+        policy_calls.append(ctx.call_id)
+        return value
+
+    responses.respond(mcp_call("search", "mcp__docs", "cancelled-peer"))
+    responses.respond(assistant_output("must not continue"))
+    async with timeout(30), peer.serve() as url:
+        descriptor = HttpMCP(name="docs", url=url, tools=["search"], transform_result=transform)
+        async with Agent(
+            instructions="Read.", tools=[descriptor], provider=provider(responses)
+        ).session() as session:
+            handle = await session.submit("read")
+            await peer.call_entered.wait()
+            try:
+                if ending == "cancel":
+                    await handle.cancel()
+                else:
+                    await session.aclose()
+                with pytest.raises(TurnStoppedError):
+                    await handle.get_result()
+                assert policy_calls == []
+                assert len(responses.requests) == 1
+                assert len(peer.calls) == 1
+            finally:
+                peer.release_call.set()

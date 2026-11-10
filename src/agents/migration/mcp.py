@@ -13,7 +13,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import RootModel, TypeAdapter
 
 from _agents_codex._function_tools import FunctionTool, ToolContext
-from _agents_codex.mcp import _launch_text
+from _agents_codex.mcp import _launch_text, _project_tool_names
 from _agents_codex.native_interception import Allow, Deny
 from _agents_codex.tools import _CapturedFunction
 
@@ -26,7 +26,7 @@ from ..classic.mcp._compat import (
 )
 from ..classic.mcp.server import _UNSET, MCPServer
 from ..classic.run_context import RunContextWrapper
-from ..tools import ToolOutput, ToolOutputImage, ToolOutputText
+from ..tools import ToolOutput, ToolOutputImage, ToolOutputText, ToolRef
 
 __all__ = ("MCPNamespace", "select_mcp_tools")
 
@@ -124,10 +124,9 @@ async def select_mcp_tools(
     Discovery with a callable Classic filter requires its actual (run_context,
     agent) pair, with the same application context.
 
-    Selection preserves each selected peer name exactly. Names must use ASCII
-    letters, digits, underscores, or hyphens. The namespace and tool name,
-    including two separator bytes, must fit in 128 bytes. Selection rejects
-    unsupported names among the tools chosen after filtering.
+    Native projected names for model-facing tools; each returned tool's ``ref``
+    for native selection. Original peer names for ``tool_names`` and borrowed
+    dispatch. Namespace characters: ASCII letters, digits, underscores, or hyphens.
 
     Selection and native Session cleanup leave connection ownership with the
     caller. Keep the client's authentication scope stable while its bindings are
@@ -217,9 +216,16 @@ async def select_mcp_tools(
     if any(name not in by_name for name in names):
         raise ValueError("Requested MCP tools were not discovered or were filtered out")
 
+    projected = _project_tool_names([(namespace.name, tuple(by_name))], prefix=False)
     return tuple(
         _capture_tool(
-            namespace, context, by_name[name], call_tool, use_structured_content, approval
+            namespace,
+            context,
+            by_name[name],
+            call_tool,
+            use_structured_content,
+            approval,
+            ToolRef(**projected[namespace.name, name]),
         )
         for name in names
     )
@@ -232,13 +238,9 @@ def _capture_tool(
     call_tool: Callable[[str, dict[str, Any]], Awaitable[CallToolResult]],
     use_structured_content: bool,
     approval: _Approval[ContextT] | None,
+    model_ref: ToolRef,
 ) -> _SelectedMCPTool[ContextT]:
     raw_name = tool.name
-    if _MCP_NAME.fullmatch(raw_name) is None or len(namespace.name) + 2 + len(raw_name) > 128:
-        raise ValueError(
-            "Selected MCP tool identity must use ASCII letters, digits, underscores or hyphens "
-            "and fit within 128 bytes including the namespace and separator"
-        )
     schema = tool_input_schema(tool)
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise ValueError("Selected MCP tools require an object input schema")
@@ -283,11 +285,11 @@ def _capture_tool(
         )
 
     return _SelectedMCPTool(
-        name=raw_name,
+        name=model_ref.name,
         description=description,
         input_type=_Arguments,
         output_type=ToolOutput,
-        namespace=namespace.name,
+        namespace=model_ref.namespace,
         namespace_description=namespace.description,
         _schema_json=schema_json,
         _selected_context=context,

@@ -16,7 +16,9 @@ from aiohttp.test_utils import TestServer
 
 from agents import (
     Agent,
+    Allow,
     HttpMCP,
+    MCPCallContext,
     NativeError,
     SessionBusyError,
     ToolContext,
@@ -825,3 +827,86 @@ async def test_fresh_and_restored_native_default_model_with_current_mcp_selectio
             (tmp_path / "default-model-requests.json").write_text(
                 json.dumps(responses.requests, indent=2)
             )
+
+
+async def test_native_collision_names_survive_raw_step_narrowing(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(names=("a.b", "a_b"))
+    async with timeout(30), peer.serve() as url:
+        remote = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        dotted, underscored = remote.tool("a.b"), remote.tool("a_b")
+        responses.respond(mcp_call(dotted.name, dotted.namespace, "first"))
+        responses.respond(mcp_call(underscored.name, underscored.namespace, "second"))
+        responses.respond(mcp_call(dotted.name, dotted.namespace, "third"))
+        responses.respond(assistant_output("complete"))
+        selections = ([remote], [underscored], [dotted], [dotted])
+        async with Agent(
+            instructions="Use selected tools.", tools=[remote], provider=provider(responses)
+        ).session() as session:
+            handle = await session.submit(
+                "read", before_step=lambda turn, step_index: selections[step_index]
+            )
+            assert (await handle.get_result()).final_output == "complete"
+        assert [call["name"] for call in peer.calls] == ["a.b", "a_b", "a.b"]
+        assert [(dotted.namespace, dotted.name)] == list(declarations(responses.requests[2]))
+
+
+@pytest.mark.asyncio
+async def test_partial_mcp_declaration_resolves_against_peer_collision_catalog(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import CapabilityError
+
+    peer = Peer(names=("a.b", "a_b"))
+    policies: list[str] = []
+
+    def before(request: MCPCallContext[Any], call: Any) -> Allow:
+        assert (call.namespace, call.name) == (actual.namespace, actual.name)
+        policies.append(request.tool_name)
+        return Allow()
+
+    async with timeout(30), peer.serve() as url:
+        complete = HttpMCP(name="docs", url=url, tools=["a.b", "a_b"])
+        actual = complete.tool("a.b")
+        partial = HttpMCP(
+            name="docs",
+            url=url,
+            tools=["a.b"],
+            before=before,
+        )
+        assert partial.tool("a.b").name != actual.name
+        responses.respond(mcp_call(actual.name, actual.namespace, "partial"))
+        responses.respond(assistant_output("complete"))
+        async with Agent(
+            instructions="Read the selected tool.", tools=[partial], provider=provider(responses)
+        ).session() as session:
+            handle = await session.submit(
+                "read",
+                tools=[partial.tool("a.b")],
+                before_step=lambda turn, step_index: [partial.tool("a.b")],
+            )
+            assert (await handle.get_result()).final_output == "complete"
+            denied = await session.submit(
+                "deny", before_step=lambda turn, step_index: [complete.tool("a_b")]
+            )
+            with pytest.raises(CapabilityError):
+                await denied.get_result()
+        assert policies == ["a.b"]
+        assert [call["name"] for call in peer.calls] == ["a.b"]
+        assert len(responses.requests) == 2
+        assert list(declarations(responses.requests[0])) == [(actual.namespace, actual.name)]
+
+
+def test_raw_mcp_reference_selection_uses_captured_identity() -> None:
+    from _agents_codex.session import _split_tools
+    from agents import CapabilityError
+
+    partial = HttpMCP(name="docs", url="http://localhost/mcp", tools=["a.b"])
+    complete = HttpMCP(name="docs", url="http://localhost/mcp", tools=["a.b", "a_b"])
+    assert partial.tool("a.b") != complete.tool("a.b")
+    _, selected, _ = _split_tools((complete.tool("a.b"),), available=(partial,), ceiling=(partial,))
+    assert len(selected) == 1
+    assert selected[0].tools == ("a.b",)
+    with pytest.raises(CapabilityError):
+        _split_tools((complete.tool("a_b"),), available=(partial,), ceiling=(partial,))

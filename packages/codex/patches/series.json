@@ -463,7 +463,11 @@
     {
       "path": "sdk-realtime-raw-settings-and-item-deletion.patch",
       "sha256": "d20046f25c4b80a9e9136cc075d3759cda422c985c0857264ed9f01da88907ce"
+    },
+    {
+      "path": "0212-native-mcp-routing.patch",
+      "sha256": "cb5f96565d84dcb0626c122c4e5d399c2fe3d56753b87d3f6c06c914fba19be9"
     }
   ],
-  "result_tree": "a84e7d22396240543240d724a033b00b5afc92b1"
+  "result_tree": "5a7f1f64acfd306a1bbc9e9c6678c45de5a571a7"
 }
