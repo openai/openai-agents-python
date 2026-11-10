@@ -494,12 +494,12 @@
     },
     {
       "path": "0156-sdk-commit-completed-compaction-summary.patch",
-      "sha256": "9c0a8b10fa7d9d40de9ce76f17e8c6032eab0435322b8d2978e86acb292a8eb2"
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
     },
     {
       "path": "0157-sdk-registered-http-429-diagnostics.patch",
       "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
     }
   ],
-  "result_tree": "10eceeab7691ab32e5839252c70826e4f3060201"
+  "result_tree": "154036199220cdeec78e90df83765fbd513310dc"
 }

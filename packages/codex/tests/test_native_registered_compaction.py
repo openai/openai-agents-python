@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -11,8 +12,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import (
+    CustomStorage,
     LocalStorage,
     NativeError,
+    SteeringReceipt,
     TurnNeedsAttention,
     _native,
     function_tool,
@@ -20,6 +23,7 @@ from agents import (
 from agents.compaction import CompactionContext
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
+from tests.native_storage_fixtures import MemorySessionStore
 from tests.test_native_codex_login import (
     uncompressed_model_requests as uncompressed_model_requests,
 )
@@ -32,6 +36,20 @@ from tests.test_native_sign_in_with_chatgpt import (
 
 COMPACTION_MARKER = "You are performing a CONTEXT CHECKPOINT COMPACTION."
 EFFECT = "synthetic-tool-effect-committed"
+
+
+def set_compaction_thresholds(monkeypatch, *, post_turn_percent=0):
+    create_engine = _native.create_engine
+
+    def configure_compaction(config_json: str, *args: Any, **kwargs: Any) -> Any:
+        config = json.loads(config_json)
+        config.update(
+            model_auto_compact_token_limit=10_000,
+            model_post_turn_compact_threshold_percent=post_turn_percent,
+        )
+        return create_engine(json.dumps(config), *args, **kwargs)
+
+    monkeypatch.setattr(_native, "create_engine", configure_compaction)
 
 
 @pytest.mark.parametrize(
@@ -58,18 +76,7 @@ async def test_registered_auto_compaction_is_terminal_before_eof(
     monkeypatch, phase, code, kind, reason, category
 ):
     if phase == "pre-turn":
-        create_engine = _native.create_engine
-
-        def pre_turn_compaction(config_json: str, *args: Any, **kwargs: Any) -> Any:
-            config = json.loads(config_json)
-            # Seed the next turn above its threshold without post-turn compaction.
-            config.update(
-                model_auto_compact_token_limit=10_000,
-                model_post_turn_compact_threshold_percent=0,
-            )
-            return create_engine(json.dumps(config), *args, **kwargs)
-
-        monkeypatch.setattr(_native, "create_engine", pre_turn_compaction)
+        set_compaction_thresholds(monkeypatch)
 
     token = access_token()
     effects: list[str] = []
@@ -183,6 +190,177 @@ async def test_registered_auto_compaction_is_terminal_before_eof(
         ("POST", "/v1/responses", True, True)
     ]
     assert effects == [EFFECT]
+
+
+@pytest.mark.parametrize("failure", ["append", "flush"])
+async def test_registered_compaction_abort_reports_accepted_steer_write_failure(
+    monkeypatch, failure
+):
+    set_compaction_thresholds(monkeypatch)
+    token = access_token()
+    summary = "synthetic-retirement-summary"
+    original = "synthetic-original-before-retirement"
+    steer = "synthetic-steer-retirement-write"
+    checkpoint_pending = threading.Event()
+    release_checkpoint = threading.Event()
+    interrupt_entered = asyncio.Event()
+    terminal_events = []
+
+    class FailSteerWrite(MemorySessionStore):
+        checkpoint_committed = False
+        steer_writes = 0
+        failed = False
+
+        def commit(self, session_id, writer, revision, write_id, payload):
+            items = json.loads(payload)["items"]
+            if self.steer_writes == 0 and steer in json.dumps(items):
+                self.steer_writes += 1
+                assert checkpoint_pending.is_set() and release_checkpoint.is_set()
+                if failure == "append":
+                    self.failed = True
+                    raise OSError("synthetic steering append rejected")
+            super().commit(session_id, writer, revision, write_id, payload)
+            if not checkpoint_pending.is_set() and any(
+                row["type"] == "compacted" and summary in json.dumps(row) for row in items
+            ):
+                self.checkpoint_committed = True
+
+        def flush(self, session_id, writer):
+            if self.checkpoint_committed and not checkpoint_pending.is_set():
+                checkpoint_pending.set()
+                if not release_checkpoint.wait(10):
+                    raise TimeoutError("synthetic checkpoint flush was not released")
+            if failure == "flush" and self.steer_writes and not self.failed:
+                self.failed = True
+                raise OSError("synthetic steering flush acknowledgment lost")
+            super().flush(session_id, writer)
+
+    peer = ResponsesFixture()
+    peer.respond(assistant_output("Seeded history."))
+    peer.respond(assistant_output(summary))
+
+    async def high_usage(event):
+        if event["type"] == "response.completed" and len(peer.requests) == 1:
+            event["response"]["usage"].update(
+                input_tokens=260_000, output_tokens=1_000, total_tokens=261_000
+            )
+
+    peer.before_event = high_usage
+
+    async def handle(request):
+        assert request.method == "POST" and request.path == "/v1/responses"
+        assert request.headers.get("Authorization") == f"Bearer {token}"
+        assert request.headers.get("x-openai-internal-codex-responses-lite") == "true"
+        return await peer.handle(request)
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handle)
+    async with timeout(30), TestServer(app, host="127.0.0.1") as server:
+        set_endpoint(monkeypatch, str(server.make_url("/v1")))
+        agent = plan_agent(token)
+        store = FailSteerWrite()
+        storage = CustomStorage(store)
+        async with agent.session(storage=storage) as session:
+            thread_id = session.id
+            assert (await (await session.submit("Seed history.")).get_result()).final_output == (
+                "Seeded history."
+            )
+            native = session._native
+
+            class ObserveRetirement:
+                def __getattr__(self, name):
+                    return getattr(native, name)
+
+                async def _interrupt_session(self, *args, **kwargs):
+                    interrupt_entered.set()
+                    return await native._interrupt_session(*args, **kwargs)
+
+                async def _next_session_event(self):
+                    raw = await native._next_session_event()
+                    event = json.loads(raw)
+                    if event is not None and event["msg"]["type"] in {
+                        "error",
+                        "turn_aborted",
+                        "task_complete",
+                        "turn_complete",
+                    }:
+                        terminal_events.append(event)
+                    return raw
+
+            session._native = ObserveRetirement()
+            turn = await session.submit(original)
+            try:
+                assert await asyncio.to_thread(checkpoint_pending.wait, 6)
+                assert turn.turn_id is not None
+                accepted = await turn.steer_exact(steer, expected_turn_id=turn.turn_id)
+                assert isinstance(accepted, SteeringReceipt)
+                assert accepted.turn_id == turn.turn_id
+                cancelling = asyncio.create_task(turn.cancel())
+                await interrupt_entered.wait()
+                assert not cancelling.done()
+            finally:
+                release_checkpoint.set()
+            await cancelling
+            assert store.failed
+            reports = [event["msg"] for event in terminal_events if event["id"] == turn.turn_id]
+            [aborted] = [event for event in reports if event["type"] != "error"]
+            assert aborted["type"] == "turn_aborted" and aborted["reason"] == "interrupted"
+            error = aborted.get("error")
+            assert error is not None, "accepted steer write failure settled as a clean abort"
+            assert "Canonical thread persistence failed" in error["message"]
+            [reported] = [event for event in reports if event["type"] == "error"]
+            assert reported["message"] == error["message"]
+
+        async with agent.session(storage=storage, resume=thread_id) as reopened:
+            restored = json.dumps((await reopened.history_snapshot()).items)
+            assert restored.count(summary) == restored.count(original) == 1
+            assert restored.count(steer) == (1 if failure == "flush" else 0)
+            if failure == "flush":
+                assert restored.index(summary) < restored.index(original) < restored.index(steer)
+    assert len(peer.requests) == 2
+
+
+async def test_registered_blank_post_turn_summary_preserves_history(monkeypatch, tmp_path):
+    set_compaction_thresholds(monkeypatch, post_turn_percent=1)
+    token = access_token()
+    answer = "Synthetic answer before post-turn compaction."
+    peer = ResponsesFixture()
+    peer.respond(assistant_output(answer))
+    peer.respond(assistant_output(" \n\t "))
+
+    async def high_usage(event):
+        if event["type"] == "response.completed" and len(peer.requests) == 1:
+            event["response"]["usage"].update(
+                input_tokens=260_000, output_tokens=1_000, total_tokens=261_000
+            )
+
+    peer.before_event = high_usage
+
+    async def handle(request):
+        assert request.method == "POST" and request.path == "/v1/responses"
+        assert request.headers.get("Authorization") == f"Bearer {token}"
+        assert request.headers.get("x-openai-internal-codex-responses-lite") == "true"
+        return await peer.handle(request)
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handle)
+    async with timeout(25), TestServer(app, host="127.0.0.1") as server:
+        set_endpoint(monkeypatch, str(server.make_url("/v1")))
+        agent = plan_agent(token)
+        storage = LocalStorage(tmp_path / "blank-post-turn")
+        async with agent.session(storage=storage) as session:
+            thread_id = session.id
+            result = await (await session.submit("Give a short answer.")).get_result()
+            assert result.final_output == answer
+            assert answer in json.dumps((await session.model_context()).items)
+
+        async with agent.session(storage=storage, resume=thread_id) as reopened:
+            assert answer in json.dumps((await reopened.model_context()).items)
+
+    assert [COMPACTION_MARKER in json.dumps(body["input"]) for body in peer.requests] == [
+        False,
+        True,
+    ]
 
 
 async def test_registered_auto_compaction_summary_survives_reopen(monkeypatch, tmp_path):

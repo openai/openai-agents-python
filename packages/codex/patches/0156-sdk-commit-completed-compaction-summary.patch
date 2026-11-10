@@ -717,7 +717,7 @@ index 68851c0e7bd76675f1c0f27a90ced5819f77fb34..28f1daf8cf89a3d3a2d684af6336ad29
                  compaction_model_hash: None,
                  reviewer_compaction_hash: None,
 diff --git a/codex-rs/core/src/session/terminal_tool_tests.rs b/codex-rs/core/src/session/terminal_tool_tests.rs
-index 59c33d5f70e2e263579dc7e735941405937b6679..e6e6bf01d6f4a246752baa63c6c9dc52847cd923 100644
+index 59c33d5f70e2e263579dc7e735941405937b6679..896e655212f72dd721520715ebec88b0d7251569 100644
 --- a/codex-rs/core/src/session/terminal_tool_tests.rs
 +++ b/codex-rs/core/src/session/terminal_tool_tests.rs
 @@ -14,6 +14,7 @@ struct TerminalStore {
@@ -754,7 +754,7 @@ index 59c33d5f70e2e263579dc7e735941405937b6679..e6e6bf01d6f4a246752baa63c6c9dc52
          hold_append: std::sync::atomic::AtomicBool::new(false),
          flushes,
      });
-@@ -673,3 +682,572 @@ async fn tool_terminal_conditional_interrupt_cannot_take_held_append_or_flush()
+@@ -673,3 +682,644 @@ async fn tool_terminal_conditional_interrupt_cannot_take_held_append_or_flush()
      session.abort_all_tasks(TurnAbortReason::Interrupted).await;
      assert!(session.active_turn.lock().await.is_none());
  }
@@ -1234,6 +1234,78 @@ index 59c33d5f70e2e263579dc7e735941405937b6679..e6e6bf01d6f4a246752baa63c6c9dc52
 +}
 +
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compaction_checkpoint_steer_flush_failure_preserves_published_error() {
++    let (session, turn, events, mut fences, store) = compaction_checkpoint_session().await;
++    let recording = turn
++        .extension_data
++        .get_or_init(crate::tasks::CompactionPromptRecording::default);
++    let held_prompt = recording.0.lock().await;
++    let checkpoint = hold_owned_compaction_flush(&session, &turn, &mut fences).await;
++    assert_eq!(
++        submit_steer_only(
++            &session,
++            vec![UserInput::Text {
++                text: "steer accepted before abort".into(),
++                text_elements: Vec::new(),
++            }],
++            &turn.sub_id,
++        )
++        .await,
++        TurnInputSubmission::Steered {
++            turn_id: turn.sub_id.clone(),
++        }
++    );
++    let primary = CodexErr::InvalidRequest("earlier reported error".into()).to_error_event(None);
++    session
++        .send_event(&turn, EventMsg::Error(primary.clone()))
++        .await;
++    let retired = retire_checkpoint_owner(&session, &turn).await;
++    checkpoint.release.send(Ok(())).unwrap();
++    timeout(Duration::from_secs(2), async {
++        while turn
++            .extension_data
++            .get::<crate::tasks::CommittedCompactionCheckpoint>()
++            .is_none()
++        {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    store
++        .terminal_seen
++        .store(true, std::sync::atomic::Ordering::SeqCst);
++    drop(held_prompt);
++    let steering_flush = timeout(Duration::from_secs(2), fences.recv())
++        .await
++        .unwrap()
++        .unwrap();
++    steering_flush
++        .release
++        .send(Err("synthetic steering flush failure".into()))
++        .unwrap();
++    assert!(
++        timeout(Duration::from_secs(2), retired)
++            .await
++            .unwrap()
++            .unwrap()
++    );
++
++    let mut errors = Vec::new();
++    let mut terminal = None;
++    while let Ok(event) = events.try_recv() {
++        match event.msg {
++            EventMsg::Error(error) => errors.push(error),
++            EventMsg::TurnAborted(event) => assert!(terminal.replace(event).is_none()),
++            EventMsg::TurnComplete(_) => panic!("interrupted checkpoint reported success"),
++            _ => {}
++        }
++    }
++    assert_eq!(errors, vec![primary.clone()]);
++    assert_eq!(terminal.unwrap().error, Some(primary));
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +async fn compaction_checkpoint_failed_flush_waits_for_original_prompt_before_retirement() {
 +    let (session, turn, events, mut fences, store) = compaction_checkpoint_session().await;
 +    let recording = turn
@@ -1483,7 +1555,7 @@ index fa8b9fc37260ab45b76e14552683653d3354ba12..0c1e19ff6196ef8cbb1ef70d252d1ce6
          };
          if let Err(err) = result {
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 75b625f51bb4cc32af4e456f7d7735e3cf531609..f83faf7b90b3ffc262df64973ff00b6ca15faf1b 100644
+index 75b625f51bb4cc32af4e456f7d7735e3cf531609..7911f4eef7fe59c27d42e6d3219f1f75e439e03a 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -81,6 +81,32 @@ pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
@@ -1606,7 +1678,7 @@ index 75b625f51bb4cc32af4e456f7d7735e3cf531609..f83faf7b90b3ffc262df64973ff00b6c
          let task_result = match (task_result, owned_fatal) {
              (result, Some(_)) if already_reported => {
                  warn!("Additional owned code-mode failure after the primary turn error");
-@@ -1159,17 +1209,57 @@ impl Session {
+@@ -1159,17 +1209,86 @@ impl Session {
                  .services
                  .thread_extension_data
                  .get_or_init(TaskFinalization::default);
@@ -1642,9 +1714,37 @@ index 75b625f51bb4cc32af4e456f7d7735e3cf531609..f83faf7b90b3ffc262df64973ff00b6c
                  .await;
 -            let primary = error.or(task.turn_context.terminal_error.lock().await.clone());
 -            match (primary, owned_fatal) {
++            let retirement_fatal = if task
++                .turn_context
++                .extension_data
++                .get::<CommittedCompactionCheckpoint>()
++                .is_some()
++            {
++                // The original prompt has settled. The detached task owns these
++                // inputs and must not replay them after a partial write.
++                let pending = self
++                    .input_queue
++                    .take_pending_input_for_turn_state(turn_state)
++                    .await;
++                let recorded = run_hooks_and_record_inputs(
++                    self,
++                    &task.turn_context,
++                    &task.turn_context.capture_current_model_info(),
++                    &pending,
++                    PersistContext::SteeredUserInput,
++                )
++                .await;
++                let flushed = self.flush_rollout().await.map_err(|error| {
++                    warn!("failed to flush accepted input after compaction retirement: {error}");
++                    persistence_completion_fatal()
++                });
++                recorded.and(flushed).err()
++            } else {
++                None
++            };
 +            let reported = task.turn_context.terminal_error.lock().await.clone();
 +            let checkpoint = task.turn_context.extension_data.get::<PendingCompactionFatal>();
-+            let primary = if checkpoint.is_some() {
++            let primary = if checkpoint.is_some() || retirement_fatal.is_some() {
 +                // Keep a published error, then a supplied abort error, ahead of
 +                // the writer failure that has not yet been reported.
 +                if reported.is_none()
@@ -1660,7 +1760,8 @@ index 75b625f51bb4cc32af4e456f7d7735e3cf531609..f83faf7b90b3ffc262df64973ff00b6c
 +            let fatal = checkpoint
 +                .as_deref()
 +                .and_then(PendingCompactionFatal::take)
-+                .or_else(|| owned_fatal.map(CodexErr::Fatal));
++                .or_else(|| owned_fatal.map(CodexErr::Fatal))
++                .or(retirement_fatal);
 +            match (primary, fatal) {
                  (Some(primary), _) => Some(primary),
 -                (None, Some(message)) => {
@@ -1669,35 +1770,3 @@ index 75b625f51bb4cc32af4e456f7d7735e3cf531609..f83faf7b90b3ffc262df64973ff00b6c
                      self.emit_turn_error_lifecycle(
                          task.turn_context.as_ref(),
                          fatal.to_codex_protocol_error(),
-@@ -1186,6 +1276,31 @@ impl Session {
-                 (None, None) => None,
-             }
-         };
-+        // The checkpoint gate above has settled publication before this suffix.
-+        // The task has been removed from active_turn, so accepted input belongs
-+        // only to this captured state and can be taken once without its lock.
-+        if task
-+            .turn_context
-+            .extension_data
-+            .get::<CommittedCompactionCheckpoint>()
-+            .is_some()
-+        {
-+            let pending = self
-+                .input_queue
-+                .take_pending_input_for_turn_state(turn_state)
-+                .await;
-+            let _ = run_hooks_and_record_inputs(
-+                self,
-+                &task.turn_context,
-+                &task.turn_context.capture_current_model_info(),
-+                &pending,
-+                PersistContext::SteeredUserInput,
-+            )
-+            .await;
-+            if let Err(error) = self.flush_rollout().await {
-+                warn!("failed to flush accepted input after compaction retirement: {error}");
-+            }
-+        }
-         let sub_id = task.turn_context.sub_id.clone();
-         let request_owner = task.turn_context.extension_data
-             .get::<Arc<crate::session::model_invocation_deadline::ModelInvocationDeadline>>();
