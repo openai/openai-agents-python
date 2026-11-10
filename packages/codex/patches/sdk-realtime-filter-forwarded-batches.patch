@@ -1,17 +1,8 @@
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index c2c64d8..7f6aaa0 100644
+index d2d6cd57..629c038d 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -5916,7 +5916,7 @@ async fn handle_realtime_server_event_with_configuration(
- ) -> anyhow::Result<()> {
-     // An echo of a historical call is a history receipt. Only a provider-owned
-     // call may enter the live function dispatcher.
--    let event = match (&handoff_state.sdk, &event) {
-+    let mut event = match (&handoff_state.sdk, &event) {
-         (Some(sdk), RealtimeEvent::FunctionCallRequested(call))
-             if sdk
-                 .history
-@@ -6025,6 +6025,17 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6111,6 +6111,17 @@ async fn handle_realtime_server_event_with_configuration(
              sdk.history.lock().unwrap().observe_deleted(item_id);
          }
      }
@@ -29,7 +20,7 @@ index c2c64d8..7f6aaa0 100644
      let should_stop = match &event {
          RealtimeEvent::AudioOut(frame) => {
              match session_kind {
-@@ -6135,15 +6146,6 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6227,15 +6238,6 @@ async fn handle_realtime_server_event_with_configuration(
              false
          }
          RealtimeEvent::ResponseDone(response) => {

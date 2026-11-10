@@ -1,16 +1,16 @@
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-index 9a6d451..951dfd5 100644
+index ec0a07ce..c45d7b5e 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
-@@ -1593,6 +1593,7 @@ impl RealtimeWebsocketEvents {
-             | RealtimeEvent::HostedMcpCallCompleted(_)
+@@ -1603,6 +1603,7 @@ impl RealtimeWebsocketEvents {
              | RealtimeEvent::FunctionCallRequested(_)
+             | RealtimeEvent::DetachedFunctionCall(_)
              | RealtimeEvent::FunctionCallFinished { .. }
 +            | RealtimeEvent::FunctionCallRejected { .. }
              | RealtimeEvent::FunctionBatchFinished { .. }
              | RealtimeEvent::ConversationItemAdded { .. }
              | RealtimeEvent::ConversationItemRetrieved(_)
-@@ -5036,6 +5037,7 @@ mod tests {
+@@ -5046,6 +5047,7 @@ mod tests {
              parse_realtime_event(&payload, RealtimeEventParser::RealtimeV2),
              Some(RealtimeEvent::FunctionCallRequested(
                  codex_protocol::protocol::RealtimeFunctionCallRequested {
@@ -19,7 +19,7 @@ index 9a6d451..951dfd5 100644
                      call_id: "call-1".into(),
                      item_id: "item-1".into(),
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
-index c4f61b9..7c9fb1c 100644
+index c4f61b92..7c9fb1c1 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
 @@ -199,6 +199,7 @@ fn parse_conversation_item_done_event(parsed: &Value) -> Option<RealtimeEvent> {
@@ -31,7 +31,7 @@ index c4f61b9..7c9fb1c 100644
                      .get("namespace")
                      .and_then(Value::as_str)
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 191732b..1ea05c5 100644
+index 70011ad7..d6b92e1b 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -777,6 +777,26 @@ impl CodexThread {
@@ -105,10 +105,10 @@ index 191732b..1ea05c5 100644
                      reply,
                  },
 diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index 6b77dad..c2c64d8 100644
+index c2a970b2..d2d6cd57 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -1420,8 +1420,14 @@ impl RealtimeConversationManager {
+@@ -1435,8 +1435,14 @@ impl RealtimeConversationManager {
          generation: &str,
          response_id: &str,
          call_ids: &[String],
@@ -123,7 +123,7 @@ index 6b77dad..c2c64d8 100644
          let guard = self.state.lock().await;
          let sdk = guard
              .conversation
-@@ -1462,14 +1468,17 @@ impl RealtimeConversationManager {
+@@ -1477,14 +1483,17 @@ impl RealtimeConversationManager {
              }
              let (definition, native_name) =
                  tool_task::captured_definition(&batch.configuration, &call.request.name)?;
@@ -149,7 +149,7 @@ index 6b77dad..c2c64d8 100644
          }
          for id in call_ids {
              let call = calls.get_mut(id).expect("validated call");
-@@ -1818,6 +1827,7 @@ impl RealtimeConversationManager {
+@@ -1833,6 +1842,7 @@ impl RealtimeConversationManager {
                          if profile.request.response_id.is_none()
                              && profile.request.target.is_some()
                              && profile.request.function_tools.is_none()
@@ -157,7 +157,7 @@ index 6b77dad..c2c64d8 100644
                              && update == RealtimeSessionUpdate::default()
                              && configuration
                                  .accepted()
-@@ -1878,12 +1888,18 @@ impl RealtimeConversationManager {
+@@ -1893,12 +1903,18 @@ impl RealtimeConversationManager {
                                      .into(),
                              ));
                          }
@@ -177,7 +177,7 @@ index 6b77dad..c2c64d8 100644
                          let reservation = configuration
                              .reserve_update_with_source(&update, Arc::clone(&profile.source))
                              .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
-@@ -3308,6 +3324,7 @@ pub(crate) async fn handle_tools_sdk(
+@@ -3340,6 +3356,7 @@ pub(crate) async fn handle_tools_sdk(
          generation,
          response_id,
          call_ids,
@@ -185,7 +185,7 @@ index 6b77dad..c2c64d8 100644
          submission_id,
          settings,
      )
-@@ -3320,6 +3337,7 @@ async fn handle_tools_sdk_with_root(
+@@ -3352,6 +3369,7 @@ async fn handle_tools_sdk_with_root(
      generation: String,
      response_id: String,
      call_ids: Vec<String>,
@@ -193,7 +193,7 @@ index 6b77dad..c2c64d8 100644
      submission_id: String,
      settings: crate::WithTurnExtensionData<codex_protocol::protocol::ThreadSettingsOverrides>,
  ) -> CodexResult<codex_protocol::turn_input::TurnInputSubmission> {
-@@ -3329,6 +3347,7 @@ async fn handle_tools_sdk_with_root(
+@@ -3361,6 +3379,7 @@ async fn handle_tools_sdk_with_root(
              &generation,
              &response_id,
              &call_ids,
@@ -201,7 +201,7 @@ index 6b77dad..c2c64d8 100644
              expected_root_turn_id.as_deref().unwrap_or(&submission_id),
          )
          .await?;
-@@ -6116,6 +6135,15 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6208,6 +6227,15 @@ async fn handle_realtime_server_event_with_configuration(
              false
          }
          RealtimeEvent::ResponseDone(response) => {
@@ -217,17 +217,7 @@ index 6b77dad..c2c64d8 100644
              if handoff_state.sdk.is_some()
                  && (response.response_id.is_none()
                      || response.response_id != response_create_queue.sdk_response_id)
-@@ -6243,9 +6271,6 @@ async fn handle_realtime_server_event_with_configuration(
-             if request.namespace.is_some() {
-                 anyhow::bail!("Namespaced Realtime functions are not supported");
-             }
--            if let Some(configuration) = &configuration {
--                tool_task::captured_definition(configuration, &request.name)?;
--            }
-             if serde_json::to_vec(&request)?.len() > SDK_FUNCTION_CALL_MAX_BYTES {
-                 anyhow::bail!("SDK Realtime function request exceeds capacity");
-             }
-@@ -6257,6 +6282,71 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6431,6 +6459,71 @@ async fn handle_realtime_server_event_with_configuration(
                  &request.arguments,
              ))?)
              .into();
@@ -299,7 +289,7 @@ index 6b77dad..c2c64d8 100644
              sdk.reclaim_terminal_calls(&request.call_id).await;
              let mut calls = sdk.function_calls.lock().await;
              if let Some(previous) = calls.get_mut(&request.call_id) {
-@@ -6422,6 +6512,7 @@ async fn handle_realtime_server_event_with_configuration(
+@@ -6596,6 +6689,7 @@ async fn handle_realtime_server_event_with_configuration(
          | RealtimeEvent::OutputTranscriptDelta(_)
          | RealtimeEvent::OutputTranscriptDone(_)
          | RealtimeEvent::FunctionCallFinished { .. }
@@ -308,7 +298,7 @@ index 6b77dad..c2c64d8 100644
          | RealtimeEvent::ConversationItemAdded { .. }
          | RealtimeEvent::ConversationItemRetrieved(_)
 diff --git a/codex-rs/core/src/realtime_conversation/preparation.rs b/codex-rs/core/src/realtime_conversation/preparation.rs
-index 59760c9..5af14d2 100644
+index 59760c9c..5af14d29 100644
 --- a/codex-rs/core/src/realtime_conversation/preparation.rs
 +++ b/codex-rs/core/src/realtime_conversation/preparation.rs
 @@ -20,6 +20,7 @@ pub(super) struct SdkPreparedInput {
@@ -426,11 +416,47 @@ index 59760c9..5af14d2 100644
          submission_id,
          settings,
          reply,
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+index f913a279..e78ef799 100644
+--- a/codex-rs/core/src/realtime_conversation/provider_history.rs
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -1101,6 +1101,7 @@ impl State {
+             return Err(mismatch());
+         }
+         let request = RealtimeFunctionCallRequested {
++            source_profile: None,
+             namespace: None,
+             call_id: call_id.clone(),
+             item_id: id.to_owned(),
+@@ -2203,6 +2204,7 @@ mod tests {
+     async fn caller_function_output_uses_exact_live_call_and_history_receipt() {
+         let mut state = State::default();
+         let request = codex_protocol::protocol::RealtimeFunctionCallRequested {
++            source_profile: None,
+             namespace: None,
+             call_id: "caller-call".into(),
+             item_id: "caller-item".into(),
+@@ -2268,6 +2270,7 @@ mod tests {
+     fn terminal_caller_calls_leave_capacity_for_new_responses() {
+         let mut state = State::default();
+         let request = |index| codex_protocol::protocol::RealtimeFunctionCallRequested {
++            source_profile: None,
+             namespace: None,
+             call_id: format!("call-{index}"),
+             item_id: format!("item-{index}"),
+@@ -2309,6 +2312,7 @@ mod tests {
+     async fn retrieval_verifies_the_observed_caller_function() {
+         let mut state = State::default();
+         let observed = RealtimeFunctionCallRequested {
++            source_profile: None,
+             namespace: None,
+             call_id: "call".into(),
+             item_id: "item".into(),
 diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
-index 52ce6a3..544b33f 100644
+index 590f9273..fef8f024 100644
 --- a/codex-rs/core/src/realtime_conversation/tool_task.rs
 +++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
-@@ -86,7 +86,7 @@ impl RealtimeSourceDraft {
+@@ -88,7 +88,7 @@ impl RealtimeSourceDraft {
          tools: Option<&[RealtimeFunctionTool]>,
          expected: Option<&str>,
      ) -> codex_protocol::error::Result<()> {
@@ -439,7 +465,7 @@ index 52ce6a3..544b33f 100644
              && (self.captured.as_ref().is_none_or(|source| {
                  source.selection_id.is_empty() || Some(source.selection_id.as_str()) != expected
              }))
-@@ -251,10 +251,8 @@ pub(super) fn select_source_tools(
+@@ -262,10 +262,8 @@ pub(super) fn select_source_tools(
          .iter()
          .map(wire_definition)
          .collect::<codex_protocol::error::Result<Vec<_>>>()?;
@@ -452,7 +478,7 @@ index 52ce6a3..544b33f 100644
          && (source.selection_id.is_empty()
              || expected_selection_id != Some(source.selection_id.as_str()))
      {
-@@ -262,6 +260,9 @@ pub(super) fn select_source_tools(
+@@ -273,6 +271,9 @@ pub(super) fn select_source_tools(
              "Realtime subset belongs to another captured catalog/profile".into(),
          ));
      }
@@ -462,8 +488,8 @@ index 52ce6a3..544b33f 100644
      requested
          .into_iter()
          .map(|definition| {
-@@ -285,6 +286,16 @@ pub(super) fn select_source_tools(
-         .collect()
+@@ -324,6 +325,16 @@ pub(super) fn classify_raw_session_tools(
+     Ok(caller_managed)
  }
  
 +/// A policy can remove names from this captured source, never add a declaration.
@@ -479,7 +505,7 @@ index 52ce6a3..544b33f 100644
  pub(super) fn source_instructions(
      source: &Arc<dyn codex_api::RealtimeNativeSource>,
  ) -> codex_protocol::error::Result<Option<String>> {
-@@ -393,10 +404,16 @@ pub(super) struct RealtimeToolCall {
+@@ -432,10 +443,16 @@ pub(super) struct RealtimeToolCall {
      batch: Option<Arc<super::RealtimeFunctionBatch>>,
      request: RealtimeFunctionCallRequested,
      definition: RealtimeFunctionTool,
@@ -496,7 +522,7 @@ index 52ce6a3..544b33f 100644
      pub(super) fn new(
          sdk: Arc<SdkRealtimeState>,
          request: RealtimeFunctionCallRequested,
-@@ -412,6 +429,7 @@ impl RealtimeToolCall {
+@@ -451,6 +468,7 @@ impl RealtimeToolCall {
              batch,
              request,
              definition,
@@ -504,7 +530,7 @@ index 52ce6a3..544b33f 100644
              cancel,
          }
      }
-@@ -444,6 +462,13 @@ impl RealtimeToolCall {
+@@ -483,6 +501,13 @@ impl RealtimeToolCall {
          runtime: ToolCallRuntime,
          cancellation: CancellationToken,
      ) -> codex_protocol::error::Result<(String, bool, bool)> {
@@ -518,7 +544,7 @@ index 52ce6a3..544b33f 100644
          // The same immutable native definition must still be selected, directly visible,
          // and compatible with the generation's advertisement. No deferred/code-mode widening.
          let normalized = codex_tools::dynamic_tool_to_responses_api_tool(
-@@ -1029,9 +1054,10 @@ impl RealtimeToolTask {
+@@ -1068,9 +1093,10 @@ impl RealtimeToolTask {
                      .get::<codex_extension_api::AgentProfileHandoffTools>()
                      .is_some_and(|roles| {
                          self.calls.iter().any(|call| {
@@ -533,7 +559,7 @@ index 52ce6a3..544b33f 100644
                      })
              });
 diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
-index 7947d71..e3bae49 100644
+index daa3ca53..1baa0c7d 100644
 --- a/codex-rs/core/src/realtime_conversation_tests.rs
 +++ b/codex-rs/core/src/realtime_conversation_tests.rs
 @@ -1766,6 +1766,7 @@ async fn realtime_tool_fixture(
@@ -576,7 +602,7 @@ index 7947d71..e3bae49 100644
          true,
          None,
      )
-@@ -4396,6 +4401,7 @@ async fn sdk_delegation_receipt_wire(retire_before_ack: bool) {
+@@ -4391,6 +4396,7 @@ async fn sdk_delegation_receipt_wire(retire_before_ack: bool) {
                          target: None,
                          function_tools: None,
                          expected_selection_id: None,
@@ -584,7 +610,7 @@ index 7947d71..e3bae49 100644
                      },
                      source: Arc::clone(&source_b),
                  }),
-@@ -4781,6 +4787,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
+@@ -4776,6 +4782,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
      let mut audio = None;
      let mut responses = super::RealtimeResponseCreateQueue::default();
      let first = RealtimeFunctionCallRequested {
@@ -592,7 +618,7 @@ index 7947d71..e3bae49 100644
          namespace: None,
          call_id: "terminal-function-0".into(),
          item_id: "item-0".into(),
-@@ -4790,6 +4797,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
+@@ -4785,6 +4792,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
      };
      for index in 0..super::SDK_FUNCTION_CALL_LIMIT + 4 {
          let request = RealtimeFunctionCallRequested {
@@ -600,7 +626,7 @@ index 7947d71..e3bae49 100644
              call_id: format!("terminal-function-{index}"),
              item_id: format!("item-{index}"),
              response_id: Some(format!("response-{index}")),
-@@ -4875,6 +4883,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
+@@ -4870,6 +4878,7 @@ async fn sdk_terminal_function_rollover_preserves_payload_response_and_kind_iden
      assert!(
          super::handle_realtime_server_event(
              RealtimeEvent::FunctionCallRequested(RealtimeFunctionCallRequested {
@@ -608,7 +634,7 @@ index 7947d71..e3bae49 100644
                  call_id: "old-handoff".into(),
                  response_id: Some("old-response".into()),
                  ..first
-@@ -4954,6 +4963,7 @@ async fn sdk_terminal_reclamation_keeps_pending_physical_preparation_and_handoff
+@@ -4949,6 +4958,7 @@ async fn sdk_terminal_reclamation_keeps_pending_physical_preparation_and_handoff
              super::SdkFunctionCall {
                  preparation: (index == 2).then(|| Arc::clone(&preparing)),
                  request: codex_protocol::protocol::RealtimeFunctionCallRequested {
@@ -616,7 +642,7 @@ index 7947d71..e3bae49 100644
                      namespace: None,
                      call_id: id,
                      item_id: format!("item-{index}"),
-@@ -5007,10 +5017,16 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
+@@ -5002,10 +5012,16 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
      let mut params = prepared_voice_params();
      params.prompt = Some(Some("Use this accepted application instruction".into()));
      let settings = codex_api::RealtimeV2SessionSettings::default();
@@ -637,7 +663,7 @@ index 7947d71..e3bae49 100644
      let draft = super::tool_task::capture_realtime_source_draft(&session)
          .await
          .unwrap();
-@@ -5055,6 +5071,7 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
+@@ -5050,6 +5066,7 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
          Some(Default::default()),
          None,
          None,
@@ -646,7 +672,7 @@ index 7947d71..e3bae49 100644
          None,
      )
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
-index 5fccc90..0eb61bc 100644
+index 5fccc902..0eb61bc7 100644
 --- a/codex-rs/core/src/session/handlers.rs
 +++ b/codex-rs/core/src/session/handlers.rs
 @@ -513,6 +513,7 @@ pub(super) async fn submission_loop(
@@ -714,7 +740,7 @@ index 5fccc90..0eb61bc 100644
                          WithTurnExtensionData {
                              request: thread_settings,
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 695f0e2..80027a9 100644
+index 2887081a..2945127a 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
 @@ -548,6 +548,12 @@ pub struct RealtimeHandoffRequested {
@@ -739,7 +765,7 @@ index 695f0e2..80027a9 100644
  }
  
  #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
-@@ -705,6 +713,11 @@ pub enum RealtimeEvent {
+@@ -707,6 +715,11 @@ pub enum RealtimeEvent {
          call_id: String,
          succeeded: bool,
      },
@@ -751,7 +777,7 @@ index 695f0e2..80027a9 100644
      /// Native completion, not a provider wire event. Target is the committed native receipt.
      FunctionBatchFinished {
          response_id: String,
-@@ -899,6 +912,7 @@ pub enum Op {
+@@ -901,6 +914,7 @@ pub enum Op {
          settings: Option<crate::realtime_settings::RealtimeV2SessionSettings>,
          function_tools: Option<Vec<crate::realtime_settings::RealtimeFunctionTool>>,
          expected_selection_id: Option<String>,
@@ -759,7 +785,7 @@ index 695f0e2..80027a9 100644
          reply: oneshot::Sender<CodexResult<serde_json::Value>>,
      },
  
-@@ -909,6 +923,7 @@ pub enum Op {
+@@ -911,6 +925,7 @@ pub enum Op {
          settings: Option<crate::realtime_settings::RealtimeV2SessionSettings>,
          function_tools: Option<Vec<crate::realtime_settings::RealtimeFunctionTool>>,
          expected_selection_id: Option<String>,
@@ -767,7 +793,7 @@ index 695f0e2..80027a9 100644
          hosted_mcp_auto_response: bool,
          reply: oneshot::Sender<CodexResult<RealtimeConversationPrepareResult>>,
      },
-@@ -926,6 +941,7 @@ pub enum Op {
+@@ -928,6 +943,7 @@ pub enum Op {
          settings: Option<crate::realtime_settings::RealtimeV2SessionSettings>,
          function_tools: Option<Vec<crate::realtime_settings::RealtimeFunctionTool>>,
          expected_selection_id: Option<String>,
@@ -775,7 +801,7 @@ index 695f0e2..80027a9 100644
          hosted_mcp_auto_response: bool,
          reply: oneshot::Sender<CodexResult<RealtimeConversationStartResult>>,
      },
-@@ -953,6 +969,7 @@ pub enum Op {
+@@ -955,6 +971,7 @@ pub enum Op {
          generation: String,
          response_id: String,
          call_ids: Vec<String>,
@@ -784,10 +810,10 @@ index 695f0e2..80027a9 100644
          reply: oneshot::Sender<CodexResult<crate::turn_input::TurnInputSubmission>>,
      },
 diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
-index df56402..7be8786 100644
+index 3bfb11fa..b1eb3609 100644
 --- a/codex-rs/protocol/src/realtime_settings.rs
 +++ b/codex-rs/protocol/src/realtime_settings.rs
-@@ -487,4 +487,6 @@ pub struct RealtimeToolProfileUpdate {
+@@ -506,4 +506,6 @@ pub struct RealtimeToolProfileUpdate {
      pub function_tools: Option<Vec<RealtimeFunctionTool>>,
      #[serde(default)]
      pub expected_selection_id: Option<String>,
