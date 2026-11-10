@@ -491,7 +491,11 @@
     {
       "path": "0155-sdk-registered-auto-compaction-terminal-rate-limits.patch",
       "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "24cff6c5ac1c76899c40e1906b39cb3d07f2c929"
+  "result_tree": "14ba6e05d24df6b7349dc1a76d012fbf00a34a80"
 }
