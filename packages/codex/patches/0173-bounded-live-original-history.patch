@@ -43,10 +43,10 @@ index 7e4cd19c696282b05b5eecd31527b2b28bccf0ba..5d5ba4636d4ae653e207a5386ecc3824
              replacement_history: Some(history.annotated_items().to_vec()),
              guardian_history: history.guardian_history_checkpoint(),
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638e7bfd363 100644
+index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..276739a21f0f7b249e6468be2fda93fb3beb7e38 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
-@@ -273,21 +273,87 @@ impl Session {
+@@ -273,21 +273,102 @@ impl Session {
      pub(crate) async fn sdk_history_snapshot(
          &self,
          limit: Option<usize>,
@@ -91,7 +91,22 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638
 +            |row| {
 +                let mut projected = crate::context_manager::ContextManager::new();
 +                // Captured per-record limits take precedence over the scalar legacy restore policy.
-+                projected.replay_annotated_item(row, fallback_policy);
++                let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
++                    let mut normalized = row.clone();
++                    if let Some(content) =
++                        codex_context_fragments::to_annotated_content(&mut normalized.item)
++                    {
++                        let _ = codex_context_fragments::set_annotated_content(
++                            &mut normalized.item,
++                            content,
++                        );
++                    }
++                    Some(normalized)
++                } else {
++                    None
++                };
++                projected
++                    .replay_annotated_item(normalized.as_ref().unwrap_or(row), fallback_policy);
 +                projected.annotated_items().last().cloned()
 +            },
 +            |items, turns| {
@@ -141,7 +156,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638
      }
  
      /// The SDK owns exclusive native ingress and the mutation permit throughout.
-@@ -305,14 +371,28 @@ impl Session {
+@@ -305,14 +386,28 @@ impl Session {
          if active.is_some() {
              return Err(invalid("history transaction requires an idle thread"));
          }
@@ -173,7 +188,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638
          for original in appended {
              let projection = input_projection(&original)
                  .map_err(|_| invalid("Invalid canonical history item"))?
-@@ -325,8 +405,7 @@ impl Session {
+@@ -325,8 +420,7 @@ impl Session {
                  projection,
              });
          }
@@ -183,7 +198,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638
              .retained_projection(state.history.annotated_items(), keep)
              .map_err(invalid)?;
          envelopes.extend(
-@@ -378,7 +457,8 @@ impl Session {
+@@ -378,7 +472,8 @@ impl Session {
              .await
              .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
          state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
@@ -194,7 +209,7 @@ index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..1173c79b22537119ef9c81ed779cc638
      }
  }
 diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
-index d83e4311808ccf2f9e92d5395d5477f746b8b580..f2e034a0153ecb7e30574a5ed7377ee6043716a3 100644
+index d83e4311808ccf2f9e92d5395d5477f746b8b580..8571388f16972c4bd8f3b5ab187769fae8ca6158 100644
 --- a/codex-rs/core/src/session/inject_tests.rs
 +++ b/codex-rs/core/src/session/inject_tests.rs
 @@ -65,7 +65,11 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
@@ -321,18 +336,23 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..f2e034a0153ecb7e30574a5ed7377ee6
      let mut checkpoint: codex_history::CompactedItem =
          serde_json::from_value(json!({"message":""})).unwrap();
      checkpoint.replacement_history = Some(model.clone());
-@@ -205,12 +236,18 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -205,12 +236,20 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
      records.push(RolloutItem::Compacted(checkpoint));
      records = serde_json::from_value(serde_json::to_value(records).unwrap()).unwrap();
      session.apply_rollout_reconstruction(&turn, &records).await;
 -    assert_eq!(session.sdk_history_snapshot(None).await.2, originals);
+-    records.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+-        ThreadRolledBackEvent { num_turns: 1 },
+-    )));
 +    assert_eq!(
 +        session.sdk_history_snapshot(None).await.unwrap().2,
 +        originals
 +    );
-     records.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
-         ThreadRolledBackEvent { num_turns: 1 },
-     )));
++    let rollback = RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
++        num_turns: 1,
++    }));
++    records.push(rollback.clone());
++    session.persist_rollout_items(&[rollback]).await;
      session.apply_rollout_reconstruction(&turn, &records).await;
 -    assert_eq!(session.sdk_history_snapshot(None).await.2, originals[..3]);
 +    assert_eq!(
@@ -342,7 +362,7 @@ index d83e4311808ccf2f9e92d5395d5477f746b8b580..f2e034a0153ecb7e30574a5ed7377ee6
      let retained_model = session.clone_history().await.into_annotated_items();
      assert_eq!(retained_model.len(), 2);
      assert_eq!(
-@@ -218,3 +255,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+@@ -218,3 +257,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
          "first"
      );
  }
