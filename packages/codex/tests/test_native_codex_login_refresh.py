@@ -26,7 +26,13 @@ from agents import Environment, Turn, TurnStoppedError
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 from tests.test_core_schema_transport import connect_proxy
-from tests.test_native_codex_login import ACCOUNT, codex_agent, saved_login, submit
+from tests.test_native_codex_login import (
+    ACCOUNT,
+    codex_agent,
+    disable_model_request_compression,
+    saved_login,
+    submit,
+)
 
 AUTH_HOST = "auth.openai.com"
 SESSION_COUNT = 3
@@ -230,6 +236,7 @@ async def test_trusted_macos_keeps_saved_login_private_during_rotation(
 ) -> None:
     from _agents_codex import session as session_module
 
+    disable_model_request_compression(monkeypatch)
     tmp_path = tmp_path.resolve()
     directory = saved_login(tmp_path / "credentials")
     cache = directory / "auth.json"

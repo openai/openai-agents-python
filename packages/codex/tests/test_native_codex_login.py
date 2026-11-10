@@ -93,8 +93,7 @@ def split_saved_login(tmp_path: Path) -> tuple[Path, Path]:
     return home, credential_directory
 
 
-@pytest.fixture(autouse=True)
-def uncompressed_model_requests(monkeypatch):
+def disable_model_request_compression(monkeypatch: pytest.MonkeyPatch) -> None:
     # The shared aiohttp peer can read JSON without an optional Zstandard decoder.
     def without_compression(native_create):
         def create(config, *args, **kwargs):
@@ -107,6 +106,11 @@ def uncompressed_model_requests(monkeypatch):
     native = importlib.import_module("agents._native")
     for name in ("create_engine", "create_checkpoint_engine"):
         monkeypatch.setattr(native, name, without_compression(getattr(native, name)))
+
+
+@pytest.fixture(autouse=True)
+def uncompressed_model_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    disable_model_request_compression(monkeypatch)
 
 
 @pytest.fixture
