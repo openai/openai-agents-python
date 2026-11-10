@@ -280,7 +280,7 @@ async def _prepare_realtime_params(
             else session._check_open,
             usage=owner.usage if owner is not None else None,
         )
-        if policy_selection is not None:
+        if policy_selection is not None and selection_id is None:
             params["expected_selection_id"] = policy_selection
         if allowed is not None:
             params["disabled_tool_names"] = allowed
@@ -2417,9 +2417,9 @@ class RealtimeSession:
                 "delegation_id": delegation_id,
                 "target": target,
                 "function_tools": definitions,
-                "expected_selection_id": policy_selection
-                if policy_selection is not None
-                else selection_id,
+                "expected_selection_id": selection_id
+                if selection_id is not None
+                else policy_selection,
                 "disabled_tool_names": allowed,
             },
         )

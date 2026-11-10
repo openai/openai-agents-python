@@ -376,3 +376,90 @@ async def test_native_remembered_rejection_preserves_formatter_omission(
         assert effects == []
         assert await session.pending_interactions() == ()
         assert peer.responses.requests == []
+
+
+@pytest.mark.parametrize("entry", ["sip", "profile"])
+async def test_explicit_voice_capture_rejects_source_changed_between_policy_reads(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    from contextlib import AsyncExitStack
+
+    peer = realtime_peer
+    effects = []
+
+    @function_tool(name="probe", description="Identical wire definition")
+    def original() -> str:
+        effects.append("original")
+        return "original"
+
+    @function_tool(name="probe", description="Identical wire definition")
+    def replacement() -> str:
+        effects.append("replacement")
+        return "replacement"
+
+    config = RealtimeConfig(
+        model="fixture-realtime", tools=(original,), instructions=lambda run: "Captured policy"
+    )
+    async with (
+        timeout(25),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-selection-race",
+            supports_websockets=False,
+        ) as provider,
+        Agent(
+            name="Root", instructions="Use probe", tools=[original], provider=provider
+        ).session() as session,
+        AsyncExitStack() as stack,
+    ):
+        owner = None
+        if entry == "profile":
+            owner = await stack.enter_async_context(session.realtime(config=config))
+            await peer.frame(lambda frame: frame["type"] == "session.update")
+        captured = asyncio.Event()
+        resume = asyncio.Event()
+        wire = []
+        select = type(session)._realtime_function_tools
+        stale = None
+
+        async def capture(self, tools, **kwargs):
+            value = await select(self, tools, **kwargs)
+            wire.append(value[0])
+            if asyncio.current_task() is stale:
+                captured.set()
+                await resume.wait()
+            return value
+
+        monkeypatch.setattr(type(session), "_realtime_function_tools", capture)
+        # _sync_active_profile is the native completed-delegation/profile-event
+        # entry boundary; the competing replacement uses public Session.update.
+        stale = asyncio.create_task(
+            session.build_realtime_sip_config(config=config)
+            if owner is None
+            else owner._sync_active_profile(include_mono=True)
+        )
+        try:
+            await captured.wait()
+            await session.update(tools=[replacement])
+            current, _ = await select(session, (original,))
+            assert wire[0] == current
+            resume.set()
+            with pytest.raises(
+                (RuntimeError, ValueError), match="another captured catalog/profile"
+            ):
+                await stale
+        finally:
+            resume.set()
+            await asyncio.gather(stale, return_exceptions=True)
+        assert effects == []
+        if owner is None:
+            # A fresh capture of the same admitted selector resolves the accepted binding.
+            assert await session.build_realtime_sip_config(config=config)
+        else:
+            assert sum(frame["type"] == "session.update" for frame in peer.frames) == 2
+            await peer.function("probe", {}, "captured-replacement")
+            output = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "captured-replacement"
+            )
+            assert output["item"]["output"] == "replacement"
+            assert effects == ["replacement"]
