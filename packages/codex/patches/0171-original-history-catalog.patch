@@ -1,5 +1,5 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 3289c916378b56974248199f85a1a3a62243f129..4542bbbdb9a1e072941c8b89af1783cef46a85da 100644
+index 64d9a0699a338914e4bc4129271636000281a5f9..c8b2070ed94731c21695d51c2a66e3e7ba5c8fb4 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -3638,6 +3638,7 @@ dependencies = [
@@ -110,24 +110,27 @@ index f5f26556c89b76fbf3d621c68b281c6214d36f94..540c43702575200ebc28cbe2b4e396a6
          },
          application_instructions: codex_history::ResponseItemEnvelope::new(ResponseItem::Message {
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 191732b6725ce85f1479afc2fdb5c2a8c47c6175..110175f2038e975f45ce8c31a551b61e1e17e82e 100644
+index 191732b6725ce85f1479afc2fdb5c2a8c47c6175..f2eef7425c41caea5f5d3cbe5ef44ec712b6aed2 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -1076,7 +1076,7 @@ impl CodexThread {
-     pub async fn sdk_history_snapshot(
-         &self,
-         limit: Option<usize>,
+@@ -1073,10 +1073,7 @@ impl CodexThread {
+     }
+ 
+     #[doc(hidden)]
+-    pub async fn sdk_history_snapshot(
+-        &self,
+-        limit: Option<usize>,
 -    ) -> (String, usize, Vec<ResponseItem>) {
-+    ) -> (String, usize, Vec<serde_json::Value>) {
++    pub async fn sdk_history_snapshot(&self, limit: Option<usize>) -> (String, usize, Vec<String>) {
          self.session.sdk_history_snapshot(limit).await
      }
  
-@@ -1086,13 +1086,25 @@ impl CodexThread {
+@@ -1086,13 +1083,25 @@ impl CodexThread {
          &self,
          expected_revision: &str,
          keep: usize,
 -        items: Vec<ResponseItem>,
-+        items: Vec<serde_json::Value>,
++        items: Vec<String>,
      ) -> CodexResult<String> {
          self.session
              .sdk_replace_history(expected_revision, keep, items)
@@ -232,7 +235,7 @@ index 127050493e56edbe1b367d272beecf6e4f4307ac..925a8f89347ec12d2553ec231e58643e
              replacement_history: Some(history.annotated_items().to_vec()),
              guardian_history: history.guardian_history_checkpoint(),
 diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
-index b90892458fd53b52398116905247e0205b410874..579c29a5075a5d9ecde07def07375cc3f76cfd3d 100644
+index b90892458fd53b52398116905247e0205b410874..5fd9c0943598145b065a76ce3d9688b27b638751 100644
 --- a/codex-rs/core/src/session/inject.rs
 +++ b/codex-rs/core/src/session/inject.rs
 @@ -269,31 +269,31 @@ impl Session {
@@ -253,7 +256,7 @@ index b90892458fd53b52398116905247e0205b410874..579c29a5075a5d9ecde07def07375cc3
          &self,
          limit: Option<usize>,
 -    ) -> (String, usize, Vec<ResponseItem>) {
-+    ) -> (String, usize, Vec<serde_json::Value>) {
++    ) -> (String, usize, Vec<String>) {
 +        self.state.lock().await.sdk_originals.snapshot(limit)
 +    }
 +
@@ -291,7 +294,7 @@ index b90892458fd53b52398116905247e0205b410874..579c29a5075a5d9ecde07def07375cc3
          expected_revision: &str,
          keep: usize,
 -        mut appended: Vec<ResponseItem>,
-+        appended: Vec<serde_json::Value>,
++        appended: Vec<String>,
      ) -> codex_protocol::error::Result<String> {
          use crate::context_manager::HistoryReplacement;
 +        use codex_history::sdk_originals::{SdkOriginalItem, input_projection};
@@ -395,10 +398,10 @@ index b90892458fd53b52398116905247e0205b410874..579c29a5075a5d9ecde07def07375cc3
      }
  }
 diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
-index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba6e08c1eb 100644
+index b8a67a986a37b42d647df5cac8aa42b56718dde5..a88308ee0826b468d67e967f7fbee557ead206c6 100644
 --- a/codex-rs/core/src/session/inject_tests.rs
 +++ b/codex-rs/core/src/session/inject_tests.rs
-@@ -60,3 +60,148 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
+@@ -60,3 +60,161 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
          .await;
      assert_eq!(reconstructed.history, recorded);
  }
@@ -429,12 +432,22 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +    }
 +    let (revision, total, originals) = session.sdk_history_snapshot(None).await;
 +    assert_eq!(total, 4);
-+    assert_eq!(originals, values);
++    assert_eq!(
++        originals
++            .iter()
++            .map(|raw| serde_json::from_str::<serde_json::Value>(raw).unwrap())
++            .collect::<Vec<_>>(),
++        values
++    );
 +    let before = session.clone_history().await.into_annotated_items();
 +    let model_output = serde_json::to_value(&before[2].item).unwrap();
 +    assert!(model_output["output"].as_str().unwrap().len() < full_output.len());
 +    session
-+        .sdk_replace_history(&revision, 3, vec![json!({"type":"audit","retained":true})])
++        .sdk_replace_history(
++            &revision,
++            3,
++            vec![json!({"type":"audit","retained":true}).to_string()],
++        )
 +        .await
 +        .unwrap();
 +    assert_eq!(
@@ -444,7 +457,10 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +    let (_, total, retained) = session.sdk_history_snapshot(None).await;
 +    assert_eq!(total, 4);
 +    assert_eq!(retained[..3], originals[..3]);
-+    assert_eq!(retained[2]["output"], full_output);
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&retained[2]).unwrap()["output"],
++        full_output
++    );
 +}
 +
 +#[tokio::test]
@@ -453,8 +469,8 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +    let (session, _turn, _) = make_session_and_context_with_rx().await;
 +    let revision = session.sdk_history_snapshot(None).await.0;
 +    session.sdk_replace_history(&revision, 0, vec![
-+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}),
-+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}),
++        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}).to_string(),
++        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}).to_string(),
 +    ]).await.unwrap();
 +    let summary: ResponseItem = serde_json::from_value(json!({"type":"message","id":"compaction-summary","role":"user","content":[{"type":"input_text","text":"summary of both"}]})).unwrap();
 +    session
@@ -479,7 +495,7 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +        .sdk_replace_history(
 +            &before.0,
 +            before.1,
-+            vec![json!({"type":"audit","appended":true})],
++            vec![json!({"type":"audit","appended":true}).to_string()],
 +        )
 +        .await
 +        .unwrap();
@@ -492,7 +508,7 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +        .sdk_replace_history(
 +            &appended.0,
 +            0,
-+            vec![json!({"type":"audit","replacement":true})],
++            vec![json!({"type":"audit","replacement":true}).to_string()],
 +        )
 +        .await
 +        .unwrap();
@@ -517,7 +533,7 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}],"future":2}),
 +        json!({"type":"future","audit":"second"}),
 +        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer two"}]}),
-+    ];
++    ].into_iter().map(|value| value.to_string()).collect::<Vec<_>>();
 +    let revision = session.sdk_history_snapshot(None).await.0;
 +    session
 +        .sdk_replace_history(&revision, 0, originals.clone())
@@ -548,19 +564,9 @@ index b8a67a986a37b42d647df5cac8aa42b56718dde5..2b2df0b0b64efc5e0fe17d6412937eba
 +    );
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..6656da77fd1c258767174241ea1873409e9746dd 100644
+index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..7742a2dcd1904a3acacb8e5ba169eb578c06b967 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -240,8 +240,8 @@ mod extension_interruption;
- pub(crate) mod extension_metrics;
- mod guardian_checkpoint;
- mod handlers;
--mod inject;
- pub(crate) mod initial_turn;
-+mod inject;
- mod reasoning_effort;
- mod submission;
- pub(crate) use reasoning_effort::RequestEffortUsage;
 @@ -253,6 +253,7 @@ mod mcp_prewarm;
  mod mcp_refresh;
  mod mcp_runtime;
@@ -577,17 +583,7 @@ index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..6656da77fd1c258767174241ea187340
  pub(crate) mod time_reminder;
  mod token_budget;
  pub(crate) mod turn;
-@@ -878,7 +878,8 @@ impl Session {
-                 tool_choice: config.sdk_tool_choice.or_else(|| {
-                     persisted_thread_settings.and_then(|settings| settings.tool_choice)
-                 }),
--                invocation_timeout_ms: persisted_thread_settings.and_then(|settings| settings.invocation_timeout_ms),
-+                invocation_timeout_ms: persisted_thread_settings
-+                    .and_then(|settings| settings.invocation_timeout_ms),
-                 request_controls: {
-                     let mut selected = persisted_thread_settings
-                         .map(|settings| settings.request_controls.clone())
-@@ -1861,6 +1862,23 @@ impl Session {
+@@ -1861,6 +1861,23 @@ impl Session {
          let reviewer_compaction_hash = reviewer.comp_hash.clone();
          {
              let mut state = self.state.lock().await;
@@ -611,7 +607,7 @@ index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..6656da77fd1c258767174241ea187340
              state.replace_annotated_history(
                  history,
                  reference_context_item,
-@@ -3744,9 +3762,7 @@ impl Session {
+@@ -3744,9 +3761,7 @@ impl Session {
                          });
                  }
              }
@@ -622,25 +618,7 @@ index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..6656da77fd1c258767174241ea187340
              // History now owns the tool result, even if rollout or notification awaits are cancelled.
              if let Some(pending_exec) = pending_exec {
                  pending_exec.mark_delivered();
-@@ -3915,8 +3931,15 @@ impl Session {
-         source: crate::realtime_conversation::RealtimeToolExecutionSource,
-         cancellation: &CancellationToken,
-     ) -> CodexResult<Arc<StepContext>> {
--        self.capture_step_context_inner(context, cancellation, &[], &HashSet::new(), false, Some(source))
--            .await
-+        self.capture_step_context_inner(
-+            context,
-+            cancellation,
-+            &[],
-+            &HashSet::new(),
-+            false,
-+            Some(source),
-+        )
-+        .await
-     }
- 
-     #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
-@@ -4274,7 +4297,7 @@ impl Session {
+@@ -4274,7 +4289,7 @@ impl Session {
          {
              let mut state = self.state.lock().await;
              state.current_time_reminder.note_recorded_items(items);
@@ -649,7 +627,7 @@ index a7006f0b1c6b827e800c25e695fe4ffd1f82d66f..6656da77fd1c258767174241ea187340
                  std::slice::from_mut(&mut response_item),
                  model_info.truncation_policy.into(),
              );
-@@ -4428,6 +4451,7 @@ impl Session {
+@@ -4428,6 +4443,7 @@ impl Session {
              state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
              state.history.set_world_state_baseline(world_state_baseline);
              CompactedItem {
@@ -837,7 +815,7 @@ index 2a9513bf249c9c068cd8a99394fae947451b1fc1..07a31c7620e00aa39c4c61058451a23a
 +    turn.next_step_settings.load().selected().clone()
 +}
 diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
-index 79ed698adced1ebdc900f44adb6f73465f524bc4..c25daa53ad20cb961741fdd514a166d3ac9a228b 100644
+index 79ed698adced1ebdc900f44adb6f73465f524bc4..809418f3147ea8b00e48568586bc38ddfbb4f9f2 100644
 --- a/codex-rs/core/src/state/session.rs
 +++ b/codex-rs/core/src/state/session.rs
 @@ -70,6 +70,7 @@ pub(crate) struct SessionState {
@@ -889,7 +867,7 @@ index 79ed698adced1ebdc900f44adb6f73465f524bc4..c25daa53ad20cb961741fdd514a166d3
 +                    .clone();
 +                self.sdk_originals
 +                    .append(codex_history::sdk_originals::SdkOriginalItem {
-+                        original: serde_json::to_value(&envelope.item)
++                        original: serde_json::to_string(&envelope.item)
 +                            .expect("response items serialize"),
 +                        projection: Some(projection),
 +                    });
@@ -943,7 +921,7 @@ index 9ee6be284237f3362756ef1f572db60a3b0adcec..8962d6238c9d2b2498ebb8967108523f
                  | ToolSpec::FileSearch(_)
                  | ToolSpec::CodeInterpreter(_)
 diff --git a/codex-rs/history/Cargo.toml b/codex-rs/history/Cargo.toml
-index bd938d2c2ea45333b8f040f41399674a28e54644..fe7a9f5f761b9fece83f53a7373759c03c97b423 100644
+index bd938d2c2ea45333b8f040f41399674a28e54644..671257e74d8b9510618a43e77507b084bc0aea03 100644
 --- a/codex-rs/history/Cargo.toml
 +++ b/codex-rs/history/Cargo.toml
 @@ -16,7 +16,8 @@ workspace = true
@@ -951,7 +929,7 @@ index bd938d2c2ea45333b8f040f41399674a28e54644..fe7a9f5f761b9fece83f53a7373759c0
  schemars = { workspace = true }
  serde = { workspace = true, features = ["derive"] }
 -serde_json = { workspace = true }
-+serde_json = { workspace = true, features = ["arbitrary_precision"] }
++serde_json = { workspace = true, features = ["raw_value"] }
 +sha2 = { workspace = true }
  
  [dev-dependencies]
@@ -1015,45 +993,51 @@ index fa4f6a8c63b68a350049cba4be95054bd7fba78b..b18c25649e7d02c4583dfe813afc967c
              guardian_history: item.guardian_history.map(Cow::into_owned),
 diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4294e963d
+index 0000000000000000000000000000000000000000..7728908b6f91631324ef40565f9aafbbb65eb2f3
 --- /dev/null
 +++ b/codex-rs/history/src/sdk_originals.rs
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,524 @@
 +//! Original SDK values and their separately admitted model projections.
 +use codex_protocol::models::ResponseItem;
 +use schemars::JsonSchema;
 +use serde::{Deserialize, Deserializer, Serialize};
-+use serde_json::Value;
++use serde_json::value::RawValue;
 +use sha2::{Digest, Sha256};
++use std::collections::BTreeMap;
 +
 +use crate::ResponseItemEnvelope;
 +
 +/// The projection is fixed at admission. Restore never promotes an audit-only value.
 +#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 +pub struct SdkOriginalItem {
-+    pub original: Value,
++    pub original: String,
 +    pub projection: Option<ResponseItemEnvelope>,
 +}
 +
 +impl SdkOriginalItem {
 +    pub fn from_native(projection: ResponseItemEnvelope) -> Self {
 +        Self {
-+            original: serde_json::to_value(&projection.item).expect("response items serialize"),
++            original: serde_json::to_string(&projection.item).expect("response items serialize"),
 +            projection: Some(projection),
 +        }
 +    }
 +}
 +
 +/// Decode supported input once, without treating unknown or harness-only records as work.
-+pub fn input_projection(value: &Value) -> Result<Option<ResponseItem>, String> {
-+    if !value.is_object() {
-+        return Err("canonical history items must be JSON objects".into());
-+    }
-+    if value.get("type").and_then(Value::as_str).is_none() {
++pub fn input_projection(value: &str) -> Result<Option<ResponseItem>, String> {
++    let fields: BTreeMap<String, &RawValue> = serde_json::from_str(value)
++        .map_err(|_| "canonical history items must be JSON objects".to_string())?;
++    let Some(kind) = fields
++        .get("type")
++        .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
++    else {
++        return Ok(None);
++    };
++    if matches!(kind.as_str(), "configuration_update" | "compaction_trigger") {
 +        return Ok(None);
 +    }
-+    let item: ResponseItem = serde_json::from_value(value.clone())
-+        .map_err(|_| "Invalid canonical history item".to_string())?;
++    let item: ResponseItem =
++        serde_json::from_str(value).map_err(|_| "Invalid canonical history item".to_string())?;
 +    Ok(match item {
 +        ResponseItem::Other
 +        | ResponseItem::ConfigurationUpdate { .. }
@@ -1122,7 +1106,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +        }
 +        let mut history = Self::default();
 +        for item in stored.items {
-+            if !item.original.is_object() {
++            if serde_json::from_str::<BTreeMap<String, &RawValue>>(&item.original).is_err() {
 +                return Err(serde::de::Error::custom("invalid original history value"));
 +            }
 +            history.append(item);
@@ -1140,9 +1124,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +        if !self.items.is_empty() {
 +            self.index.hash.update(b",");
 +        }
-+        self.index
-+            .hash
-+            .update(serde_json::to_vec(&item.original).expect("JSON values serialize"));
++        self.index.hash.update(item.original.as_bytes());
 +        let mut completed = self.index.hash.clone();
 +        completed.update(b"]");
 +        self.index.revision = format!("{:x}", completed.finalize());
@@ -1150,7 +1132,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +    }
 +
 +    /// A hot suffix read clones only the requested values and uses the cached revision.
-+    pub fn snapshot(&self, limit: Option<usize>) -> (String, usize, Vec<Value>) {
++    pub fn snapshot(&self, limit: Option<usize>) -> (String, usize, Vec<String>) {
 +        let total = self.items.len();
 +        let start = total.saturating_sub(limit.unwrap_or(total));
 +        (
@@ -1225,7 +1207,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +                crate::RolloutItem::ResponseItem(envelope) => {
 +                    if let Some(projection) = project(envelope) {
 +                        history.append(SdkOriginalItem {
-+                            original: serde_json::to_value(&envelope.item)
++                            original: serde_json::to_string(&envelope.item)
 +                                .expect("response items serialize"),
 +                            projection: Some(projection),
 +                        });
@@ -1240,7 +1222,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +                        for envelope in items {
 +                            if let Some(projection) = project(envelope) {
 +                                history.append(SdkOriginalItem {
-+                                    original: serde_json::to_value(&envelope.item)
++                                    original: serde_json::to_string(&envelope.item)
 +                                        .expect("response items serialize"),
 +                                    projection: Some(projection),
 +                                });
@@ -1317,19 +1299,19 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +
 +    #[test]
 +    fn unknown_values_and_extra_fields_survive_restore_without_projection_promotion() {
-+        let unknown = json!({"type":"future_tool_call","payload":{"nested":[1,null,true]}});
-+        let known = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}],"future":{"value":7}});
++        let unknown =
++            json!({"type":"future_tool_call","payload":{"nested":[1,null,true]}}).to_string();
++        let known = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}],"future":{"value":7}}).to_string();
 +        let mut history = SdkOriginalHistory::default();
 +        history.append(SdkOriginalItem {
 +            original: unknown.clone(),
 +            projection: None,
 +        });
-+        let projection = input_projection(&known)
-+            .unwrap()
-+            .map(ResponseItemEnvelope::new);
 +        history.append(SdkOriginalItem {
++            projection: input_projection(&known)
++                .unwrap()
++                .map(ResponseItemEnvelope::new),
 +            original: known.clone(),
-+            projection,
 +        });
 +        let restored: SdkOriginalHistory =
 +            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
@@ -1342,18 +1324,27 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +
 +    #[test]
 +    fn malformed_known_calls_reject_instead_of_becoming_audit_only() {
-+        assert!(input_projection(&json!({"type":"function_call","arguments":17})).is_err());
-+        assert!(input_projection(&json!({"type":"message","content":false})).is_err());
-+        assert!(
-+            input_projection(&json!({"type":"unknown","arguments":17}))
-+                .unwrap()
-+                .is_none()
-+        );
++        for raw in [
++            r#"{"type":"function_call","arguments":17}"#,
++            r#"{"type":"message","content":false}"#,
++        ] {
++            assert!(input_projection(raw).is_err());
++        }
++        for raw in [
++            r#"{"type":"unknown","arguments":17}"#,
++            r#"{"type":"configuration_update","opaque":true}"#,
++            r#"{"type":"compaction_trigger","opaque":true}"#,
++        ] {
++            assert!(input_projection(raw).unwrap().is_none());
++        }
++        for raw in ["null", "[]", "42", "false", r#""scalar""#] {
++            assert!(input_projection(raw).is_err());
++        }
 +    }
 +
 +    #[test]
 +    fn original_numeric_values_and_untyped_objects_remain_exact() {
-+        let original: Value = serde_json::from_str(r#"{"type":17,"n":184467440737095516161234567890,"nested":{"fraction":1.2345678901234567890123456789}}"#).unwrap();
++        let original = r#"{"type":17,"n":184467440737095516161234567890,"nested":{"fraction":1.2345678901234567890123456789}}"#.to_owned();
 +        assert!(input_projection(&original).unwrap().is_none());
 +        let mut history = SdkOriginalHistory::default();
 +        history.append(SdkOriginalItem {
@@ -1361,21 +1352,8 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +            projection: None,
 +        });
 +        let restored: SdkOriginalHistory =
-+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
++            serde_json::from_value(serde_json::to_value(&history).unwrap()).unwrap();
 +        assert_eq!(restored.snapshot(None).2, vec![original]);
-+        assert!(
-+            serde_json::to_string(&restored)
-+                .unwrap()
-+                .contains("184467440737095516161234567890")
-+        );
-+        assert!(
-+            serde_json::to_string(&restored)
-+                .unwrap()
-+                .contains("1.2345678901234567890123456789")
-+        );
-+        for value in [json!(null), json!([]), json!("scalar")] {
-+            assert!(input_projection(&value).is_err());
-+        }
 +    }
 +
 +    #[test]
@@ -1387,7 +1365,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +            ("user-2", "user", "second"),
 +            ("assistant-2", "assistant", "removed"),
 +        ] {
-+            let original = json!({"type":"message","id":id,"role":role,"content":[{"type":"input_text","text":text}],"unknown":"preserved"});
++            let original = json!({"type":"message","id":id,"role":role,"content":[{"type":"input_text","text":text}],"unknown":"preserved"}).to_string();
 +            history.append(SdkOriginalItem {
 +                projection: input_projection(&original)
 +                    .unwrap()
@@ -1396,7 +1374,7 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +            });
 +            if role == "user" {
 +                history.append(SdkOriginalItem {
-+                    original: json!({"type":"audit","user":id}),
++                    original: json!({"type":"audit","user":id}).to_string(),
 +                    projection: None,
 +                });
 +            }
@@ -1420,14 +1398,14 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +        projected["id"] = json!("trusted-projection-id");
 +        let mut history = SdkOriginalHistory::default();
 +        history.append(SdkOriginalItem {
-+            original: original.clone(),
-+            projection: input_projection(&projected)
++            original: original.to_string(),
++            projection: input_projection(&projected.to_string())
 +                .unwrap()
 +                .map(ResponseItemEnvelope::new),
 +        });
 +        let restored: SdkOriginalHistory =
 +            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
-+        assert_eq!(restored.snapshot(None).2, vec![original]);
++        assert_eq!(restored.snapshot(None).2, vec![original.to_string()]);
 +        assert_eq!(
 +            restored.projection()[0].item.id().unwrap().as_str(),
 +            "trusted-projection-id"
@@ -1447,19 +1425,16 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +                admitted["content"][0]["text"] = json!("truncated model payload");
 +            }
 +            history.append(SdkOriginalItem {
-+                original,
-+                projection: input_projection(&admitted)
++                original: original.to_string(),
++                projection: input_projection(&admitted.to_string())
 +                    .unwrap()
 +                    .map(ResponseItemEnvelope::new),
 +            });
 +        }
 +        let model = history.projection();
 +        assert_eq!(history.retained_projection(&model, 1).unwrap(), model[..1]);
-+        assert_eq!(
-+            history.snapshot(None).2[0]["content"][0]["text"],
-+            "full original payload"
-+        );
-+        let summary = input_projection(&json!({"type":"message","id":"compacted-summary","role":"user","content":[{"type":"input_text","text":"summary of both originals"}]})).unwrap().map(ResponseItemEnvelope::new).unwrap();
++        assert!(history.snapshot(None).2[0].contains("full original payload"));
++        let summary = input_projection(&json!({"type":"message","id":"compacted-summary","role":"user","content":[{"type":"input_text","text":"summary of both originals"}]}).to_string()).unwrap().map(ResponseItemEnvelope::new).unwrap();
 +        let compacted = vec![summary];
 +        let before = history.snapshot(None);
 +        assert!(
@@ -1482,11 +1457,54 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +    }
 +
 +    #[test]
++    fn original_numbers_survive_tagged_rollout_value_roundtrip() {
++        let original = format!(
++            r#"{{"type":"future_record","large":1{},"nested":{{"fraction":1.2345678901234567890123456789}}}}"#,
++            "0".repeat(80)
++        );
++        let mut history = SdkOriginalHistory::default();
++        history.append(SdkOriginalItem {
++            original,
++            projection: None,
++        });
++        let before = history.snapshot(None);
++        let wire =
++            json!({"type":"compacted", "payload":{"message":"summary", "sdk_originals":history}});
++        let restored: crate::RolloutItem = serde_json::from_value(wire).unwrap();
++        let crate::RolloutItem::Compacted(compacted) = restored else {
++            panic!("compacted record");
++        };
++        assert_eq!(compacted.sdk_originals.unwrap().snapshot(None), before);
++    }
++
++    #[test]
++    fn magic_map_keys_remain_original_data_without_type_promotion() {
++        for original in [
++            r#"{"type":"future","payload":{"$serde_json::private::Number":"7"}}"#,
++            r#"{"type":"future","payload":{"$serde_json::private::RawValue":"{\"converted\":true}"}}"#,
++            r#"{"$serde_json::private::RawValue":"{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"no authority\"}]}"}"#,
++            r#"{"type":{"$serde_json::private::RawValue":"\"message\""}}"#,
++            r#"{"__proto__":{"preserved":true}}"#,
++        ] {
++            assert!(input_projection(original).unwrap().is_none());
++            let mut history = SdkOriginalHistory::default();
++            history.append(SdkOriginalItem {
++                original: original.to_owned(),
++                projection: None,
++            });
++            let restored: SdkOriginalHistory =
++                serde_json::from_value(serde_json::to_value(&history).unwrap()).unwrap();
++            assert_eq!(restored.snapshot(None), history.snapshot(None));
++            assert!(restored.projection().is_empty());
++        }
++    }
++
++    #[test]
 +    fn original_revision_and_tail_include_audit_only_values() {
 +        let mut history = SdkOriginalHistory::default();
 +        for index in 0..10_000 {
 +            history.append(SdkOriginalItem {
-+                original: json!({"type":"future","value":index}),
++                original: json!({"type":"future","value":index}).to_string(),
 +                projection: None,
 +            });
 +        }
@@ -1495,8 +1513,8 @@ index 0000000000000000000000000000000000000000..9743263e145a144232677d456d6ec8c4
 +        assert_eq!(
 +            values,
 +            vec![
-+                json!({"type":"future","value":9998}),
-+                json!({"type":"future","value":9999})
++                json!({"type":"future","value":9998}).to_string(),
++                json!({"type":"future","value":9999}).to_string()
 +            ]
 +        );
 +        assert_eq!(history.snapshot(Some(0)), (revision, total, vec![]));

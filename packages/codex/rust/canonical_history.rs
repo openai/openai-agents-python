@@ -43,7 +43,7 @@ pub async fn replace(
     state: &ThreadState,
     expected: String,
     keep: usize,
-    items: Vec<Value>,
+    items: Vec<String>,
 ) -> anyhow::Result<Value> {
     let _operation = state
         .engine
@@ -100,7 +100,7 @@ pub async fn replace(
         .context("canonical history requires complete tool call/result pairs")?;
     let appended: Vec<ResponseItem> = items
         .iter()
-        .map(codex_history::sdk_originals::input_projection)
+        .map(|item| codex_history::sdk_originals::input_projection(item))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| anyhow::anyhow!("Invalid canonical history item"))?
         .into_iter()

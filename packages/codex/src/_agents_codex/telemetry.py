@@ -392,8 +392,13 @@ class SpanContext:
         data = json.loads(_native_tracing().trace_span_context(self._handle))
         if "root_metadata" not in data:
             raise RuntimeError("Native trace metadata unavailable")
-        metadata = data["root_metadata"]
-        if metadata is not None and not isinstance(metadata, dict):
+        encoded = data["root_metadata"]
+        if encoded is None:
+            return None
+        if not isinstance(encoded, str):
+            raise RuntimeError("Invalid native trace metadata")
+        metadata = json.loads(encoded)
+        if not isinstance(metadata, dict):
             raise RuntimeError("Invalid native trace metadata")
         return metadata
 

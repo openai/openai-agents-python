@@ -633,7 +633,7 @@ class Environment(Generic[ContextT_contra]):
             "connect_timeout": self.connect_timeout,
         }
         if self.env is not None:
-            result["env"] = dict(self.env)
+            result["env_json"] = json.dumps(dict(self.env))
         if self.read_only:
             result["read_only"] = True
         if self._is_local:

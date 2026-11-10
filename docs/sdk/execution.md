@@ -330,6 +330,8 @@ Remote equivalent: the same `env` argument on `Environment(url=..., cwd=..., too
 
 Session usage: `agent.session(environment=environment)`. One-shot usage: `agent.run(input, environment=environment)`.
 
+Async values: application-defined resolution inside an [`EnvironmentSource`](#manage-the-executor-lifetime) before yielding the new `Environment`. For restore: a fresh source with current values.
+
 | Setting | Behavior |
 | --- | --- |
 | Explicit values | An immutable copy at construction, overriding the selected executor policy's values for new commands. Empty string values: supported. |

@@ -281,9 +281,50 @@ To check whether the Session is ready to save, use `checkpoint_status(kind="idle
 
 Capability support does not prove readiness. A readiness check reserves nothing, and `save_state()` and `suspend()` check again.
 
+## Original history reads and edits
+
+Original JSON objects from an idle Session, separate from its current model context and projected `items()`. Copies for inspection, without conversation changes from local edits to the returned dictionaries.
+
+| Operation | Contract |
+| --- | --- |
+| `await session.history_snapshot()` | Original records, `revision` for all records, and `total` count, including records retained only for inspection. |
+| `await session.history_snapshot(limit=N)` | Latest `N` original records; revision and count for all records. Zero for revision and count only. |
+| `await session.transact_history(expected_revision=revision, keep=total, items=objects)` | Append for positive `total`, with current model context preserved before the new items. |
+| `keep=0` | Explicit replacement of all original history and model context, including an empty original catalog. |
+| `0 < keep < total` | Original prefix retention with its current model content. Rejection before commit for ambiguous partial edits across a compaction summary. |
+
+Imported application objects: unknown fields and missing IDs unchanged on read and restore. Records with unknown, missing, or non-string types: inspection only, excluded from model input and tool calls. Known malformed executable records and incomplete client tool call/result pairs: rejection before commit. Object records only; scalar, array, and null records unsupported.
+
+Native records after provider decoding, native identity assignment, and tool-result processing, before model-context truncation. No recovery of data already lost before that capture or in older checkpoints. Imported originals: no added IDs, including IDs generated separately for execution. Existing truncation and compaction preserved by positive `keep=total`; ambiguous partial compaction editing unsupported.
+
+Example fragment, inside an async function with the application's configured `agent`:
+
+```python
+async with agent.session(
+    initial_messages=[{"role": "user", "content": "Keep this original input."}]
+) as session:
+    before = await session.history_snapshot()
+    note = {"type": "application_note", "label": "retained audit data"}
+    revision = await session.transact_history(
+        expected_revision=before.revision,
+        keep=before.total,
+        items=[note],
+    )
+    tail = await session.history_snapshot(limit=1)
+    assert tail.revision == revision
+    assert tail.total == before.total + 1
+    assert tail.items == (note,)
+    state = await session.save_state()
+
+async with agent.session(state=state) as restored:
+    assert await restored.history_snapshot(limit=1) == tail
+```
+
+Current application bindings and an idle Session required. Unchanged accepted state after revision conflicts. Session retirement following uncertain persistence; closure and restore before further work. Storage audit records retained after history edits. Existing edit restrictions for child graphs, goals, background work, and unresolved tool effects.
+
 ## Compact conversation context
 
-While the Session is idle, use `await session.compact()` to ask Codex to compact its conversation context. The call returns `None` after native work finishes. Codex generates the summary and replaces the history. The Agent's output schema does not apply to this summary.
+While the Session is idle, use `await session.compact()` to ask Codex to compact its conversation context. The call returns `None` after native work finishes. Codex generates the summary and replaces the model context. The Agent's output schema does not apply to this summary.
 
 Cancelling the call stops its native work and waits for cleanup. Closing the Session waits for the same cleanup. Submission, tool replacement, and checkpoint operations cannot run during compaction. Cancellation does not undo history changes that Codex has already committed.
 

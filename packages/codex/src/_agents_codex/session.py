@@ -6336,11 +6336,12 @@ class Session(Generic[ContextT, OutputT]):
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
 
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
-        """Read effective canonical response items from an idle Session.
+        """Original JSON object records from an idle Session.
 
-        ``limit`` returns the latest items; zero returns only revision and count.
-        The revision identifies the entire canonical input, including an omitted
-        prefix. This is distinct from projected ``items()`` and raw audit records.
+        ``limit``: latest original records; zero: revision and total only.
+        Revision and count for all original records, including audit-only records and
+        omitted prefixes. Imported unknown fields and missing IDs unchanged;
+        current model context and projected ``items()`` available separately.
         """
         self._check_callback_operation("read canonical history from its own Session")
         self._check_idle_update()
@@ -6352,7 +6353,9 @@ class Session(Generic[ContextT, OutputT]):
         async def capture() -> CanonicalHistorySnapshot:
             value = json.loads(await self._native._canonical_history(limit))
             return CanonicalHistorySnapshot(
-                value["revision"], value["total"], tuple(value["items"])
+                value["revision"],
+                value["total"],
+                tuple(json.loads(item) for item in value["items"]),
             )
 
         return await self._join_mutation(asyncio.create_task(capture()))
@@ -6364,16 +6367,21 @@ class Session(Generic[ContextT, OutputT]):
         keep: int,
         items: Sequence[Mapping[str, Any]] = (),
     ) -> str:
-        """Atomically retain a prefix and replace its suffix with native items.
+        """Atomic original-prefix retention and suffix replacement with JSON objects.
 
-        Use a current ``history_snapshot().revision``. Core rejects a conflict,
-        invalid item batch or non-idle owner before committing. ``keep=0`` replaces
-        the effective conversation; append with ``keep=snapshot.total``. The
-        acknowledged replacement survives restore through canonical storage.
-        An uncertain persistence outcome retires this Session; close it and
-        restore from storage before continuing. Raw rollout audit records remain.
-        Child graphs, goals and pending work
-        must settle or use their dedicated APIs before editing history.
+        ``expected_revision``: current ``history_snapshot().revision``.
+        ``keep``: original-record count, including audit-only rows.
+        Positive ``keep=snapshot.total``: append with current model context preserved.
+        ``keep=0``: explicit whole-history and model-context replacement, even if empty.
+        Other prefixes: exact retained-original model projections only;
+        ambiguous partial compaction-summary edits rejected before commit.
+
+        Unknown imported record types: audit-only, without model input or work.
+        Known malformed executable records, invalid client tool pairs, stale
+        revisions and non-idle owners: rejection before commit. Acknowledged
+        replacements retained through native restore; raw rollout audit records retained.
+        Uncertain persistence retires this Session; close and restore required.
+        Child graphs, goals and pending work require their dedicated APIs first.
         """
         self._check_callback_operation("edit canonical history from its own Session")
         self._check_idle_update()
@@ -6381,7 +6389,7 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("expected_revision must be nonempty text")
         if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
             raise ValueError("keep must be a nonnegative integer")
-        captured = json.dumps(list(items))
+        captured = json.dumps([json.dumps(item) for item in items])
 
         async def replace() -> str:
             value = json.loads(
