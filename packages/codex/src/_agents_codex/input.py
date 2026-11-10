@@ -5,7 +5,13 @@ from typing import Any as Any, Literal as Literal, TypeAlias as TypeAlias
 
 from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict
 
-from ._media import ImageDetail as ImageDetail, _capture_audio, _capture_file, _capture_image
+from ._media import (
+    _MAX_AUDIO_INPUT_BYTES,
+    ImageDetail as ImageDetail,
+    _capture_audio,
+    _capture_file,
+    _capture_image,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -67,7 +73,11 @@ class AssistantMessage(TypedDict):
 InitialMessage: TypeAlias = UserMessage | AssistantMessage
 
 
-def _native_input(input: UserInput) -> list[dict[str, Any]]:
+def _native_input(
+    input: UserInput, *, _audio_budget: list[int] | None = None
+) -> list[dict[str, Any]]:
+    if _audio_budget is None:
+        _audio_budget = [_MAX_AUDIO_INPUT_BYTES]
     if isinstance(input, str):
         return [{"type": "text", "text": input}]
     if not isinstance(input, Mapping):
@@ -95,7 +105,7 @@ def _native_input(input: UserInput) -> list[dict[str, Any]]:
                 raise ValueError("input_text requires a text string")
             parts.append({"type": "text", "text": part["text"]})
         elif kind == "input_audio":
-            parts.append({"type": "audio", **_capture_audio(part)})
+            parts.append({"type": "audio", **_capture_audio(part, _audio_budget)})
         elif kind == "input_image":
             parts.append({"type": "image", **_capture_image(part)})
         elif kind == "input_file":
