@@ -889,7 +889,7 @@ mod computer_recovery_tests {
             meta.content_item_kinds = Some(vec![ContentItemKind(NOT_APPLIED.into())]);
         }
         let receipt = ReconciledCall {
-            thread_id: "thread".into(),
+            thread_id: ThreadId::new(),
             turn_id: "turn-1".into(),
             call_id: "computer-1".into(),
             outcome: Outcome::NotApplied,
