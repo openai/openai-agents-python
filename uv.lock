@@ -3790,6 +3790,9 @@ tracing = [
     { name = "httpx2", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "httpx2", version = "2.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
+decisions = [
+    { name = "openai" },
+]
 voice = [
     { name = "certifi" },
     { name = "griffelib" },
@@ -3877,6 +3880,7 @@ requires-dist = [
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'classic-voice'", specifier = ">=2.2.0,<3" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
     { name = "openai", marker = "extra == 'classic'", specifier = ">=3.0.0,<4" },
+    { name = "openai", marker = "extra == 'decisions'", specifier = ">=3.41.0,<4" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-any-llm'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-blaxel'" },
     { name = "openai-agents", extras = ["classic"], marker = "extra == 'classic-cloudflare'" },
@@ -3927,7 +3931,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'classic-voice'", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<17" },
 ]
-provides-extras = ["tracing", "a2a", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
+provides-extras = ["tracing", "a2a", "decisions", "voice", "classic", "classic-voice", "classic-viz", "classic-litellm", "classic-any-llm", "classic-realtime", "classic-sqlalchemy", "classic-encrypt", "classic-redis", "classic-dapr", "classic-mongodb", "classic-docker", "classic-blaxel", "classic-daytona", "classic-cloudflare", "classic-e2b", "classic-modal", "classic-vercel", "classic-s3", "classic-temporal"]
 
 [package.metadata.requires-dev]
 dev = [

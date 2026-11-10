@@ -12,7 +12,15 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from typing_extensions import assert_type
 
-from agents import Agent, Completed, Session, SessionState, Turn, TurnStoppedError, function_tool
+from agents import (
+    Agent,
+    Completed,
+    Session,
+    SessionState,
+    Turn,
+    TurnStoppedError,
+    function_tool,
+)
 from agents._history import project_history
 from agents.observation import UsageUpdated
 from agents.usage import TokenUsage, TokenUsageInfo

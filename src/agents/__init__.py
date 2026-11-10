@@ -38,6 +38,14 @@ if TYPE_CHECKING:
         ComputerSafetyError as ComputerSafetyError,
         computer_tool as computer_tool,
     )
+    from .decisions import (
+        DecisionError as DecisionError,
+        DecisionInput as DecisionInput,
+        DecisionProvider as DecisionProvider,
+        DecisionRequest as DecisionRequest,
+        DecisionResponse as DecisionResponse,
+        OpenAIDecisions as OpenAIDecisions,
+    )
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -199,6 +207,12 @@ _MODULES = {
     "ModelRequest": ".models",
     "ModelResponse": ".models",
     "NativeModel": ".models",
+    "DecisionError": ".decisions",
+    "DecisionInput": ".decisions",
+    "DecisionProvider": ".decisions",
+    "DecisionRequest": ".decisions",
+    "DecisionResponse": ".decisions",
+    "OpenAIDecisions": ".decisions",
     "CompactionContext": ".compaction",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",

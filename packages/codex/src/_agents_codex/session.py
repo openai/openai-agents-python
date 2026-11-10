@@ -109,6 +109,7 @@ from .canonical_storage import (
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
 from .computer import _CapturedComputer, _ComputerCall, _ComputerResources
+from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -944,6 +945,9 @@ class _Submission:
     last_assistant_had_blank_final: bool = False
     policy_stop: Literal["requested", "expired"] | None = None
     repairing: bool = False
+    repair_attempt_count: int = 0
+    # A one-element tuple distinguishes an accepted None from no accepted value.
+    accepted_output: tuple[Any] | None = None
     before_step: _BeforeStep[Any] | None = None
     prepare_request: _PrepareRequest | None = None
     preparation_index: int = 0
@@ -2661,6 +2665,57 @@ def _configure_child_roles(
         }
 
 
+def _capture_opening_agent(
+    agent: Agent[ContextT, OutputT],
+    *,
+    provider: NativeProvider | None,
+    model: str | None,
+    model_settings: ModelSettings | None,
+    tool_selection: Sequence[Tool[ContextT]] | None,
+) -> Agent[ContextT, OutputT]:
+    """Detach declaration defaults before native opening can suspend."""
+    return Agent[ContextT, OutputT](
+        instructions=agent.instructions,
+        name=agent.name,
+        tools=agent.tools if tool_selection is None else tool_selection,
+        handoffs=agent.handoffs,
+        model=agent.model if model is None else model,
+        model_settings=cast(
+            ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
+        ),
+        provider=agent.provider if provider is None else provider,
+        decisions=agent.decisions,
+        output_type=cast(OutputSpec[OutputT], agent.output_type),
+        programmatic_tool_calling=agent.programmatic_tool_calling,
+        transform_context=agent.transform_context,
+        before_compact=agent.before_compact,
+        before_complete=agent.before_complete,
+    )
+
+
+def _supports_atomic_first_turn(
+    agent: Agent[Any, Any],
+    *,
+    output_mode: str,
+    programmatic_tool_calling: bool,
+    tools: Sequence[Tool[Any]],
+) -> bool:
+    return (
+        output_mode == "plain"
+        and not programmatic_tool_calling
+        and agent.transform_context is None
+        and agent.before_compact is None
+        and agent.before_complete is None
+        and all(
+            isinstance(tool, FunctionTool)
+            and tool._bind is not None
+            and tool.needs_approval is False
+            and not tool.defer_loading
+            for tool in tools
+        )
+    )
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -2743,21 +2798,12 @@ class Session(Generic[ContextT, OutputT]):
             selected = None
             # Capture the declaration before native opening can suspend. Keep
             # application hooks and executor policy bound to the original Agent.
-            agent = Agent[ContextT, OutputT](
-                instructions=agent.instructions,
-                name=agent.name,
-                tools=agent.tools if tool_selection is None else tool_selection,
-                handoffs=agent.handoffs,
-                model=agent.model if model is None else model,
-                model_settings=cast(
-                    ModelSettings, {**agent.model_settings, **_copy_model_settings(model_settings)}
-                ),
-                provider=agent.provider if provider is None else provider,
-                output_type=cast(OutputSpec[OutputT], agent.output_type),
-                programmatic_tool_calling=agent.programmatic_tool_calling,
-                transform_context=agent.transform_context,
-                before_compact=agent.before_compact,
-                before_complete=agent.before_complete,
+            agent = _capture_opening_agent(
+                agent,
+                provider=provider,
+                model=model,
+                model_settings=model_settings,
+                tool_selection=tool_selection,
             )
         if observation_retention not in ("bounded", "all"):
             raise ValueError('observation_retention must be "bounded" or "all"')
@@ -2990,17 +3036,11 @@ class Session(Generic[ContextT, OutputT]):
             and agent.provider is not None
             and codex_login is None
             and not agent.provider._websockets_enabled
-            and output.mode == "plain"
-            and not programmatic_tool_calling
-            and agent.transform_context is None
-            and agent.before_compact is None
-            and agent.before_complete is None
-            and all(
-                isinstance(tool, FunctionTool)
-                and tool._bind is not None
-                and tool.needs_approval is False
-                and not tool.defer_loading
-                for tool in available
+            and _supports_atomic_first_turn(
+                agent,
+                output_mode=output.mode,
+                programmatic_tool_calling=programmatic_tool_calling,
+                tools=available,
             )
         )
         lease = None
@@ -3590,6 +3630,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
+                session._decisions_provider = agent.decisions
                 session._profiles = profile_runtimes
                 session._agent_profile_fingerprint = profile_fingerprint
                 session._bindings = agent.tools
@@ -3996,6 +4037,7 @@ class Session(Generic[ContextT, OutputT]):
         self._observations = _ObservationBuffer(self.id, retention=observation_retention)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
+        self._decisions_provider: DecisionProvider | None = None
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
             weakref.WeakValueDictionary()
         )
@@ -5670,7 +5712,9 @@ class Session(Generic[ContextT, OutputT]):
                 and function.before is not None
                 and not preapproval_complete
             ):
-                decision = await _call_callback(function.before, admit, context)
+                decision = await self._call_decision_callback(
+                    state, message, function.before, admit, context
+                )
                 if not admit():
                     return
                 if isinstance(decision, Deny):
@@ -5717,7 +5761,7 @@ class Session(Generic[ContextT, OutputT]):
                 required = (
                     policy
                     if isinstance(policy, bool)
-                    else await _call_callback(policy, admit, context)
+                    else await self._call_decision_callback(state, message, policy, admit, context)
                 )
                 if not isinstance(required, bool):
                     raise TypeError("needs_approval must return a bool")
@@ -8475,8 +8519,8 @@ class Session(Generic[ContextT, OutputT]):
                     else terminal.get("last_agent_message") or ""
                 )
                 # Preserve single validation and its established error ordering
-                # unless correction is explicitly enabled. A correction can
-                # start only after all original callbacks and usage have settled.
+                # unless correction is enabled. Completion-gated correction has
+                # already settled; ungated correction starts after callback/usage drain.
                 tool_payload = terminal.get("tool_completion")
                 proposal = state.tool_completion
                 if tool_payload is not None:
@@ -8501,10 +8545,14 @@ class Session(Generic[ContextT, OutputT]):
                     if state.cleanup_error is not None:
                         raise state.cleanup_error
                     invalid = False
-                    try:
-                        output = self._validate_traced_output(state, text)
-                    except OutputValidationError:
-                        invalid = True
+                    if state.accepted_output is not None:
+                        (output,) = state.accepted_output
+                        state.accepted_output = None
+                    else:
+                        try:
+                            output = self._validate_traced_output(state, text)
+                        except OutputValidationError:
+                            invalid = True
                     if invalid:
                         # Leave the validation exception context before running
                         # other work or surfacing a different native failure.
@@ -8743,8 +8791,12 @@ class Session(Generic[ContextT, OutputT]):
         ) and (
             isinstance(error, asyncio.CancelledError)
             or state.policy_stop == "requested"
-            and state.failure.done()
-            and error is state.failure.result()
+            and (
+                state.failure.done()
+                and error is state.failure.result()
+                or state.graceful_requested
+                and not state.failure.done()
+            )
         ):
             if state.cleanup_error is None:
                 stopped = TurnStoppedError(
@@ -8793,31 +8845,83 @@ class Session(Generic[ContextT, OutputT]):
         self._finish_failed_observations()
         self._promote()
 
-    def _validate_traced_output(self, state: _Submission, text: str) -> Any:
+    def _validate_traced_output(
+        self, state: _Submission, text: str, *, output: _PreparedOutput | None = None
+    ) -> Any:
         context = state.tracing.context if state.tracing is not None else None
-        return _validate_output(state.output, text, context)
+        return _validate_output(state.output if output is None else output, text, context)
 
     async def _repair_output(self, state: _Submission, text: str) -> Any:
-        """Correct only invalid final text under the still-active root owner."""
+        """Correct invalid final text when no application completion gate is active."""
+        issues: tuple[OutputValidationIssue, ...] = ()
+        output = state.output
+        while state.repair_attempt_count < output.max_retries:
+            corrected = await self._repair_output_once(state, text)
+            if corrected is None:
+                raise asyncio.CancelledError()
+            text = corrected
+            try:
+                return self._validate_traced_output(state, text, output=output)
+            except OutputValidationError as error:
+                issues = error.issues
+        # Never expose validator inputs through an attached exception context.
+        raise OutputValidationError(text, issues)
+
+    async def _repair_output_once(
+        self,
+        state: _Submission,
+        text: str,
+        *,
+        source_message: Mapping[str, Any] | None = None,
+        active: Callable[[], bool] | None = None,
+    ) -> str | None:
+        """Own one correction; None means a graceful stop prevented admission."""
+        state.repair_attempt_count += 1
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
-        provider = self._opening_agent.provider
+        source_agent = (
+            self._agent_for_message(source_message)
+            if source_message is not None
+            else self._effective_agent()
+        )
+        output = (
+            self._profiles[source_message["profile_id"]].output
+            if source_message is not None and self._profiles and not state.output_override
+            else state.output
+        )
+        if active is not None and not active():
+            raise asyncio.CancelledError()
+        provider = source_agent.provider
+        if provider is None:
+            provider = self._opening_agent.provider
         if provider is None:
             provider = self._owned_provider
         assert provider is not None
         assert self._model_api_key is not None or self._codex_login_binding is not None
         history = json.loads(await self._native.read_thread_history(None))
+        if active is not None and not active():
+            raise asyncio.CancelledError()
         captured = None
         for row in reversed(history):
-            payload = row.get("payload")
-            if (
-                row.get("type") == "event_msg"
-                and isinstance(payload, dict)
-                and payload.get("type") == "thread_settings_applied"
-                and payload.get("thread_id") == self.id
-            ):
-                captured = payload.get("thread_settings")
-                break
+            if source_message is not None and self._profiles:
+                profile = (row.get("metadata") or {}).get("sdk_agent_profile")
+                if (
+                    isinstance(profile, dict)
+                    and profile.get("profile_id") == source_message["profile_id"]
+                    and profile.get("epoch") == source_message["profile_epoch"]
+                ):
+                    captured = profile.get("model")
+                    break
+            else:
+                payload = row.get("payload")
+                if (
+                    row.get("type") == "event_msg"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "thread_settings_applied"
+                    and payload.get("thread_id") == self.id
+                ):
+                    captured = payload.get("thread_settings")
+                    break
         if not isinstance(captured, dict) or not isinstance(captured.get("model"), str):
             raise NativeError("Native history does not contain accepted model settings for repair")
         settings = cast(
@@ -8831,108 +8935,103 @@ class Session(Generic[ContextT, OutputT]):
         declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
-            model=captured["model"],
+            model=(source_message or {}).get("model") or captured["model"],
             model_settings=settings,
-            transform_context=self._effective_agent().transform_context,
-            before_compact=self._effective_agent().before_compact,
+            transform_context=source_agent.transform_context,
+            before_compact=source_agent.before_compact,
         )
-        issues: tuple[OutputValidationIssue, ...] = ()
-        for _ in range(state.output.max_retries):
-            # The original native turn has already settled. Its owner can
-            # still request a graceful stop before another correction starts.
-            if state.graceful_requested:
+        # The original owner may still hold its completion receipt. A graceful
+        # stop prevents any new correction from starting in either path.
+        if state.graceful_requested:
+            return None
+        if state.failure.done():
+            raise state.failure.result()
+        # A previous Turn may have left a failed repair close. Retire that
+        # exact owner before another repair can replace it.
+        if self._repair_session is not None:
+            await self._repair_session.aclose()
+            self._repair_session = None
+        if active is not None and not active():
+            raise asyncio.CancelledError()
+        repair = await Session[ContextT, str]._open(
+            declaration,
+            context=self._context,
+            _captured_api_key=self._model_api_key,
+            _expected_codex_login_binding=self._codex_login_binding,
+            parent_trace=state.parent_trace,
+        )
+        assert isinstance(repair, Session)
+        self._repair_session = repair
+        repair._trace_context = state.tracing.context if state.tracing is not None else None
+        repair._context_transform_purpose = "output_repair"
+        repair._observations.repair_parent = (self._observations, handle.submission_id)
+        repair._rate_limit_parent = self
+        try:
+            if active is not None and not active():
                 raise asyncio.CancelledError()
+            if state.graceful_requested:
+                await repair.aclose()
+                return None
             if state.failure.done():
                 raise state.failure.result()
-            # A previous Turn may have left a failed repair close. Retire that
-            # exact owner before another repair can replace it.
-            if self._repair_session is not None:
-                await self._repair_session.aclose()
-                self._repair_session = None
-            repair = await Session[ContextT, str]._open(
-                declaration,
-                context=self._context,
-                _captured_api_key=self._model_api_key,
-                _expected_codex_login_binding=self._codex_login_binding,
-                parent_trace=state.parent_trace,
-            )
-            assert isinstance(repair, Session)
-            self._repair_session = repair
-            repair._trace_context = state.tracing.context if state.tracing is not None else None
-            repair._context_transform_purpose = "output_repair"
-            repair._observations.repair_parent = (self._observations, handle.submission_id)
-            repair._rate_limit_parent = self
+            # No repair work can have started before this local check.
+            # _start reaches its identical check without yielding.
+            repair._check_open()
+            rejected = False
             try:
-                if state.graceful_requested:
-                    raise asyncio.CancelledError()
-                if state.failure.done():
-                    raise state.failure.result()
-                # No repair work can have started before this local check.
-                # _start reaches its identical check without yielding.
-                repair._check_open()
-                rejected = False
                 try:
-                    try:
-                        attempt = await repair._start(
-                            _native_input(
-                                json.dumps({"schema": state.output.schema, "invalid_output": text})
-                            ),
-                            _prepare_spec(str),
-                            budget=state.budget,
-                        )
-                    except NativeError as error:
-                        rejected = error._effects == "not_started"
-                        raise
-                    repair_result = asyncio.create_task(attempt.get_result())
-                    try:
-                        await asyncio.wait(
-                            (repair_result, state.failure), return_when=asyncio.FIRST_COMPLETED
-                        )
-                        if state.failure.done():
-                            raise state.failure.result()
-                        result = repair_result.result()
-                    except BaseException as error:
-                        # Waiting is passive. This producer, not the waiter,
-                        # owns cancellation and joins only its exact attempt.
-                        await _close_after_error(error, attempt.cancel)
-                        raise
-                    finally:
-                        cancel_once(repair_result)
-                        await asyncio.gather(repair_result, return_exceptions=True)
+                    attempt = await repair._start(
+                        _native_input(
+                            json.dumps({"schema": output.schema, "invalid_output": text})
+                        ),
+                        _prepare_spec(str),
+                        budget=state.budget,
+                    )
+                except NativeError as error:
+                    rejected = error._effects == "not_started"
+                    raise
+                repair_result = asyncio.create_task(attempt.get_result())
+                try:
+                    await asyncio.wait(
+                        (repair_result, state.failure), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if state.failure.done():
+                        raise state.failure.result()
+                    result = repair_result.result()
+                except BaseException as error:
+                    # Waiting is passive. This producer, not the waiter,
+                    # owns cancellation and joins only its exact attempt.
+                    await _close_after_error(error, attempt.cancel)
+                    raise
                 finally:
-                    if not rejected:
-                        if repair._broken:
-                            self._repair_receipts_incomplete = True
-                        else:
-                            try:
-                                recorded = json.loads(
-                                    await repair._native.read_thread_history(None)
-                                )
-                                turns, items = project_history(recorded, repair.id)
-                                for turn in turns:
-                                    turn["parent_session_id"] = self.id
-                                    turn["parent_turn_id"] = handle.turn_id
-                                self._repair_turns.extend(turns)
-                                self._repair_items.extend(items)
-                            except BaseException:
-                                # Preserve uncertainty even if a later repair succeeds.
-                                self._repair_receipts_incomplete = True
-                                raise
-            except BaseException as error:
-                await _close_after_error(error, repair.aclose)
-                raise
-            else:
-                await repair.aclose()
+                    cancel_once(repair_result)
+                    await asyncio.gather(repair_result, return_exceptions=True)
             finally:
-                if repair._closed and repair._environment_lease is None:
-                    self._repair_session = None
-            text = result.final_output
-            try:
-                return self._validate_traced_output(state, text)
-            except OutputValidationError as error:
-                issues = error.issues
-        # Never expose validator inputs through an attached exception context.
-        raise OutputValidationError(text, issues)
+                if not rejected:
+                    if repair._broken:
+                        self._repair_receipts_incomplete = True
+                    else:
+                        try:
+                            recorded = json.loads(await repair._native.read_thread_history(None))
+                            turns, items = project_history(recorded, repair.id)
+                            for turn in turns:
+                                turn["parent_session_id"] = self.id
+                                turn["parent_turn_id"] = handle.turn_id
+                            self._repair_turns.extend(turns)
+                            self._repair_items.extend(items)
+                        except BaseException:
+                            # Preserve uncertainty even if a later repair succeeds.
+                            self._repair_receipts_incomplete = True
+                            raise
+        except BaseException as error:
+            await _close_after_error(error, repair.aclose)
+            raise
+        else:
+            await repair.aclose()
+        finally:
+            if repair._closed and repair._environment_lease is None:
+                self._repair_session = None
+        return cast(str, result.final_output)
 
     def _finish_failed_observations(self) -> None:
         """Close a failed stream after every already-known owner has settled."""
@@ -9482,7 +9581,9 @@ class Session(Generic[ContextT, OutputT]):
             snapshot = cast(PreparedRequest, deepcopy(message["data"]))
             context = state.tracing.context if state.tracing is not None else None
             with _activate(context):
-                reply = await _call_callback(
+                reply = await self._call_decision_callback(
+                    state,
+                    message,
                     _capturing_callback(
                         state.prepare_request,
                         lambda: (
@@ -9516,6 +9617,36 @@ class Session(Generic[ContextT, OutputT]):
                 if not state.stopping and not state.failure.done():
                     state.failure.set_result(NativeError("Prepared request expired"))
 
+    async def _call_decision_callback(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
+            provider = getattr(self, "_decisions_provider", None)
+            if getattr(self, "_profiles", None):
+                profile_provider = self._agent_for_message(message).decisions
+                if profile_provider is not None:
+                    provider = profile_provider
+            async with _bind_decisions(
+                args[0],
+                lambda: (
+                    not state.stopping
+                    and not state.failure.done()
+                    and not self._closing
+                    and not _native_callback_cancelled(state)
+                    and active()
+                ),
+                provider,
+            ):
+                return await _call_callback(callback, active, *args, **kwargs)
+        return await _call_callback(callback, active, *args, **kwargs)
+
     async def _run_owned_context_callback(
         self,
         state: _CallbackState,
@@ -9529,6 +9660,7 @@ class Session(Generic[ContextT, OutputT]):
         def active() -> bool:
             if (
                 state.stopping
+                or _native_callback_cancelled(state)
                 or state.failure.done()
                 or isinstance(state, _Submission)
                 and self._active is not state
@@ -9549,7 +9681,14 @@ class Session(Generic[ContextT, OutputT]):
             if not active():
                 return
             callback, request = prepare()
-            result = await _call_callback(callback, active, request)
+            if isinstance(request, CompletionContext):
+                result = await self._call_completion_callback(
+                    state, message, callback, active, request
+                )
+            else:
+                result = await self._call_decision_callback(
+                    state, message, callback, active, request
+                )
             if not active():
                 return
             reply(result)
@@ -9657,6 +9796,69 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _call_completion_callback(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        callback: Callable[..., Any],
+        active: Callable[[], bool],
+        request: CompletionContext[ContextT],
+    ) -> Any:
+        if (
+            isinstance(state, _Submission)
+            and self._profiles
+            and not state.output_override
+            and state.realtime_tool is None
+        ):
+            self._agent_for_message(message)
+            state.output = self._profiles[message["profile_id"]].output
+        if (
+            not isinstance(state, _Submission)
+            or not state.output.max_retries
+            or state.unsampled_steering
+            or state.realtime_tool is not None
+        ):
+            return await self._call_decision_callback(state, message, callback, active, request)
+        # Every native proposal owns a fresh acceptance. ContinueTurn must never
+        # leave a tentative result for a later proposal or terminal settlement.
+        state.accepted_output = None
+        output_contract = state.output
+        while True:
+            if not active():
+                raise asyncio.CancelledError()
+            decision = await self._call_decision_callback(state, message, callback, active, request)
+            if not active():
+                return decision
+            if decision is not None:
+                if isinstance(decision, ContinueTurn) and state.graceful_requested:
+                    return StopTurn("Graceful stop requested")
+                return decision
+            text = request.text or ""
+            invalid = False
+            issues: tuple[OutputValidationIssue, ...] = ()
+            try:
+                output = self._validate_traced_output(state, text, output=output_contract)
+            except OutputValidationError as error:
+                invalid = True
+                issues = error.issues
+            if not invalid:
+                state.accepted_output = (output,)
+                return None
+            if state.graceful_requested:
+                return StopTurn("Graceful stop requested")
+            if state.repair_attempt_count >= output_contract.max_retries:
+                raise OutputValidationError(text, issues)
+            state.repairing = True
+            try:
+                corrected = await self._repair_output_once(
+                    state, text, source_message=message, active=active
+                )
+            finally:
+                state.repairing = False
+            if corrected is None:
+                return StopTurn("Graceful stop requested")
+            request = replace(request, text=corrected)
+
     async def _propose_tool_completion(
         self, state: _CallbackState, message: dict[str, Any]
     ) -> None:
@@ -9664,8 +9866,13 @@ class Session(Generic[ContextT, OutputT]):
         proposal: _ToolCompletionProposal | None = None
 
         def admitted() -> bool:
-            self._native._check_step(message["step_id"], message["thread"], message["instance"])
-            return not state.stopping and not state.failure.done()
+            if state.stopping or state.failure.done():
+                return False
+            try:
+                self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            except RuntimeError:
+                return False
+            return True
 
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal
@@ -9718,7 +9925,9 @@ class Session(Generic[ContextT, OutputT]):
             )
             callback = source_agent.before_complete
             if callback is not None:
-                decision = await _call_callback(
+                decision = await self._call_decision_callback(
+                    state,
+                    message,
                     callback,
                     admitted,
                     CompletionContext(
@@ -9816,7 +10025,10 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     state.policy_stop = "requested"
                     state.stopping = True
-                    state.failure.set_result(NativeError("Turn stopped by policy"))
+                    # A caller's graceful stop is an owned cancellation, not
+                    # an application callback failure returned to that caller.
+                    if not isinstance(state, _Submission) or not state.graceful_requested:
+                        state.failure.set_result(NativeError("Turn stopped by policy"))
                 return
             instructions = None
             if decision is not None:
@@ -9911,7 +10123,9 @@ class Session(Generic[ContextT, OutputT]):
             if callback is not None:
                 if child:
                     assert isinstance(state.handle, ChildInvocation)
-                    selection = await _call_callback(
+                    selection = await self._call_decision_callback(
+                        state,
+                        message,
                         callback,
                         active,
                         ChildStepContext(
@@ -9919,8 +10133,13 @@ class Session(Generic[ContextT, OutputT]):
                         ),
                     )
                 else:
-                    selection = await _call_callback(
-                        callback, active, self.active_turn or state.handle, step_index=index
+                    selection = await self._call_decision_callback(
+                        state,
+                        message,
+                        callback,
+                        active,
+                        self.active_turn or state.handle,
+                        step_index=index,
                     )
             if not active():
                 return
@@ -9936,6 +10155,8 @@ class Session(Generic[ContextT, OutputT]):
                 state.stopping = True
                 state.failure.set_result(NativeError("Turn stopped by policy"))
                 return
+            if budget is not None:
+                budget.check()
             defaults = {
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in (
@@ -11248,8 +11469,8 @@ class Session(Generic[ContextT, OutputT]):
                 )
             if entry.before is not None:
                 assert context is not None
-                decision = await _call_callback(
-                    entry.before, lambda: self._admit_tool(state, request), context
+                decision = await self._call_decision_callback(
+                    state, message, entry.before, lambda: self._admit_tool(state, request), context
                 )
                 if not self._admit_tool(state, request):
                     return
@@ -11286,14 +11507,22 @@ class Session(Generic[ContextT, OutputT]):
             duration = entry.callback_timeout
             if isinstance(entry, _CapturedComputer):
                 assert context is not None and isinstance(parsed, _ComputerCall)
-                value = await entry.invoke(
-                    self._computer_resources,
+                value = await self._call_decision_callback(
+                    state,
+                    message,
+                    partial(
+                        entry.invoke,
+                        self._computer_resources,
+                        lambda: self._admit_tool(state, request),
+                    ),
                     lambda: self._admit_tool(state, request),
                     context,
                     parsed,
                 )
             elif duration is None:
-                value = await _call_callback(
+                value = await self._call_decision_callback(
+                    state,
+                    message,
                     entry.callback,
                     lambda: self._admit_tool(state, request),
                     *args,
@@ -11325,8 +11554,8 @@ class Session(Generic[ContextT, OutputT]):
                     nonlocal value, body_error
                     try:
                         if admit_body():
-                            value = await _call_callback(
-                                entry.callback, admit_body, *args, **kwargs
+                            value = await self._call_decision_callback(
+                                state, message, entry.callback, admit_body, *args, **kwargs
                             )
                     except BaseException as error:
                         # Transport every exit to the owner without letting
@@ -11380,7 +11609,9 @@ class Session(Generic[ContextT, OutputT]):
                     text = str(timeout_error)
                     if entry.timeout_error_function is not None:
                         assert context is not None
-                        text = await _call_callback(
+                        text = await self._call_decision_callback(
+                            state,
+                            message,
                             entry.timeout_error_function,
                             lambda: self._admit_tool(state, request),
                             context,
@@ -11412,7 +11643,9 @@ class Session(Generic[ContextT, OutputT]):
 
                 timer = loop.call_at(cutoff, expire_callback)
                 try:
-                    value = await _call_callback(
+                    value = await self._call_decision_callback(
+                        state,
+                        message,
                         entry.callback,
                         lambda: self._admit_tool(state, request),
                         *args,
@@ -11458,8 +11691,13 @@ class Session(Generic[ContextT, OutputT]):
             if entry.after is not None and timeout_output is None:
                 assert context is not None
                 original_output = output
-                replacement = await _call_callback(
-                    entry.after, lambda: self._admit_tool(state, request), context, output
+                replacement = await self._call_decision_callback(
+                    state,
+                    message,
+                    entry.after,
+                    lambda: self._admit_tool(state, request),
+                    context,
+                    output,
                 )
                 if not self._admit_tool(state, request):
                     return

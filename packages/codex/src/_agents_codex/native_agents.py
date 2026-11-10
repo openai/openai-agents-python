@@ -19,6 +19,7 @@ from typing import (
     Literal as Literal,
     Protocol as Protocol,
     TypeAlias as TypeAlias,
+    overload as overload,
 )
 
 from typing_extensions import TypeVar as TypeVar
@@ -29,9 +30,11 @@ from .turn import _child_submission_id as _child_submission_id
 
 if TYPE_CHECKING:
     from ._function_tools import Tool, ToolContext
+    from .decisions import DecisionInput, DecisionProvider
     from .executor import Environment
     from .tools import ToolRef
 
+_DecisionT = TypeVar("_DecisionT")
 ContextT = TypeVar("ContextT", contravariant=True, default=object)
 _ContextT_co = TypeVar("_ContextT_co", covariant=True, default=object)
 
@@ -214,6 +217,71 @@ class ChildStepContext(Generic[_ContextT_co]):
     context: _ContextT_co = field(repr=False)
     child: ChildInvocation
     step_index: int
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: Any,
+        choices: None = None,
+    ) -> Any: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a typed question during this exact admitted callback.
+
+        Input is explicit. The callback's captured provider is the default;
+        provider overrides it for this call. Completed usage is recorded before
+        local validation. For overlapping decisions, await ``asyncio.gather()`` in this callback.
+        """
+        from .decisions import _bound_decide
+
+        return await _bound_decide(
+            self, question, input=input, provider=provider, choices=choices, output_type=output_type
+        )
 
 
 _preserve_module_identity(globals(), "agents.native_agents")

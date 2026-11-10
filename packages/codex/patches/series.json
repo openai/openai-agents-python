@@ -391,7 +391,15 @@
     {
       "path": "0098-retained-trace-root-descriptors.patch",
       "sha256": "f6d9722ba0406441820dbc17106f124ce954157a7b28195eb872f23f838c8ed0"
+    },
+    {
+      "path": "0068-decisions.patch",
+      "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
+    },
+    {
+      "path": "0099-retained-trace-recovery-watermark.patch",
+      "sha256": "860664c1fbf24002588e74e5dbbda2ea7b14d4aadd0bca5ba2c1f0e8871625f9"
     }
   ],
-  "result_tree": "34b61e58ba179c4a24c900044ad78471d52b9e59"
+  "result_tree": "b182776b9784eb4dff6f9447f8172c1705db5724"
 }
