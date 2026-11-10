@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from agents import Agent, NativeProvider, function_tool
+from agents import Agent, Deny, NativeProvider, function_tool
+from agents.observation import ToolFinished, ToolStarted
 from agents.realtime import RealtimeConfig
 from tests._asyncio import timeout
 from tests.test_native_manual_tools import next_request
@@ -266,4 +267,108 @@ async def test_native_voice_close_discards_late_availability(realtime_peer: Real
         assert not any(
             frame.get("item", {}).get("call_id") == "retired-call" for frame in peer.frames
         )
+        assert peer.responses.requests == []
+
+
+async def test_native_managed_availability_rejection_has_no_unfinished_tool_notice(
+    realtime_peer: RealtimePeer,
+) -> None:
+    peer = realtime_peer
+    allowed = True
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def risky() -> str:
+        effects.append("forbidden")
+        return "forbidden"
+
+    def enabled(_context, _tool):
+        return allowed
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-policy", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Use risky.", tools=[risky], provider=provider).session() as session,
+    ):
+        reader = session.events(include_execution_details=True)
+        async with session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", is_tool_enabled=enabled)
+        ) as owner:
+            await peer.function("risky", {}, "approval-disabled")
+            request = await next_request(session.interactions(), risky)
+            allowed = False
+            await request.approve()
+            output = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "approval-disabled"
+            )
+            assert output["item"]["output"] == "Tool risky not found"
+            await owner.update({"instructions": "Rejection acknowledged."})
+            assert effects == []
+            assert await session.pending_interactions() == ()
+    notices = [
+        event
+        async for event in reader
+        if isinstance(event, (ToolStarted, ToolFinished)) and event.call_id == "approval-disabled"
+    ]
+    # Python checks execution availability before publishing ToolStarted.
+    assert notices == []
+    assert peer.responses.requests == []
+
+
+@pytest.mark.parametrize("reason", ["implicit", "explicit_default", "input_policy"])
+async def test_native_remembered_rejection_preserves_formatter_omission(
+    realtime_peer: RealtimePeer, reason: str
+) -> None:
+    peer = realtime_peer
+    effects, formatted = [], []
+
+    def before(_context):
+        return Deny("Tool execution was rejected")
+
+    @function_tool(
+        needs_approval=True,
+        before=before if reason == "input_policy" else None,
+        run_before_approval=True,
+    )
+    def risky() -> str:
+        effects.append("forbidden")
+        return "forbidden"
+
+    def formatter(error):
+        formatted.append(error.call_id)
+        return "Application declined " + error.call_id
+
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="synthetic-policy", supports_websockets=False
+        ) as provider,
+        Agent(instructions="Use risky.", tools=[risky], provider=provider).session() as session,
+        session.realtime(
+            config=RealtimeConfig(model="fixture-realtime", tool_error_formatter=formatter)
+        ) as owner,
+    ):
+        for index in range(2):
+            call_id = f"remembered-{index}"
+            await peer.function("risky", {}, call_id)
+            if index == 0 and reason != "input_policy":
+                request = await next_request(session.interactions(), risky)
+                if reason == "implicit":
+                    await request.reject(always=True)
+                else:
+                    await request.reject("Tool execution was rejected", always=True)
+            output = await peer.frame(
+                lambda frame, call_id=call_id: frame.get("item", {}).get("call_id") == call_id
+            )
+            assert output["item"]["output"] == (
+                "Application declined " + call_id
+                if reason == "implicit"
+                else "Tool execution was rejected"
+            )
+            await owner.update({"instructions": f"Completed {index}."})
+        assert formatted == (["remembered-0", "remembered-1"] if reason == "implicit" else [])
+        assert effects == []
+        assert await session.pending_interactions() == ()
         assert peer.responses.requests == []
