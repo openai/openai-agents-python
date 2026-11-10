@@ -4,6 +4,7 @@ Set Content-Type: text/event-stream and x-vercel-ai-ui-message-stream: v1
 on the HTTP response in your own framework. Authentication, rendering and
 history projection belong to the application. This example emits a narrow
 subset of UI Message Stream v1, not the older data-stream v1 protocol.
+Copy this recipe with the sibling _ui_projection.py helper.
 Tests verify this stream with AI SDK client ai@6.0.315 using synthetic fetch.
 They do not cover browser rendering or real network transport.
 """
@@ -12,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from typing import Any, TypeVar
@@ -25,6 +25,7 @@ from agents.observation import (
     ToolStarted,
     TurnStarted,
 )
+from examples.codex._ui_projection import _complete_display
 
 OutputT = TypeVar("OutputT")
 
@@ -127,62 +128,8 @@ async def stream_turn(
             except Exception:
                 yield _sse({"type": "error", "errorText": "turn_failed"})
             else:
-                final_id = None
-                unphased_id = None
-                recorded_text: dict[str, str] = {}
-                if started and (completed.final_output or opened):
-                    try:
-                        async for item in session.items(subagent_id=turn.child_id):
-                            if (
-                                item["type"] == "message"
-                                and item["role"] == "assistant"
-                                and item["turn_id"] == started
-                                and item["status"] == "completed"
-                            ):
-                                recorded_text[item["id"]] = "".join(
-                                    part["text"] for part in item["content"]
-                                )
-                                if item["phase"] == "final_answer":
-                                    final_id = item["id"]
-                                elif item["phase"] is None:
-                                    unphased_id = item["id"]
-                                    # Rust treats U+001C..U+001F as nonblank.
-                                    if re.search(r"\S|[\x1c-\x1f]", recorded_text[item["id"]]):
-                                        final_id = item["id"]
-                    except Exception:
-                        # Unavailable identity cannot establish a complete display.
-                        final_id = unphased_id = None
-                        recorded_text.clear()
-                final_id = final_id or unphased_id
-                if (
-                    started
-                    and all(
-                        "".join(parts) == recorded_text.get(item_id)
-                        for item_id, parts in opened.items()
-                    )
-                    and (
-                        (
-                            not completed.final_output
-                            and not any(any(parts) for parts in opened.values())
-                        )
-                        or (
-                            final_id is not None
-                            and final_id in opened
-                            and (
-                                "".join(opened[final_id]) == completed.final_output
-                                or (
-                                    completed.final_output == ""
-                                    # Rust whitespace excludes Python's U+001C..U+001F.
-                                    and re.sub(
-                                        r"^[^\S\x1c-\x1f]+|[^\S\x1c-\x1f]+\Z",
-                                        "",
-                                        "".join(opened[final_id]),
-                                    )
-                                    == ""
-                                )
-                            )
-                        )
-                    )
+                if started and await _complete_display(
+                    session, turn.child_id, {started}, started, opened, True, completed.final_output
                 ):
                     yield _sse({"type": "finish"})
                 else:
