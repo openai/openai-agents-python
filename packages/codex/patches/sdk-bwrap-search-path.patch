@@ -1,0 +1,11 @@
+diff --git a/codex-rs/sandboxing/src/bwrap.rs b/codex-rs/sandboxing/src/bwrap.rs
+index 633487136abe00065ee0f30707573ceb67b04e5b..1823edd14fe0ad3e0f01561090e1acb9a8f0248b 100644
+--- a/codex-rs/sandboxing/src/bwrap.rs
++++ b/codex-rs/sandboxing/src/bwrap.rs
+@@ -168,3 +168,5 @@ fn is_user_namespace_failure(output: &Output) -> bool {
+ pub fn find_system_bwrap_in_path() -> Option<PathBuf> {
+-    let search_path = std::env::var_os("PATH")?;
++    // The SDK launcher keeps pre-sandbox lookup separate from the child PATH.
++    let search_path =
++        std::env::var_os("CODEX_SDK_BWRAP_SEARCH_PATH").or_else(|| std::env::var_os("PATH"))?;
+     let cwd = std::env::current_dir().ok()?;

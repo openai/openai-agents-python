@@ -24,7 +24,8 @@ use codex_exec_server::{
 };
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
-    ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
+    EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
+    WindowsSandboxLevel,
 };
 use codex_protocol::models::{PermissionProfile, PermissionProfileSnapshot};
 use codex_protocol::permissions::{
@@ -110,6 +111,9 @@ pub struct EnvironmentOptions {
     writable_roots: Option<Vec<PathUri>>,
     #[serde(default)]
     read_only: bool,
+    #[serde(default)]
+    trusted_workspace_write: bool,
+    temp_dir: Option<PathUri>,
     #[serde(default, deserialize_with = "deserialize_mounts")]
     mounts: Vec<LocalStorageMount>,
     #[serde(default)]
@@ -222,6 +226,7 @@ pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
     storage_mounts: bool,
     read_only: bool,
+    trusted_workspace_write: bool,
 }
 
 impl StrictExecutorWrites {
@@ -515,6 +520,16 @@ impl EnvironmentOptions {
     }
 
     fn check_config(&self, config: &Config) -> Result<()> {
+        if self.trusted_workspace_write {
+            ensure!(
+                self.local && !self.read_only && self.mounts.is_empty(),
+                "trusted workspace-write requires a writable local executor without storage mounts"
+            );
+        }
+        ensure!(
+            self.temp_dir.is_none() || self.trusted_workspace_write,
+            "temp_dir requires trusted workspace-write"
+        );
         if self.read_only {
             ensure!(
                 self.strict_writes(),
@@ -620,6 +635,7 @@ impl EnvironmentOptions {
                 config.codex_home.as_path(),
                 private_paths,
                 self.read_only,
+                self.trusted_workspace_write,
             )
             .await?;
             let mut policy = profile.file_system_sandbox_policy();
@@ -704,7 +720,21 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![workspace_root];
-        let shell_environment_policy = if self.local {
+        let shell_environment_policy = if self.trusted_workspace_write {
+            let mut policy = ShellEnvironmentPolicy {
+                // This environment also starts the native sandbox launcher.
+                exclude: ["LD_*", "DYLD_*"]
+                    .map(EnvironmentVariablePattern::new_case_insensitive)
+                    .to_vec(),
+                ..Default::default()
+            };
+            if let Some(temp_dir) = &self.temp_dir {
+                let path = temp_dir.to_abs_path()?;
+                let path = path.as_path().to_str().context("temp_dir must be UTF-8")?;
+                policy.r#set.insert("TMPDIR".to_owned(), path.to_owned());
+            }
+            policy
+        } else if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
                 r#set: local_shell_env(),
@@ -891,6 +921,7 @@ async fn strict_write_profile(
     codex_home: &Path,
     private_paths: LocalPrivatePaths<'_>,
     read_only: bool,
+    trusted_workspace_write: bool,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -904,6 +935,7 @@ async fn strict_write_profile(
     let mut roots = Vec::with_capacity(additional.len() + 1);
     let mut writes = StrictExecutorWrites {
         read_only,
+        trusted_workspace_write,
         ..Default::default()
     };
     for root in std::iter::once(cwd).chain(additional) {
@@ -945,6 +977,8 @@ async fn strict_write_profile(
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
         check_local_private_write_roots(&roots, codex_home, private_paths)?;
+    }
+    if local && !trusted_workspace_write {
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -1430,6 +1464,7 @@ pub(crate) async fn replace_writable_roots(
         config.codex_home.as_path(),
         private_paths,
         current.read_only,
+        current.trusted_workspace_write,
     )
     .await?;
     ensure!(

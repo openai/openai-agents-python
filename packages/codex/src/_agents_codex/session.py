@@ -3000,7 +3000,9 @@ class Session(Generic[ContextT, OutputT]):
                     saved.executor_policy_digest is not None
                     and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
                 )
-                if recorded_strict != (executor is not None and executor.write_policy == "strict"):
+                if recorded_strict != (
+                    executor is not None and executor.writable_roots is not None
+                ):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )

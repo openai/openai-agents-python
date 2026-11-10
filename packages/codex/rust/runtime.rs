@@ -14,11 +14,13 @@ fn main() -> anyhow::Result<()> {
         let executable = args.next().expect("the runtime has argv[0]");
         let name = Path::new(&executable).file_name();
         if name == Some("codex-linux-sandbox".as_ref()) {
-            // The process and filesystem sandboxes use this alias to find
-            // bubblewrap. Do not search host or workspace PATH entries.
+            // Keep pre-sandbox Bubblewrap lookup separate from the child PATH.
             // SAFETY: this entry point runs before any helper thread starts.
             unsafe {
-                std::env::set_var("PATH", local_sandbox::SYSTEM_EXECUTABLE_PATH);
+                std::env::set_var(
+                    "CODEX_SDK_BWRAP_SEARCH_PATH",
+                    local_sandbox::SYSTEM_EXECUTABLE_PATH,
+                );
                 std::env::remove_var("CARGO_BIN_EXE_bwrap");
             }
         }

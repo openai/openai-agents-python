@@ -359,7 +359,11 @@
     {
       "path": "0068-decisions.patch",
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
+    },
+    {
+      "path": "sdk-bwrap-search-path.patch",
+      "sha256": "1b1f87bda8fca4a75ca687ae5662bf28ad6eb7538af8b882576daea23c8b01fa"
     }
   ],
-  "result_tree": "054297b00a11edfe3e731caaffc36e1c768fee70"
+  "result_tree": "5e461ca3871c08ba3ddb48f378364c314203aa15"
 }
