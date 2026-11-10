@@ -1,0 +1,93 @@
+name: macOS security session control
+
+on:
+  push:
+    branches: [codex/5688-macos-cli-workspace-control]
+    paths: [.github/workflows/nov9-macos-security-session-control.yml]
+
+permissions: {}
+
+jobs:
+  security-session:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Compare account lookup after creating a Security session
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          sw_vers -productVersion
+          uname -m
+          /usr/bin/id -u
+
+          cat > session.c <<'C'
+          #include <Security/AuthSession.h>
+          #include <mach/mach.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <unistd.h>
+
+          static int bootstrap_present(void) {
+              mach_port_t port = MACH_PORT_NULL;
+              if (task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &port) != KERN_SUCCESS)
+                  return -1;
+              if (!MACH_PORT_VALID(port))
+                  return 0;
+              if (mach_port_deallocate(mach_task_self(), port) != KERN_SUCCESS)
+                  return -1;
+              return 1;
+          }
+
+          int main(int argc, char **argv) {
+              if (argc != 2 || (strcmp(argv[1], "id") && strcmp(argv[1], "ssh")))
+                  return 125;
+              SecuritySessionId before = 0, after = 0;
+              OSStatus before_status = SessionGetInfo(callerSecuritySession, &before, NULL);
+              mach_port_t registered[3] = {MACH_PORT_NULL, MACH_PORT_NULL, MACH_PORT_NULL};
+              int initial = bootstrap_present();
+              if (before_status != errSessionSuccess || initial != 1 ||
+                  mach_ports_register(mach_task_self(), registered, 3) != KERN_SUCCESS ||
+                  task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, MACH_PORT_NULL) != KERN_SUCCESS)
+                  return 125;
+              int cleared = bootstrap_present();
+              if (cleared != 0)
+                  return 125;
+
+              OSStatus create = SessionCreate(0, 0);
+              OSStatus info = SessionGetInfo(callerSecuritySession, &after, NULL);
+              int final = bootstrap_present();
+              fprintf(stderr, "SessionCreate status=%d info=%d audit_session_changed=%d bootstrap_before=%d bootstrap_cleared=%d bootstrap_after=%d\n",
+                      (int)create, (int)info, info == errSessionSuccess && before != after,
+                      initial, cleared, final);
+              if (info != errSessionSuccess || final != 0)
+                  return 125;
+
+              if (!strcmp(argv[1], "id"))
+                  execl("/usr/bin/id", "id", "-F", (char *)NULL);
+              else
+                  execl("/usr/bin/ssh", "ssh", "-G", "-F", "/dev/null",
+                        "-o", "CanonicalizeHostname=no", "account-control.invalid", (char *)NULL);
+              return 125;
+          }
+          C
+
+          xcrun --sdk macosx clang -Wall -Wextra -Werror session.c -framework Security -o session
+          /usr/bin/id -F > host-id.out
+          /usr/bin/ssh -G -F /dev/null -o CanonicalizeHostname=no account-control.invalid > host-ssh.out
+          grep -q '^user ' host-ssh.out
+          echo 'host id -F=0 ssh -G=0 ssh-user=true'
+
+          id_status=0
+          ./session id > id.out 2> id.err || id_status=$?
+          ssh_status=0
+          ./session ssh > ssh.out 2> ssh.err || ssh_status=$?
+          grep '^SessionCreate ' id.err ssh.err
+          printf 'after SessionCreate id -F=%s ssh -G=%s\n' "$id_status" "$ssh_status"
+          if grep -q 'No user exists for uid' ssh.err; then
+            echo 'after SessionCreate ssh_missing_uid=true'
+          fi
+          test "$id_status" -ne 125
+          test "$ssh_status" -ne 125
