@@ -284,7 +284,7 @@ index 99a5f411..55430b52 100644
          response_observation_id: "batch".into(),
          call_ids: ["prefix", "fresh", "suffix"]
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
-index 32ae3148..8c35e139 100644
+index 32ae3148..29cee108 100644
 --- a/codex-rs/core/src/tasks/regular.rs
 +++ b/codex-rs/core/src/tasks/regular.rs
 @@ -45,6 +45,36 @@ impl SessionTask for RegularTask {
@@ -310,7 +310,7 @@ index 32ae3148..8c35e139 100644
 +                .map(serde_json::to_value)
 +                .collect::<Result<Vec<_>, _>>()
 +                .map_err(|error| {
-+                    crate::error::CodexErr::Fatal(format!(
++                    codex_protocol::error::CodexErr::Fatal(format!(
 +                        "Could not capture initial input: {error}"
 +                    ))
 +                })?;
