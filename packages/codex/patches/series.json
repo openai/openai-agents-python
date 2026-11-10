@@ -493,6 +493,14 @@
       "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
     },
     {
+      "path": "0156-sdk-commit-completed-compaction-summary.patch",
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
+    },
+    {
+      "path": "0157-sdk-registered-http-429-diagnostics.patch",
+      "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
+    },
+    {
       "path": "sdk-realtime-provider-events-and-scopes.patch",
       "sha256": "765ea5dd42cd743855514d8694e6a497c1352c0ea0a95f1940bbff4c5c4db542"
     },
@@ -517,5 +525,5 @@
       "sha256": "61a544805338b79ec8bb0cec3e177389b47c9fa3fee4e4790cd7a83d3ede2d76"
     }
   ],
-  "result_tree": "5fae19b971d3f9c431f4437c798c48a37ad955d4"
+  "result_tree": "d554cfbf23be5f7f1c8e1013978c83061aa99df7"
 }

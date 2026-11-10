@@ -1,0 +1,63 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index 2433d32217255f40a71b5407dbe9d0b6aab401f4..ef4b9b776cb6d97dcc2277d488cd9e974d363643 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -216,9 +216,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                 } else if status == http::StatusCode::TOO_MANY_REQUESTS
+                     && !is_chatgpt_plan_usage_limit(status, &body_text)
+                 {
+-                    if let Ok(body) = serde_json::from_str::<Value>(&body_text)
+-                        && let Some(error) = body.get("error").and_then(parse_flex_unavailable)
+-                    {
++                    let body = serde_json::from_str::<Value>(&body_text).ok();
++                    let provider_error = body.as_ref().and_then(|body| body.get("error"));
++                    if let Some(error) = provider_error.and_then(parse_flex_unavailable) {
+                         return map_api_error(error);
+                     }
+                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
+@@ -274,6 +274,12 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+                     CodexErr::RetryLimit(RetryLimitReachedError {
+                         status,
+                         request_id: extract_request_tracking_id(headers.as_ref()),
++                        provider_code: (body_text.len() <= 128 * 1024
++                            && provider_error
++                                .and_then(|error| error.get("code"))
++                                .and_then(Value::as_str)
++                                == Some("rate_limit_exceeded"))
++                        .then_some("rate_limit_exceeded"),
+                     })
+                 } else {
+                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
+@@ -294,6 +300,7 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+             TransportError::RetryLimit => CodexErr::RetryLimit(RetryLimitReachedError {
+                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                 request_id: None,
++                provider_code: None,
+             }),
+             TransportError::Timeout => CodexErr::RequestTimeout,
+             TransportError::Policy(denied) => CodexErr::Fatal(denied.to_string()),
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 35ea0a41fa8184981352d642c24c67fb1217d0d2..be42aa143e8f322eec948d3890a144997356ab0c 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -753,6 +753,8 @@ fn truncate_text(content: &str, policy: TruncationPolicy) -> String {
+ pub struct RetryLimitReachedError {
+     pub status: StatusCode,
+     pub request_id: Option<String>,
++    /// Allowlisted code observed in the HTTP body.
++    pub provider_code: Option<&'static str>,
+ }
+ 
+ impl std::fmt::Display for RetryLimitReachedError {
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index d56deb8156ca8a8defea65d85d97055b17419194..574d7ab68d03aeb7cd9095648626965f754b43b7 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -49,6 +49,7 @@ fn retryability_preserves_error_details_distinctions() {
+             CodexErr::RetryLimit(RetryLimitReachedError {
+                 status: StatusCode::TOO_MANY_REQUESTS,
+                 request_id: None,
++                provider_code: None,
+             }),
+             false,
+         ),
