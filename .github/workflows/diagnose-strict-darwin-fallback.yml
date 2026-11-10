@@ -53,7 +53,7 @@ jobs:
           test "$(git rev-parse 'HEAD^{tree}')" = d4bc57a0a96a8a3d7f96b2be764d197042b1c7f6
           git cat-file -p HEAD | grep -Fx 'parent 98d13e8f5c75cfe3c06c1864e7657c62fa70b79c'
           printf '%s  %s\n' \
-            3f69c1a4bf8b1d5d0ce2a3ce7c349edd33e78fb7d8e0151dbcef23c77bcda3ba \
+            03ca002791526eaebe427c364f20b4765c8550629bb923268daf556be55783c1 \
             ../diagnostic/.github/diagnostics/test_native_strict_darwin_fallback.py | shasum -a 256 -c -
       - name: Verify and stage the qualified native artifact
         env:
