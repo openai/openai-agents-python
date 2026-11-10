@@ -118,7 +118,17 @@ class NativeRealtimeToolChoiceFunction(TypedDict):
     name: str
 
 
-NativeRealtimeToolChoice = Literal["auto", "none", "required"] | NativeRealtimeToolChoiceFunction
+class NativeRealtimeToolChoiceMcp(TypedDict, total=False):
+    type: Required[Literal["mcp"]]
+    server_label: Required[str]
+    name: str
+
+
+NativeRealtimeToolChoice = (
+    Literal["auto", "none", "required"]
+    | NativeRealtimeToolChoiceFunction
+    | NativeRealtimeToolChoiceMcp
+)
 
 
 class NativeRealtimeSettings(TypedDict, total=False):
@@ -171,8 +181,13 @@ def serialize_realtime_settings(settings: NativeRealtimeSettings) -> dict[str, A
             and set(choice) == {"type", "name"}
             and choice.get("type") == "function"
             and isinstance(choice.get("name"), str)
+            or isinstance(choice, dict)
+            and choice.get("type") == "mcp"
+            and set(choice) <= {"type", "server_label", "name"}
+            and isinstance(choice.get("server_label"), str)
+            and ("name" not in choice or isinstance(choice.get("name"), str))
         ):
-            raise ValueError("tool_choice must be auto, none, required, or a named function")
+            raise ValueError("tool_choice must be auto, none, required, a function, or an MCP tool")
     return cast(dict[str, Any], json.loads(json.dumps(settings, allow_nan=False)))
 
 

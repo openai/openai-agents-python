@@ -87,12 +87,16 @@ class RealtimePeer:
                 elif payload["type"] == "response.create":
                     self.response_count += 1
                     response_id = f"voice-response-{self.response_count}"
-                    await socket.send_json(
-                        {"type": "response.created", "response": {"id": response_id}}
-                    )
-                    await socket.send_json(
-                        {"type": "response.done", "response": {"id": response_id}}
-                    )
+                    response = {
+                        "id": response_id,
+                        "conversation_id": None
+                        if payload.get("response", {}).get("conversation") == "none"
+                        else "fixture-conversation",
+                    }
+                    if "metadata" in payload.get("response", {}):
+                        response["metadata"] = deepcopy(payload["response"]["metadata"])
+                    await socket.send_json({"type": "response.created", "response": response})
+                    await socket.send_json({"type": "response.done", "response": response})
         finally:
             self.socket = None
             self.disconnected.set()

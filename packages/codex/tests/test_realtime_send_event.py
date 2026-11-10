@@ -385,7 +385,13 @@ async def test_raw_response_tool_choice_override_preserves_next_response_default
                 lambda frame, event_id=event_id: frame.get("event_id") == event_id, after=cursor
             )
             cursor = peer.frames.index(frame, cursor) + 1
-            assert frame.get("response", {}) == overrides
+            forwarded = dict(frame.get("response", {}))
+            if overrides:
+                metadata = forwarded.pop("metadata")
+                assert set(metadata) == {"codex_response_id"}
+                assert isinstance(metadata["codex_response_id"], str)
+                assert metadata["codex_response_id"]
+            assert forwarded == overrides
             async for event in events:
                 if isinstance(event, RealtimeResponse) and event.status == "done":
                     break

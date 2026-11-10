@@ -923,20 +923,34 @@ impl NativeThread {
     }
 
     #[pyo3(signature = (limit=None))]
-    fn _canonical_history<'py>(&self, py: Python<'py>, limit: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+    fn _canonical_history<'py>(
+        &self,
+        py: Python<'py>,
+        limit: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
+            let value = canonical_history::snapshot(&inner, limit)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
 
-    fn _transact_history<'py>(&self, py: Python<'py>, expected_revision: String, keep: usize, items_json: &str) -> PyResult<Bound<'py, PyAny>> {
+    fn _transact_history<'py>(
+        &self,
+        py: Python<'py>,
+        expected_revision: String,
+        keep: usize,
+        items_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let items = serde_json::from_str(items_json)
             .map_err(|_| py_error("Invalid canonical history items"))?;
         async_bridge::future_into_py(py, async move {
-            let value = canonical_history::replace(&inner, expected_revision, keep, items).await.map_err(py_error)?;
+            let value = canonical_history::replace(&inner, expected_revision, keep, items)
+                .await
+                .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
         })
     }
@@ -1965,6 +1979,66 @@ impl NativeThread {
             .await
             .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _admit_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        roster_json: String,
+        root_id: String,
+        expected_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let expected = serde_json::from_str(&expected_json).map_err(py_error)?;
+            let receipt = agent_profiles::admit_realtime_graph(
+                &inner,
+                &generation,
+                &roster_json,
+                &root_id,
+                expected,
+            )
+            .await
+            .map_err(py_error)?;
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _restore_realtime_agent_graph<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = agent_profiles::restore_realtime_graph(&inner.thread, &generation)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&receipt).map_err(py_error)
+        })
+    }
+
+    fn _realtime_agent_source<'py>(
+        &self,
+        py: Python<'py>,
+        generation: String,
+        receipt_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_factory_into_py(py, move || async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let receipt = serde_json::from_str(&receipt_json).map_err(py_error)?;
+            let snapshot = agent_profiles::realtime_source(&inner.thread, &generation, receipt)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&snapshot).map_err(py_error)
         })
     }
 

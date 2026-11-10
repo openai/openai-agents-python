@@ -2142,8 +2142,19 @@ def _capture_profile_runtimes(
     for index, profile in enumerate(profiles):
         declaration = profile.declaration
         tools, mcp, roles = _split_tools(declaration.tools, declaration.programmatic_tool_calling)
-        catalog = root_catalog if index == 0 else _capture_tools(0, tools, context)
-        _check_handoff_tool_names((tool._ref for tool in catalog.tools), profile.handoffs)
+        catalog = (
+            root_catalog
+            if index == 0 and not profile.handoff_callbacks
+            else _capture_tools(root_catalog.generation if index == 0 else 0, tools, context)
+        )
+        _check_handoff_tool_names(
+            (
+                tool._ref
+                for slot, tool in enumerate(catalog.tools)
+                if slot not in profile.handoff_callbacks.values()
+            ),
+            profile.handoffs,
+        )
         _check_namespaced_tool_collisions(
             tools,
             _tool_names(mcp),
@@ -2173,6 +2184,11 @@ def _capture_profile_runtimes(
                 "terminal_slots": catalog.finish_slots(),
                 "step_defaults": list(range(len(catalog.tools))),
                 "handoffs": dict(profile.handoffs),
+                **(
+                    {"handoff_callbacks": dict(profile.handoff_callbacks)}
+                    if profile.handoff_callbacks
+                    else {}
+                ),
                 "transform_context": declaration.transform_context is not None,
                 "before_compact": declaration.before_compact is not None,
                 "before_complete": declaration.before_complete is not None,
@@ -2864,6 +2880,7 @@ def _capture_opening_agent(
     """Detach declaration defaults before native opening can suspend."""
     return Agent[ContextT, OutputT](
         instructions=agent.instructions,
+        realtime=agent.realtime,
         name=agent.name,
         tools=agent.tools if tool_selection is None else tool_selection,
         handoffs=agent.handoffs,
@@ -4153,6 +4170,7 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
+        self._voice_profiles: dict[str, _ProfileRuntime] = {}
         self._agent_profile_fingerprint: str | None = None
         self._profile_generation_high_water = catalog.generation
         self._profile_current: tuple[str, int] | None = None
@@ -4451,16 +4469,21 @@ class Session(Generic[ContextT, OutputT]):
         await self._join_mutation(asyncio.create_task(prepare()))
 
     async def _realtime_function_tools(
-        self, tools: Sequence[FunctionTool[Any, Any, Any]] | None, *, allow_missing: bool = False
+        self,
+        tools: Sequence[FunctionTool[Any, Any, Any]] | None,
+        *,
+        allow_missing: bool = False,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]] | None, str | None]:
         """Fence explicit declarations to the exact native source capture."""
         self._check_open()
         self._check_callback_operation("configure Realtime tools in its own Session")
         if tools is None:
-            return None, None
+            return None, snapshot["selection_id"] if snapshot is not None else None
         if not tools:
-            return [], None
-        snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
+            return [], snapshot["selection_id"] if snapshot is not None else None
+        if snapshot is None:
+            snapshot = json.loads(await self._native.call("realtime_tool_selection_sdk", "{}"))
         receipt = snapshot["profile_receipt"]
         source_agent = self._agent_for_profile(receipt)
         generation = snapshot["catalog_generation"]
@@ -4510,6 +4533,14 @@ class Session(Generic[ContextT, OutputT]):
 
     def _agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
         """Resolve a native source receipt without consulting the current Agent."""
+        if (
+            isinstance(receipt, Mapping)
+            and isinstance(receipt.get("profile_id"), str)
+            and receipt.get("profile_id") in getattr(self, "_voice_profiles", {})
+        ):
+            if type(receipt.get("epoch")) is not int or receipt["epoch"] < 0:
+                raise NativeError("Native voice source has an invalid Agent profile receipt")
+            return self._voice_profiles[receipt["profile_id"]].profile.declaration
         if not self._profiles:
             if receipt is not None or self._opening_agent is None:
                 raise NativeError("Native source does not belong to this Session's Agent graph")
@@ -4536,6 +4567,12 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
+    def _source_profile_runtime(self, profile_id: str) -> _ProfileRuntime:
+        runtime = self._profiles.get(profile_id) or self._voice_profiles.get(profile_id)
+        if runtime is None:
+            raise NativeError("Native request has an unknown captured Agent profile")
+        return runtime
+
     def _bindings_for_message(self, message: Mapping[str, Any]) -> Sequence[Tool[Any]]:
         declaration = self._agent_for_message(message)
         generation = message.get("generation")
@@ -4552,7 +4589,7 @@ class Session(Generic[ContextT, OutputT]):
         return declaration.tools
 
     def _catalog_for_message(self, message: Mapping[str, Any], generation: Any) -> _ToolCatalog:
-        if self._profiles:
+        if self._profiles or message.get("profile_id") in getattr(self, "_voice_profiles", {}):
             self._agent_for_message(message)
             catalog = self._profile_catalogs.get((message["profile_id"], generation))
             if catalog is None:
@@ -9179,7 +9216,7 @@ class Session(Generic[ContextT, OutputT]):
             else self._effective_agent()
         )
         output = (
-            self._profiles[source_message["profile_id"]].output
+            self._source_profile_runtime(source_message["profile_id"]).output
             if source_message is not None and self._profiles and not state.output_override
             else state.output
         )
@@ -10121,7 +10158,7 @@ class Session(Generic[ContextT, OutputT]):
             and state.realtime_tool is None
         ):
             self._agent_for_message(message)
-            state.output = self._profiles[message["profile_id"]].output
+            state.output = self._source_profile_runtime(message["profile_id"]).output
         if (
             not isinstance(state, _Submission)
             or not state.output.max_retries
@@ -10214,7 +10251,7 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
             value, wire = output.terminal_value(text)
             # JSON persistence must never silently accept NaN or Infinity.
@@ -10391,10 +10428,12 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.output_override
                 and state.realtime_tool is None
             ):
-                state.output = self._profiles[message["profile_id"]].output
+                state.output = self._source_profile_runtime(message["profile_id"]).output
             source_bindings = self._bindings_for_message(message)
             source_handoffs = (
-                self._profiles[message["profile_id"]].profile.handoffs if self._profiles else None
+                self._source_profile_runtime(message["profile_id"]).profile.handoffs
+                if message.get("profile_id") is not None
+                else None
             )
             index = state.step_index
             state.step_index += 1
@@ -11743,6 +11782,35 @@ class Session(Generic[ContextT, OutputT]):
                 namespace=ref.namespace,
             )
             self._observations.append(started)
+            if isinstance(state, _Submission) and state.realtime_tool is not None:
+                source_agent = self._agent_for_message(message)
+                defaults = source_agent.realtime
+                if defaults is not None and defaults.tool_enabled is not None:
+                    from .realtime_agents import RealtimeAgentContext
+
+                    original = (
+                        self._source_profile_runtime(message["profile_id"]).profile.agent
+                        if message.get("profile_id") is not None
+                        else self._agent
+                    )
+                    enabled = await self._call_decision_callback(
+                        state,
+                        message,
+                        defaults.tool_enabled,
+                        lambda: self._admit_tool(state, request),
+                        RealtimeAgentContext(entry.context, original),
+                        ref,
+                    )
+                    if type(enabled) is not bool:
+                        raise TypeError("Realtime tool_enabled must return a bool")
+                    if not self._admit_tool(state, request):
+                        return
+                    if not enabled:
+                        denial = ToolOutput.error("Tool disabled by its source Agent")
+                        reply = json.dumps({"request": message, "response": denial.to_native()})
+                        if await self._respond_tool(state, reply):
+                            status = "failed"
+                        return
             approved = None
             if managed_approval:
                 approved = self._approval_ready.pop(
