@@ -37,6 +37,16 @@ NATIVE_RELEASE_ARTIFACTS = {
     "native-Windows-X64": ("native-windows / Native package (windows-latest)", "win_amd64"),
     "native-macOS-ARM64": ("native-macos / Native package (macos-latest)", "macosx_11_0_arm64"),
 }
+RELEASE_ARTIFACTS = {
+    "main": NATIVE_RELEASE_ARTIFACTS,
+    "feat/codex-harness": {
+        **NATIVE_RELEASE_ARTIFACTS,
+        "native-Linux-ARM64": (
+            "native-linux-arm64 / Native package (ubuntu-24.04-arm)",
+            "manylinux_2_39_aarch64",
+        ),
+    },
+}
 
 
 def api(
@@ -159,7 +169,8 @@ def qualified_distributions(head: str, *, source_branch: str = "main") -> dict[s
         raise ValueError("Release version manifest does not match the validated tag")
     run_path = f"actions/runs/{int(run['id'])}"
     jobs = records(run_path + "/jobs?filter=all", "jobs")
-    required = {job for job, _ in NATIVE_RELEASE_ARTIFACTS.values()} | {
+    expected_artifacts = RELEASE_ARTIFACTS[source_branch]
+    required = {job for job, _ in expected_artifacts.values()} | {
         "lint",
         "typecheck",
         "mypy-win32",
@@ -193,7 +204,7 @@ def qualified_distributions(head: str, *, source_branch: str = "main") -> dict[s
         producers[name] = job
     artifacts = records(run_path + "/artifacts", "artifacts")
     selected = []
-    for name, (job_name, _) in NATIVE_RELEASE_ARTIFACTS.items():
+    for name, (job_name, _) in expected_artifacts.items():
         producer = producers[job_name]
         started = release_timestamp(producer.get("started_at"))
         completed = release_timestamp(producer.get("completed_at"))
@@ -257,12 +268,17 @@ def verify_distribution(path: Path, release_version: str, platform: str | None =
 
 
 def collect_distributions(qualified: dict[str, Any], destination: Path) -> None:
-    """Download immutable artifact IDs and publish only the validated four files."""
+    """Download immutable artifact IDs and keep only the validated distributions."""
+    run = qualified["run"]
+    expected_artifacts = RELEASE_ARTIFACTS[run["head_branch"]]
+    artifacts = qualified["artifacts"]
+    if sorted(artifact["name"] for artifact in artifacts) != sorted(expected_artifacts):
+        raise ValueError("Release collection requires the exact source-branch artifact set")
     destination.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="agents-release-") as directory:
         staging = Path(directory)
         distributions = []
-        for artifact in qualified["artifacts"]:
+        for artifact in artifacts:
             path = staging / f"{int(artifact['id'])}.zip"
             with path.open("wb") as output_stream:
                 subprocess.run(
@@ -276,7 +292,7 @@ def collect_distributions(qualified: dict[str, Any], destination: Path) -> None:
                     digest.update(block)
             if f"sha256:{digest.hexdigest()}" != artifact["digest"]:
                 raise ValueError("Downloaded release artifact digest mismatch")
-            platform = NATIVE_RELEASE_ARTIFACTS[artifact["name"]][1]
+            platform = expected_artifacts[artifact["name"]][1]
             with zipfile.ZipFile(path) as archive:
                 wheels = [name for name in archive.namelist() if name.endswith(".whl")]
                 if len(wheels) != 1:
@@ -295,14 +311,13 @@ def collect_distributions(qualified: dict[str, Any], destination: Path) -> None:
                         shutil.copyfileobj(source, output_stream)
                     verify_distribution(target, qualified["version"], expected_platform)
                     distributions.append(target)
-        run = qualified["run"]
         current_run = repo_api(f"actions/runs/{int(run['id'])}")
         for key in ("id", "head_sha", "run_attempt", "status", "conclusion"):
             if current_run[key] != run[key]:
                 raise ValueError("Qualified Tests run changed during artifact collection")
         for distribution in distributions:
             shutil.copy2(distribution, destination / distribution.name)
-    print(f"Collected three native wheels and one sdist from Tests run {run['id']}")
+    print(f"Collected {len(artifacts)} native wheels and one sdist from Tests run {run['id']}")
 
 
 def sha(value: str) -> str:
