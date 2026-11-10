@@ -4,10 +4,10 @@ Use `agents.artifacts.json_artifact_tool` to check JSON before writing a file. Y
 
 ## Run the example
 
-Use a matching SDK preview wheel and source checkout that include `agents.artifacts`. Follow the [installation guide](../../docs/sdk/installation.md), activate your Python environment, and run this command from the repository root:
+Matching source builds have been providing `agents.artifacts` with the corresponding native extension. The [source setup](../../packages/codex/MAINTAINING.md#build-from-this-source) has been covering Python 3.10 through 3.14 and the matching build environment. From the repository root:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.packaged_artifact
+PYTHONPATH=. uv run --no-sync python -m examples.codex.packaged_artifact
 ```
 
 The [complete example](packaged_artifact.py) uses a local scripted Responses peer and needs no API key. It sends malformed JSON, then an empty title, then a valid title through one native Session. The tool returns syntax and schema errors before writing the corrected report. The script asserts the saved content and prints:
