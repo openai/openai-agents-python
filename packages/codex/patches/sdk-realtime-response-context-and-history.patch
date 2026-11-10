@@ -1,0 +1,1374 @@
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
+index 14f647d87a06a9a85239f21740b4b56f45cdf9e2..42da41746815689572a4d23663c4fa30971062ab 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/hosted_mcp.rs
+@@ -19,7 +19,11 @@ fn charge(bytes: &mut usize, additional: usize) -> Result<(), ObserveError> {
+     Ok(())
+ }
+
+-pub(super) fn json_bytes(value: &Value, bytes: &mut usize, depth: usize) -> Result<(), ObserveError> {
++pub(super) fn json_bytes(
++    value: &Value,
++    bytes: &mut usize,
++    depth: usize,
++) -> Result<(), ObserveError> {
+     // Bound container/scalar/key allocations without serializing or cloning.
+     if depth > 128 {
+         return Err(ObserveError::Capacity);
+@@ -106,6 +110,7 @@ struct Record {
+     native_call_id: Option<String>,
+     approval_request_id: Option<String>,
+     approval_id: Option<String>,
++    approval_response_id: Option<String>,
+     published: bool,
+     decision: Option<bool>,
+     completed: bool,
+@@ -145,6 +150,7 @@ impl HostedMcpState {
+                     + r.name.len()
+                     + r.arguments.len()
+                     + r.approval_id.as_ref().map_or(0, String::len)
++                    + r.approval_response_id.as_ref().map_or(0, String::len)
+             })
+             .sum()
+     }
+@@ -578,6 +584,7 @@ impl HostedMcpState {
+                         native_call_id: c.native_call_id.map(str::to_owned),
+                         approval_request_id: approval_request_id.clone(),
+                         approval_id: None,
++                        approval_response_id: None,
+                         published: false,
+                         decision: None,
+                         completed: false,
+@@ -661,6 +668,52 @@ impl HostedMcpState {
+             .iter()
+             .any(|r| r.source.id.as_ref() == response)
+     }
++    pub(super) fn is_approval_response_id(&self, id: &str) -> bool {
++        self.records
++            .iter()
++            .any(|record| record.approval_response_id.as_deref() == Some(id))
++    }
++
++    pub(super) fn decide_response(
++        &mut self,
++        request_id: &str,
++        approve: bool,
++        reason: Option<&str>,
++        item_id: Option<&str>,
++        event_id: Option<&str>,
++        accepted: &RealtimeAcceptedConfiguration,
++    ) -> Result<Value, &'static str> {
++        // Provider IDs select only an approval capability this owner has issued.
++        // The ordinary decision path remains authoritative for single use,
++        // retirement and the accepted server declaration.
++        let token = self
++            .records
++            .iter()
++            .find(|record| record.item_id == request_id && record.approval && record.published)
++            .and_then(|record| record.approval_id.clone())
++            .ok_or("Hosted MCP approval receipt is unknown")?;
++        if item_id.is_some_and(|id| {
++            self.records.iter().any(|record| {
++                record.item_id == id || record.approval_response_id.as_deref() == Some(id)
++            })
++        }) {
++            return Err("Hosted MCP approval response item ID is already in use");
++        }
++        let mut payload = self.decide(&token, approve, reason, accepted)?;
++        if let Some(id) = item_id {
++            payload["item"]["id"] = Value::String(id.to_owned());
++            self.records
++                .iter_mut()
++                .find(|record| record.approval_id.as_deref() == Some(token.as_str()))
++                .unwrap()
++                .approval_response_id = Some(id.to_owned());
++        }
++        if let Some(id) = event_id {
++            payload["event_id"] = Value::String(id.to_owned());
++        }
++        Ok(payload)
++    }
++
+     pub(super) fn decide(
+         &mut self,
+         token: &str,
+@@ -683,7 +736,9 @@ impl HostedMcpState {
+             return Err("Hosted MCP approval receipt is stale or already consumed");
+         }
+         r.decision = Some(approve); // Consume before writing; uncertain writes are never replayed.
+-        let mut item = json!({"type":"mcp_approval_response","id":uuid::Uuid::now_v7().to_string(),"approval_request_id":r.item_id,"approve":approve});
++        let response_id = uuid::Uuid::now_v7().to_string();
++        r.approval_response_id = Some(response_id.clone());
++        let mut item = json!({"type":"mcp_approval_response","id":response_id,"approval_request_id":r.item_id,"approve":approve});
+         if let Some(reason) = reason {
+             item["reason"] = Value::String(reason.to_owned());
+         }
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 3f5ea9496a4b9afa9ba4c01beb8c9dd839845cab..815aad39acb874bd7b4fb1cc0ba119f164f33bf2 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -90,6 +90,7 @@ struct QueuedWireMessage {
+     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+     configuration: Option<Arc<super::readiness::RealtimeAcceptedConfiguration>>,
+     output_guard: codex_protocol::protocol::RealtimeOutputGuard,
++    out_of_band: bool,
+     hosted_mcp_events: Vec<RealtimeEvent>,
+ }
+
+@@ -123,6 +124,7 @@ impl QueuedWireMessage {
+             _permit: permit,
+             configuration: None,
+             output_guard: Default::default(),
++            out_of_band: false,
+             hosted_mcp_events: Vec::new(),
+         })
+     }
+@@ -163,6 +165,7 @@ impl QueuedWireMessage {
+             _permit: None,
+             configuration: None,
+             output_guard: Default::default(),
++            out_of_band: false,
+             hosted_mcp_events: Vec::new(),
+         }
+     }
+@@ -190,6 +193,14 @@ pub enum RealtimePlaybackControl {
+ }
+
+ enum WsCommand {
++    HostedMcpApprovalResponse {
++        request_id: String,
++        approve: bool,
++        reason: Option<String>,
++        item_id: Option<String>,
++        event_id: Option<String>,
++        tx_result: oneshot::Sender<Result<Result<(), ApiError>, WsError>>,
++    },
+     HostedMcpApproval {
+         approval_id: String,
+         approve: bool,
+@@ -325,6 +336,15 @@ impl WsStream {
+                             break;
+                         };
+                         match command {
++                            WsCommand::HostedMcpApprovalResponse {request_id,approve,reason,item_id,event_id,tx_result} => {
++                                let payload=readiness_observer.as_ref().ok_or_else(||ApiError::InvalidRequest{message:"Hosted MCP owner is absent".into()})
++                                    .and_then(|observer|observer.configuration().decide_hosted_mcp_response(&request_id,approve,reason.as_deref(),item_id.as_deref(),event_id.as_deref()));
++                                let payload=match payload {Ok(payload)=>payload,Err(error)=>{let _=tx_result.send(Ok(Err(error)));continue;}};
++                                match inner.send(Message::Text(payload.to_string().into())).await {
++                                    Ok(())=>{let _=tx_result.send(Ok(Ok(())));}
++                                    Err(error)=>{report_write_policy_error(&error);let _=tx_result.send(Err(error));break;}
++                                }
++                            }
+                             WsCommand::HostedMcpApproval {approval_id,approve,reason,tx_result} => {
+                                 let payload=readiness_observer.as_ref().ok_or_else(||ApiError::InvalidRequest{message:"Hosted MCP owner is absent".into()})
+                                     .and_then(|observer|observer.configuration().decide_hosted_mcp(&approval_id,approve,reason.as_deref()));
+@@ -404,7 +424,7 @@ impl WsStream {
+                                 let event=match &message {Message::Text(text)=>serde_json::from_str::<serde_json::Value>(text).ok(),_=>None};
+                                 if let (Some(event),Some(observer))=(&event,&readiness_observer) {
+                                     if event["type"]=="response.create" {
+-                                        if !observer.configuration().observe_response_create() {
++                                        if !observer.configuration().observe_response_create(event["response"]["conversation"] == "none") {
+                                             let _=tx_result.send(Err(WsError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput,"Realtime response creation is already pending"))));
+                                             continue;
+                                         }
+@@ -489,6 +509,7 @@ impl WsStream {
+                                         let observation=readiness.observe_frame(text,true);
+                                         queued.configuration=observation.configuration;
+                                         queued.output_guard=observation.output_guard;
++                                        queued.out_of_band=observation.out_of_band;
+                                         if queued.charge_hosted_events(observation.hosted_mcp_events,wire_budget.clone()).is_err() {
+                                             pump_overflow.store(true,Ordering::Release);break;
+                                         }
+@@ -824,6 +845,26 @@ impl RealtimeWebsocketWriter {
+             .map_err(map_realtime_websocket_connect_error)
+     }
+
++    pub async fn send_hosted_mcp_approval_response(
++        &self,
++        request_id: &str,
++        approve: bool,
++        reason: Option<String>,
++        item_id: Option<String>,
++        event_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.stream
++            .request(|tx_result| WsCommand::HostedMcpApprovalResponse {
++                request_id: request_id.to_owned(),
++                approve,
++                reason,
++                item_id,
++                event_id,
++                tx_result,
++            })
++            .await
++            .map_err(map_realtime_websocket_connect_error)?
++    }
+     pub async fn send_hosted_mcp_approval(
+         &self,
+         approval_id: &str,
+@@ -1287,15 +1328,23 @@ impl RealtimeWebsocketEvents {
+                     "SDK Realtime wire event queue capacity exceeded".into(),
+                 ));
+             }
+-            let (msg, configuration, output_guard, hosted_mcp_events, permit) =
++            let (msg, configuration, output_guard, out_of_band, hosted_mcp_events, permit) =
+                 match self.rx_message.recv().await {
+                     Ok(QueuedWireMessage {
+                         message: Ok(msg),
+                         configuration,
+                         output_guard,
++                        out_of_band,
+                         hosted_mcp_events,
+                         _permit,
+-                    }) => (msg, configuration, output_guard, hosted_mcp_events, _permit),
++                    }) => (
++                        msg,
++                        configuration,
++                        output_guard,
++                        out_of_band,
++                        hosted_mcp_events,
++                        _permit,
++                    ),
+                     Ok(QueuedWireMessage {
+                         message: Err(err), ..
+                     }) => {
+@@ -1334,6 +1383,11 @@ impl RealtimeWebsocketEvents {
+                         trace!(target: REALTIME_WIRE_LOG_TARGET, "realtime websocket event: {diagnostic}");
+                     }
+                     if let Some(mut event) = parse_realtime_event(&text, self.event_parser) {
++                        if out_of_band
++                            && matches!(&event, RealtimeEvent::ConversationItemDone { .. })
++                        {
++                            continue;
++                        }
+                         if matches!(&event, RealtimeEvent::InputAudioSpeechStarted(_))
+                             && output_guard.is_retired()
+                         {
+@@ -1380,7 +1434,9 @@ impl RealtimeWebsocketEvents {
+                             frame.sample_rate = format.sample_rate();
+                             frame.num_channels = 1;
+                         }
+-                        self.update_active_transcript(&mut event).await;
++                        if !out_of_band {
++                            self.update_active_transcript(&mut event).await;
++                        }
+                         if matches!(&event, RealtimeEvent::AudioOut(_)) && event.is_output_retired()
+                         {
+                             continue;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+index 7ba5b2907191e116b146e1a126e46e424c7bdd53..8f1ad398275cfcdf884200b22036b20bfc71d724 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/readiness.rs
+@@ -166,6 +166,7 @@ impl RealtimeConfigurationReceipt {
+ pub(super) struct ActiveResponse {
+     pub(super) id: Arc<str>,
+     pub(super) configuration: Arc<RealtimeAcceptedConfiguration>,
++    out_of_band: bool,
+     // Runtime-only lineage: automatic replies inherit, explicit user work replaces.
+     request_owner: Arc<()>,
+     pub(super) output_guard: RealtimeOutputGuard,
+@@ -175,6 +176,7 @@ pub(super) struct FrameObservation {
+     pub hosted_mcp_events: Vec<codex_protocol::protocol::RealtimeEvent>,
+     pub configuration: Option<Arc<RealtimeAcceptedConfiguration>>,
+     pub output_guard: RealtimeOutputGuard,
++    pub out_of_band: bool,
+ }
+ impl Default for FrameObservation {
+     fn default() -> Self {
+@@ -182,6 +184,7 @@ impl Default for FrameObservation {
+             hosted_mcp_events: Vec::new(),
+             configuration: None,
+             output_guard: RealtimeOutputGuard::default(),
++            out_of_band: false,
+         }
+     }
+ }
+@@ -191,6 +194,7 @@ impl FrameObservation {
+             hosted_mcp_events: Vec::new(),
+             configuration: Some(Arc::clone(&response.configuration)),
+             output_guard: response.output_guard.clone(),
++            out_of_band: response.out_of_band,
+         }
+     }
+     fn suppressed() -> Self {
+@@ -241,6 +245,7 @@ struct ConfigurationState {
+     cancelled_response_id: Option<Arc<str>>,
+     feedback_response_id: Option<Arc<str>>,
+     response_create_pending: bool,
++    out_of_band_response_pending: bool,
+     received_audio: VecDeque<ReceivedAudio>,
+     audio_input_sources: VecDeque<(String, AudioInputSource)>,
+     failure: Option<ReadyState>,
+@@ -706,6 +711,32 @@ impl RealtimeConfiguration {
+         }
+         ready
+     }
++    /// Response IDs stay reserved after an issued decision, before provider ACK.
++    pub fn is_raw_approval_item_id(&self, id: &str) -> bool {
++        self.inner
++            .state
++            .lock()
++            .unwrap()
++            .hosted_mcp
++            .is_approval_response_id(id)
++    }
++
++    pub(super) fn decide_hosted_mcp_response(
++        &self,
++        request_id: &str,
++        approve: bool,
++        reason: Option<&str>,
++        item_id: Option<&str>,
++        event_id: Option<&str>,
++    ) -> Result<Value, ApiError> {
++        let mut state = self.inner.state.lock().unwrap();
++        let accepted = Self::settled(&state)?;
++        state
++            .hosted_mcp
++            .decide_response(request_id, approve, reason, item_id, event_id, &accepted)
++            .map_err(invalid)
++    }
++
+     pub(super) fn decide_hosted_mcp(
+         &self,
+         token: &str,
+@@ -723,7 +754,7 @@ impl RealtimeConfiguration {
+     pub(super) fn observe_user_input(&self) {
+         self.inner.state.lock().unwrap().request_owner = Arc::new(());
+     }
+-    pub(super) fn observe_response_create(&self) -> bool {
++    pub(super) fn observe_response_create(&self, out_of_band: bool) -> bool {
+         let mut state = self.inner.state.lock().unwrap();
+         // Never overwrite the owner of a create already written to the socket.
+         if state.response_create_pending {
+@@ -733,6 +764,7 @@ impl RealtimeConfiguration {
+         state.pending_create_owner = Some(Arc::clone(&state.request_owner));
+         state.pending_create_guard = Some(state.output_owner.new_response());
+         state.response_create_pending = true;
++        state.out_of_band_response_pending = out_of_band;
+         true
+     }
+
+@@ -1105,6 +1137,7 @@ impl SessionReadiness {
+                         cancelled_response_id: None,
+                         feedback_response_id: None,
+                         response_create_pending: false,
++                        out_of_band_response_pending: false,
+                         received_audio: VecDeque::new(),
+                         audio_input_sources: VecDeque::new(),
+                         failure: None,
+@@ -1370,9 +1403,14 @@ impl SessionReadiness {
+                             state.cancelled_response_id = None;
+                             state.feedback_response_id = None;
+                             state.response_create_pending = false;
++                            let out_of_band = event["response"].get("conversation_id").map_or(
++                                std::mem::take(&mut state.out_of_band_response_pending),
++                                Value::is_null,
++                            );
+                             let response = Arc::new(ActiveResponse {
+                                 id: Arc::from(id),
+                                 configuration: accepted,
++                                out_of_band,
+                                 request_owner: state
+                                     .pending_create_owner
+                                     .take()
+@@ -2183,7 +2221,7 @@ mod tests {
+             done(&observer, "a");
+             match boundary {
+                 "user" => configuration.observe_user_input(),
+-                "manual" => assert!(configuration.observe_response_create()),
++                "manual" => assert!(configuration.observe_response_create(false)),
+                 "speech" => {
+                     observer.observe_frame(
+                         r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
+@@ -2227,7 +2265,7 @@ mod tests {
+             );
+             match boundary {
+                 "user" => configuration.observe_user_input(),
+-                "manual" => assert!(configuration.observe_response_create()),
++                "manual" => assert!(configuration.observe_response_create(false)),
+                 "speech" => {
+                     observer.observe_frame(
+                         r#"{"type":"input_audio_buffer.speech_started","item_id":"new-vad-input"}"#,
+@@ -2259,7 +2297,7 @@ mod tests {
+             .unwrap();
+         assert!(repeated.payloads.is_empty());
+         done(&observer, "a");
+-        configuration.observe_response_create();
++        configuration.observe_response_create(false);
+         assert!(!configuration.response_create_for("a"));
+         assert!(
+             !configuration
+@@ -2495,7 +2533,7 @@ mod tests {
+     fn pending_response_create_guard_is_retired_before_its_id_is_observed() {
+         let observer = accepted_observer();
+         let configuration = observer.configuration();
+-        configuration.observe_response_create();
++        configuration.observe_response_create(false);
+         configuration
+             .prepare_interrupt(None, None, None, false)
+             .unwrap();
+@@ -2732,6 +2770,81 @@ mod tests {
+         };
+         request
+     }
++    #[test]
++    fn raw_hosted_approval_uses_issued_request_and_preserves_wire_ids() {
++        let observer = accepted_hosted_observer();
++        let request = issue_hosted(&observer);
++        let configuration = observer.configuration();
++        assert!(
++            configuration
++                .decide_hosted_mcp_response("unknown", true, None, Some("reply"), Some("event"))
++                .is_err()
++        );
++        // A conflicting item ID must not consume the issued decision.
++        assert!(
++            configuration
++                .decide_hosted_mcp_response(
++                    &request.request_id,
++                    true,
++                    None,
++                    Some(&request.request_id),
++                    None
++                )
++                .is_err()
++        );
++        let payload = configuration
++            .decide_hosted_mcp_response(
++                &request.request_id,
++                false,
++                Some("declined"),
++                Some("reply"),
++                Some("event"),
++            )
++            .unwrap();
++        assert!(configuration.is_raw_approval_item_id("reply"));
++        assert!(!configuration.is_raw_approval_item_id("unknown"));
++        assert!(
++            configuration
++                .decide_hosted_mcp_response(&request.request_id, true, None, Some("reply"), None)
++                .unwrap_err()
++                .to_string()
++                .contains("already in use")
++        );
++        assert_eq!(
++            payload,
++            json!({"type":"conversation.item.create",
++            "event_id":"event", "previous_item_id":"approval", "item": {
++                "type":"mcp_approval_response", "id":"reply",
++                "approval_request_id":"approval", "approve":false, "reason":"declined"
++            }})
++        );
++        assert!(
++            configuration
++                .decide_hosted_mcp_response(&request.request_id, true, None, None, None)
++                .is_err()
++        );
++        assert!(
++            configuration
++                .decide_hosted_mcp(&request.approval_id, true, None)
++                .is_err()
++        );
++    }
++
++    #[test]
++    fn raw_hosted_approval_rejects_retired_issued_request() {
++        let observer = accepted_hosted_observer();
++        let request = issue_hosted(&observer);
++        let configuration = observer.configuration();
++        configuration
++            .prepare_interrupt(Some("r"), None, None, false)
++            .unwrap();
++        assert!(
++            configuration
++                .decide_hosted_mcp_response(&request.request_id, true, None, None, None)
++                .is_err()
++        );
++    }
++
+     #[test]
+     fn hosted_receipt_uses_actual_membership_survives_done_and_is_single_use() {
+         let observer = accepted_hosted_observer();
+@@ -3327,7 +3440,7 @@ mod tests {
+             match boundary {
+                 "user" => config.observe_user_input(),
+                 "manual" => {
+-                    assert!(config.observe_response_create());
++                    assert!(config.observe_response_create(false));
+                 }
+                 "speech" => {
+                     observer.observe_frame(
+@@ -3352,7 +3465,7 @@ mod tests {
+         assert!(config.function_response_create("a", "one"));
+         config.observe_user_input();
+         assert!(
+-            !config.observe_response_create(),
++            !config.observe_response_create(false),
+             "do not overwrite outstanding automatic create"
+         );
+         created(&observer, "b");
+@@ -3366,7 +3479,7 @@ mod tests {
+             !config.function_response_create("b", "b-call"),
+             "late automatic B must not gain newer user owner"
+         );
+-        assert!(config.observe_response_create());
++        assert!(config.observe_response_create(false));
+         created(&observer, "new-user");
+         done(&observer, "new-user");
+         assert!(!observer.mismatched());
+@@ -3376,7 +3489,7 @@ mod tests {
+         let observer = accepted_hosted_observer();
+         let config = observer.configuration();
+         config.observe_user_input();
+-        assert!(config.observe_response_create());
++        assert!(config.observe_response_create(false));
+         observer.observe_frame(r#"{"type":"conversation.item.created","item":{"type":"message","role":"user","id":"user-item","content":[]}}"#,true);
+         created(&observer, "a");
+         observer.observe_frame(
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+index ca355c8b9874eb75b9e7f5a50298e2fc06230201..473c907933500808f2767f220aeaa8bf86a59b1f 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/settings.rs
+@@ -18,6 +18,14 @@ fn put<T: Serialize>(
+
+ pub(super) fn response_create_json(options: &RealtimeResponseOptions) -> serde_json::Result<Value> {
+     let mut response = Map::new();
++    put(&mut response, "conversation", &options.conversation)?;
++    put(&mut response, "input", &options.input)?;
++    if options.conversation
++        == Some(codex_protocol::realtime_settings::RealtimeResponseConversation::None)
++    {
++        response.insert("tools".into(), Value::Array(Vec::new()));
++        response.insert("tool_choice".into(), Value::String("none".into()));
++    }
+     put(&mut response, "instructions", &options.instructions)?;
+     put(
+         &mut response,
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 7b0a340d23969d6e8ec830de59b89ab6c7dc7ba5..08a49793fca31862849efa59b2a8c061c1065853 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -397,6 +397,14 @@ pub(crate) type SdkInterruptReply = Arc<
+ pub(crate) enum SdkRealtimeCommand {
+     History(provider_history::Request),
+     HistoryAdvance,
++    HostedMcpApprovalResponse {
++        request_id: String,
++        approve: bool,
++        reason: Option<String>,
++        item_id: Option<String>,
++        event_id: Option<String>,
++        reply: SdkControlReply,
++    },
+     HostedMcpApproval {
+         approval_id: String,
+         approve: bool,
+@@ -4062,6 +4070,12 @@ async fn handle_start_inner_with_adapter(
+                         }
+                     }
+                 } else if sdk.active.load(Ordering::Acquire) {
++                    let replayed_call =
++                        if let RealtimeEvent::ConversationItemAdded { item, .. } = &event {
++                            sdk.history.lock().unwrap().replayed_call_for_item(item)
++                        } else {
++                            None
++                        };
+                     // The existing native call ledger retains exact completion
+                     // proof even when its provider call item was deleted/evicted.
+                     let settled_output_call =
+@@ -4086,8 +4100,8 @@ async fn handle_start_inner_with_adapter(
+                     let observed = {
+                         let mut state = sdk.item_deletion.lock().unwrap();
+                         let observed = state.observe(&event);
+-                        if let Some(call) = settled_output_call {
+-                            state.settle_call(&call);
++                        if let Some(call) = replayed_call.or(settled_output_call.as_deref()) {
++                            state.settle_call(call);
+                         }
+                         observed
+                     };
+@@ -5156,17 +5170,51 @@ async fn handle_sdk_realtime_command(
+                 &request,
+                 &sdk.item_deletion.lock().unwrap(),
+             );
++            let approval_id_conflict = writer.configuration().is_some_and(|configuration| {
++                let reserved = |item: &serde_json::Value| {
++                    item["id"]
++                        .as_str()
++                        .is_some_and(|id| configuration.is_raw_approval_item_id(id))
++                };
++                match &request {
++                    provider_history::Request::Create { item, .. } => reserved(item),
++                    provider_history::Request::Update { items, .. } => items
++                        .iter()
++                        .any(|item| item["type"] == "message" && reserved(item)),
++                    _ => false,
++                }
++            });
+             if let Err(error) = identity {
+                 provider_history::reject(request, error);
++            } else if approval_id_conflict {
++                provider_history::reject(
++                    request,
++                    CodexErr::InvalidRequest(
++                        "Provider item ID is reserved for an approval response".into(),
++                    ),
++                );
+             } else if sdk.item_deletion.lock().unwrap().deadline().is_some() {
+                 provider_history::reject(
+                     request,
+                     CodexErr::InvalidRequest("Provider item deletion is pending".into()),
+                 );
+-            } else if matches!(request, provider_history::Request::Update { .. })
++            } else if (matches!(request, provider_history::Request::Update { .. })
++                || matches!(&request, provider_history::Request::Create { item, .. }
++                    if provider_history::is_tool_replay(item)))
+                 && (responses.active_default_response || !sdk.pending.lock().await.is_empty())
+             {
+                 provider_history::reject(request,CodexErr::InvalidRequest("Provider history cannot be edited during an active response or native work".into()));
++            } else if let provider_history::Request::Create { item, .. } = &request
++                && provider_history::is_tool_replay(item)
++                && let Some(call_id) = item["call_id"].as_str()
++                && sdk.seen.lock().await.contains_key(call_id)
++            {
++                provider_history::reject(
++                    request,
++                    CodexErr::InvalidRequest(
++                        "Historical tool item cannot use a native call ID".into(),
++                    ),
++                );
+             } else {
+                 let action = sdk.history.lock().unwrap().start(request);
+                 match action {
+@@ -5211,6 +5259,36 @@ async fn handle_sdk_realtime_command(
+                 }
+             }
+         }
++        SdkRealtimeCommand::HostedMcpApprovalResponse {
++            request_id,
++            approve,
++            reason,
++            item_id,
++            event_id,
++            reply,
++        } => {
++            {
++                let history = sdk.history.lock().unwrap();
++                if history.busy()
++                    || item_id.as_deref().is_some_and(|id| {
++                        history.contains_id(id) || sdk.item_deletion.lock().unwrap().is_deleted(id)
++                    })
++                {
++                    finish_sdk_control(
++                        reply,
++                        Err(CodexErr::InvalidRequest(
++                            "Hosted MCP approval response conflicts with provider history".into(),
++                        )),
++                    );
++                    return Ok(());
++                }
++            }
++            let result = writer
++                .send_hosted_mcp_approval_response(&request_id, approve, reason, item_id, event_id)
++                .await
++                .map_err(|error| CodexErr::InvalidRequest(error.to_string()));
++            finish_sdk_control(reply, result);
++        }
+         SdkRealtimeCommand::HostedMcpApproval {
+             approval_id,
+             approve,
+@@ -5789,6 +5867,22 @@ async fn handle_realtime_server_event_with_configuration(
+     response_create_queue: &mut RealtimeResponseCreateQueue,
+     configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
+ ) -> anyhow::Result<()> {
++    // An echo of a historical call is a history receipt. Only a provider-owned
++    // call may enter the live function dispatcher.
++    let event = match (&handoff_state.sdk, &event) {
++        (Some(sdk), RealtimeEvent::FunctionCallRequested(call))
++            if sdk
++                .history
++                .lock()
++                .unwrap()
++                .is_replayed_call(&call.call_id, &call.item_id) =>
++        {
++            RealtimeEvent::ConversationItemDone {
++                item_id: call.item_id.clone(),
++            }
++        }
++        _ => event,
++    };
+     if let Some(sdk) = &handoff_state.sdk {
+         let action = match &event {
+             RealtimeEvent::ConversationItemRetrieved(item) => {
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+index 7fd56784c426d4bddd20d8bfda0007d55e496740..1493f99aa252f4c0725194c9be11b628b5c059c6 100644
+--- a/codex-rs/core/src/realtime_conversation/provider_history.rs
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -4,6 +4,7 @@ use super::*;
+ use base64::Engine as _;
+ use image::ImageDecoder as _;
+ use serde_json::Value;
++use std::collections::BTreeMap;
+ use std::collections::VecDeque;
+ const LIMIT: usize = 4096;
+ const ID_BYTES: usize = 512;
+@@ -23,6 +24,7 @@ pub(crate) enum Request {
+     },
+     Update {
+         items: Vec<Value>,
++        expected_items: Option<Vec<Value>>,
+         reply: Reply<()>,
+     },
+     Create {
+@@ -56,11 +58,19 @@ struct Pending {
+     waiting: Option<Action>,
+     deadline: tokio::time::Instant,
+ }
++#[derive(Debug)]
++struct ReplayedCall {
++    item_id: String,
++    output_id: Option<String>,
++    confirmed: bool,
++}
++
+ #[derive(Debug)]
+ pub(super) struct State {
+     order: Vec<String>,
+     boundary: Option<String>,
+     incomplete: bool,
++    replayed_calls: BTreeMap<String, ReplayedCall>,
+     pending: Option<Pending>,
+ }
+ impl Default for State {
+@@ -69,6 +79,7 @@ impl Default for State {
+             order: Vec::new(),
+             boundary: Some("root".into()),
+             incomplete: false,
++            replayed_calls: BTreeMap::new(),
+             pending: None,
+         }
+     }
+@@ -161,6 +172,53 @@ fn mutable_message(item: &Value) -> bool {
+     item["type"] == "message"
+         && matches!(item["role"].as_str(), Some("user" | "assistant" | "system"))
+ }
++
++pub(super) fn is_tool_replay(item: &Value) -> bool {
++    matches!(
++        item["type"].as_str(),
++        Some("function_call" | "function_call_output")
++    )
++}
++
++fn replay_item(item: &Value) -> CodexResult<Value> {
++    let fields = item
++        .as_object()
++        .ok_or_else(|| invalid("Invalid historical tool item"))?;
++    let call_id_valid = item["call_id"].as_str().is_some_and(valid_id);
++    let status_valid = fields
++        .get("status")
++        .is_none_or(|status| status == "completed");
++    let allowed = if item["type"] == "function_call" {
++        let name_valid = item["name"].as_str().is_some_and(|name| {
++            valid_id(name) && !matches!(name, "background_agent" | "remain_silent")
++        });
++        if !name_valid || !item["arguments"].is_string() {
++            return Err(invalid("Invalid historical function call"));
++        }
++        &["name", "arguments"][..]
++    } else {
++        if !item["output"].is_string() {
++            return Err(invalid("Invalid historical function output"));
++        }
++        &["output"][..]
++    };
++    if !call_id_valid
++        || !status_valid
++        || fields
++            .get("object")
++            .is_some_and(|object| object != "realtime.item")
++        || fields.keys().any(|key| {
++            !["id", "type", "call_id", "status", "object"].contains(&key.as_str())
++                && !allowed.contains(&key.as_str())
++        })
++    {
++        return Err(invalid("Invalid historical tool item"));
++    }
++    let mut item = item.clone();
++    item["status"] = Value::String("completed".into());
++    Ok(item)
++}
++
+ fn same_message(a: &Value, b: &Value) -> bool {
+     let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else {
+         return a == b;
+@@ -246,6 +304,17 @@ fn creation_item(item: &Value, remaining: &mut u64) -> CodexResult<Value> {
+ // Server receipts may omit optional media or add defaults. Only contradictory
+ // writable fields that are actually present establish a different item.
+ fn creation_receipt_conflicts(expected: &Value, actual: &Value) -> bool {
++    if is_tool_replay(expected) {
++        return actual["type"] != expected["type"]
++            || actual["call_id"] != expected["call_id"]
++            || ["name", "arguments", "output", "status"]
++                .iter()
++                .any(|field| {
++                    actual
++                        .get(*field)
++                        .is_some_and(|value| value != &expected[*field])
++                });
++    }
+     for field in ["type", "role"] {
+         if actual
+             .get(field)
+@@ -423,6 +492,14 @@ impl State {
+                 _ => None,
+             })
+     }
++    pub(super) fn contains_id(&self, id: &str) -> bool {
++        self.boundary.as_deref() == Some(id)
++            || self.order.iter().any(|known| known == id)
++            || self
++                .replayed_calls
++                .values()
++                .any(|call| call.item_id == id || call.output_id.as_deref() == Some(id))
++    }
+     pub(super) fn busy(&self) -> bool {
+         self.pending.is_some()
+     }
+@@ -570,29 +647,52 @@ impl State {
+         }
+         Ok(())
+     }
+-    fn insert_message(
+-        &self,
++    fn insert_item(
++        &mut self,
+         item: &Value,
+         previous: &Option<String>,
+         event_id: &Option<String>,
+     ) -> CodexResult<Action> {
+         let id = item_id(item)?;
+-        if self.order.len() == LIMIT
+-            || self.boundary.as_deref() == Some(id)
+-            || self.order.iter().any(|known| known == id)
+-        {
++        if self.order.len() == LIMIT || self.contains_id(id) {
+             return Err(invalid(
+-                "Provider message ID is already in use or history is full",
++                "Provider item ID is already in use or history is full",
+             ));
+         }
+         if previous
+             .as_ref()
+             .is_some_and(|id| self.boundary.as_ref() != Some(id) && !self.order.contains(id))
+         {
+-            return Err(invalid("Unknown provider message predecessor"));
++            return Err(invalid("Unknown provider item predecessor"));
+         }
+-        let mut remaining_image_work = MAX_IMAGE_DECODE_BYTES;
+-        let item = creation_item(item, &mut remaining_image_work)?;
++        let item = if is_tool_replay(item) {
++            let item = replay_item(item)?;
++            let call_id = item["call_id"].as_str().unwrap();
++            if item["type"] == "function_call" {
++                if self.replayed_calls.len() == LIMIT || self.replayed_calls.contains_key(call_id) {
++                    return Err(invalid(
++                        "Historical tool call ID is already in use or history is full",
++                    ));
++                }
++                self.replayed_calls.insert(
++                    call_id.to_owned(),
++                    ReplayedCall {
++                        item_id: id.to_owned(),
++                        output_id: None,
++                        confirmed: false,
++                    },
++                );
++            } else {
++                let call = self.replayed_calls.get_mut(call_id)
++                    .filter(|call| call.confirmed && call.output_id.is_none() && self.order.contains(&call.item_id))
++                    .ok_or_else(|| invalid("Historical function output requires an imported call without an output"))?;
++                call.output_id = Some(id.to_owned());
++            }
++            item
++        } else {
++            let mut remaining_image_work = MAX_IMAGE_DECODE_BYTES;
++            creation_item(item, &mut remaining_image_work)?
++        };
+         Ok(Action::Create {
+             item,
+             previous: previous.clone(),
+@@ -600,6 +700,25 @@ impl State {
+             recreate: false,
+         })
+     }
++
++    pub(super) fn is_replayed_call(&self, call_id: &str, item_id: &str) -> bool {
++        self.replayed_calls
++            .get(call_id)
++            .is_some_and(|call| call.item_id == item_id)
++    }
++
++    pub(super) fn replayed_call_for_item<'a>(&self, item: &'a Value) -> Option<&'a str> {
++        let call_id = item["call_id"].as_str()?;
++        let id = item["id"].as_str()?;
++        let call = self.replayed_calls.get(call_id)?;
++        let replayed = match item["type"].as_str() {
++            Some("function_call") => call.item_id == id,
++            Some("function_call_output") => call.output_id.as_deref() == Some(id),
++            _ => false,
++        };
++        replayed.then_some(call_id)
++    }
++
+     pub(super) fn start(&mut self, request: Request) -> CodexResult<Option<Action>> {
+         if self.busy() {
+             finish_request(
+@@ -633,7 +752,7 @@ impl State {
+                 event_id,
+                 ..
+             } => {
+-                match self.insert_message(item, previous, event_id) {
++                match self.insert_item(item, previous, event_id) {
+                     Ok(action) => actions.push_back(action),
+                     Err(error) => {
+                         finish_request(request, Err(error));
+@@ -643,7 +762,13 @@ impl State {
+                 VecDeque::new()
+             }
+         };
+-        if let Request::Update { items, .. } = &request {
++        let mut retained_bytes = 0;
++        if let Request::Update {
++            items,
++            expected_items,
++            ..
++        } = &request
++        {
+             if items.len() > LIMIT {
+                 finish_request(
+                     request,
+@@ -651,10 +776,22 @@ impl State {
+                 );
+                 return Ok(None);
+             }
+-        }
+-        let mut retained_bytes = 0;
+-        if let Request::Update { items, .. } = &request {
+-            for item in items {
++            if expected_items.as_ref().is_some_and(|expected| {
++                expected.len() != ids.len()
++                    || expected
++                        .iter()
++                        .zip(&ids)
++                        .any(|(item, id)| item["id"].as_str() != Some(id.as_str()))
++            }) {
++                finish_request(
++                    request,
++                    Err(invalid(
++                        "Provider history changed after the updater snapshot",
++                    )),
++                );
++                return Ok(None);
++            }
++            for item in items.iter().chain(expected_items.iter().flatten()) {
+                 if codex_api::charge_realtime_json_storage(item, &mut retained_bytes).is_err() {
+                     finish_request(
+                         request,
+@@ -701,7 +838,20 @@ impl State {
+         }
+         // This matching receipt is consumed even if retaining its body exceeds the budget.
+         pending.waiting = None;
+-        if pending.request.is_some() {
++        if let Some(Request::Update {
++            expected_items: Some(expected),
++            ..
++        }) = &pending.request
++        {
++            // The remaining IDs exclude the receipt just consumed.
++            let index = expected.len() - pending.ids.len() - 1;
++            if expected[index] != item {
++                self.interrupt(invalid(
++                    "Provider history changed after the updater snapshot",
++                ));
++                return Ok(None);
++            }
++        } else if pending.request.is_some() {
+             codex_api::charge_realtime_json_storage(&item, &mut pending.retained_bytes).map_err(
+                 |_| invalid("Provider history exceeds its 8 MiB estimated storage limit"),
+             )?;
+@@ -744,7 +894,7 @@ impl State {
+         }
+         if creation_receipt_conflicts(expected, item) {
+             self.interrupt(invalid(
+-                "Provider create receipt conflicts with the requested message",
++                "Provider create receipt conflicts with the requested item",
+             ));
+             return Ok(None);
+         }
+@@ -766,6 +916,12 @@ impl State {
+             };
+             self.order.insert(index, id);
+         }
++        if expected["type"] == "function_call"
++            && let Some(call_id) = expected["call_id"].as_str()
++            && let Some(call) = self.replayed_calls.get_mut(call_id)
++        {
++            call.confirmed = true;
++        }
+         pending.waiting = None;
+         self.advance()
+     }
+@@ -823,13 +979,18 @@ impl State {
+             pending.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+             return Ok(Some(action));
+         }
+-        if let Some(Request::Update { items, .. }) = &pending.request {
+-            if pending.actions.is_empty() && !pending.snapshot.is_empty() {
+-                pending.actions = edits(&pending.snapshot, items, self.boundary.as_deref())?;
+-                pending.snapshot.clear();
+-            } else if pending.actions.is_empty() && self.order.is_empty() {
+-                pending.actions = edits(&[], items, self.boundary.as_deref())?;
+-            }
++        if let Some(Request::Update {
++            items,
++            expected_items,
++            ..
++        }) = &mut pending.request
++            && pending.actions.is_empty()
++            && (expected_items.is_some() || !pending.snapshot.is_empty() || self.order.is_empty())
++        {
++            let expected = expected_items.take();
++            let snapshot = expected.as_deref().unwrap_or(&pending.snapshot);
++            pending.actions = edits(snapshot, items, self.boundary.as_deref())?;
++            pending.snapshot.clear();
+         }
+         if let Some(action) = pending.actions.pop_front() {
+             pending.waiting = Some(action.clone());
+@@ -1132,6 +1293,7 @@ mod tests {
+             let (reply, _) = tokio::sync::oneshot::channel();
+             let update = Request::Update {
+                 items: vec![message(id, "new")],
++                expected_items: None,
+                 reply,
+             };
+             assert_eq!(
+@@ -1270,6 +1432,7 @@ mod tests {
+         state
+             .start(Request::Update {
+                 items: vec![new.clone(), old.clone()],
++                expected_items: None,
+                 reply,
+             })
+             .unwrap();
+@@ -1288,6 +1451,99 @@ mod tests {
+         assert!(!state.busy());
+         assert_eq!(state.order, vec!["new", "old"]);
+     }
++    #[tokio::test]
++    async fn updater_snapshot_must_match_current_ids_and_bodies() {
++        let old = message("old", "old");
++        let desired = message("old", "edited");
++        let arrived = message("arrived", "new speech");
++        let mut state = State::default();
++        state.observe_added(&old, Some(None)).unwrap();
++        state.observe_added(&arrived, Some(Some("old"))).unwrap();
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        assert!(
++            state
++                .start(Request::Update {
++                    items: vec![desired.clone()],
++                    expected_items: Some(vec![old.clone()]),
++                    reply,
++                })
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            receipt
++                .await
++                .unwrap()
++                .unwrap_err()
++                .to_string()
++                .contains("updater snapshot")
++        );
++        assert!(!state.busy());
++
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        assert!(matches!(state.start(Request::Update {
++            items: vec![desired, arrived.clone()],
++            expected_items: Some(vec![old, arrived]),
++            reply,
++        }).unwrap(), Some(Action::Retrieve { id, .. }) if id == "old"));
++        assert!(
++            state
++                .retrieved(message("old", "changed by provider"))
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            receipt
++                .await
++                .unwrap()
++                .unwrap_err()
++                .to_string()
++                .contains("updater snapshot")
++        );
++        assert!(!state.busy());
++    }
++
++    #[tokio::test]
++    async fn replayed_tool_history_requires_a_receipted_call_and_one_output() {
++        let mut state = State::default();
++        let call = json!({"type":"function_call","id":"past-call","call_id":"past","name":"lookup","arguments":"{}"});
++        let output = json!({"type":"function_call_output","id":"past-output","call_id":"past","output":"42"});
++        let request = |item| {
++            let (reply, receipt) = tokio::sync::oneshot::channel();
++            (
++                Request::Create {
++                    item,
++                    previous: None,
++                    event_id: None,
++                    reply,
++                },
++                receipt,
++            )
++        };
++        let (missing, receipt) = request(output.clone());
++        assert!(state.start(missing).unwrap().is_none());
++        assert!(receipt.await.unwrap().is_err());
++
++        for item in [call, output.clone()] {
++            let (create, receipt) = request(item);
++            let Some(Action::Create { item, .. }) = state.start(create).unwrap() else {
++                panic!("expected a historical item create");
++            };
++            assert_eq!(item["status"], "completed");
++            assert_eq!(state.replayed_call_for_item(&item), Some("past"));
++            state.observe_added(&item, None).unwrap();
++            assert!(state.created(&item, false).unwrap().is_none());
++            assert!(receipt.await.unwrap().is_ok());
++        }
++        assert!(state.is_replayed_call("past", "past-call"));
++        assert!(!state.is_replayed_call("past", "other-call"));
++        let mut duplicate = output;
++        duplicate["id"] = json!("other-output");
++        let (create, receipt) = request(duplicate);
++        assert!(state.start(create).unwrap().is_none());
++        assert!(receipt.await.unwrap().is_err());
++    }
++
+     #[tokio::test]
+     async fn new_provider_item_interrupts_edit_and_drains_retrieval() {
+         for added_event in [false, true] {
+@@ -1297,7 +1553,7 @@ mod tests {
+             let (reply, receipt) = tokio::sync::oneshot::channel();
+             assert!(matches!(
+                 state.start(Request::Update {
+-                    items: vec![message("old", "corrected")], reply,
++                    items: vec![message("old", "corrected")], expected_items: None, reply,
+                 }).unwrap(), Some(Action::Retrieve { id, .. }) if id == "old"
+             ));
+             let arrived = message("arrived", "new speech");
+@@ -1325,6 +1581,7 @@ mod tests {
+                 state
+                     .start(Request::Update {
+                         items: vec![old.clone()],
++                        expected_items: None,
+                         reply,
+                     })
+                     .unwrap()
+diff --git a/codex-rs/core/src/realtime_conversation/raw_event.rs b/codex-rs/core/src/realtime_conversation/raw_event.rs
+index 906739b0b5d3e0eb244cbd19ea687f8057334b78..042a7ed9ba3d0b5472d7d1d2464900605d278b23 100644
+--- a/codex-rs/core/src/realtime_conversation/raw_event.rs
++++ b/codex-rs/core/src/realtime_conversation/raw_event.rs
+@@ -9,6 +9,7 @@ use codex_protocol::protocol::RealtimeInterruptReceipt;
+ use codex_protocol::protocol::RealtimeOutputModality;
+ use codex_protocol::realtime_settings::RealtimeMaxOutputTokens;
+ use codex_protocol::realtime_settings::RealtimeReasoning;
++use codex_protocol::realtime_settings::RealtimeResponseConversation;
+ use codex_protocol::realtime_settings::RealtimeResponseOptions;
+ use serde::Deserialize;
+ use serde_json::Value;
+@@ -65,6 +66,8 @@ enum ClientEvent {
+ #[derive(Default, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ struct Response {
++    conversation: Option<RealtimeResponseConversation>,
++    input: Option<Vec<Value>>,
+     instructions: Option<String>,
+     output_modalities: Option<[RealtimeOutputModality; 1]>,
+     max_output_tokens: Option<RealtimeMaxOutputTokens>,
+@@ -103,7 +106,21 @@ fn response_options(
+             "Raw Realtime response metadata exceeds provider limits",
+         ));
+     }
++    if response.input.iter().flatten().any(|item| {
++        !matches!(
++            item["type"].as_str(),
++            Some("message" | "function_call" | "function_call_output")
++        ) && !(item["type"] == "item_reference"
++            && item["id"]
++                .as_str()
++                .is_some_and(|id| !id.is_empty() && id.len() <= 512)
++            && item.as_object().is_some_and(|fields| fields.len() == 2))
++    }) {
++        return Err(invalid("Unsupported raw Realtime response input item"));
++    }
+     Ok(RealtimeResponseOptions {
++        conversation: response.conversation,
++        input: response.input,
+         instructions: response.instructions,
+         output_modality: response.output_modalities.map(|[modality]| modality),
+         max_output_tokens: response.max_output_tokens,
+@@ -205,16 +222,22 @@ pub(crate) async fn handle_send_event_sdk(
+             item,
+             previous_item_id,
+         } => {
++            if item.get("type").and_then(Value::as_str) == Some("mcp_approval_response") {
++                dispatch_raw_approval(sess, generation, item, previous_item_id, event_id, reply)
++                    .await;
++                return;
++            }
+             let mut item = match item {
+                 Value::Object(item)
+-                    if item.get("type").and_then(Value::as_str) == Some("message") =>
++                    if matches!(
++                        item.get("type").and_then(Value::as_str),
++                        Some("message" | "function_call" | "function_call_output")
++                    ) =>
+                 {
+                     item
+                 }
+                 _ => {
+-                    let _ = reply.send(Err(invalid(
+-                        "Raw Realtime item creation requires a supported message",
+-                    )));
++                    let _ = reply.send(Err(invalid("Unsupported raw Realtime conversation item")));
+                     return;
+                 }
+             };
+@@ -343,3 +366,61 @@ fn parse_event(mut value: Value) -> CodexResult<(ClientEvent, Option<String>)> {
+         .map_err(|_| invalid("Unsupported or invalid raw Realtime client event"))?;
+     Ok((event, event_id))
+ }
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct ApprovalResponse {
++    #[serde(rename = "type")]
++    kind: String,
++    id: Option<String>,
++    approval_request_id: String,
++    approve: bool,
++    reason: Option<String>,
++}
++
++async fn dispatch_raw_approval(
++    sess: &Arc<Session>,
++    generation: String,
++    item: Value,
++    previous: Option<String>,
++    event_id: Option<String>,
++    reply: Reply<Option<Value>>,
++) {
++    let response = serde_json::from_value::<ApprovalResponse>(item);
++    let response = match response {
++        Ok(response)
++            if response.kind == "mcp_approval_response"
++                && !response.approval_request_id.is_empty()
++                && response.approval_request_id.len() <= 512
++                && response.approval_request_id != "root"
++                && response.id.as_ref().is_none_or(|id| {
++                    !id.is_empty()
++                        && id.len() <= 512
++                        && id != "root"
++                        && id != &response.approval_request_id
++                })
++                && previous
++                    .as_ref()
++                    .is_none_or(|id| id == &response.approval_request_id) =>
++        {
++            response
++        }
++        _ => {
++            let _ = reply.send(Err(invalid(
++                "Unsupported or invalid raw Hosted MCP approval response",
++            )));
++            return;
++        }
++    };
++    dispatch_sdk_control(sess, generation, completion(reply, |_| None), |reply| {
++        SdkRealtimeCommand::HostedMcpApprovalResponse {
++            request_id: response.approval_request_id,
++            approve: response.approve,
++            reason: response.reason,
++            item_id: response.id,
++            event_id,
++            reply,
++        }
++    })
++    .await;
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 27434420d45f0275d30f27b8ea0ba7a29a238eb1..5fccc9024e1c63a8b9227dbe5c7ae9fb18462acf 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -763,6 +763,7 @@ pub(super) async fn submission_loop(
+                 Op::RealtimeConversationUpdateHistorySdk {
+                     generation,
+                     items,
++                    expected_items,
+                     reply,
+                 } => {
+                     crate::realtime_conversation::handle_history_sdk(
+@@ -770,6 +771,7 @@ pub(super) async fn submission_loop(
+                         generation,
+                         crate::realtime_conversation::provider_history::Request::Update {
+                             items,
++                            expected_items,
+                             reply,
+                         },
+                     )
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index d9563eddf39729d2e5ce9c341b9793f56954b4e6..695f0e20690492164b06032fb5453df0ab772cfd 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1012,6 +1012,7 @@ pub enum Op {
+     RealtimeConversationUpdateHistorySdk {
+         generation: String,
+         items: Vec<Value>,
++        expected_items: Option<Vec<Value>>,
+         reply: oneshot::Sender<CodexResult<()>>,
+     },
+
+diff --git a/codex-rs/protocol/src/realtime_settings.rs b/codex-rs/protocol/src/realtime_settings.rs
+index 6966215d9cdd8f3b392002c0fe42eb59673e0ce6..f107bcc52574976f7ad540b80aba0765bed52384 100644
+--- a/codex-rs/protocol/src/realtime_settings.rs
++++ b/codex-rs/protocol/src/realtime_settings.rs
+@@ -251,6 +251,10 @@ pub struct RealtimeResponseOptions {
+     #[serde(skip)]
+     pub event_id: Option<String>,
+     #[serde(skip)]
++    pub conversation: Option<RealtimeResponseConversation>,
++    #[serde(skip)]
++    pub input: Option<Vec<serde_json::Value>>,
++    #[serde(skip)]
+     pub metadata: Option<BTreeMap<String, String>>,
+     #[serde(skip)]
+     pub parallel_tool_calls: Option<bool>,
+@@ -258,6 +262,13 @@ pub struct RealtimeResponseOptions {
+     pub reasoning: Option<RealtimeReasoning>,
+ }
+
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum RealtimeResponseConversation {
++    Auto,
++    None,
++}
++
+ /// Canonical wire formats; PCM is always 24 kHz and G.711 has no rate field.
+ #[derive(
+     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS,

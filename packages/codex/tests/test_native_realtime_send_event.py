@@ -13,6 +13,7 @@ from agents.realtime import (
     RealtimeConfig,
     RealtimeConversationItemObserved,
     RealtimeHostedMcpToolsListed,
+    RealtimeResponse,
 )
 from tests._asyncio import timeout
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -164,7 +165,7 @@ async def test_raw_response_preserves_event_id_metadata_and_overrides(
             "approve": True,
         },
     ],
-    ids=["tool-call", "tool-output", "approval"],
+    ids=["reserved-tool-call", "orphan-tool-output", "unissued-approval"],
 )
 async def test_raw_item_create_rejects_forged_authority_before_wire_send(
     realtime_peer: RealtimePeer, item: dict[str, Any]
@@ -366,3 +367,106 @@ async def test_raw_session_update_waits_for_provider_receipt(realtime_peer: Real
             if not updating.done():
                 await voice.aclose()
             await asyncio.gather(updating, return_exceptions=True)
+
+
+async def test_raw_detached_responses_keep_explicit_inputs_and_observed_history(
+    realtime_peer: RealtimePeer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer = realtime_peer
+    observed = {
+        "id": "classification-context",
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Classify this synthetic message."}],
+    }
+    async with (
+        timeout(20),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-detached-response",
+            supports_websockets=False,
+        ) as provider,
+        Agent(instructions="Listen.", provider=provider).session() as session,
+        session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        aclosing(voice.events()) as events,
+    ):
+        await observe_item(peer, events, observed)
+        assert peer.socket is not None
+        send_json = peer.socket.send_json
+
+        async def detached_response(data: Any, *args: Any, **kwargs: Any) -> None:
+            if data.get("type") in ("response.created", "response.done"):
+                response = {**data["response"], "conversation_id": None}
+                if data["type"] == "response.done":
+                    item = {
+                        "id": f"detached-{response['id']}",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "synthetic-classification"}],
+                    }
+                    await send_json(
+                        {
+                            "type": "response.output_item.done",
+                            "response_id": response["id"],
+                            "output_index": 0,
+                            "item": item,
+                        }
+                    )
+                    response["output"] = [item]
+                data = {**data, "response": response}
+            await send_json(data, *args, **kwargs)
+
+        monkeypatch.setattr(peer.socket, "send_json", detached_response)
+        cursor = len(peer.frames)
+        completions = []
+        for index, inputs in enumerate(
+            ([], [{"type": "item_reference", "id": observed["id"]}]), start=1
+        ):
+            response = {
+                "conversation": "none",
+                "input": inputs,
+                "output_modalities": ["text"],
+                "metadata": {"purpose": "classification"},
+            }
+            event_id = f"classification-request-{index}"
+            assert (
+                await voice.send_event(
+                    {"type": "response.create", "event_id": event_id, "response": response}
+                )
+                is None
+            )
+            frame = await peer.frame(lambda frame: frame["type"] == "response.create", after=cursor)
+            cursor = peer.frames.index(frame, cursor) + 1
+            assert frame == {
+                "type": "response.create",
+                "event_id": event_id,
+                "response": {**response, "tools": [], "tool_choice": "none"},
+            }
+            async for event in events:
+                if isinstance(event, RealtimeResponse):
+                    completions.append((event.response_id, event.status))
+                    if event.status == "done":
+                        assert event.response_id == f"voice-response-{index}"
+                        break
+            retrieving = asyncio.create_task(voice.retrieve_conversation_history())
+            try:
+                request = await peer.frame(
+                    lambda frame: frame["type"] == "conversation.item.retrieve", after=cursor
+                )
+                cursor = peer.frames.index(request, cursor) + 1
+                assert request["item_id"] == observed["id"]
+                await peer.socket.send_json(
+                    {"type": "conversation.item.retrieved", "item": observed}
+                )
+                assert await retrieving == [observed]
+            finally:
+                if not retrieving.done():
+                    await voice.aclose()
+                await asyncio.gather(retrieving, return_exceptions=True)
+        assert completions == [
+            ("voice-response-1", "created"),
+            ("voice-response-1", "done"),
+            ("voice-response-2", "created"),
+            ("voice-response-2", "done"),
+        ]
