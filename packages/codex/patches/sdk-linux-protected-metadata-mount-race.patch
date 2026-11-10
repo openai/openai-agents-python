@@ -1,0 +1,138 @@
+diff --git a/codex-rs/linux-sandbox/src/bwrap.rs b/codex-rs/linux-sandbox/src/bwrap.rs
+index 5efdb6f3553dbe241c49f61908ee40b91a3ac1b6..18d2d01c8cd5925d93cb4fd6bb441df6e9000298 100644
+--- a/codex-rs/linux-sandbox/src/bwrap.rs
++++ b/codex-rs/linux-sandbox/src/bwrap.rs
+@@ -733,9 +733,14 @@ fn create_filesystem_args(
+             if deferred_read_only_subpaths.contains(&subpath) {
+                 continue;
+             }
++            let protected_metadata = subpath
++                .file_name()
++                .is_some_and(is_protected_metadata_name)
++                .then(|| fs::symlink_metadata(&subpath));
+             append_read_only_subpath_args(
+                 &mut bwrap_args,
+                 &subpath,
++                protected_metadata,
+                 &allowed_write_paths,
+                 &daemon_directories,
+             )?;
+@@ -1214,24 +1219,34 @@ fn append_mount_target_parent_dir_args(args: &mut Vec<String>, mount_target: &Pa
+ fn append_read_only_subpath_args(
+     bwrap_args: &mut BwrapArgs,
+     subpath: &Path,
++    protected_metadata: Option<io::Result<Metadata>>,
+     allowed_write_paths: &[PathBuf],
+     daemon_directories: &BTreeSet<PathBuf>,
+ ) -> Result<()> {
+-    if let Some(metadata) = transient_empty_metadata_path(subpath)
++    if let Some(metadata) = protected_metadata
+         && is_within_allowed_write_paths(subpath, allowed_write_paths)
+     {
+         // Another concurrent bwrap setup can leave an empty mount target at
+-        // a missing metadata path. Treat it like the missing case instead of
+-        // binding that transient host path as the stable source.
++        // a missing metadata path. Use the initial observation to avoid a
++        // bind that depends on this transient host path.
+         match metadata {
+-            EmptyProtectedMetadataPath::File(metadata) => {
+-                append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata)?;
++            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
++                return append_existing_empty_file_bind_data_args(bwrap_args, subpath, &metadata);
+             }
+-            EmptyProtectedMetadataPath::Directory(metadata) => {
++            Ok(metadata) if metadata.is_dir() && directory_is_empty_or_missing(subpath) => {
+                 append_existing_empty_directory_args(bwrap_args, subpath, &metadata);
++                return Ok(());
+             }
++            Err(err) if err.kind() == io::ErrorKind::NotFound => {
++                let missing_ancestor = subpath.parent().and_then(find_first_non_existent_component);
++                let first_missing_component = missing_ancestor.as_deref().unwrap_or(subpath);
++                if is_within_allowed_write_paths(first_missing_component, allowed_write_paths) {
++                    append_missing_read_only_subpath_args(bwrap_args, first_missing_component)?;
++                }
++                return Ok(());
++            }
++            _ => {}
+         }
+-        return Ok(());
+     }
+ 
+     if !subpath.exists() {
+@@ -1402,33 +1417,11 @@ fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -
+         .any(|root| path.starts_with(root))
+ }
+ 
+-enum EmptyProtectedMetadataPath {
+-    File(Metadata),
+-    Directory(Metadata),
+-}
+-
+-fn transient_empty_metadata_path(path: &Path) -> Option<EmptyProtectedMetadataPath> {
+-    if !path.file_name().is_some_and(is_protected_metadata_name) {
+-        return None;
+-    }
+-
+-    let metadata = fs::symlink_metadata(path).ok()?;
+-    if metadata.file_type().is_file() && metadata.len() == 0 {
+-        return Some(EmptyProtectedMetadataPath::File(metadata));
+-    }
+-
+-    if metadata.file_type().is_dir() && directory_is_empty(path) {
+-        return Some(EmptyProtectedMetadataPath::Directory(metadata));
++fn directory_is_empty_or_missing(path: &Path) -> bool {
++    match fs::read_dir(path).and_then(|mut entries| entries.next().transpose()) {
++        Ok(entry) => entry.is_none(),
++        Err(err) => err.kind() == io::ErrorKind::NotFound,
+     }
+-
+-    None
+-}
+-
+-fn directory_is_empty(path: &Path) -> bool {
+-    let Ok(mut entries) = fs::read_dir(path) else {
+-        return false;
+-    };
+-    entries.next().is_none()
+ }
+ 
+ fn first_writable_symlink_component_in_path(
+@@ -2058,6 +2051,38 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn protected_metadata_observed_missing_uses_a_mask_if_a_placeholder_appears() {
++        let workspace = TempDir::new().expect("workspace");
++        let dot_git = workspace.path().join(".git");
++        let missing = fs::symlink_metadata(&dot_git).expect_err(".git should be missing");
++        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
++        fs::create_dir(&dot_git).expect("create transient .git directory");
++
++        let mut args = BwrapArgs {
++            args: Vec::new(),
++            preserved_files: Vec::new(),
++            synthetic_mount_targets: Vec::new(),
++            protected_create_targets: Vec::new(),
++        };
++        append_read_only_subpath_args(
++            &mut args,
++            &dot_git,
++            Some(Err(missing)),
++            &[workspace.path().to_path_buf()],
++            &BTreeSet::new(),
++        )
++        .expect("plan read-only mount");
++        fs::remove_dir(&dot_git).expect("remove transient .git directory");
++
++        assert_empty_directory_mounted_read_only(&args.args, &dot_git);
++        assert!(!args.args.iter().any(|arg| arg == "--ro-bind"));
++        assert_eq!(
++            args.synthetic_mount_targets,
++            vec![SyntheticMountTarget::missing_empty_directory(&dot_git)]
++        );
++    }
++
+     #[test]
+     fn transient_empty_preserved_file_uses_empty_file_bind_data() {
+         let temp_dir = TempDir::new().expect("temp dir");
