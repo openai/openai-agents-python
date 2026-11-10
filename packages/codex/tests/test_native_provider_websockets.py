@@ -7,6 +7,7 @@ import json
 import socket
 import socketserver
 import ssl
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -1050,6 +1051,7 @@ async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
     prefixes: list[bytes] = []
     handshake_failures: list[str] = []
     handshake_successes: list[bool] = []
+    post_handshake_closures: list[str] = []
     accepted_data: list[bytes] = []
     loop = asyncio.get_running_loop()
     attempt_observed = asyncio.Event()
@@ -1061,7 +1063,8 @@ async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
             prefix = self.request.recv(1, socket.MSG_PEEK)
             prefixes.append(prefix)
             if prefix != b"\x16":
-                loop.call_soon_threadsafe(attempt_observed.set)
+                if prefix:
+                    loop.call_soon_threadsafe(attempt_observed.set)
                 return
             try:
                 secured = context.wrap_socket(self.request, server_side=True)
@@ -1073,17 +1076,21 @@ async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
                 return
             handshake_successes.append(True)
             with secured:
+                data = b""
                 try:
-                    data = b""
                     while b"\r\n" not in data and len(data) < 1024:
                         chunk = secured.recv(min(256, 1024 - len(data)))
                         if not chunk:
+                            post_handshake_closures.append("EOF")
                             break
                         data += chunk
-                    accepted_data.append(data.split(b"\r\n", 1)[0])
-                except OSError:
-                    pass
+                except OSError as error:
+                    post_handshake_closures.append(
+                        str(getattr(error, "reason", None) or type(error).__name__)
+                    )
                 finally:
+                    if data:
+                        accepted_data.append(data.split(b"\r\n", 1)[0])
                     loop.call_soon_threadsafe(attempt_observed.set)
 
     proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Proxy)
@@ -1138,6 +1145,15 @@ async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
             await asyncio.to_thread(proxy.server_close)
     assert any(prefix == b"\x16" for prefix in prefixes)
     assert all(prefix in (b"", b"\x16") for prefix in prefixes), "plaintext reached the HTTPS proxy"
+    rejection_errors = {
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "UNEXPECTED_EOF_WHILE_READING",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+    }
+    assert all(reason in rejection_errors | {"EOF"} for reason in post_handshake_closures), (
+        post_handshake_closures
+    )
     if trust_proxy:
         assert handshake_successes, "the trusted proxy never completed TLS negotiation"
         # Proxy policy can select WebSocket CONNECT or the existing HTTP fallback.
@@ -1149,11 +1165,11 @@ async def test_websocket_provider_verifies_https_proxy_including_http_fallback(
         }
         assert accepted_data and all(line in expected for line in accepted_data), accepted_data
     else:
-        # Platform verifiers can close the stream without sending an unknown-CA alert.
-        assert handshake_failures
-        assert all(
-            reason in {"TLSV1_ALERT_UNKNOWN_CA", "UNEXPECTED_EOF_WHILE_READING"}
-            for reason in handshake_failures
-        ), handshake_failures
-        assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
+        assert all(reason in rejection_errors for reason in handshake_failures), handshake_failures
+        if sys.platform == "win32":
+            # SChannel: final TLS bytes before certificate validation.
+            assert handshake_failures or post_handshake_closures
+        else:
+            assert handshake_failures
+            assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
         assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"
