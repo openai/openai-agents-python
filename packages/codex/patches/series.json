@@ -357,8 +357,48 @@
       "sha256": "cd078f600aafb1078014ec3005198de0637d2f66c7a45c2a3ca35f1d054dd4af"
     },
     {
+      "path": "0100-native-hosted-option-fidelity.patch",
+      "sha256": "c06cdc7449e3767e439c349e2253546e15e2fa1b97b7f2d048fb3e429cd632a6"
+    },
+    {
+      "path": "0210-native-computer-use.patch",
+      "sha256": "6f2e8711da00c50f64b3fcb48ae3c11ce2df2e7a74c6d55d7521d9e4c71568ce"
+    },
+    {
+      "path": "0211-native-computer-guardian.patch",
+      "sha256": "70a07e4e7e46d5e0ae324fd80d53da0b18a9e944287a7cb59f8bd5e2e05a3887"
+    },
+    {
+      "path": "0170-canonical-history-transactions.patch",
+      "sha256": "e88a2db32ae35587399c2eeae49284f96ef83383399b26f60961f9748d74e779"
+    },
+    {
+      "path": "0101-native-request-extensions.patch",
+      "sha256": "fc28e524a2b71b3501d232cad8a2a3e420f8463f719c2415b89ab853b9beaa68"
+    },
+    {
+      "path": "0102-native-model-producer.patch",
+      "sha256": "3d5712a9f72e4175ed10ea59968da53986d55e0b64dfbe9f5e67245944ce2695"
+    },
+    {
+      "path": "0103-empty-extra-body-lite.patch",
+      "sha256": "8b13438eea150779e0adcb4d2b533e4192cb5e5c4539f054a8402aaaef29cf77"
+    },
+    {
+      "path": "0104-native-model-response-fidelity.patch",
+      "sha256": "6cf79cbb142fef7b1d995f3f3556b40c1d0c6be3f7ba48298ad962e72a112549"
+    },
+    {
+      "path": "0098-retained-trace-root-descriptors.patch",
+      "sha256": "f6d9722ba0406441820dbc17106f124ce954157a7b28195eb872f23f838c8ed0"
+    },
+    {
       "path": "0068-decisions.patch",
       "sha256": "7cb52df3b0f021adf948338dae82ba4aed59548f35508e9335fc54a452f48e2a"
+    },
+    {
+      "path": "0099-retained-trace-recovery-watermark.patch",
+      "sha256": "860664c1fbf24002588e74e5dbbda2ea7b14d4aadd0bca5ba2c1f0e8871625f9"
     },
     {
       "path": "sdk-realtime-raw-events-and-history.patch",
@@ -371,7 +411,11 @@
     {
       "path": "0152-sdk-codex-login-terminal-rate-limits.patch",
       "sha256": "18e553a5981488043c85a1c6c22cb87a436036d647a278bd1a0b0270fa939bf4"
+    },
+    {
+      "path": "sdk-realtime-provider-controls-and-tool-history.patch",
+      "sha256": "fa13e4a0e5475eb5581f1cf96763fba7b72cccdc47e6afe98a019dba065a9327"
     }
   ],
-  "result_tree": "e51608a363e9d7b40570a6bb408a6de632cc674d"
+  "result_tree": "4e50813c66bb4fd9cd0ef5d421d1e3f7b6a9148f"
 }

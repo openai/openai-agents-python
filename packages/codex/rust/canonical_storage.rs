@@ -242,28 +242,46 @@ impl CanonicalStore {
         let writer = writers.get_mut(&id).ok_or_else(failure)?;
         let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
         let mut turn = None;
-        let mut found = false;
+        let mut invocation = None;
+        let mut completed = false;
         for record in &snapshot.items {
             match record {
                 RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
                     turn = Some(event.turn_id.as_str())
                 }
-                RolloutItem::ResponseItem(envelope) => match &envelope.item {
-                    ResponseItem::FunctionCall { call_id, .. }
-                        if call_id == &key.call && turn == Some(key.turn.as_str()) =>
-                    {
-                        found = true
+                RolloutItem::ResponseItem(envelope) => {
+                    let owner = envelope.item.turn_id().or(turn);
+                    match &envelope.item {
+                        ResponseItem::FunctionCall { call_id, .. }
+                        | ResponseItem::ComputerCall { call_id, .. }
+                            if call_id == &key.call && owner == Some(key.turn.as_str()) =>
+                        {
+                            if invocation.replace(&envelope.item).is_some() {
+                                return Err(failure());
+                            }
+                        }
+                        _ => {
+                            if crate::local_reconciliation::output_identity(&envelope.item)
+                                .is_some_and(|(call, _)| {
+                                    call == key.call && owner == Some(key.turn.as_str())
+                                })
+                            {
+                                completed = true;
+                            }
+                        }
                     }
-                    ResponseItem::FunctionCallOutput {
-                        call_id: Some(call_id),
-                        ..
-                    } if call_id == &key.call => found = false,
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
-        if !found || key.reply.thread != id.to_string() {
+        if key.reply.thread != id.to_string()
+            || completed
+            || !invocation.is_some_and(|call| {
+                crate::local_reconciliation::output_matches_invocation(call, &item)
+            })
+            || crate::local_reconciliation::output_identity(&item)
+                != Some((key.call.as_str(), Some(key.turn.as_str())))
+        {
             return Err(failure());
         }
         let record = RolloutItem::ResponseItem(codex_history::ResponseItemEnvelope::new(item));
@@ -291,41 +309,35 @@ impl CanonicalStore {
             let writer = writers.get_mut(&id).ok_or_else(failure)?;
             let mut snapshot = writer.snapshot.clone().ok_or_else(failure)?;
             let mut turn = None;
-            let mut found = false;
+            let mut invocation = None;
             let mut completed = false;
             for record in &snapshot.items {
                 match record {
-                    RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
-                        turn = Some(event.turn_id.as_str())
+                    RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => turn = Some(event.turn_id.as_str()),
+                    RolloutItem::ResponseItem(envelope) => {
+                        let owner = envelope.item.turn_id().or(turn);
+                        match &envelope.item {
+                            ResponseItem::FunctionCall { call_id: saved, .. }
+                            | ResponseItem::ComputerCall { call_id: saved, .. }
+                                if saved == call_id && owner == Some(turn_id) => {
+                                    if invocation.replace(&envelope.item).is_some() {
+                                        return Err(ThreadStoreError::InvalidRequest { message: "Reconciliation requires an unambiguous original call".into() });
+                                    }
+                                }
+                            _ => {
+                                if crate::local_reconciliation::output_identity(&envelope.item)
+                                    .is_some_and(|(saved, _)| saved == call_id && owner == Some(turn_id)) {
+                                    completed = true;
+                                }
+                            }
+                        }
                     }
-                    RolloutItem::ResponseItem(envelope) => match &envelope.item {
-                        ResponseItem::FunctionCall { call_id: saved, .. }
-                            if saved == call_id && turn == Some(turn_id) =>
-                        {
-                            found = true
-                        }
-                        ResponseItem::FunctionCallOutput {
-                            call_id: Some(saved),
-                            internal_chat_message_metadata_passthrough,
-                            ..
-                        } if saved == call_id
-                            && internal_chat_message_metadata_passthrough
-                                .as_ref()
-                                .and_then(|metadata| metadata.turn_id.as_deref())
-                                .or(turn)
-                                == Some(turn_id) =>
-                        {
-                            completed = true
-                        }
-                        _ => {}
-                    },
                     _ => {}
                 }
             }
-            if !found || completed {
+            if invocation.is_none() || completed {
                 return Err(ThreadStoreError::InvalidRequest {
-                    message: "Reconciliation requires an unresolved original turn/call identity"
-                        .into(),
+                    message: "Reconciliation requires an unresolved original turn/call identity".into(),
                 });
             }
             let response =
@@ -333,7 +345,13 @@ impl CanonicalStore {
                     .map_err(|_| ThreadStoreError::InvalidRequest {
                         message: "Reconciliation requires valid tool output".into(),
                     })?;
-            let item = crate::python_tools::PythonOutput(response).receipt_for(turn_id, call_id);
+            let original = invocation.expect("original invocation was checked");
+            let item = if matches!(original, ResponseItem::ComputerCall { .. }) {
+                crate::local_reconciliation::computer_receipt(original, response, turn_id)
+                    .map_err(|_| ThreadStoreError::InvalidRequest { message: "Computer reconciliation requires a valid screenshot and safety acknowledgements".into() })?
+            } else {
+                crate::python_tools::PythonOutput(response).receipt_for(turn_id, call_id)
+            };
             snapshot.items.push(RolloutItem::ResponseItem(
                 codex_history::ResponseItemEnvelope::new(item),
             ));

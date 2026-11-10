@@ -227,6 +227,7 @@ async def test_equal_tool_names_do_not_transfer_operation_authority_between_prof
     session._profiles = {"agent_0": object()}
     session._executor = None
     session._native_agents = None
+    session._project_guidance = False
     state = _Submission(
         _prepare_spec(str), operation_refs=(left.ref,), operation_declarations=(left,)
     )

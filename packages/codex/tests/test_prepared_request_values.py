@@ -59,9 +59,16 @@ async def test_default_websocket_permission_rejects_before_opening() -> None:
         )
 
 
-@pytest.mark.parametrize("profile", ["deferred", "code", "hosted"])
-async def test_unsupported_profile_rejects_before_opening(profile: str) -> None:
-    from agents import Agent, NativeProvider, WebSearch, function_tool
+@pytest.mark.parametrize(
+    "profile", ["deferred", "code", "hosted", "hosted-web-search", "hosted-file-search"]
+)
+async def test_unsupported_profile_rejects_before_opening(profile: str, monkeypatch) -> None:
+    from agents import Agent, FileSearch, NativeProvider, WebSearch, function_tool
+
+    def must_not_acquire(*args, **kwargs):
+        pytest.fail("unsupported prepared-request profile acquired provider resources")
+
+    monkeypatch.setattr(NativeProvider, "_acquire_lease", must_not_acquire)
 
     @function_tool(defer_loading=profile == "deferred")
     def ordinary() -> str:
@@ -71,7 +78,13 @@ async def test_unsupported_profile_rejects_before_opening(profile: str) -> None:
         await Agent(
             instructions="No connection",
             provider=NativeProvider(supports_websockets=False),
-            tools=[WebSearch()] if profile == "hosted" else [ordinary],
+            tools=[WebSearch()]
+            if profile == "hosted"
+            else [WebSearch(route="hosted")]
+            if profile == "hosted-web-search"
+            else [FileSearch(vector_store_ids=["vs_fixture"])]
+            if profile == "hosted-file-search"
+            else [ordinary],
             programmatic_tool_calling=profile == "code",
         ).run("Try", prepare_request=lambda turn, request, **indices: None)
 

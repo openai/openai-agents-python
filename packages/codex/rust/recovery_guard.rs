@@ -230,7 +230,9 @@ impl Stream for GuardedStream {
             let id = match item {
                 ResponseItem::FunctionCall { call_id, .. }
                 | ResponseItem::CustomToolCall { call_id, .. }
-                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+                | ResponseItem::CustomToolCallOutput { call_id, .. }
+                | ResponseItem::ComputerCall { call_id, .. }
+                | ResponseItem::ComputerCallOutput { call_id, .. } => Some(call_id.as_str()),
                 ResponseItem::FunctionCallOutput { call_id, .. } => call_id.as_deref(),
                 _ => None,
             };
@@ -340,5 +342,40 @@ mod tests {
                 if response_id == "provider-response"
         ));
         assert!(guarded.next().await.is_none());
+    }
+    #[tokio::test]
+    async fn recovery_fences_original_computer_calls_and_outputs_before_forwarding() {
+        let computer: ResponseItem = serde_json::from_value(json!({
+            "type":"computer_call", "call_id":"original", "actions":[{"type":"click","x":1,"y":2}]
+        }))
+        .unwrap();
+        let output: ResponseItem = serde_json::from_value(json!({
+            "type":"computer_call_output", "call_id":"original",
+            "output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="},
+            "acknowledged_safety_checks":[]
+        }))
+        .unwrap();
+        for item in [computer, output] {
+            for added in [true, false] {
+                let event = if added {
+                    ResponseEvent::OutputItemAdded(item.clone())
+                } else {
+                    ResponseEvent::OutputItemDone(item.clone())
+                };
+                let upstream = stream::iter(vec![
+                    Ok(event),
+                    Ok(ResponseEvent::OutputItemDone(call("fresh"))),
+                    Ok(completed()),
+                ]);
+                let mut guarded = Box::new(Request(Arc::new(HashSet::from(["original".into()]))))
+                    .intercept(Box::pin(upstream));
+                assert!(matches!(
+                    guarded.next().await,
+                    Some(Err(ModelResponseError::InvalidRequest { .. }))
+                ));
+                assert!(guarded.next().await.is_none());
+                assert!(guarded.next().await.is_none());
+            }
+        }
     }
 }

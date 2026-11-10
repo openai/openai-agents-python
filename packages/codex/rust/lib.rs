@@ -7,6 +7,7 @@ mod agent_run;
 mod application_instructions;
 mod async_bridge;
 mod auth;
+mod canonical_history;
 mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
@@ -908,6 +909,25 @@ impl NativeThread {
             })));
             owner.lock().map_err(py_error)?.context_change = Arc::downgrade(&change);
             Ok(ContextChange { inner: change })
+        })
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn _canonical_history<'py>(&self, py: Python<'py>, limit: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::snapshot(&inner, limit).await.map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _transact_history<'py>(&self, py: Python<'py>, expected_revision: String, keep: usize, items_json: &str) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let items = serde_json::from_str(items_json)
+            .map_err(|_| py_error("Invalid canonical history items"))?;
+        async_bridge::future_into_py(py, async move {
+            let value = canonical_history::replace(&inner, expected_revision, keep, items).await.map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
         })
     }
 
@@ -2049,6 +2069,46 @@ impl NativeThread {
         })
     }
 
+    fn _enable_model_producer(&self, enabled: bool) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Request preparation requires Python tools"))?;
+        tools.enable_model_producer(enabled).map_err(py_error)
+    }
+
+    fn _check_model_producer(&self, request_id: u64) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.check_model_producer(request_id)))
+    }
+
+    #[pyo3(signature = (request_id, data_json=None, error=false))]
+    fn _reply_model_producer(
+        &self,
+        request_id: u64,
+        data_json: Option<&str>,
+        error: bool,
+    ) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.reply_model_producer(request_id, data_json, error)))
+    }
+
     fn _prepare_requests(&self, enabled: bool) -> PyResult<()> {
         let inner = self.current()?;
         let tools = inner
@@ -2497,6 +2557,50 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_manual(&grant.key.reply.thread, grant)))
     }
 
+    #[pyo3(signature = (grant, arguments_json=None))]
+    fn _require_tool_approval(
+        &self,
+        grant: &python_tools::ManualToolGrant,
+        arguments_json: Option<&str>,
+    ) -> PyResult<bool> {
+        let arguments = arguments_json
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(py_error)?;
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        Ok(inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            .is_some_and(|tools| tools.require_approval(&grant.key.reply.thread, grant, arguments)))
+    }
+
+    fn _approve_manual_tool<'py>(
+        &self,
+        py: Python<'py>,
+        grant: &python_tools::ManualToolGrant,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let grant = grant.clone();
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = inner.mutations.lock().await;
+            let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            else {
+                return Ok(false);
+            };
+            tools
+                .approve_manual(&grant.key.reply.thread, &grant)
+                .map_err(py_error)
+        })
+    }
+
     fn _respond_manual_tool<'py>(
         &self,
         py: Python<'py>,
@@ -2630,6 +2734,17 @@ impl NativeThread {
                             )
                             .await
                             .map_err(py_error)?;
+                        let receipt = if inner.engine.local_checklist_store.is_some() {
+                            let Some(receipt) = child_tools
+                                .response_receipt(&request, response.clone())
+                                .map_err(py_error)?
+                            else {
+                                return Ok(false);
+                            };
+                            Some(receipt)
+                        } else {
+                            None
+                        };
                         let Some(sender) = child_tools
                             .take_reply(&request.reply.thread, &request)
                             .map_err(py_error)?
@@ -2641,8 +2756,7 @@ impl NativeThread {
                         if inner.engine.local_checklist_store.is_some() {
                             let id = codex_protocol::ThreadId::from_string(&request.reply.thread)
                                 .map_err(py_error)?;
-                            let item =
-                                python_tools::PythonOutput(response.clone()).receipt(&request);
+                            let item = receipt.expect("selected durable callback receipt");
                             return async_bridge::retain_writer_operation(async move {
                                 let _operation = _context_operation;
                                 let _mutation = _mutation;
@@ -2693,6 +2807,23 @@ impl NativeThread {
                         )
                         .await
                         .map_err(py_error)?;
+                    let receipt = if inner
+                        .engine
+                        .store
+                        .as_any()
+                        .is::<canonical_storage::CanonicalStore>()
+                        || inner.engine.local_checklist_store.is_some()
+                    {
+                        let Some(receipt) = tools
+                            .response_receipt(&request, response.clone())
+                            .map_err(py_error)?
+                        else {
+                            return Ok(false);
+                        };
+                        Some(receipt)
+                    } else {
+                        None
+                    };
                     let Some(sender) = tools
                         .take_reply(&inner.id.to_string(), &request)
                         .map_err(py_error)?
@@ -2705,7 +2836,7 @@ impl NativeThread {
                         .as_any()
                         .is::<canonical_storage::CanonicalStore>()
                     {
-                        let item = python_tools::PythonOutput(response.clone()).receipt(&request);
+                        let item = receipt.expect("selected durable callback receipt");
                         return async_bridge::retain_writer_operation(async move {
                             let _operation = _context_operation;
                             let _mutation = _mutation;
@@ -2729,7 +2860,7 @@ impl NativeThread {
                         .await;
                     }
                     if inner.engine.local_checklist_store.is_some() {
-                        let item = python_tools::PythonOutput(response.clone()).receipt(&request);
+                        let item = receipt.expect("selected durable callback receipt");
                         return async_bridge::retain_writer_operation(async move {
                             // Both leases move with the real result. Python
                             // cancellation cannot open the suspension race.
@@ -2753,12 +2884,17 @@ impl NativeThread {
                         })
                         .await;
                     }
-                    Ok(sender
+                    let receipt = response.clone();
+                    let accepted = sender
                         .send(python_tools::ToolReply {
                             response,
                             start_response,
                         })
-                        .is_ok())
+                        .is_ok();
+                    if accepted {
+                        tools.record_approved_result(&request, &receipt);
+                    }
+                    Ok(accepted)
                 }
             }
         })
