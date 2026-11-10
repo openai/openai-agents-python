@@ -39,6 +39,7 @@ class RuntimeEnvironment(TypedDict, total=False, closed=True):
     capability_directories: list[str]  # Remote file: URIs; omitted inherits, [] clears.
     writable_roots: list[str]  # Additional write roots, as executor file: URIs.
     mounts: list[RuntimeStorageMount]
+    read_only_roots: list[str]  # Additional macOS read roots, as executor file: URIs.
 
 
 class BasicSpecialPath(TypedDict):

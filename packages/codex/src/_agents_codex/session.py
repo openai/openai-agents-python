@@ -5413,6 +5413,10 @@ class Session(Generic[ContextT, OutputT]):
                     raise CapabilityError(
                         "Writable roots cannot change while storage mounts are active"
                     )
+                if self._executor.read_only_roots:
+                    raise CapabilityError(
+                        "Writable roots cannot change while read_only_roots are active"
+                    )
                 if self._native_agents is not None:
                     raise CapabilityError("Writable roots cannot change with NativeAgents")
                 roots = _writable_roots(writable_roots)

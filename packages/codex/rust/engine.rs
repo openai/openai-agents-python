@@ -340,7 +340,7 @@ impl EngineState {
         };
         let environment_options = runtime_options.environment()?;
         if let Some(environment) = &environment_options {
-            environment.validate_storage_mounts(
+            environment.validate_read_grants(
                 &config,
                 LocalPrivatePaths {
                     storage_home,
