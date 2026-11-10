@@ -13,6 +13,7 @@ import pytest
 
 from agents import telemetry
 from agents.testing import ScriptedResponses, text
+from tests._asyncio import capture_cancellation
 from tests.test_testing import request
 
 
@@ -48,7 +49,8 @@ async def test_fixture_preserves_primary_body_error_and_callback_context(cancell
                 await asyncio.Event().wait()
             raise primary
 
-    task = asyncio.create_task(run())
+    cancellations: list[asyncio.CancelledError] = []
+    task = asyncio.create_task(capture_cancellation(run(), cancellations))
     await asyncio.wait_for(ready.wait(), 2)
     if cancelled:
         task.cancel("synthetic-primary-cancellation")
@@ -56,11 +58,11 @@ async def test_fixture_preserves_primary_body_error_and_callback_context(cancell
         await task
     assert task.cancelled() is cancelled
     if cancelled:
-        assert raised.value.args == ("synthetic-primary-cancellation",)
+        assert [error.args for error in cancellations] == [("synthetic-primary-cancellation",)]
     else:
         assert raised.value is primary
     contexts = []
-    current = raised.value.__context__
+    current = (cancellations[0] if cancelled else raised.value).__context__
     while current is not None and current not in contexts:
         contexts.append(current)
         current = current.__context__

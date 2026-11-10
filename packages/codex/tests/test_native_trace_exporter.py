@@ -17,6 +17,7 @@ import pytest
 
 from agents import Agent, telemetry
 from agents.testing import ScriptedResponses, text
+from tests._asyncio import capture_cancellation
 
 
 @contextmanager
@@ -56,10 +57,10 @@ def collector(
         worker.join()
 
 
-def assert_sanitized_failure(error, secret):
+def assert_sanitized_failure(error, secret, *, expected_context=None):
     """Inspect exception objects and library frames, including suppressed context."""
     assert error.__cause__ is None
-    assert error.__context__ is None
+    assert error.__context__ is expected_context
     pending = [error]
     seen = set()
     while pending:
@@ -276,15 +277,25 @@ async def test_export_deadline_and_cancellation_close_trickling_connection(cance
     event = completed_event()
     event["attributes"]["private_fixture"] = secret
     started = time.monotonic()
-    delivery = asyncio.create_task(exporter.on_trace_event(event))
+    cancellations = []
+    delivery = asyncio.create_task(
+        capture_cancellation(exporter.on_trace_event(event), cancellations)
+    )
     try:
         if cancelled:
             await asyncio.wait_for(request_started.wait(), 1)
             delivery.cancel("synthetic caller cancellation")
             with pytest.raises(asyncio.CancelledError) as failure:
                 await delivery
-            assert failure.value.args == ("synthetic caller cancellation",)
-            assert_sanitized_failure(failure.value, secret)
+            assert delivery.cancelled()
+            assert [error.args for error in cancellations] == [("synthetic caller cancellation",)]
+            assert_sanitized_failure(cancellations[0], secret)
+            # Python 3.10 wraps the original cancellation when the Task finishes.
+            assert_sanitized_failure(
+                failure.value,
+                secret,
+                expected_context=None if failure.value is cancellations[0] else cancellations[0],
+            )
         else:
             with pytest.raises(RuntimeError, match="Native OpenAI trace export failed") as failure:
                 await delivery

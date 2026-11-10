@@ -1,13 +1,13 @@
 """Provider-hosted tools compose with the selected canonical backend."""
 
 import json
-from pathlib import Path
 
-from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, WebSearch
+from agents import Agent, CustomStorage, NativeProvider, WebSearch
 from tests.native_fixtures import assistant_output, responses as responses
+from tests.native_storage_fixtures import MemorySessionStore
 
 
-async def test_custom_backend_retains_hosted_search_across_native_resume(tmp_path: Path, responses):
+async def test_custom_backend_retains_hosted_search_across_native_resume(responses):
     action = {"type": "search", "query": "synthetic query", "sources": []}
     responses.respond(
         {
@@ -31,7 +31,7 @@ async def test_custom_backend_retains_hosted_search_across_native_resume(tmp_pat
             provider=provider,
             tools=[WebSearch(route="hosted")],
         )
-        storage = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+        storage = CustomStorage(MemorySessionStore())
         async with agent.session(storage=storage) as session:
             identity = session.id
             assert (

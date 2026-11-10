@@ -4,12 +4,13 @@ import json
 
 import pytest
 
-from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore
+from agents import Agent, CustomStorage, NativeProvider
 from tests.native_fixtures import assistant_output, responses as responses
+from tests.native_storage_fixtures import MemorySessionStore
 
 
-async def test_committed_history_flush_failure_retires_live_session(responses, tmp_path):
-    class FailCheckpointFlush(SQLiteSessionStore):
+async def test_committed_history_flush_failure_retires_live_session(responses):
+    class FailCheckpointFlush(MemorySessionStore):
         armed = False
         accepted_checkpoint = False
 
@@ -28,7 +29,7 @@ async def test_committed_history_flush_failure_retires_live_session(responses, t
             return super().flush(session_id, token)
 
     responses.respond(assistant_output("restored replacement"))
-    backend = FailCheckpointFlush(tmp_path / "uncertain.sqlite")
+    backend = FailCheckpointFlush()
     storage = CustomStorage(backend)
     async with NativeProvider(base_url=responses.url, api_key="synthetic-uncertain") as provider:
         agent = Agent(instructions="Answer.", provider=provider)
