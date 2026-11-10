@@ -54,6 +54,7 @@ def owner(callback):
     )
     for method in (
         "_select_step_body",
+        "_call_decision_callback",
         "_catalog_for_message",
         "_agent_for_profile",
         "_agent_for_message",

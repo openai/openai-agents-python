@@ -57,6 +57,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .completion import _BeforeComplete
+from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .initial_messages import _capture_initial_messages, _initial_messages_json
 from .input import InitialMessage
 from .model_context import _ContextTransform
@@ -92,6 +93,7 @@ ContextT = TypeVar("ContextT", default=None)
 OutputT = TypeVar("OutputT", default=str)
 SessionContextT = TypeVar("SessionContextT")
 NewOutputT = TypeVar("NewOutputT")
+_DecisionT = TypeVar("_DecisionT")
 TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
 
@@ -633,6 +635,10 @@ _PROVIDER_LOCK = RLock()
 class Agent(Generic[ContextT, OutputT]):
     """Declare a native agent without starting a runtime or connection.
 
+    ``decisions`` supplies an optional typed decision provider. Callback
+    helpers inherit the captured provider and accept per-call overrides.
+    It never changes the Agent's model API.
+
     Declaration fields are immutable. Construct a new Agent to change defaults;
     tools and model settings are captured at construction. A session captures
     effective overrides when it opens. The native runtime owns
@@ -681,6 +687,7 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
+    decisions: DecisionProvider | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -745,6 +752,7 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
@@ -765,6 +773,7 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
@@ -782,6 +791,7 @@ class Agent(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
+        decisions: DecisionProvider | None = None,
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
@@ -814,6 +824,9 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "tools", tuple(tools or ()))
         object.__setattr__(self, "handoffs", captured_handoffs)
         object.__setattr__(self, "model", model)
+        if decisions is not None:
+            _check_provider(decisions)
+        object.__setattr__(self, "decisions", decisions)
         object.__setattr__(self, "provider", provider)
         object.__setattr__(
             self, "model_settings", MappingProxyType(_copy_model_settings(model_settings))
@@ -823,6 +836,72 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: None = None,
+        output_type: None = None,
+    ) -> bool: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[_DecisionT],
+        output_type: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: type[_DecisionT],
+        choices: None = None,
+    ) -> _DecisionT: ...
+
+    @overload
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        output_type: Any,
+        choices: None = None,
+    ) -> Any: ...
+
+    async def decide(
+        self,
+        question: str,
+        *,
+        input: DecisionInput,
+        provider: DecisionProvider | None = None,
+        choices: Sequence[Any] | None = None,
+        output_type: Any = None,
+    ) -> Any:
+        """Answer a typed question using this Agent's Decisions default.
+
+        This starts no Agent run and records no conversation or turn usage.
+        A per-call provider overrides the declaration's ``decisions`` default.
+        """
+        return await _decide(
+            question,
+            input=input,
+            provider=_check_provider(provider if provider is not None else self.decisions),
+            choices=choices,
+            output_type=output_type,
+        )
 
     def validate(self) -> None:
         """Check the declaration without opening a Session.
@@ -1338,6 +1417,7 @@ class Agent(Generic[ContextT, OutputT]):
         initial_messages = _capture_initial_messages(initial_messages, state=state)
         options: dict[str, Any] = {}
         try:
+            from ._function_tools import FunctionTool
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
             from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
@@ -1498,7 +1578,16 @@ class Agent(Generic[ContextT, OutputT]):
 
                 if isinstance(session, Completed):
                     return session
-                if pause_manual or (prepare_request is not None and on_interaction is None):
+                if (
+                    pause_manual
+                    or (prepare_request is not None and on_interaction is None)
+                    or (
+                        session._profiles
+                        and on_interaction is None
+                        and before_step is None
+                        and prepare_request is None
+                    )
+                ):
                     # A delegating factory may change the opening roster or its
                     # default operation. Check the same effective selection that
                     # submit will capture, before it admits work or starts MCP.
@@ -1513,6 +1602,21 @@ class Agent(Generic[ContextT, OutputT]):
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
                     )
+                    # Handoff targets keep their own captured declarations. Their
+                    # bare manual requests can pause the same root Session.
+                    if on_interaction is None and before_step is None and prepare_request is None:
+                        pause_manual = (
+                            *pause_manual,
+                            *(
+                                tool
+                                for runtime in session._profiles.values()
+                                if runtime.profile.agent is not self
+                                for tool in runtime.profile.declaration.tools
+                                if isinstance(tool, FunctionTool)
+                                and tool._bind is None
+                                and not tool._requires_live_manual_session
+                            ),
+                        )
                     if budget_capture_error is not None:
                         if any(tool._bind is None for tool in selected):
                             raise budget_capture_error

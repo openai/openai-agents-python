@@ -44,6 +44,11 @@ from agents.config import JsonValue as JsonValue
 from ._lifecycle import _close_after_error as _close_after_error, _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .agent import NativeProvider as NativeProvider
+from .testing_realtime import (
+    RealtimeConnectCall as RealtimeConnectCall,
+    RealtimeStep as RealtimeStep,
+    ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
+)
 
 
 @dataclass(frozen=True)

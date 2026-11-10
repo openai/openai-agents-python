@@ -541,7 +541,7 @@ class _NativeInterception:
                             self.session._invoke_executor_policy, state, nonce, request
                         )
                     else:
-                        invoke = partial(self._invoke, state, nonce, call, descriptor)
+                        invoke = partial(self._invoke, state, nonce, call, descriptor, notice)
                     task = _create_task(self._dispatch(nonce, tracing, invoke))
                     self._start_task(nonce, task)
                     state.add_callback(task)
@@ -581,6 +581,7 @@ class _NativeInterception:
         nonce: int,
         call: NativeToolCall,
         descriptor: NativeAgents | _MCP[Any],
+        notice: dict[str, Any] | None = None,
     ) -> None:
         from ._function_tools import ToolContext
         from .mcp import _MCP, MCPCallContext, _tool_names
@@ -736,7 +737,22 @@ class _NativeInterception:
                 collab_context = ToolContext(
                     session._context, state.handle, call.call_id, call=info
                 )
-                value = await _call_callback(approval, admitted, collab_context, call)
+                value = await session._call_decision_callback(
+                    state,
+                    {
+                        "type": "_sdk_native_interception",
+                        "nonce": nonce,
+                        **{
+                            key: notice[key]
+                            for key in ("profile_id", "profile_epoch")
+                            if notice is not None and key in notice
+                        },
+                    },
+                    approval,
+                    admitted,
+                    collab_context,
+                    call,
+                )
                 if admitted() and type(value) is bool and value:
                     reply = '{"action":"continue"}'
         except BaseException:

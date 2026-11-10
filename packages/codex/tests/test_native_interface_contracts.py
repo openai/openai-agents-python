@@ -88,6 +88,7 @@ async def cleanup_session(events, *, managed_environment=True):
     session._owned_provider = None
     session._repair_session = None
     session._model_context_snapshots = {}
+    session._profiles = {}
     session._profile_catalogs = {}
     session._catalog_bindings = {}
     failed = False

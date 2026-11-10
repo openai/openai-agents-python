@@ -12,6 +12,7 @@ mod canonical_storage;
 mod checkpoint;
 mod config;
 mod context;
+mod decisions;
 mod engine;
 mod environment;
 mod extensions;
@@ -3532,7 +3533,7 @@ fn create_checkpoint_engine<'py>(
             let checkpoint: checkpoint::Checkpoint =
                 serde_json::from_value(payload).map_err(py_error)?;
             checkpoint
-                .initial_managed_model(specs.as_deref())
+                .initial_managed_models(specs.as_deref())
                 .map_err(py_error)
         })
         .transpose()?
@@ -3841,6 +3842,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<provider_owner::NativeProviderOwner>()?;
     module.add_class::<provider_owner::NativeProviderLease>()?;
     module.add_class::<provider_owner::NativeProviderHome>()?;
+    module.add_function(wrap_pyfunction!(decisions::_decision_questions, module)?)?;
+    module.add_function(wrap_pyfunction!(decisions::_decision_result, module)?)?;
     module.add_function(wrap_pyfunction!(create_engine, module)?)?;
     module.add_function(wrap_pyfunction!(_open_conversation, module)?)?;
     module.add_function(wrap_pyfunction!(_prepare_run_conversation, module)?)?;

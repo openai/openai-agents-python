@@ -441,7 +441,7 @@ async def test_completion_rejection_runs_automatic_compaction_before_next_reques
     assert "Pending: verify source-17" in json.dumps(responses.requests[1]["input"])
 
 
-async def test_output_repair_does_not_reenter_completion_gate(responses):
+async def test_output_repair_reenters_original_completion_gate(responses):
     calls = []
 
     def complete(request):
@@ -458,7 +458,9 @@ async def test_output_repair_does_not_reenter_completion_gate(responses):
     async with timeout(20):
         result = await agent.run("Answer.")
     assert result.final_output == 42
-    assert [call.text for call in calls] == ["not an integer"]
+    assert [call.text for call in calls] == ["not an integer", "42"]
+    assert {call.turn_id for call in calls} == {result.turn.turn_id}
+    assert {call.continuation_count for call in calls} == {0}
     assert len(responses.requests) == 2
 
 

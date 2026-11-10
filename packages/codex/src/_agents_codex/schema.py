@@ -102,6 +102,7 @@ class _PreparedOutput:
     schema: dict[str, Any] | None
     wrapped: bool = False
     max_retries: int = 0
+    value_adapter: TypeAdapter[Any] | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -163,19 +164,26 @@ def _prepare_spec(output: OutputSpec[Any] | None) -> _PreparedOutput:
     if isinstance(output, PromptedOutput):
         adapter: TypeAdapter[Any] = TypeAdapter(output.type_)
         return _PreparedOutput(
-            "prompted", adapter, adapter.json_schema(), max_retries=output.max_retries
+            "prompted",
+            adapter,
+            adapter.json_schema(),
+            max_retries=output.max_retries,
+            value_adapter=adapter,
         )
     native_type = output.type_ if isinstance(output, NativeOutput) else output
-    adapter, schema, wrapped = _prepare_output(native_type)
-    return _PreparedOutput("native", adapter, schema, wrapped)
+    adapter, schema, wrapped, value_adapter = _prepare_output(native_type)
+    return _PreparedOutput("native", adapter, schema, wrapped, value_adapter=value_adapter)
 
 
 def output_schema(output_type: Any) -> dict[str, Any] | None:
     return _prepare_output(output_type)[1]
 
 
-def _prepare_output(output_type: Any) -> tuple[TypeAdapter[Any], dict[str, Any], bool]:
+def _prepare_output(
+    output_type: Any, *, wrap_scalars: bool = True
+) -> tuple[TypeAdapter[Any], dict[str, Any], bool, TypeAdapter[Any]]:
     adapter: TypeAdapter[Any] = TypeAdapter(output_type)
+    value_adapter = adapter
     schema = adapter.json_schema()
     if "$ref" in schema:
         reference = schema.pop("$ref")
@@ -183,7 +191,7 @@ def _prepare_output(output_type: Any) -> tuple[TypeAdapter[Any], dict[str, Any],
             raise ValueError("output_type requires a local object schema")
         definition = schema["$defs"][reference.removeprefix("#/$defs/")]
         schema = {**definition, **schema}
-    wrapped = schema.get("type") != "object"
+    wrapped = wrap_scalars and schema.get("type") != "object"
     if wrapped:
         adapter = TypeAdapter(
             create_model(
@@ -195,6 +203,8 @@ def _prepare_output(output_type: Any) -> tuple[TypeAdapter[Any], dict[str, Any],
         schema = adapter.json_schema()
 
     def close(node: dict[str, Any]) -> None:
+        if not wrap_scalars and "$ref" in node and not node["$ref"].startswith("#/$defs/"):
+            raise ValueError("output_type requires local schema references")
         if not any(key in node for key in ("type", "$ref", "anyOf")):
             raise ValueError("output_type cannot contain unconstrained values")
         if any(key in node for key in ("oneOf", "allOf", "prefixItems", "uniqueItems")):
@@ -216,7 +226,7 @@ def _prepare_output(output_type: Any) -> tuple[TypeAdapter[Any], dict[str, Any],
             close(branch)
 
     close(schema)
-    return adapter, schema, wrapped
+    return adapter, schema, wrapped, value_adapter
 
 
 _preserve_module_identity(globals(), "agents.schema")

@@ -156,7 +156,15 @@ async def test_loopback_startup_does_not_require_reverse_dns(monkeypatch):
 
 
 async def test_http_response_order_and_request_snapshots(capsys):
-    assert testing.__all__ == ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
+    assert testing.__all__ == [
+        "ScriptedResponse",
+        "ScriptedResponses",
+        "text",
+        "tool_call",
+        "RealtimeConnectCall",
+        "RealtimeStep",
+        "ScriptedRealtimeAdapter",
+    ]
     arguments = {"key": "synthetic-record"}
     call = tool_call("lookup", arguments, call_id="http-call")
     arguments["key"] = "later-mutation"

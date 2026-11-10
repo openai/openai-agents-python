@@ -55,6 +55,7 @@ from .realtime_settings import (
     NativeRealtimePromptImage as NativeRealtimePromptImage,
     NativeRealtimePromptText as NativeRealtimePromptText,
     NativeRealtimeReasoning as NativeRealtimeReasoning,
+    NativeRealtimeResponseOptions as NativeRealtimeResponseOptions,
     NativeRealtimeSemanticVad as NativeRealtimeSemanticVad,
     NativeRealtimeServerVad as NativeRealtimeServerVad,
     NativeRealtimeSessionUpdate as NativeRealtimeSessionUpdate,
@@ -65,6 +66,12 @@ from .realtime_settings import (
     NativeRealtimeTranscription as NativeRealtimeTranscription,
     serialize_realtime_session_update as _serialize_update,
     serialize_realtime_settings as _serialize_settings,
+)
+from .realtime_usage import (
+    RealtimeUsage as RealtimeUsage,
+    _add_usage,
+    _reported_usage,
+    _usage_snapshot,
 )
 from .voice.workflow import NativeSessionVoiceWorkflow
 
@@ -127,6 +134,7 @@ class RealtimeConfig:
     # Resolve once per connection; omit to use the Session provider's credentials.
     api_key: str | Callable[[], str | Awaitable[str]] | None = field(default=None, repr=False)
     adapter: NativeRealtimeAdapter | None = field(default=None, repr=False)
+    output_modality: Literal["audio", "text"] = "audio"
 
 
 async def _prepare_realtime_params(
@@ -155,7 +163,7 @@ async def _prepare_realtime_params(
                 "backend_reasoning_status": False,
                 "codex_response_handoff_channel_prefixes": None,
                 "model": config.model,
-                "output_modality": "audio",
+                "output_modality": config.output_modality,
                 "include_startup_context": False,
                 "initial_items": [],
                 "realtime_start_instructions": None,
@@ -365,6 +373,7 @@ class RealtimeLifecycle:
 class RealtimeResponse:
     status: Literal["created", "done", "cancelled"]
     response_id: str | None
+    usage: RealtimeUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -725,6 +734,7 @@ class RealtimeSession:
         self._seen: dict[str, int] = {}
         self._terminal_requests: dict[str, None] = {}
         self._history: dict[str, RealtimeHistoryItem] = {}
+        self._usage_totals: dict[str, Any] | None = None
         self._live = False
         self._entered = False
         self._consuming = False
@@ -737,6 +747,11 @@ class RealtimeSession:
         self._response_id: str | None = None
         self._context: Context | None = None
         self._session_shutdown = False
+
+    @property
+    def usage(self) -> RealtimeUsage | None:
+        """Cumulative reported speech-model usage; missing usage remains unknown."""
+        return _usage_snapshot(self._usage_totals)
 
     @property
     def history(self) -> tuple[RealtimeHistoryItem, ...]:
@@ -964,15 +979,29 @@ class RealtimeSession:
                 self._check_live()
                 await self._call("input", content=content, trigger_response=trigger_response)
 
-    async def request_response(self) -> None:
-        """Request a response from accepted input without appending or committing it."""
+    async def request_response(self, response: NativeRealtimeResponseOptions | None = None) -> None:
+        """Request a response from accepted input, with optional one-response overrides.
+
+        When requests coalesce behind an active response, the latest explicit
+        request supplies the overrides. Instructions share the 1 MiB input limit.
+        """
         self._check_live()
+        captured = dict(response) if response is not None else None
+        instructions = captured.get("instructions") if captured is not None else None
+        size = (
+            _user_input_bytes(instructions, _USER_INPUT_BYTES_LIMIT)
+            if isinstance(instructions, str)
+            else 0
+        )
         if self._pending_audio_commits:
             self._check_adapter_operation("enqueue input behind a pending audio commit")
-        with self._input_admission():
+        with self._input_admission(size):
             async with self._input_lock:
                 self._check_live()
-                await self._call("response")
+                if captured is None:
+                    await self._call("response")
+                else:
+                    await self._call("response", response=captured)
 
     async def delete_conversation_item(self, provider_item_id: str) -> None:
         """Delete one eligible provider-observed item and retain its history audit."""
@@ -1212,6 +1241,11 @@ class RealtimeSession:
                 ((tool.name, tool.description, tool.input_schema) for tool in event.tools),
                 RealtimeSession._BUFFER_BYTES_LIMIT,
             )
+        usage_bytes = (
+            4 * len(json.dumps(vars(event.usage)))
+            if isinstance(event, RealtimeResponse) and event.usage is not None
+            else 0
+        )
         values = list(vars(event).values())
         for value in tuple(values):
             if isinstance(
@@ -1222,7 +1256,7 @@ class RealtimeSession:
                 values.extend(value)
         # Four bytes per character also bounds non-ASCII Python strings. Local
         # callback objects and diagnostics are application-owned, not wire data.
-        return sum(
+        return usage_bytes + sum(
             len(value) * 4 if isinstance(value, str) else len(value)
             for value in values
             if isinstance(value, (str, bytes))
@@ -2475,7 +2509,22 @@ class RealtimeSession:
                 for key, received in self._audio_samples.items():
                     if key[0] == value.get("response_id"):
                         received.completed = True
-            self._emit(RealtimeResponse(status, value.get("response_id")))
+            reported_usage = None
+            if name == "ResponseDone" and isinstance(value.get("usage"), dict):
+                try:
+                    reported = _reported_usage(value["usage"])
+                    totals = _add_usage(self._usage_totals or {}, reported)
+                    reported_usage = _usage_snapshot(reported)
+                except ValueError as error:
+                    # The public terminal error must not retain rejected provider
+                    # fields in completed validators or this active payload frame.
+                    del payload, value
+                    _clear_adapter_error_frames(error)
+                    error.__traceback__ = None
+                    self._finish(error)
+                    return
+                self._usage_totals = totals
+            self._emit(RealtimeResponse(status, value.get("response_id"), reported_usage))
             if name == "ResponseDone":
                 self._start_function_batch(value)
         elif name in {
