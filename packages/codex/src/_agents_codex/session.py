@@ -9978,7 +9978,9 @@ class Session(Generic[ContextT, OutputT]):
     ) -> Any:
         if args and isinstance(args[0], (Turn, CompletionContext, ToolContext, ChildStepContext)):
             provider = getattr(self, "_decisions_provider", None)
-            if getattr(self, "_profiles", None):
+            if getattr(self, "_profiles", None) or message.get("profile_id") in getattr(
+                self, "_voice_profiles", {}
+            ):
                 profile_provider = self._agent_for_message(message).decisions
                 if profile_provider is not None:
                     provider = profile_provider

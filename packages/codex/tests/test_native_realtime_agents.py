@@ -6,7 +6,14 @@ from dataclasses import dataclass
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, NativeProvider, function_tool
+from agents import (
+    Agent,
+    DecisionRequest,
+    DecisionResponse,
+    NativeProvider,
+    ToolContext,
+    function_tool,
+)
 from agents.realtime import RealtimeAgentConfig, RealtimeConfig, RealtimeSession, realtime_handoff
 from tests._asyncio import timeout
 from tests.test_native_realtime import realtime_peer as realtime_peer
@@ -201,6 +208,55 @@ async def test_voice_agent_change_uses_destination_instructions(
         updated = await peer.frame(lambda frame: frame["type"] == "session.update", after=start)
         assert updated["session"]["instructions"] == target_instructions
         assert await voice.get_active_agent() is target
+
+
+@pytest.mark.parametrize("with_provider", [False, True])
+async def test_updated_voice_tool_uses_its_source_decision_provider(realtime_peer, with_provider):
+    peer = realtime_peer
+
+    @dataclass
+    class Decisions:
+        source: str
+
+        async def get_decision(self, request: DecisionRequest) -> DecisionResponse:
+            return DecisionResponse(value=self.source)
+
+    @function_tool
+    async def choose_source(context: ToolContext[None]) -> str:
+        return await context.decide(
+            "Which Agent issued the call?", input="voice tool", choices=("opening", "voice")
+        )
+
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url,
+            api_key="synthetic-voice-decision-key",
+            supports_websockets=False,
+        ) as provider,
+    ):
+        source = Agent(
+            name="Opening",
+            instructions="Opening Agent",
+            provider=provider,
+            decisions=Decisions("opening"),
+        )
+        target = Agent(
+            name="Voice",
+            instructions="Voice Agent",
+            tools=[choose_source],
+            decisions=Decisions("voice") if with_provider else None,
+        )
+        async with (
+            source.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            await voice.update_agent(target)
+            await peer.function("choose_source", {}, "voice-source-decision")
+            result = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "voice-source-decision"
+            )
+            assert result["item"]["output"] == ("voice" if with_provider else "opening")
 
 
 async def test_conflicting_handoffs_in_one_response_invoke_only_the_first_target(realtime_peer):
