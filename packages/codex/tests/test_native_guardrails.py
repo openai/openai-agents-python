@@ -691,13 +691,13 @@ async def test_child_terminal_observations_keep_equal_call_ids_separate(
             assert len(children) == 2
             for child in children:
                 assert child.turn is not None
-                if child.id in blocked:
-                    with pytest.raises(GuardrailTripwire):
-                        await child.turn.get_result()
+                try:
+                    completed = await child.turn.get_result()
+                except GuardrailTripwire:
+                    assert child.id in blocked
                 else:
-                    assert (
-                        await child.turn.get_result()
-                    ).final_output == f"child-output:{child.id}"
+                    assert child.id not in blocked
+                    assert completed.final_output == f"child-output:{child.id}"
                 events = [
                     event async for event in child.turn.events(include_execution_details=True)
                 ]

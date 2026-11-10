@@ -285,6 +285,7 @@ from .usage import (
 if TYPE_CHECKING:
     from .realtime import RealtimeConfig, RealtimeSession, _RealtimePolicySource
     from .realtime_usage import RealtimeUsage
+    from .turn import ChildTurn
 
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
@@ -898,7 +899,7 @@ class Completed(Generic[OutputT, TurnT]):
     run_usage: RunUsage = field(init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "run_usage", self.turn.run_usage)
+        object.__setattr__(self, "run_usage", cast("Turn[Any] | ChildTurn", self.turn).run_usage)
 
 
 def _future() -> asyncio.Future[Any]:
@@ -10595,6 +10596,8 @@ class Session(Generic[ContextT, OutputT]):
         message: dict[str, Any],
         agent: Agent[Any, Any],
         checks: Sequence[InputGuardrail[Any]],
+        *,
+        step_index: int,
     ) -> None:
         if not checks:
             return
@@ -10628,7 +10631,7 @@ class Session(Generic[ContextT, OutputT]):
                     guardrail.child_callback,
                     active,
                     ChildStepContext(
-                        context=self._context, child=state.handle, step_index=state.step_index
+                        context=self._context, child=state.handle, step_index=step_index
                     ),
                     agent,
                     deepcopy(state.guardrail_input),
@@ -11003,15 +11006,17 @@ class Session(Generic[ContextT, OutputT]):
                     ):
                         raise NativeError("Child guardrail lacks admitted initial input")
                     state.guardrail_input = tuple(deepcopy(initial))
-            if state.input_guardrails_started:
-                await self._await_input_guardrails(state)
-            elif state.guardrail_input is not None:
+            # Selection can repeat before the first provider request. Parallel
+            # input checks join at completion, not during this preparation.
+            if not state.input_guardrails_started and state.guardrail_input is not None:
                 state.input_guardrails_started = True
+                guardrail_step_index = state.step_index
                 await self._run_input_guardrails(
                     state,
                     message,
                     source_agent,
                     tuple(check for check in checks if not check.run_in_parallel),
+                    step_index=guardrail_step_index,
                 )
                 parallel = tuple(check for check in checks if check.run_in_parallel)
                 if parallel:
@@ -11020,7 +11025,13 @@ class Session(Generic[ContextT, OutputT]):
                         scope = _Invocation(self)
                         token = _invocation.set(scope)
                         try:
-                            await self._run_input_guardrails(state, message, source_agent, parallel)
+                            await self._run_input_guardrails(
+                                state,
+                                message,
+                                source_agent,
+                                parallel,
+                                step_index=guardrail_step_index,
+                            )
                         except BaseException as error:
                             if not state.stopping and not state.failure.done():
                                 state.failure.set_result(error)
