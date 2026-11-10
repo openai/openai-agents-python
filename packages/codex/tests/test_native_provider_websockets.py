@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
+import socketserver
 import ssl
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -30,6 +32,7 @@ from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call, tool_output
 from tests.test_native_agent_observation import text_response
+from tests.test_sdk_session_tls import TLS_FIXTURES
 
 
 def unauthorized() -> web.Response:
@@ -979,7 +982,7 @@ async def test_websocket_malformed_terminal_retires_socket_before_next_request()
 
 
 @pytest.mark.parametrize("ca_variable", ["SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"])
-async def test_shared_websocket_tls_rechecks_custom_ca_before_fresh_connections(
+async def test_plain_websocket_rechecks_custom_ca_before_fresh_connections(
     ca_variable: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     for variable in ("SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE"):
@@ -993,7 +996,9 @@ async def test_shared_websocket_tls_rechecks_custom_ca_before_fresh_connections(
             stream_max_retries=0,
         )
         server.providers.append(shared)
-        agent = Agent(instructions="Keep fresh transport and trust ownership.", provider=shared)
+        agent = Agent(
+            instructions="Keep plain transport and fresh custom trust validation.", provider=shared
+        )
         server.respond(assistant_output("default trust"))
         first = await agent.run("default trust input")
         assert first.final_output == "default trust"
@@ -1002,7 +1007,7 @@ async def test_shared_websocket_tls_rechecks_custom_ca_before_fresh_connections(
         frames_before_error = len(server.frames)
         monkeypatch.setenv(ca_variable, str(tmp_path / "missing-custom-ca.pem"))
         server.respond(assistant_output("HTTP fallback"))
-        fallback = await agent.run("custom trust must not reuse the default snapshot")
+        fallback = await agent.run("custom CA validation must precede a plain connection")
         assert fallback.final_output == "HTTP fallback"
         assert len(server.requests) == 2
         assert len(server.http_requests) == 1
@@ -1022,3 +1027,87 @@ async def test_shared_websocket_tls_rechecks_custom_ca_before_fresh_connections(
         assert len(server.upgrades) == upgrades_before_error + 1
         await server.disconnected.wait()
         assert not server.sockets and server.handlers == 0
+
+
+@pytest.mark.serial
+async def test_plain_websocket_rejects_untrusted_https_proxy_before_connect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    for name in ("CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    for name in ("server-A.pem", "server-A.key"):
+        (tmp_path / name).write_text(TLS_FIXTURES[name])
+    context.load_cert_chain(tmp_path / "server-A.pem", tmp_path / "server-A.key")
+    prefixes: list[bytes] = []
+    handshake_failures: list[str] = []
+    handshake_successes: list[bool] = []
+    accepted_data: list[bytes] = []
+
+    class UntrustedProxy(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.settimeout(5)
+            # Peek without consuming ClientHello before the real TLS handshake.
+            prefix = self.request.recv(1, socket.MSG_PEEK)
+            prefixes.append(prefix)
+            if prefix != b"\x16":
+                return
+            try:
+                secured = context.wrap_socket(self.request, server_side=True)
+            except OSError as error:
+                handshake_failures.append(type(error).__name__)
+                return
+            handshake_successes.append(True)
+            with secured:
+                try:
+                    accepted_data.append(secured.recv(8))
+                except OSError:
+                    pass
+
+    proxy = socketserver.ThreadingTCPServer(("127.0.0.1", 0), UntrustedProxy)
+    serving = asyncio.create_task(asyncio.to_thread(proxy.serve_forever, poll_interval=0.01))
+    proxy_url = f"https://127.0.0.1:{proxy.server_address[1]}"
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.delenv("CODEX_SANDBOX", raising=False)
+    try:
+        async with timeout(30), peer() as destination:
+            destination.respond(assistant_output("unexpected proxy bypass"))
+            provider = NativeProvider(
+                base_url=destination.url,
+                api_key="synthetic-proxy-key",
+                supports_websockets=True,
+                request_max_retries=0,
+                stream_max_retries=0,
+            )
+            try:
+                with pytest.raises(NativeError):
+                    await Agent(instructions="Keep proxy TLS verification.", provider=provider).run(
+                        "Do not send a request through an untrusted proxy."
+                    )
+            finally:
+                await provider.aclose()
+            assert not destination.requests
+            assert not destination.http_requests
+            assert not destination.upgrades
+    finally:
+        # shutdown joins serve_forever; server_close joins every request thread.
+        try:
+            await asyncio.to_thread(proxy.shutdown)
+            await serving
+        finally:
+            await asyncio.to_thread(proxy.server_close)
+    assert any(prefix == b"\x16" for prefix in prefixes)
+    assert all(prefix in (b"", b"\x16") for prefix in prefixes), "plaintext reached the HTTPS proxy"
+    assert handshake_failures
+    assert not handshake_successes, "the untrusted proxy completed TLS negotiation"
+    assert not accepted_data, "an untrusted proxy accepted CONNECT or application data"

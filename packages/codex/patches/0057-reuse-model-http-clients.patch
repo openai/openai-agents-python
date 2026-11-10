@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index b3ae84d..61bb2dd 100644
+index b3ae84d194ebd9316f091926ca830d37b2e6f031..390fa6668116a6c7231ec1390284b9be38ba3a21 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -272,6 +272,7 @@ pub struct ModelClient {
@@ -62,87 +62,6 @@ index b3ae84d..61bb2dd 100644
          let client = create_client_for_route(
              &self.http_client_factory,
              &api_provider.url_for_path(endpoint),
-@@ -1233,6 +1265,7 @@ impl ModelClient {
-         auth_context: AuthRequestTelemetryContext,
-         request_route_telemetry: RequestRouteTelemetry,
-         responses_headers: &ApiHeaderMap,
-+        api_key_auth: bool,
-     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
-         let mut headers = self.build_websocket_headers(responses_metadata).await;
-         headers.extend(responses_headers.clone());
-@@ -1246,13 +1279,19 @@ impl ModelClient {
-         let start = Instant::now();
-         let result = match tokio::time::timeout(
-             websocket_connect_timeout,
--            ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
--                &self.http_client_factory,
--                headers,
--                codex_login::default_client::default_headers(),
--                /*turn_state*/ None,
--                Some(websocket_telemetry),
--            ),
-+            ApiWebSocketResponsesClient::new(api_provider, api_auth)
-+                .with_sdk_model_http_pool(if api_key_auth {
-+                    self.sdk_model_http_pool.clone()
-+                } else {
-+                    None
-+                })
-+                .connect(
-+                    &self.http_client_factory,
-+                    headers,
-+                    codex_login::default_client::default_headers(),
-+                    /*turn_state*/ None,
-+                    Some(websocket_telemetry),
-+                ),
-         )
-         .await
-         {
-@@ -1518,6 +1557,10 @@ impl ModelClientSession {
-             match self
-                 .websocket_connection(WebsocketConnectParams {
-                     session_telemetry,
-+                    api_key_auth: client_setup
-+                        .auth
-+                        .as_ref()
-+                        .is_some_and(|auth| matches!(auth.auth_mode(), AuthMode::ApiKey)),
-                     api_provider: client_setup.api_provider,
-                     auth_revision: client_setup.auth_revision,
-                     api_auth: client_setup.api_auth,
-@@ -1586,6 +1629,7 @@ impl ModelClientSession {
-     ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
-         let WebsocketConnectParams {
-             session_telemetry,
-+            api_key_auth,
-             api_provider,
-             auth_revision,
-             api_auth,
-@@ -1630,6 +1674,7 @@ impl ModelClientSession {
-                     auth_context,
-                     request_route_telemetry,
-                     responses_headers,
-+                    api_key_auth,
-                 )
-                 .await?;
-             self.websocket_session.connection = Some(new_conn);
-@@ -1961,6 +2006,10 @@ impl ModelClientSession {
-             match self
-                 .websocket_connection(WebsocketConnectParams {
-                     session_telemetry,
-+                    api_key_auth: client_setup
-+                        .auth
-+                        .as_ref()
-+                        .is_some_and(|auth| matches!(auth.auth_mode(), AuthMode::ApiKey)),
-                     api_provider: client_setup.api_provider,
-                     auth_revision: client_setup.auth_revision,
-                     api_auth: client_setup.api_auth,
-@@ -2762,6 +2811,7 @@ impl AuthRequestTelemetryContext {
- }
- 
- struct WebsocketConnectParams<'a> {
-+    api_key_auth: bool,
-     session_telemetry: &'a SessionTelemetry,
-     api_provider: codex_api::Provider,
-     auth_revision: Option<u64>,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
 index 641e390371085f65819f721a102164d766d58e89..c232c57f8f7cf8db3b8f75e7656abde111ab848e 100644
 --- a/codex-rs/core/src/session/session.rs
@@ -964,19 +883,18 @@ index 905aaf8f0dd11598b9ff4e31e03bb3e42c8bec89..28104827934e95dd644ae8f1072dfec0
      client_build: Arc<tokio::sync::Mutex<()>>,
 diff --git a/codex-rs/http-client/src/sdk_model_http_pool.rs b/codex-rs/http-client/src/sdk_model_http_pool.rs
 new file mode 100644
-index 0000000..0bb7c99
+index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822a5c61356
 --- /dev/null
 +++ b/codex-rs/http-client/src/sdk_model_http_pool.rs
-@@ -0,0 +1,647 @@
-+//! SDK Provider-owned unmanaged HTTP connections and default-system WebSocket TLS.
-+//! Ordinary system trust follows this owner's lifetime. HTTP SSL_CERT_FILE trust is
-+//! revalidated on every checkout; WebSocket CA overrides keep fresh construction.
+@@ -0,0 +1,500 @@
++//! SDK Provider-owned connection reuse, deliberately restricted to legacy unmanaged HTTP.
++//! Ordinary system trust is captured for this owner's lifetime. Explicit SSL_CERT_FILE
++//! trust is revalidated on every checkout; all other transports keep their original builder.
 +use std::collections::VecDeque;
 +use std::io;
 +use std::sync::{Arc, Mutex, Weak};
 +
 +use http::HeaderMap;
-+use rustls::ClientConfig;
 +
 +use crate::custom_ca::SdkModelCaSnapshot;
 +use crate::{HttpClient, HttpClientBuilder, HttpClientFactory, OutboundProxyPolicy};
@@ -1010,7 +928,6 @@ index 0000000..0bb7c99
 +    closed: bool,
 +    clients: VecDeque<Entry>,
 +    ca_digest: Option<Option<[u8; 32]>>,
-+    websocket_tls: Option<Arc<ClientConfig>>,
 +}
 +
 +/// An uncredentialed socket owner carried through typed SDK thread extension data.
@@ -1033,73 +950,13 @@ index 0000000..0bb7c99
 +
 +    /// Called only after the Provider has joined every native owner.
 +    pub fn close(&self) {
-+        let retired = {
++        let clients = {
 +            let mut state = self.lock();
 +            state.closed = true;
-+            (
-+                std::mem::take(&mut state.clients),
-+                state.websocket_tls.take(),
-+            )
++            std::mem::take(&mut state.clients)
 +        };
-+        // Drop transport material outside the lock, after native owners have joined.
-+        drop(retired);
-+    }
-+
-+    /// Reuse only default system trust for an eligible explicit SDK Provider.
-+    /// The caller must prove resolved API-key auth and exclude credential routing.
-+    /// Every connection still owns its factory, permit, headers and socket.
-+    pub fn websocket_tls_config(
-+        &self,
-+        factory: &HttpClientFactory,
-+        request_url: &str,
-+        build: impl FnOnce() -> io::Result<Arc<ClientConfig>>,
-+    ) -> io::Result<Option<Arc<ClientConfig>>> {
-+        if self.lock().closed {
-+            return Err(io::Error::other("Provider model HTTP pool is closed"));
-+        }
-+        let Ok(url) = reqwest::Url::parse(request_url) else {
-+            return Ok(None);
-+        };
-+        if !reusable_factory(factory)
-+            || ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"]
-+                .iter()
-+                .any(|name| std::env::var_os(name).is_some())
-+            || !matches!(url.scheme(), "ws" | "wss")
-+            || !url.username().is_empty()
-+            || url.password().is_some()
-+            || url.host_str().is_none_or(crate::is_allowed_chatgpt_host)
-+        {
-+            return Ok(None);
-+        }
-+        // One slot has one purpose: the Provider's default-system WS configuration.
-+        // Production callers always supply the canonical native-root builder.
-+        self.websocket_tls_with(build).map(Some)
-+    }
-+
-+    fn websocket_tls_with(
-+        &self,
-+        build: impl FnOnce() -> io::Result<Arc<ClientConfig>>,
-+    ) -> io::Result<Arc<ClientConfig>> {
-+        {
-+            let state = self.lock();
-+            if state.closed {
-+                return Err(io::Error::other("Provider model HTTP pool is closed"));
-+            }
-+            if let Some(config) = &state.websocket_tls {
-+                return Ok(Arc::clone(config));
-+            }
-+        }
-+        // Construction may read system trust. No lock spans that work.
-+        let config = build()?;
-+        let mut state = self.lock();
-+        if state.closed {
-+            return Err(io::Error::other("Provider model HTTP pool is closed"));
-+        }
-+        Ok(Arc::clone(
-+            state
-+                .websocket_tls
-+                .get_or_insert_with(|| Arc::clone(&config)),
-+        ))
++        // Drop socket clients outside the state lock, before joined close completes.
++        drop(clients);
 +    }
 +
 +    fn invalidate(&self) {
@@ -1130,7 +987,15 @@ index 0000000..0bb7c99
 +        // must be absent, including empty/non-Unicode values. NO_PROXY alone cannot route.
 +        // Platform proxy services, sandbox bypass, explicit cookies and managed clients
 +        // retain their original builder and permit checks.
-+        if !reusable_factory(factory)
++        if !cfg!(target_os = "linux")
++            || factory.network_policy().is_managed()
++            || factory.has_chatgpt_cookies()
++            || factory.outbound_proxy_policy() != OutboundProxyPolicy::ReqwestDefault
++            || ROUTING_PROXY_ENV
++                .iter()
++                .any(|name| std::env::var_os(name).is_some())
++            || std::env::var_os("REQUEST_METHOD").is_some()
++            || std::env::var_os("CODEX_SANDBOX").is_some()
 +            || std::env::var_os("CODEX_CA_CERTIFICATE").is_some()
 +            || std::env::var_os("SSL_CERT_DIR").is_some()
 +            || !matches!(url.scheme(), "http" | "https")
@@ -1241,19 +1106,6 @@ index 0000000..0bb7c99
 +    }
 +}
 +
-+// Share the existing HTTP direct-route policy; WS additionally rejects every CA override.
-+fn reusable_factory(factory: &HttpClientFactory) -> bool {
-+    cfg!(target_os = "linux")
-+        && !factory.network_policy().is_managed()
-+        && !factory.has_chatgpt_cookies()
-+        && factory.outbound_proxy_policy() == OutboundProxyPolicy::ReqwestDefault
-+        && !ROUTING_PROXY_ENV
-+            .iter()
-+            .any(|name| std::env::var_os(name).is_some())
-+        && std::env::var_os("REQUEST_METHOD").is_none()
-+        && std::env::var_os("CODEX_SANDBOX").is_none()
-+}
-+
 +fn retire_redirected(owner: &Weak<Mutex<State>>, token: &Arc<()>) {
 +    if let Some(owner) = owner.upgrade() {
 +        let retired = {
@@ -1292,86 +1144,6 @@ index 0000000..0bb7c99
 +                .build()
 +                .unwrap(),
 +        )
-+    }
-+
-+    fn tls_config() -> Arc<ClientConfig> {
-+        codex_utils_rustls_provider::ensure_rustls_crypto_provider();
-+        Arc::new(
-+            ClientConfig::builder()
-+                .with_root_certificates(rustls::RootCertStore::empty())
-+                .with_no_client_auth(),
-+        )
-+    }
-+
-+    #[test]
-+    fn websocket_tls_is_shared_only_with_its_provider_and_released_on_close() {
-+        let first = SdkModelHttpPool::default();
-+        let copy = first.clone();
-+        let other = SdkModelHttpPool::default();
-+        let config = first.websocket_tls_with(|| Ok(tls_config())).unwrap();
-+        let same = copy
-+            .websocket_tls_with(|| panic!("must reuse captured trust"))
-+            .unwrap();
-+        let separate = other.websocket_tls_with(|| Ok(tls_config())).unwrap();
-+        assert!(Arc::ptr_eq(&config, &same));
-+        assert!(!Arc::ptr_eq(&config, &separate));
-+        let weak = Arc::downgrade(&config);
-+        drop((config, same));
-+        first.close();
-+        assert!(weak.upgrade().is_none());
-+        assert!(
-+            copy.websocket_tls_with(|| panic!("closed owner cannot build"))
-+                .is_err()
-+        );
-+    }
-+
-+    #[test]
-+    fn websocket_tls_does_not_cache_a_construction_error() {
-+        let pool = SdkModelHttpPool::default();
-+        assert!(
-+            pool.websocket_tls_with(|| Err(io::Error::other("trust unavailable")))
-+                .is_err()
-+        );
-+        assert!(pool.websocket_tls_with(|| Ok(tls_config())).is_ok());
-+    }
-+
-+    #[test]
-+    fn websocket_tls_cold_race_publishes_one_shared_configuration() {
-+        let pool = SdkModelHttpPool::default();
-+        let barrier = Arc::new(std::sync::Barrier::new(2));
-+        let threads = (0..2)
-+            .map(|_| {
-+                let pool = pool.clone();
-+                let barrier = Arc::clone(&barrier);
-+                std::thread::spawn(move || {
-+                    pool.websocket_tls_with(|| {
-+                        barrier.wait();
-+                        Ok(tls_config())
-+                    })
-+                    .unwrap()
-+                })
-+            })
-+            .collect::<Vec<_>>();
-+        let results = threads
-+            .into_iter()
-+            .map(|thread| thread.join().unwrap())
-+            .collect::<Vec<_>>();
-+        assert!(Arc::ptr_eq(&results[0], &results[1]));
-+    }
-+
-+    #[test]
-+    fn websocket_tls_cannot_publish_after_provider_close() {
-+        let pool = SdkModelHttpPool::default();
-+        let config = tls_config();
-+        let weak = Arc::downgrade(&config);
-+        assert!(
-+            pool.websocket_tls_with(|| {
-+                pool.close();
-+                Ok(config)
-+            })
-+            .is_err()
-+        );
-+        assert!(weak.upgrade().is_none());
 +    }
 +
 +    #[test]
@@ -1616,14 +1388,10 @@ index 0000000..0bb7c99
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 58d43f7..a845e86 100644
+index 58d43f7af9e4a3a29dd410436b5f3295249bd4ce..cf7ca828dd3a0be54ee54e671f1dff284ec69c04 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-@@ -16,9 +16,11 @@ use crate::telemetry::WebsocketTelemetry;
- use codex_client::TransportError;
- use codex_http_client::HttpClientFactory;
- use codex_http_client::RetryAfter;
-+use codex_http_client::SdkModelHttpPool;
+@@ -19,6 +19,7 @@ use codex_http_client::RetryAfter;
  use codex_protocol::protocol::ApiRateLimits;
  use codex_websocket_client::WebSocketConnection;
  use codex_websocket_client::WebSocketConnector;
@@ -1631,152 +1399,104 @@ index 58d43f7..a845e86 100644
  use futures::FutureExt;
  use futures::SinkExt;
  use futures::StreamExt;
-@@ -365,6 +367,7 @@ impl ResponsesWebsocketConnection {
- pub struct ResponsesWebsocketClient {
-     provider: Provider,
-     auth: SharedAuthProvider,
-+    sdk_model_http_pool: Option<Arc<SdkModelHttpPool>>,
+@@ -508,6 +509,20 @@ fn merge_request_headers(
+     headers
  }
  
- /// Close frame information captured by a handshake probe.
-@@ -394,7 +397,17 @@ pub struct ResponsesWebsocketProbe {
- impl ResponsesWebsocketClient {
-     /// Creates a Responses WebSocket client for an already-resolved provider and auth source.
-     pub fn new(provider: Provider, auth: SharedAuthProvider) -> Self {
--        Self { provider, auth }
-+        Self {
-+            provider,
-+            auth,
-+            sdk_model_http_pool: None,
-+        }
++// Plain destinations do not use trust roots. HTTPS proxy tunnels still build
++// their own Codex TLS configuration in the dialer when this mode supplies None.
++fn websocket_tls_mode(url: &Url) -> WebSocketTlsMode {
++    if url.scheme() == "ws"
++        && !["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"]
++            .iter()
++            .any(|name| std::env::var_os(name).is_some())
++    {
++        WebSocketTlsMode::TungsteniteDefault
++    } else {
++        WebSocketTlsMode::ExplicitCodexTls
 +    }
++}
 +
-+    /// The caller supplies this only for a resolved API-key SDK request.
-+    pub fn with_sdk_model_http_pool(mut self, pool: Option<Arc<SdkModelHttpPool>>) -> Self {
-+        self.sdk_model_http_pool = pool;
-+        self
-     }
- 
-     #[instrument(
-@@ -420,8 +433,14 @@ impl ResponsesWebsocketClient {
-             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
-         self.auth.add_auth_headers(&mut headers);
- 
--        let (stream, _status, server_reasoning_included, server_model) =
--            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
-+        let (stream, _status, server_reasoning_included, server_model) = connect_websocket(
-+            ws_url,
-+            headers,
-+            http_client_factory,
-+            turn_state.clone(),
-+            self.sdk_model_http_pool.as_deref(),
-+        )
-+        .await?;
-         Ok(ResponsesWebsocketConnection::new(
-             stream,
-             self.provider.stream_idle_timeout,
-@@ -459,6 +478,7 @@ impl ResponsesWebsocketClient {
-             headers,
-             http_client_factory,
-             /*turn_state*/ None,
-+            /*sdk_model_http_pool*/ None,
-         )
-         .await?;
-         let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
-@@ -513,6 +533,7 @@ async fn connect_websocket(
+ async fn connect_websocket(
+     url: Url,
      headers: HeaderMap,
-     http_client_factory: &HttpClientFactory,
-     turn_state: Option<Arc<OnceLock<String>>>,
-+    sdk_model_http_pool: Option<&SdkModelHttpPool>,
- ) -> Result<(WsStream, StatusCode, bool, Option<String>), ApiError> {
-     info!("connecting to websocket: {url}");
- 
-@@ -522,7 +543,23 @@ async fn connect_websocket(
+@@ -522,8 +537,9 @@ async fn connect_websocket(
          .map_err(|err| ApiError::Stream(format!("failed to build websocket request: {err}")))?;
      request.headers_mut().extend(headers);
  
 -    let connector = WebSocketConnector::new(http_client_factory)
-+    // Check final handshake headers after provider, request and auth merging.
-+    let tls = if !request.headers().contains_key(http::header::COOKIE)
-+        && !request
-+            .headers()
-+            .contains_key("x-openai-account-routing-override")
-+        && let Some(pool) = sdk_model_http_pool
-+    {
-+        pool.websocket_tls_config(http_client_factory, url.as_str(), || {
-+            codex_http_client::build_rustls_client_config_with_custom_ca()
-+                .map_err(std::io::Error::other)
-+        })
-+        .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?
-+    } else {
-+        None
-+    };
-+    let tls_mode = tls.map_or(WebSocketTlsMode::ExplicitCodexTls, WebSocketTlsMode::Rustls);
-+    let connector = WebSocketConnector::new_with_tls_mode(http_client_factory, tls_mode)
-         .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
+-        .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
++    let connector =
++        WebSocketConnector::new_with_tls_mode(http_client_factory, websocket_tls_mode(&url))
++            .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?;
      let response = connector.connect(request, websocket_config()).await;
  
-@@ -968,6 +1005,67 @@ mod tests {
+     let (stream, response) = match response {
+@@ -968,6 +984,71 @@ mod tests {
      use std::collections::HashMap;
      use std::sync::Arc;
  
-+    #[tokio::test]
-+    async fn sdk_tls_pool_wiring_respects_final_auth_headers() {
-+        struct HeaderAuth(HeaderMap);
-+        impl crate::auth::AuthProvider for HeaderAuth {
-+            fn add_auth_headers(&self, headers: &mut HeaderMap) {
-+                headers.extend(self.0.clone());
-+            }
-+        }
-+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-+        let base_url = format!("http://{}", listener.local_addr().unwrap());
-+        drop(listener);
-+        let factory =
-+            HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
-+        let pool = Arc::new(SdkModelHttpPool::default());
-+        pool.close();
-+        for excluded_header in [
-+            None,
-+            Some("cookie"),
-+            Some("x-openai-account-routing-override"),
-+        ] {
-+            let mut headers = HeaderMap::new();
-+            headers.insert(
-+                "authorization",
-+                HeaderValue::from_static("Bearer synthetic-key"),
-+            );
-+            if let Some(name) = excluded_header {
-+                headers.insert(name, HeaderValue::from_static("synthetic-routing"));
-+            }
-+            let provider = Provider {
-+                name: "synthetic".into(),
-+                base_url: base_url.clone(),
-+                query_params: None,
-+                headers: HeaderMap::new(),
-+                retry: crate::provider::RetryConfig {
-+                    max_attempts: 1,
-+                    base_delay: Duration::ZERO,
-+                    retry_429: false,
-+                    retry_5xx: false,
-+                    retry_transport: false,
-+                },
-+                stream_idle_timeout: Duration::from_secs(1),
-+            };
-+            let client = ResponsesWebsocketClient::new(provider, Arc::new(HeaderAuth(headers)))
-+                .with_sdk_model_http_pool(Some(Arc::clone(&pool)));
-+            let error = tokio::time::timeout(
-+                Duration::from_secs(2),
-+                client.connect(&factory, HeaderMap::new(), HeaderMap::new(), None, None),
-+            )
-+            .await
-+            .expect("local rejection should finish")
-+            .err()
-+            .expect("closed pool or unavailable endpoint should reject")
-+            .to_string();
++    #[test]
++    fn destination_tls_selection_preserves_secure_and_configured_ca_construction() {
++        const CASE: &str = "CODEX_RESPONSES_TLS_SELECTION_TEST_CASE";
++        const SELECTOR: &str = "endpoint::responses_websocket::tests::destination_tls_selection_preserves_secure_and_configured_ca_construction";
++        let keys = ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"];
++        if let Ok(case) = std::env::var(CASE) {
++            let url = Url::parse(if case == "secure" {
++                "wss://localhost/v1/responses"
++            } else {
++                "ws://localhost/v1/responses"
++            })
++            .unwrap();
++            let mode = websocket_tls_mode(&url);
 +            assert_eq!(
-+                error.contains("Provider model HTTP pool is closed"),
-+                excluded_header.is_none(),
-+                "{error}"
++                matches!(mode, WebSocketTlsMode::TungsteniteDefault),
++                case == "plain",
++                "only plain destinations without CA overrides may skip construction"
++            );
++            let factory =
++                HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::ReqwestDefault);
++            let connector = WebSocketConnector::new_with_tls_mode(&factory, mode);
++            if case == "CODEX_CA_CERTIFICATE" || case == "SSL_CERT_FILE" {
++                assert!(
++                    connector.is_err(),
++                    "configured missing CA files must still fail before dialing"
++                );
++            } else {
++                assert!(connector.is_ok());
++            }
++            return;
++        }
++        for case in [
++            "plain",
++            "secure",
++            "CODEX_CA_CERTIFICATE",
++            "SSL_CERT_FILE",
++            "SSL_CERT_DIR",
++            "empty",
++        ] {
++            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
++            command
++                .args(["--exact", SELECTOR, "--nocapture"])
++                .env(CASE, case);
++            for key in keys {
++                command.env_remove(key);
++            }
++            if keys.contains(&case) {
++                command.env(case, "/codex-responses-nonexistent-ca-selection-test.pem");
++            } else if case == "empty" {
++                command.env("CODEX_CA_CERTIFICATE", "");
++            }
++            let output = command.output().unwrap();
++            let stdout = String::from_utf8_lossy(&output.stdout);
++            assert!(
++                output.status.success(),
++                "{case}: {stdout}\n{}",
++                String::from_utf8_lossy(&output.stderr)
++            );
++            assert!(
++                stdout.contains("1 passed; 0 failed"),
++                "{case}: exact child test did not run: {stdout}"
 +            );
 +        }
 +    }
@@ -1784,185 +1504,3 @@ index 58d43f7..a845e86 100644
      #[tokio::test]
      #[expect(
          clippy::await_holding_invalid_type,
-diff --git a/codex-rs/websocket-client/src/dialer_tests.rs b/codex-rs/websocket-client/src/dialer_tests.rs
-index e965915..af38711 100644
---- a/codex-rs/websocket-client/src/dialer_tests.rs
-+++ b/codex-rs/websocket-client/src/dialer_tests.rs
-@@ -713,3 +713,177 @@ fn test_connection(inner: ConnectionInner) -> WebSocketConnection {
-         .unwrap();
-     WebSocketConnection::new(inner, lease)
- }
-+
-+#[cfg(target_os = "linux")]
-+#[tokio::test]
-+async fn provider_tls_cache_keeps_fresh_wss_auth_and_certificate_validation() {
-+    const CHILD: &str = "CODEX_WEBSOCKET_PROVIDER_TLS_TEST";
-+    if std::env::var_os(CHILD).is_none() {
-+        let executable = std::env::current_exe().expect("test executable should be available");
-+        let output = tokio::task::spawn_blocking(move || {
-+            let mut command = Command::new(executable);
-+            command.args([
-+                "--exact",
-+                "dialer::tests::provider_tls_cache_keeps_fresh_wss_auth_and_certificate_validation",
-+                "--nocapture",
-+            ]);
-+            for name in [
-+                "HTTP_PROXY",
-+                "http_proxy",
-+                "HTTPS_PROXY",
-+                "https_proxy",
-+                "ALL_PROXY",
-+                "all_proxy",
-+                "NO_PROXY",
-+                "no_proxy",
-+                "CODEX_CA_CERTIFICATE",
-+                "SSL_CERT_FILE",
-+                "SSL_CERT_DIR",
-+                "REQUEST_METHOD",
-+                "CODEX_SANDBOX",
-+            ] {
-+                command.env_remove(name);
-+            }
-+            command
-+                .env(CHILD, "1")
-+                .output()
-+                .expect("isolated WSS test should run")
-+        })
-+        .await
-+        .expect("isolated WSS test should join");
-+        assert!(
-+            output.status.success(),
-+            "{}\n{}",
-+            String::from_utf8_lossy(&output.stdout),
-+            String::from_utf8_lossy(&output.stderr)
-+        );
-+        let stdout = String::from_utf8_lossy(&output.stdout);
-+        assert!(stdout.contains("running 1 test"), "{stdout}");
-+        assert!(stdout.contains("test result: ok. 1 passed; 0 failed;"), "{stdout}");
-+        return;
-+    }
-+    tokio::time::timeout(Duration::from_secs(10), async {
-+        let (fixture_tls, acceptor, _) = test_tls_configs();
-+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
-+        let pool = codex_http_client::SdkModelHttpPool::default();
-+        let listener = TcpListener::bind("127.0.0.1:0")
-+            .await
-+            .expect("listener should bind");
-+        let url = format!(
-+            "wss://localhost:{}/v1/responses",
-+            listener.local_addr().unwrap().port()
-+        );
-+        let cached = pool
-+            .websocket_tls_config(&factory, &url, || Ok(Arc::clone(&fixture_tls)))
-+            .expect("fixture TLS should seed the admitted pool")
-+            .expect("default route should be eligible");
-+        assert!(Arc::ptr_eq(&cached, &fixture_tls));
-+        let positive_acceptor = acceptor.clone();
-+        let server = tokio::spawn(async move {
-+            let mut peers = std::collections::HashSet::new();
-+            for index in 0..2 {
-+                let (socket, peer) = listener.accept().await.expect("fresh socket should arrive");
-+                assert!(peers.insert(peer));
-+                let tls = positive_acceptor
-+                    .accept(socket)
-+                    .await
-+                    .expect("fixture TLS should connect");
-+                let mut websocket = tokio_tungstenite::accept_hdr_async(
-+                    tls,
-+                    move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-+                          response| {
-+                        assert_eq!(
-+                            request
-+                                .headers()
-+                                .get("authorization")
-+                                .unwrap()
-+                                .to_str()
-+                                .unwrap(),
-+                            format!("Bearer fresh-{index}")
-+                        );
-+                        Ok(response)
-+                    },
-+                )
-+                .await
-+                .expect("fresh WebSocket handshake should connect");
-+                websocket
-+                    .send(Message::Text(format!("fresh-{index}").into()))
-+                    .await
-+                    .unwrap();
-+                websocket.close(None).await.unwrap();
-+            }
-+            assert_eq!(peers.len(), 2);
-+        });
-+        for index in 0..2 {
-+            let config = pool
-+                .websocket_tls_config(&factory, &url, || {
-+                    panic!("cache hit must not reload system trust")
-+                })
-+                .unwrap()
-+                .expect("cached default route should remain eligible");
-+            assert!(Arc::ptr_eq(&config, &cached));
-+            let connector =
-+                WebSocketConnector::new_with_tls_mode(&factory, WebSocketTlsMode::Rustls(config))
-+                    .unwrap();
-+            let mut request = url.clone().into_client_request().unwrap();
-+            request.headers_mut().insert(
-+                "authorization",
-+                format!("Bearer fresh-{index}").parse().unwrap(),
-+            );
-+            let (mut socket, _) = connector
-+                .connect(request, WebSocketConfig::default())
-+                .await
-+                .unwrap();
-+            assert_eq!(
-+                socket.next().await.unwrap().unwrap(),
-+                Message::Text(format!("fresh-{index}").into())
-+            );
-+            let _ = socket.next().await;
-+        }
-+        server.await.expect("both fresh WSS sockets should join");
-+        for wrong_hostname in [false, true] {
-+            let rejected_acceptor = if wrong_hostname {
-+                acceptor.clone()
-+            } else {
-+                test_tls_configs().1
-+            };
-+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-+            let host = if wrong_hostname {
-+                "127.0.0.1"
-+            } else {
-+                "localhost"
-+            };
-+            let url = format!(
-+                "wss://{host}:{}/v1/responses",
-+                listener.local_addr().unwrap().port()
-+            );
-+            let server = tokio::spawn(async move {
-+                let (socket, _) = listener.accept().await.unwrap();
-+                assert!(rejected_acceptor.accept(socket).await.is_err());
-+            });
-+            let config = pool
-+                .websocket_tls_config(&factory, &url, || {
-+                    panic!("negative checks must use the same cached trust")
-+                })
-+                .unwrap()
-+                .expect("default route should remain eligible");
-+            assert!(Arc::ptr_eq(&config, &cached));
-+            let connector =
-+                WebSocketConnector::new_with_tls_mode(&factory, WebSocketTlsMode::Rustls(config))
-+                    .unwrap();
-+            assert!(
-+                connector
-+                    .connect(
-+                        url.into_client_request().unwrap(),
-+                        WebSocketConfig::default()
-+                    )
-+                    .await
-+                    .is_err()
-+            );
-+            server.await.expect("rejected TLS socket should join");
-+        }
-+        pool.close();
-+    })
-+    .await
-+    .expect("cached WSS checks should complete within their deadline");
-+}
