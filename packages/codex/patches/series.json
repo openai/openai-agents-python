@@ -499,7 +499,11 @@
     {
       "path": "0157-sdk-registered-http-429-diagnostics.patch",
       "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
     }
   ],
-  "result_tree": "154036199220cdeec78e90df83765fbd513310dc"
+  "result_tree": "9b37a3c3d42173e0a09ac65ceeb27e4996e46ab1"
 }
