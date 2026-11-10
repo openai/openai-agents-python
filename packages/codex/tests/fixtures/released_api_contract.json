@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "64571f20743369988216ff3ca2ab45b097207e49",
+  "baseline_commit": "d7a754bfcd374f3f3ef039edd293d37a2d263faa",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -2475,14 +2475,13 @@
           "from ._trace_context import TraceContext as TraceContext",
           "from .manual import ActionRequested as ActionRequested, InputT as InputT, ResultT as ResultT",
           "from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP",
-          "from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents",
+          "from .native_agents import ChildInvocation as ChildInvocation, ChildStepContext as ChildStepContext, NativeAgents as NativeAgents",
           "from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments",
           "from .realtime_result import BackgroundResult as BackgroundResult",
           "from .realtime_usage import RealtimeUsage as RealtimeUsage",
           "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
+          "from .turn import Turn as Turn",
           "from .decisions import DecisionInput, DecisionProvider",
-          "from .native_agents import ChildStepContext",
-          "from .turn import Turn",
           "from .usage import TokenUsage"
         ],
         "references": {
