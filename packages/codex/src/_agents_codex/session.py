@@ -193,7 +193,12 @@ from .prepared_request import (
     _check_tools as _check_tools,
     _PrepareRequest as _PrepareRequest,
 )
-from .rate_limits import ApiRateLimits as ApiRateLimits, _api_rate_limits as _api_rate_limits
+from .rate_limits import (
+    ApiRateLimits as ApiRateLimits,
+    CodexPlanUsage,
+    _api_rate_limits as _api_rate_limits,
+    _codex_plan_usage,
+)
 from .realtime_result import BackgroundResult
 from .recovery import (
     LocalRecoveryRequired as LocalRecoveryRequired,
@@ -1089,7 +1094,8 @@ class _Invocation:
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
-_CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_CODEX_ACCOUNT_BASE_URL = "https://chatgpt.com/backend-api"
+_CODEX_RESPONSES_BASE_URL = f"{_CODEX_ACCOUNT_BASE_URL}/codex"
 
 
 @dataclass(repr=False)
@@ -2670,6 +2676,7 @@ class Session(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
+        discover_agents_md: bool = False,
         _captured_api_key: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
@@ -2689,6 +2696,8 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("restored_output_type requires a pending restored turn")
         _validate_function_concurrency(max_function_concurrency)
         parent_trace = _trace_context(parent_trace)
+        if not isinstance(discover_agents_md, bool):
+            raise TypeError("discover_agents_md must be a bool")
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
@@ -3071,6 +3080,8 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+            if discover_agents_md:
+                runtime["_sdk_discover_agents_md"] = True
 
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {
@@ -3931,6 +3942,7 @@ class Session(Generic[ContextT, OutputT]):
         self._sync_cleanup_deferred = False
         self._observations = _ObservationBuffer(self.id, retention=observation_retention)
         self._api_rate_limit_snapshot = ApiRateLimits()
+        self._plan_usage_reads: set[asyncio.Task[str]] = set()
         self._rate_limit_parent: Session[Any, Any] | None = None
         self._decisions_provider: DecisionProvider | None = None
         self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
@@ -4837,6 +4849,36 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_loop()
         return self._api_rate_limit_snapshot
+
+    async def plan_usage(self) -> CodexPlanUsage | None:
+        """Read a fresh Codex plan snapshot using this Session's saved login.
+
+        Call before ``submit()`` to inspect provider-reported windows and credits.
+        Missing fields are unknown. An API-key Session returns ``None`` without an
+        account request. A failed account read raises ``RuntimeError``. This read
+        uses the Session's cached credentials. If the access token has expired,
+        renew the saved login and open a new Session before retrying.
+        Closing the Session cancels pending plan usage reads.
+        """
+        self._check_open()
+        if self._codex_account is None:
+            return None
+
+        async def read_snapshot() -> str:
+            # Let the caller register the task and forward pending cancellation.
+            await asyncio.sleep(0)
+            self._check_open()
+            snapshot: str = await self._engine._read_codex_plan_usage(_CODEX_ACCOUNT_BASE_URL)
+            return snapshot
+
+        read = _create_task(read_snapshot())
+        self._plan_usage_reads.add(read)
+        try:
+            snapshot = await read
+        finally:
+            self._plan_usage_reads.discard(read)
+        self._check_open()
+        return _codex_plan_usage(json.loads(snapshot))
 
     @property
     def _strict_executor_writes(self) -> bool:
@@ -11967,6 +12009,11 @@ class Session(Generic[ContextT, OutputT]):
         # joining voice workflows now would cancel against a closing Session.
         if self._realtime is not None:
             self._realtime._session_closing()
+        plan_reads = tuple(self._plan_usage_reads)
+        if plan_reads:
+            for read in plan_reads:
+                cancel_once(read)
+            await asyncio.gather(*plan_reads, return_exceptions=True)
         await self._retire_url_completions()
         # Capture before cancelling native work. Done callbacks remove owners
         # from the gates while shutdown runs; close must still join their results.
