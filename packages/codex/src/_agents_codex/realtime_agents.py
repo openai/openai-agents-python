@@ -35,9 +35,10 @@ class RealtimeAgentContext:
 class RealtimeAgentConfig:
     """Voice defaults without changing the Agent's backend instructions.
 
-    Callbacks run at voice startup and acknowledged Agent changes. A failed
-    callback prevents its configuration from being sent. Tool predicates only
-    remove declarations from the captured catalog; they never grant a tool.
+    Configuration callbacks run at voice startup and acknowledged Agent changes.
+    A failed callback prevents its configuration from being sent. Tool predicates
+    restrict the captured catalog and run again before host functions and native
+    MCP tools execute.
     Explicit connection instructions and prompt settings override these defaults.
     """
 

@@ -339,6 +339,8 @@ struct Notice<'a, T> {
     profile_epoch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    realtime_mcp: bool,
     nonce: u64,
     request: Identified<'a, T>,
 }
@@ -419,6 +421,7 @@ type Rules = HashMap<ToolName, (Option<Duration>, Scope, bool, Option<u64>)>;
 pub(crate) struct ProfileMcpPolicy {
     names: HashSet<ToolName>,
     rules: Rules,
+    realtime: bool,
 }
 impl ProfileMcpPolicy {
     pub(crate) fn prepare(
@@ -461,6 +464,7 @@ impl ProfileMcpPolicy {
         Ok(Self {
             names,
             rules: Control::compile_rules(rules)?,
+            realtime: false,
         })
     }
 }
@@ -525,6 +529,7 @@ struct State {
     nonce: u64,
     pending: HashMap<u64, Pending>,
     tools: Option<Rules>,
+    realtime_mcp_tools: Option<Vec<ToolName>>,
 }
 
 // The public turn store owns this identity. A model request retains this exact
@@ -778,6 +783,7 @@ impl Control {
                     nonce: 0,
                     pending: HashMap::new(),
                     tools: None,
+                    realtime_mcp_tools: None,
                 }),
                 sender,
                 receiver: AsyncMutex::new(receiver),
@@ -1011,7 +1017,16 @@ impl Control {
         Ok(tools)
     }
 
-    pub(crate) fn configure_tools(&self, rules: Vec<ToolRule>) -> Result<()> {
+    #[cfg(test)]
+    fn configure_tools(&self, rules: Vec<ToolRule>) -> Result<()> {
+        self.configure_tools_with_realtime(rules, None)
+    }
+
+    pub(crate) fn configure_tools_with_realtime(
+        &self,
+        rules: Vec<ToolRule>,
+        realtime_mcp_tools: Option<Vec<ToolName>>,
+    ) -> Result<()> {
         let tools = Self::compile_rules(rules)?;
         let mut state = self
             .channel
@@ -1023,6 +1038,7 @@ impl Control {
             "Native interception is not active"
         );
         state.tools = Some(tools);
+        state.realtime_mcp_tools = realtime_mcp_tools;
         Ok(())
     }
 
@@ -1062,8 +1078,39 @@ impl Control {
             policy: Some(Arc::new(ProfileMcpPolicy {
                 names: rules.keys().cloned().collect(),
                 rules,
+                realtime: false,
             })),
         }
+    }
+
+    /// Add a predicate-only callback to each captured Realtime MCP tool.
+    /// Existing before/approval rules retain their scope, generation, and deadline.
+    pub(crate) fn capture_realtime_mcp_source(
+        &self,
+        mut source: ProfileMcpSource,
+        generation: u64,
+    ) -> ProfileMcpSource {
+        let state = self
+            .channel
+            .state
+            .lock()
+            .expect("interception control poisoned");
+        if let (Some(names), Some(policy)) = (&state.realtime_mcp_tools, &mut source.policy) {
+            let policy = Arc::make_mut(policy);
+            if source.receipt.is_none() {
+                policy.names.extend(names.iter().cloned());
+            }
+            policy.realtime = true;
+            for name in &policy.names {
+                policy.rules.entry(name.clone()).or_insert((
+                    Some(Duration::from_secs(30)),
+                    Scope::Root,
+                    false,
+                    Some(generation),
+                ));
+            }
+        }
+        source
     }
 
     fn configured(&self) -> bool {
@@ -1610,6 +1657,9 @@ impl Control {
         let admission = request.admission();
         let owner_binding = request.cell_owner_binding().is_some();
         let result_policy = request.result_policy();
+        let realtime_mcp = !result_policy
+            && source_rule.is_some()
+            && source_policy.is_some_and(|policy| policy.realtime);
         let (nonce, deadline, mut rx) = {
             let mut state = self
                 .channel
@@ -1685,6 +1735,7 @@ impl Control {
                         .and_then(|source| source.receipt.as_ref())
                         .map(|receipt| receipt.epoch),
                     generation,
+                    realtime_mcp,
                     nonce,
                     request: Identified {
                         thread_id: &self.id,

@@ -762,11 +762,20 @@ impl NativeThread {
             .is_some_and(|control| control.check(nonce)))
     }
 
-    fn _configure_native_interception(&self, rules: &str) -> PyResult<()> {
+    #[pyo3(signature = (rules, realtime_mcp_tools = None))]
+    fn _configure_native_interception(
+        &self,
+        rules: &str,
+        realtime_mcp_tools: Option<&str>,
+    ) -> PyResult<()> {
         let rules = serde_json::from_str(rules).map_err(py_error)?;
+        let realtime_mcp_tools = realtime_mcp_tools
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(py_error)?;
         self.native_interception()?
             .ok_or_else(|| py_error("Codex thread is closed"))?
-            .configure_tools(rules)
+            .configure_tools_with_realtime(rules, realtime_mcp_tools)
             .map_err(py_error)
     }
 

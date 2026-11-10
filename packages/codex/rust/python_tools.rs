@@ -5013,9 +5013,10 @@ impl ToolContributor for PythonContributor {
             }
         }
         let mut execution_data = input.retained_execution_data.cloned().unwrap_or_default();
+        let generation_id = generation.id;
         let selection_id = codex_extension_api::realtime_tool_selection_id(
             input.thread_store.level_id(),
-            catalog.generation.id,
+            generation_id,
             input.profile.map(|profile| &profile.receipt),
         );
         if input.retained_execution_data.is_none() {
@@ -5109,6 +5110,16 @@ impl ToolContributor for PythonContributor {
             });
             if let Some(accepted) = accepted {
                 execution_data.insert(accepted);
+            }
+            if let (Some(control), Some(source)) = (
+                input
+                    .thread_store
+                    .get::<crate::native_interception::Control>(),
+                execution_data.get::<crate::native_interception::ProfileMcpSource>(),
+            ) {
+                execution_data.insert(
+                    control.capture_realtime_mcp_source(source.as_ref().clone(), generation_id),
+                );
             }
         }
         if input.mcp.is_some_and(|binding| !binding.tools().is_empty())

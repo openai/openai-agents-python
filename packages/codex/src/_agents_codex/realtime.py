@@ -1448,6 +1448,9 @@ class RealtimeSession:
 
                 async def admit() -> None:
                     async with self._session._catalog_publication_lock:
+                        self._session._start_interception(
+                            tuple(runtime.profile.declaration for runtime in runtimes.values())
+                        )
                         self._voice_registry_used = True
                         receipt = json.loads(
                             await self._session._native._admit_realtime_agent_graph(

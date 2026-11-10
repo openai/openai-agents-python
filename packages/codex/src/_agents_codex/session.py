@@ -4311,13 +4311,13 @@ class Session(Generic[ContextT, OutputT]):
         ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
-    def _start_interception(self) -> None:
+    def _start_interception(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
         if self._interception is not None:
-            self._interception.refresh()
-        elif _has_interceptors(self):
+            self._interception.refresh(pending)
+        elif _has_interceptors(self, pending):
             self._interception = _NativeInterception(self)
             with _clear_current():
-                self._interception.start()
+                self._interception.start(pending)
 
     @property
     def id(self) -> str:
@@ -4574,6 +4574,29 @@ class Session(Generic[ContextT, OutputT]):
             else None
         )
         return self._agent_for_profile(receipt)
+
+    async def _realtime_tool_enabled(
+        self,
+        message: Mapping[str, Any],
+        context: Any,
+        tool: ToolRef,
+        admitted: Callable[[], bool],
+    ) -> bool:
+        from .realtime_agents import RealtimeAgentContext
+
+        defaults = self._agent_for_message(message).realtime
+        if defaults is None or defaults.tool_enabled is None:
+            return True
+        profile = message.get("profile_id")
+        original = self._source_profile_runtime(profile).profile.agent if profile else self._agent
+        if original is None:
+            raise NativeError("Realtime tool has no source Agent")
+        enabled = await _call_callback(
+            defaults.tool_enabled, admitted, RealtimeAgentContext(context, original), tool
+        )
+        if type(enabled) is not bool:
+            raise TypeError("Realtime tool_enabled must return a bool")
+        return enabled
 
     def _source_profile_runtime(self, profile_id: str) -> _ProfileRuntime:
         runtime = self._profiles.get(profile_id) or self._voice_profiles.get(profile_id)
@@ -11798,36 +11821,17 @@ class Session(Generic[ContextT, OutputT]):
             )
             self._observations.append(started)
             if isinstance(state, _Submission) and state.realtime_tool is not None:
-                source_agent = self._agent_for_message(message)
-                defaults = source_agent.realtime
-                if defaults is not None and defaults.tool_enabled is not None:
-                    from .realtime_agents import RealtimeAgentContext
-
-                    original = (
-                        self._source_profile_runtime(message["profile_id"]).profile.agent
-                        if message.get("profile_id") is not None
-                        else self._agent
-                    )
-                    if original is None:
-                        raise NativeError("Realtime tool has no source Agent")
-                    enabled = await self._call_decision_callback(
-                        state,
-                        message,
-                        defaults.tool_enabled,
-                        lambda: self._admit_tool(state, request),
-                        RealtimeAgentContext(entry.context, original),
-                        ref,
-                    )
-                    if type(enabled) is not bool:
-                        raise TypeError("Realtime tool_enabled must return a bool")
-                    if not self._admit_tool(state, request):
-                        return
-                    if not enabled:
-                        denial = ToolOutput.error("Tool disabled by its source Agent")
-                        reply = json.dumps({"request": message, "response": denial.to_native()})
-                        if await self._respond_tool(state, reply):
-                            status = "failed"
-                        return
+                enabled = await self._realtime_tool_enabled(
+                    message, entry.context, ref, lambda: self._admit_tool(state, request)
+                )
+                if not self._admit_tool(state, request):
+                    return
+                if not enabled:
+                    denial = ToolOutput.error("Tool disabled by its source Agent")
+                    reply = json.dumps({"request": message, "response": denial.to_native()})
+                    if await self._respond_tool(state, reply):
+                        status = "failed"
+                    return
             approved = None
             if managed_approval:
                 approved = self._approval_ready.pop(

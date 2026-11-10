@@ -8,11 +8,76 @@ from typing import Any
 import pytest
 
 from agents import Agent, HttpMCP, MCPResultContext, NativeProvider, Turn, function_tool
-from agents.realtime import RealtimeConfig
+from agents.realtime import RealtimeAgentConfig, RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
 from tests.test_native_mcp_tools import Peer
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
+
+
+@pytest.mark.parametrize("voice_only", [False, True], ids=["opening", "voice-only"])
+async def test_realtime_rechecks_source_predicate_before_native_mcp(
+    realtime_peer: RealtimePeer, voice_only: bool
+) -> None:
+    peer = realtime_peer
+    mcp = Peer(names=("lookup",), label="selected MCP result")
+    application = {"enabled": True}
+    predicates = []
+
+    def enabled(context, tool):
+        predicates.append((context.agent, tool))
+        assert context.context is application
+        return application["enabled"]
+
+    async with (
+        timeout(20),
+        mcp.serve() as url,
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(
+            name="Records",
+            instructions="Read selected records.",
+            tools=[HttpMCP(name="records", url=url, tools=["lookup"])],
+            provider=provider,
+            realtime=RealtimeAgentConfig(tool_enabled=enabled),
+        )
+        opening = (
+            Agent(name="Backend", instructions="Backend", provider=provider)
+            if voice_only
+            else agent
+        )
+        async with (
+            opening.session(context=application) as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            start = len(peer.frames) if voice_only else 0
+            if voice_only:
+                await voice.update_agent(agent)
+            configuration = await peer.frame(
+                lambda frame: frame["type"] == "session.update", after=start
+            )
+            name = next(
+                tool["name"]
+                for tool in configuration["session"]["tools"]
+                if "lookup" in tool["name"]
+            )
+            application["enabled"] = False
+            await peer.function(name, {"key": "blocked"}, "mcp-blocked")
+            await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "mcp-blocked")
+            assert mcp.calls == []
+            assert len(predicates) == 2
+            assert all(source is agent for source, _ in predicates)
+            assert predicates[0][1] == predicates[1][1]
+
+            application["enabled"] = True
+            await peer.function(name, {"key": "allowed"}, "mcp-allowed")
+            result = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "mcp-allowed"
+            )
+            assert "selected MCP result" in result["item"]["output"]
+            assert [call["arguments"]["key"] for call in mcp.calls] == ["allowed"]
 
 
 @pytest.mark.parametrize("with_graph", [False, True])
