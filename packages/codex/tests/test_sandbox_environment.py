@@ -962,3 +962,67 @@ async def test_borrowed_vercel_uses_current_provider_manifest_defaults() -> None
         ):
             pass
     assert connected == []
+
+
+@pytest.mark.parametrize("change", ["unchanged", "removed", "source", "read_only"])
+async def test_borrowed_docker_checks_live_host_bind_authority(tmp_path: Path, change: str) -> None:
+    from agents.classic.sandbox.sandboxes.docker import (
+        DockerSandboxSession,
+        DockerSandboxSessionState,
+    )
+
+    host = tmp_path / "host"
+    host.mkdir()
+    original = {"path": "/mnt/trusted", "host_path": str(host), "read_only": False}
+    manifest = Manifest(extra_path_grants=[original])
+    events: list[str] = []
+
+    class Container:
+        attrs = {
+            "Mounts": [
+                {"Type": "bind", "Source": str(host), "Destination": "/mnt/trusted", "RW": True}
+            ]
+        }
+
+        def reload(self) -> None:
+            events.append("inspect")
+
+    live = SandboxSession(
+        DockerSandboxSession(
+            docker_client=None,
+            container=Container(),
+            state=DockerSandboxSessionState(
+                snapshot=scripted_sandbox_session(manifest=manifest).state.snapshot,
+                manifest=manifest,
+                image="synthetic",
+                container_id="synthetic-container",
+            ),
+        )
+    )
+    changed = dict(original)
+    if change == "source":
+        changed["host_path"] = str(tmp_path / "other")
+    if change == "read_only":
+        changed["read_only"] = True
+    current = Manifest(extra_path_grants=[] if change == "removed" else [changed])
+    client = Client(events)
+    client.backend_id = "docker"
+
+    @asynccontextmanager
+    async def connect(selected):
+        assert selected is live
+        events.append("connect")
+        yield Environment(url="wss://executor.invalid", cwd="/workspace")
+
+    source = sandbox_environment(
+        client, manifest=current, options=Options(), session=live, connect=connect
+    )
+    if change == "unchanged":
+        async with source:
+            pass
+        assert events.count("connect") == 1
+    else:
+        with pytest.raises(ValueError, match="bind mounts|path grant mount"):
+            async with source:
+                pytest.fail("Changed host authority must fail before gateway connection")
+        assert "connect" not in events and not {"close", "delete"}.intersection(events)

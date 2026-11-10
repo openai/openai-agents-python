@@ -90,3 +90,48 @@ async def test_native_agents_preserves_root_project_guidance(
         names = {tool.get("name") for tool in responses.requests[0]["tools"]}
         assert ("view_image" in names) is project_guidance
         assert "exec_command" in names
+
+
+@pytest.mark.parametrize("name", ["read_text_file", "view_image"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_guidance_tool_refs_use_the_opening_grant(
+    tmp_path: Path, responses, monkeypatch: pytest.MonkeyPatch, name: str, enabled: bool
+) -> None:
+    from agents import ToolRef
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_executor_tools import declaration
+
+    async with ExecutorPeer(tmp_path / "remote").serve() as executor:
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-certificates"))
+        environment = declaration(executor)
+        responses.replies.extend(
+            [
+                [assistant_output("selected")],
+                [assistant_output("empty")],
+                [assistant_output("workspace")],
+            ]
+        )
+        async with Agent(instructions="Answer.", provider=provider(responses)).session(
+            environment=environment, project_guidance=enabled
+        ) as session:
+            if not enabled:
+                with pytest.raises(ValueError, match=name):
+                    await session.submit("Answer.", tools=[ToolRef(name, "functions")])
+                assert responses.requests == []
+                return
+            completed = await (
+                await session.submit("Answer.", tools=[ToolRef(name, "functions")])
+            ).get_result()
+            assert completed.final_output == "selected"
+            assert {tool.get("name") for tool in responses.requests[0].get("tools", [])} == {name}
+            assert (
+                await (await session.submit("Answer.", tools=[])).get_result()
+            ).final_output == "empty"
+            assert not responses.requests[1].get("tools")
+            assert (
+                await (await session.submit("Answer.", tools=[environment])).get_result()
+            ).final_output == "workspace"
+            assert {"read_text_file", "view_image"}.issubset(
+                {tool.get("name") for tool in responses.requests[2].get("tools", [])}
+            )

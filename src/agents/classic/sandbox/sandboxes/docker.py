@@ -573,6 +573,10 @@ class DockerSandboxSession(BaseSandboxSession):
         await super()._validate_manifest_application(
             only_ephemeral=only_ephemeral, manifest=manifest, session_running=session_running
         )
+        if manifest is not None and not only_ephemeral:
+            await run_blocking_workspace_io(
+                lambda: _assert_existing_container_path_grants_match(self._container, manifest)
+            )
         service = self._removal_service
         if service is not None:
             selected_manifest = manifest if manifest is not None else self.state.manifest

@@ -58,6 +58,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "compact",
         "update",
         "get_active_agent",
+        "build_realtime_sip_config",
         "realtime",
         "events",
         "interactions",

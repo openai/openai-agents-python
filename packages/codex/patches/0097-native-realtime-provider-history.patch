@@ -1,0 +1,2672 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 1367a9f50494800709a379e87c47da1e5bbeef68..057d4cc3c5d255cd08565792e526d556e72bfa68 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -587,7 +587,7 @@ pub(crate) async fn apply_bespoke_event_handling(
+                     .await;
+             }
+             RealtimeEvent::ResponseDone(_) => {}
+-            RealtimeEvent::ConversationItemAdded(item) => {
++            RealtimeEvent::ConversationItemAdded { item, .. } => {
+                 let notification = ThreadRealtimeItemAddedNotification {
+                     thread_id: conversation_id.to_string(),
+                     item,
+@@ -600,6 +600,7 @@ pub(crate) async fn apply_bespoke_event_handling(
+             }
+             RealtimeEvent::ConversationItemDone { .. }
+             | RealtimeEvent::ConversationItemObserved(_)
++            | RealtimeEvent::ConversationItemRetrieved(_)
+             | RealtimeEvent::ConversationItemDeleted { .. }
+             | RealtimeEvent::NoopRequested(_) => {}
+             RealtimeEvent::HandoffRequested(handoff) => {
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index 9f72e662a60ce194ff6550b6a7085eada8a72c4b..4038108574ca434c13eb34d04e4e0c7b20412420 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -30,6 +30,7 @@ pub use realtime_websocket::RealtimeWebsocketClient;
+ pub use realtime_websocket::RealtimeWebsocketConnection;
+ pub use realtime_websocket::RealtimeWebsocketEvents;
+ pub use realtime_websocket::RealtimeWebsocketWriter;
++pub use realtime_websocket::charge_realtime_json_storage;
+ pub use realtime_websocket::session_update_session_json;
+ pub use realtime_websocket::sip_session_config_json;
+ pub use responses::ResponsesClient;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index b4dbad830c8600f962b60d1f1f0f916cd2fb7ee0..d9ad3ecd52c0dbc0c151de68e6e52f80b1828393 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -70,6 +70,16 @@ const REALTIME_WIRE_LOG_TARGET: &str = "codex_api::realtime_websocket::wire";
+ const OPENAI_REALTIME_API_BASE_URL: &str = "https://api.openai.com/v1";
+ pub(super) const SDK_WIRE_EVENTS_CAPACITY: usize = 256;
+ pub(super) const SDK_WIRE_BYTES_CAPACITY: usize = 8 * 1024 * 1024;
++/// Charge retained decoded JSON with the same allocation budget as the SDK wire queue.
++pub fn charge_realtime_json_storage(
++    value: &serde_json::Value,
++    total: &mut usize,
++) -> Result<(), ApiError> {
++    super::hosted_mcp::json_bytes(value, total, 0).map_err(|_| ApiError::InvalidRequest {
++        message: "Realtime JSON exceeds its 8 MiB estimated storage limit".into(),
++    })
++}
++
+ const MAX_ACTIVE_TRANSCRIPT_BYTES: usize = 8 * 1024;
+ const TRUNCATED_TRANSCRIPT_PREFIX: &str = "…";
+
+@@ -731,6 +741,21 @@ impl RealtimeWebsocketConnection {
+ }
+
+ impl RealtimeWebsocketWriter {
++    pub async fn retrieve_conversation_item(&self, item_id: String) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::ConversationItemRetrieve { item_id })
++            .await
++    }
++    pub async fn create_conversation_item_raw(
++        &self,
++        item: serde_json::Value,
++        previous_item_id: Option<String>,
++    ) -> Result<(), ApiError> {
++        self.send_json(&RealtimeOutboundMessage::ConversationItemCreateRaw {
++            item,
++            previous_item_id,
++        })
++        .await
++    }
+     pub async fn send_conversation_item_delete(&self, item_id: String) -> Result<(), ApiError> {
+         self.send_json(&RealtimeOutboundMessage::ConversationItemDelete { item_id })
+             .await
+@@ -1405,7 +1430,8 @@ impl RealtimeWebsocketEvents {
+             | RealtimeEvent::FunctionCallRequested(_)
+             | RealtimeEvent::FunctionCallFinished { .. }
+             | RealtimeEvent::FunctionBatchFinished { .. }
+-            | RealtimeEvent::ConversationItemAdded(_)
++            | RealtimeEvent::ConversationItemAdded { .. }
++            | RealtimeEvent::ConversationItemRetrieved(_)
+             | RealtimeEvent::Error(_)
+             | RealtimeEvent::HistoryItemStarted(_)
+             | RealtimeEvent::HistoryTranscriptDelta { .. }
+@@ -2227,12 +2253,56 @@ mod tests {
+         .to_string();
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
+-            Some(RealtimeEvent::ConversationItemAdded(
+-                json!({"type": "message", "seq": 7})
+-            ))
++            Some(RealtimeEvent::ConversationItemAdded {
++                item: json!({"type": "message", "seq": 7}),
++                previous_item_id: None
++            })
+         );
+     }
+
++    #[test]
++    fn item_creation_preserves_unknown_root_and_named_predecessors() {
++        for (parser, kind) in [
++            (RealtimeEventParser::V1, "conversation.item.added"),
++            (RealtimeEventParser::RealtimeV2, "conversation.item.added"),
++            (RealtimeEventParser::RealtimeV2, "conversation.item.created"),
++        ] {
++            for previous in [
++                None,
++                Some(None),
++                Some(Some("hidden-predecessor".to_owned())),
++            ] {
++                let item = json!({"id":"observed-item","type":"message","role":"user"});
++                let mut frame = json!({"type":kind,"item":item.clone()});
++                if let Some(previous) = &previous {
++                    frame["previous_item_id"] = serde_json::to_value(previous).unwrap();
++                }
++                assert_eq!(
++                    parse_realtime_event(&frame.to_string(), parser),
++                    Some(RealtimeEvent::ConversationItemAdded {
++                        item,
++                        previous_item_id: previous,
++                    })
++                );
++            }
++            let malformed = json!({"type":kind,"item":{"id":"item"},"previous_item_id":{}});
++            assert!(parse_realtime_event(&malformed.to_string(), parser).is_none());
++        }
++        let item = json!({"id":"new","type":"message","role":"user","content":[{"type":"input_text","text":"append"}]});
++        let append = serde_json::to_value(RealtimeOutboundMessage::ConversationItemCreateRaw {
++            item: item.clone(),
++            previous_item_id: None,
++        })
++        .unwrap();
++        assert!(append.get("previous_item_id").is_none());
++        let root = serde_json::to_value(RealtimeOutboundMessage::ConversationItemCreateRaw {
++            item,
++            previous_item_id: Some("root".into()),
++        })
++        .unwrap();
++        assert_eq!(root["previous_item_id"], "root");
++    }
++
+     #[test]
+     fn parse_conversation_item_done_event() {
+         let payload = json!({
+@@ -2903,9 +2973,10 @@ mod tests {
+
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+-            Some(RealtimeEvent::ConversationItemAdded(
+-                json!({"type": "message", "role": "user"})
+-            ))
++            Some(RealtimeEvent::ConversationItemAdded {
++                item: json!({"type": "message", "role": "user"}),
++                previous_item_id: None
++            })
+         );
+     }
+
+@@ -4333,7 +4404,10 @@ mod tests {
+             assert!(budget.available_permits() < SDK_WIRE_BYTES_CAPACITY - text.len());
+             assert_eq!(
+                 parse_realtime_event(&text, RealtimeEventParser::RealtimeV2),
+-                Some(RealtimeEvent::ConversationItemAdded(item.clone())),
++                Some(RealtimeEvent::ConversationItemAdded {
++                    item: item.clone(),
++                    previous_item_id: None
++                }),
+             );
+             drop(queued);
+             assert_eq!(budget.available_permits(), SDK_WIRE_BYTES_CAPACITY);
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+index a143517cb4d9c4e483a6181821fac323967513da..03bcc31f42c7eb484743ee7fbfd9f82a6b558f83 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/mod.rs
+@@ -18,6 +18,7 @@ pub use methods::RealtimeWebsocketClient;
+ pub use methods::RealtimeWebsocketConnection;
+ pub use methods::RealtimeWebsocketEvents;
+ pub use methods::RealtimeWebsocketWriter;
++pub use methods::charge_realtime_json_storage;
+ pub use methods_common::session_update_session_json;
+ pub use methods_common::sip_session_config_json;
+ pub use protocol::RealtimeContextAppendChannel;
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+index 619ec7a811811270dda24c7572f5e15b8eca8a1a..f26fe72ba7adec5330842b9c745c0006434e09bc 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol.rs
+@@ -88,6 +88,14 @@ pub(super) enum RealtimeOutboundMessage {
+     FramelessSessionUpdate { session: Value },
+     #[serde(rename = "conversation.item.create")]
+     ConversationItemCreate { item: ConversationItemPayload },
++    #[serde(rename = "conversation.item.retrieve")]
++    ConversationItemRetrieve { item_id: String },
++    #[serde(rename = "conversation.item.create")]
++    ConversationItemCreateRaw {
++        item: Value,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        previous_item_id: Option<String>,
++    },
+     #[serde(rename = "conversation.item.delete")]
+     ConversationItemDelete { item_id: String },
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_common.rs
+index f4895b26fb1e65389a4d3c26616d0329137b985e..7402cf8b0cf1395cd4f4687aa197f622aab428a9 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_common.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_common.rs
+@@ -4,6 +4,19 @@ use codex_protocol::protocol::RealtimeTranscriptDone;
+ use serde_json::Value;
+ use tracing::debug;
+
++pub(super) fn parse_conversation_item_added_event(parsed: &Value) -> Option<RealtimeEvent> {
++    let previous_item_id = match parsed.get("previous_item_id") {
++        None => None,
++        Some(Value::Null) => Some(None),
++        Some(Value::String(id)) => Some(Some(id.clone())),
++        Some(_) => return None,
++    };
++    Some(RealtimeEvent::ConversationItemAdded {
++        item: parsed.get("item")?.clone(),
++        previous_item_id,
++    })
++}
++
+ pub(super) fn parse_realtime_payload(payload: &str, parser_name: &str) -> Option<(Value, String)> {
+     let parsed: Value = match serde_json::from_str(payload) {
+         Ok(message) => message,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
+index a4bb7a19771f3c8c4735395283593aa83e3a684a..0e8bcaa3826a9398bc78e715f5edfca22f88484b 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v1.rs
+@@ -63,10 +63,9 @@ pub(super) fn parse_realtime_event_v1(payload: &str) -> Option<RealtimeEvent> {
+             parse_transcript_done_event(&parsed, "transcript")
+                 .map(RealtimeEvent::OutputTranscriptDone)
+         }
+-        "conversation.item.added" => parsed
+-            .get("item")
+-            .cloned()
+-            .map(RealtimeEvent::ConversationItemAdded),
++        "conversation.item.added" => {
++            super::protocol_common::parse_conversation_item_added_event(&parsed)
++        }
+         "conversation.item.done" => parse_conversation_item_done_event(&parsed),
+         "conversation.handoff.requested" => {
+             let handoff_id = parsed
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+index 492ed911fee8a17f692b020d268cd640edda4bee..dbd3a5a3597c7c6b7d6f761f8bc3e7f038dd9c5d 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+@@ -26,6 +26,10 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
+
+     match message_type.as_str() {
+         "session.updated" => parse_session_updated_event(&parsed),
++        "conversation.item.retrieved" => parsed
++            .get("item")
++            .cloned()
++            .map(RealtimeEvent::ConversationItemRetrieved),
+         "conversation.item.deleted" => {
+             parsed
+                 .get("item_id")
+@@ -66,10 +70,9 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
+                     .map(str::to_string),
+             },
+         )),
+-        "conversation.item.added" | "conversation.item.created" => parsed
+-            .get("item")
+-            .cloned()
+-            .map(RealtimeEvent::ConversationItemAdded),
++        "conversation.item.added" | "conversation.item.created" => {
++            super::protocol_common::parse_conversation_item_added_event(&parsed)
++        }
+         "conversation.item.done" | "response.output_item.done" => {
+             parse_conversation_item_done_event(&parsed)
+         }
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index 0df7ae06a640fc839c7b864b2b2699c5a3911b3a..8922b066b86969fbd3403ee3cb784cad111d2369 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -83,6 +83,7 @@ pub use crate::endpoint::ResponsesWebsocketClose;
+ pub use crate::endpoint::ResponsesWebsocketConnection;
+ pub use crate::endpoint::ResponsesWebsocketProbe;
+ pub use crate::endpoint::SearchClient;
++pub use crate::endpoint::charge_realtime_json_storage;
+ pub use crate::endpoint::realtime_call::RealtimeCallCreation;
+ pub use crate::endpoint::session_update_session_json;
+ pub use crate::endpoint::sip_session_config_json;
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+index 56cd65493bed3ecdc8e9982b6f15406c7291375e..436641f6923f38e8880c114017fa52eece7d9bc3 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+@@ -661,7 +661,7 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
+         .await
+         .expect("next event")
+         .expect("event");
+-    assert!(matches!(event, RealtimeEvent::ConversationItemAdded(_)));
++    assert!(matches!(event, RealtimeEvent::ConversationItemAdded { .. }));
+
+     let event = connection
+         .next_event()
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 25c467a618b3d4758a24990b39a7e94d1b7c0d96..c25ffa8dddae5ad12ad2cadbf558c49a31414b79 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -1,5 +1,6 @@
+ mod item_deletion;
+ mod preparation;
++pub(crate) mod provider_history;
+ use preparation::SdkStartPreparation;
+ pub(crate) use preparation::{
+     dispatch_start_sdk, dispatch_tool_sdk, dispatch_tools_sdk, handle_activate_sdk,
+@@ -391,6 +392,8 @@ pub(crate) type SdkInterruptReply = Arc<
+     reason = "Only media commands are constructed outside this module; configuration payloads remain manager-private."
+ )]
+ pub(crate) enum SdkRealtimeCommand {
++    History(provider_history::Request),
++    HistoryAdvance,
+     HostedMcpApproval {
+         approval_id: String,
+         approve: bool,
+@@ -646,6 +649,7 @@ impl Drop for SdkInterruptCompletion {
+ #[derive(Debug)]
+ struct SdkRealtimeState {
+     item_deletion: std::sync::Mutex<item_deletion::State>,
++    history: std::sync::Mutex<provider_history::State>,
+     hosted_mcp_auto_response: bool,
+     generation: String,
+     active: AtomicBool,
+@@ -669,6 +673,7 @@ impl SdkRealtimeState {
+             async_channel::bounded(HANDOFF_OUT_QUEUE_CAPACITY);
+         Self {
+             item_deletion: std::sync::Mutex::new(item_deletion::State::default()),
++            history: Default::default(),
+             hosted_mcp_auto_response: true,
+             generation,
+             active: AtomicBool::new(true),
+@@ -685,6 +690,13 @@ impl SdkRealtimeState {
+         }
+     }
+
++    fn observe_history_item_id(&self, id: &str) -> CodexResult<()> {
++        if !self.item_deletion.lock().unwrap().is_deleted(id) {
++            self.history.lock().unwrap().observe_id(id)?;
++        }
++        Ok(())
++    }
++
+     async fn retire_tool_work(
+         &self,
+         retire_generation: bool,
+@@ -761,6 +773,7 @@ impl SdkRealtimeState {
+         self.active.store(false, Ordering::Release);
+         self.stop.cancel();
+         self.item_deletion.lock().unwrap().retire();
++        self.history.lock().unwrap().retire();
+         self.commands_tx.close();
+         self.interrupt_completions_tx.close();
+         // Release queued control waiters immediately if their actor is gone.
+@@ -1461,6 +1474,13 @@ impl RealtimeConversationManager {
+             .as_ref()
+             .filter(|sdk| sdk.generation == generation && sdk.active.load(Ordering::Acquire))
+             .ok_or_else(|| CodexErr::InvalidRequest("SDK Realtime generation is stale".into()))?;
++        if sdk.history.lock().unwrap().editing()
++            && !matches!(&command, SdkRealtimeCommand::HistoryAdvance)
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Provider history replacement is pending".into(),
++            ));
++        }
+         if matches!(&command, SdkRealtimeCommand::Audio(_)) && !state.accepts_audio {
+             return Err(CodexErr::InvalidRequest(
+                 "Existing calls receive media from their provider".into(),
+@@ -2062,6 +2082,10 @@ impl RealtimeConversationManager {
+         let handoff = RealtimeHandoffState {
+             sdk: sdk_generation.map(|generation| {
+                 let mut sdk = SdkRealtimeState::new(generation);
++                sdk.history
++                    .lock()
++                    .unwrap()
++                    .set_boundary(existing_call_id.is_none());
+                 sdk.hosted_mcp_auto_response = hosted_mcp_auto_response;
+                 sdk.function_tools = session_config.function_tools.clone();
+                 Arc::new(sdk)
+@@ -2925,6 +2949,94 @@ pub(crate) async fn dispatch_audio_commit_sdk(
+     }
+ }
+
++pub(crate) async fn handle_history_sdk(
++    sess: &Arc<Session>,
++    generation: String,
++    request: provider_history::Request,
++) {
++    let state = sess.conversation.state.lock().await;
++    let sdk = state
++        .conversation
++        .as_ref()
++        .and_then(|state| state.handoff.sdk.as_ref())
++        .filter(|sdk| sdk.generation == generation && sdk.active.load(Ordering::Acquire));
++    let Some(sdk) = sdk else {
++        provider_history::reject(
++            request,
++            CodexErr::InvalidRequest("SDK Realtime generation is stale".into()),
++        );
++        return;
++    };
++    if state.conversation.as_ref().unwrap().handoff.event_parser != RealtimeEventParser::RealtimeV2
++    {
++        provider_history::reject(
++            request,
++            CodexErr::InvalidRequest("Provider history requires RealtimeV2".into()),
++        );
++        return;
++    }
++    if let Err(error) = sdk
++        .commands_tx
++        .try_send(SdkRealtimeCommand::History(request))
++    {
++        if let SdkRealtimeCommand::History(request) = error.into_inner() {
++            provider_history::reject(
++                request,
++                CodexErr::InvalidRequest("Realtime command queue is unavailable".into()),
++            );
++        }
++    }
++}
++
++async fn run_history_action(
++    sdk: &SdkRealtimeState,
++    writer: &RealtimeWebsocketWriter,
++    action: Option<provider_history::Action>,
++) -> anyhow::Result<()> {
++    let result = match action {
++        Some(provider_history::Action::Retrieve(id)) => writer.retrieve_conversation_item(id).await,
++        Some(provider_history::Action::Create { item, previous }) => {
++            if let Some(id) = item["id"].as_str() {
++                sdk.item_deletion.lock().unwrap().allow_recreation(id);
++            }
++            writer.create_conversation_item_raw(item, previous).await
++        }
++        Some(provider_history::Action::Delete(id)) => {
++            // Validate the complete pending deletion plan before its first remote edit.
++            let validation = {
++                let history = sdk.history.lock().unwrap();
++                let deletion = sdk.item_deletion.lock().unwrap();
++                let result = history.deletions().try_for_each(|id| deletion.validate(id));
++                result
++            };
++            if let Err(error) = validation {
++                sdk.history.lock().unwrap().fail(error);
++                return Ok(());
++            }
++            let (reply, _result) = tokio::sync::oneshot::channel();
++            if !sdk
++                .item_deletion
++                .lock()
++                .unwrap()
++                .begin_history_message(id.clone(), item_deletion::DeleteReply::new(reply))
++            {
++                sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
++                    "Provider item cannot be edited while work is unresolved".into(),
++                ));
++                return Ok(());
++            }
++            writer.send_conversation_item_delete(id).await
++        }
++        None => return Ok(()),
++    };
++    if result.is_err() {
++        sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
++            "Provider history transport write failed".into(),
++        ));
++    }
++    result.map_err(Into::into)
++}
++
+ pub(crate) async fn handle_delete_item_sdk(
+     sess: &Arc<Session>,
+     generation: String,
+@@ -3209,11 +3321,12 @@ async fn prepare_realtime_start_with_source(
+                 ));
+             }
+             if params.include_startup_context
+-                || params.prompt.is_some()
+                 || !params.initial_items.is_empty()
+-                || params.model.is_some()
+-                || params.voice.is_some()
+                 || params.delegation_ack_filler.is_some()
++                || (!(sdk_owned && version == RealtimeWsVersion::V2)
++                    && (params.prompt.is_some()
++                        || params.model.is_some()
++                        || params.voice.is_some()))
+             {
+                 return Err(CodexErr::InvalidRequest(
+                     "existing realtime calls do not support session configuration options"
+@@ -3224,6 +3337,12 @@ async fn prepare_realtime_start_with_source(
+         ConversationStartTransport::Websocket => {}
+     }
+     let configured_voice = match (&transport, params.version) {
++        (ConversationStartTransport::ExistingCall { .. }, _)
++            if sdk_owned && version == RealtimeWsVersion::V2 =>
++        {
++            // SDK options describe the accepted call and are checked at readiness.
++            ConfiguredRealtimeVoice::Use
++        }
+         (ConversationStartTransport::ExistingCall { .. }, _)
+         | (ConversationStartTransport::Webrtc { .. }, None) => ConfiguredRealtimeVoice::Ignore,
+         (ConversationStartTransport::Webrtc { .. } | ConversationStartTransport::Websocket, _) => {
+@@ -3731,6 +3850,17 @@ async fn handle_start_inner_with_adapter(
+                     {
+                         Ok(()) if sdk.active.load(Ordering::Acquire) => {
+                             sdk.item_deletion.lock().unwrap().finish(item_id, Ok(()));
++                            let advance = sdk.history.lock().unwrap().deleted(item_id);
++                            match advance {
++                                Ok(true) => {
++                                    let _ = sdk
++                                        .commands_tx
++                                        .send(SdkRealtimeCommand::HistoryAdvance)
++                                        .await;
++                                }
++                                Ok(false) => {}
++                                Err(error) => sdk.history.lock().unwrap().fail(error),
++                            }
+                         }
+                         result => {
+                             let message = result
+@@ -3749,7 +3879,7 @@ async fn handle_start_inner_with_adapter(
+                     // The existing native call ledger retains exact completion
+                     // proof even when its provider call item was deleted/evicted.
+                     let settled_output_call =
+-                        if let RealtimeEvent::ConversationItemAdded(item) = &event {
++                        if let RealtimeEvent::ConversationItemAdded { item, .. } = &event {
+                             if item["type"].as_str() == Some("function_call_output") {
+                                 if let Some(id) = item["call_id"].as_str() {
+                                     sdk.seen
+@@ -4197,12 +4327,23 @@ async fn run_realtime_input_task(
+             }
+             _ = async {
+                 let deadline = handoff_state.sdk.as_ref()
+-                    .and_then(|sdk| sdk.item_deletion.lock().unwrap().deadline());
++                    .and_then(|sdk| {
++                        let deletion=sdk.item_deletion.lock().unwrap().deadline();
++                        let history=sdk.history.lock().unwrap().deadline();
++                        match (deletion,history) {(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)}
++                    });
+                 match deadline {
+                     Some(deadline) => tokio::time::sleep_until(deadline).await,
+                     None => std::future::pending::<()>().await,
+                 }
+-            } => Err(RealtimeInputTaskExit::Terminal),
++            } => {
++                let read_timed_out = handoff_state.sdk.as_ref().is_some_and(|sdk| {
++                    let deletion_expired = sdk.item_deletion.lock().unwrap().deadline()
++                        .is_some_and(|deadline| deadline <= tokio::time::Instant::now());
++                    !deletion_expired && sdk.history.lock().unwrap().expire_read()
++                });
++                if read_timed_out { Ok(()) } else { Err(RealtimeInputTaskExit::Terminal) }
++            },
+             command = async {
+                 match &handoff_state.sdk {
+                     Some(sdk) => sdk.commands_rx.recv().await,
+@@ -4812,8 +4953,61 @@ async fn handle_sdk_realtime_command(
+     if !sdk.active.load(Ordering::Acquire) {
+         return Ok(());
+     }
+-    match command.context("SDK Realtime command channel closed")? {
+-        SdkRealtimeCommand::DeleteItem { item_id, reply } => {
++    let command = command.context("SDK Realtime command channel closed")?;
++    if sdk.history.lock().unwrap().editing()
++        && !matches!(
++            &command,
++            SdkRealtimeCommand::History(_) | SdkRealtimeCommand::HistoryAdvance
++        )
++    {
++        // The input was admitted before the edit reached the actor. Reject the
++        // edit while retaining its written receipt, then honor the accepted input.
++        sdk.history
++            .lock()
++            .unwrap()
++            .interrupt(CodexErr::InvalidRequest(
++                "Competing input was queued during provider history replacement".into(),
++            ));
++    }
++    match command {
++        SdkRealtimeCommand::History(request) => {
++            let identity = provider_history::validate_request_ids(
++                &request,
++                &sdk.item_deletion.lock().unwrap(),
++            );
++            if let Err(error) = identity {
++                provider_history::reject(request, error);
++            } else if sdk.item_deletion.lock().unwrap().deadline().is_some() {
++                provider_history::reject(
++                    request,
++                    CodexErr::InvalidRequest("Provider item deletion is pending".into()),
++                );
++            } else if matches!(request, provider_history::Request::Update { .. })
++                && (responses.active_default_response || !sdk.pending.lock().await.is_empty())
++            {
++                provider_history::reject(request,CodexErr::InvalidRequest("Provider history cannot be edited during an active response or native work".into()));
++            } else {
++                let action = sdk.history.lock().unwrap().start(request);
++                match action {
++                    Ok(action) => run_history_action(sdk, writer, action).await?,
++                    Err(error) => sdk.history.lock().unwrap().fail(error),
++                }
++            }
++        }
++        SdkRealtimeCommand::HistoryAdvance => {
++            let action = sdk.history.lock().unwrap().advance();
++            match action {
++                Ok(action) => run_history_action(sdk, writer, action).await?,
++                Err(error) => sdk.history.lock().unwrap().fail(error),
++            }
++        }
++        SdkRealtimeCommand::DeleteItem { item_id, mut reply } => {
++            if sdk.history.lock().unwrap().busy() {
++                reply.finish(Err(CodexErr::InvalidRequest(
++                    "Provider history operation is pending".into(),
++                )));
++                return Ok(());
++            }
+             if sdk
+                 .item_deletion
+                 .lock()
+@@ -5399,12 +5593,99 @@ async fn handle_realtime_server_event_with_configuration(
+     response_create_queue: &mut RealtimeResponseCreateQueue,
+     configuration: Option<Arc<codex_api::RealtimeAcceptedConfiguration>>,
+ ) -> anyhow::Result<()> {
++    if let Some(sdk) = &handoff_state.sdk {
++        let action = match &event {
++            RealtimeEvent::ConversationItemRetrieved(item) => {
++                Some(sdk.history.lock().unwrap().retrieved(item.clone()))
++            }
++            RealtimeEvent::ConversationItemAdded {
++                item,
++                previous_item_id,
++            } if item["id"]
++                .as_str()
++                .is_none_or(|id| !sdk.item_deletion.lock().unwrap().is_deleted(id)) =>
++            {
++                let mut history = sdk.history.lock().unwrap();
++                history.observe_added(
++                    item,
++                    previous_item_id
++                        .as_ref()
++                        .map(|previous| previous.as_deref()),
++                )?;
++                Some(history.created(item, previous_item_id.is_some()))
++            }
++            RealtimeEvent::ConversationItemAdded { item, .. } => {
++                // An external deletion can precede an already-written create receipt.
++                // Drain that receipt without restoring the deleted provider row.
++                Some(sdk.history.lock().unwrap().created(item, true))
++            }
++            RealtimeEvent::FunctionCallRequested(call) => {
++                sdk.observe_history_item_id(&call.item_id)?;
++                None
++            }
++            RealtimeEvent::HandoffRequested(call) => {
++                sdk.observe_history_item_id(&call.item_id)?;
++                None
++            }
++            RealtimeEvent::NoopRequested(call) => {
++                sdk.observe_history_item_id(&call.item_id)?;
++                None
++            }
++            RealtimeEvent::ConversationItemDone { item_id } => {
++                sdk.observe_history_item_id(item_id)?;
++                None
++            }
++            RealtimeEvent::ResponseCreated(_) if sdk.history.lock().unwrap().editing() => {
++                sdk.history
++                    .lock()
++                    .unwrap()
++                    .interrupt(CodexErr::InvalidRequest(
++                        "Provider response started during history replacement".into(),
++                    ));
++                None
++            }
++            RealtimeEvent::Error(_) => {
++                sdk.history.lock().unwrap().fail(CodexErr::InvalidRequest(
++                    "Provider error terminated the voice connection".into(),
++                ));
++                None
++            }
++            _ => None,
++        };
++        if let Some(action) = action {
++            match action {
++                Ok(action) => run_history_action(sdk, writer, action).await?,
++                Err(error) => sdk.history.lock().unwrap().fail(error),
++            }
++        }
++    }
++    if matches!(event, RealtimeEvent::ConversationItemRetrieved(_)) {
++        return Ok(());
++    }
+     if let RealtimeEvent::ConversationItemDeleted { item_id } = &event {
+-        if !handoff_state.sdk.as_ref().is_some_and(|sdk| {
+-            sdk.active.load(Ordering::Acquire)
+-                && sdk.item_deletion.lock().unwrap().acknowledge(item_id)
+-        }) {
++        let Some(sdk) = handoff_state
++            .sdk
++            .as_ref()
++            .filter(|sdk| sdk.active.load(Ordering::Acquire))
++        else {
+             return Ok(());
++        };
++        let external = {
++            let mut deletion = sdk.item_deletion.lock().unwrap();
++            if deletion.pending_matches(item_id) {
++                if !deletion.acknowledge(item_id) {
++                    return Ok(());
++                }
++                false
++            } else {
++                if !deletion.observe_deleted(item_id)? {
++                    return Ok(());
++                }
++                true
++            }
++        };
++        if external {
++            sdk.history.lock().unwrap().observe_deleted(item_id);
+         }
+     }
+     let should_stop = match &event {
+@@ -5812,7 +6093,8 @@ async fn handle_realtime_server_event_with_configuration(
+         | RealtimeEvent::OutputTranscriptDone(_)
+         | RealtimeEvent::FunctionCallFinished { .. }
+         | RealtimeEvent::FunctionBatchFinished { .. }
+-        | RealtimeEvent::ConversationItemAdded(_)
++        | RealtimeEvent::ConversationItemAdded { .. }
++        | RealtimeEvent::ConversationItemRetrieved(_)
+         | RealtimeEvent::ConversationItemDone { .. }
+         | RealtimeEvent::ConversationItemObserved(_)
+         | RealtimeEvent::ConversationItemDeleted { .. }
+diff --git a/codex-rs/core/src/realtime_conversation/item_deletion.rs b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+index 9b650125b925d6ad3c29e2546c97abe4bf3a6216..97cb28ea2bd3deeae323d533d9dd520df9648eb8 100644
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -27,6 +27,7 @@ impl Drop for DeleteReply {
+ #[derive(Debug, Clone)]
+ struct Item {
+     kind: String,
++    present: bool,
+     role: Option<String>,
+     call_id: Option<String>,
+     approval_request_id: Option<String>,
+@@ -34,9 +35,15 @@ struct Item {
+     effect_done: bool,
+ }
+ #[derive(Debug)]
++struct DeletedItem {
++    id: String,
++    recreatable_message: bool,
++}
++#[derive(Debug)]
+ struct Pending {
+     item_id: String,
+     acknowledged: bool,
++    recreatable_message: bool,
+     deadline: tokio::time::Instant,
+     reply: DeleteReply,
+ }
+@@ -44,7 +51,8 @@ struct Pending {
+ pub(super) struct State {
+     items: HashMap<String, Item>,
+     order: VecDeque<String>,
+-    recent_deleted: VecDeque<String>,
++    recent_deleted: VecDeque<DeletedItem>,
++    deleted_ids_evicted: bool,
+     recent_noop_completions: VecDeque<String>,
+     pending: Option<Pending>,
+ }
+@@ -54,7 +62,7 @@ impl State {
+     }
+     fn upsert(&mut self, id: &str, item: Item) -> anyhow::Result<()> {
+         anyhow::ensure!(Self::valid_id(id), "Invalid provider conversation item ID");
+-        if self.recent_deleted.iter().any(|known| known == id) {
++        if self.is_deleted(id) {
+             return Ok(());
+         }
+         let mut item = item;
+@@ -117,7 +125,7 @@ impl State {
+     ) -> anyhow::Result<Option<codex_protocol::protocol::RealtimeConversationItemObservation>> {
+         let mut observed = None;
+         match event {
+-            RealtimeEvent::ConversationItemAdded(value) => {
++            RealtimeEvent::ConversationItemAdded { item: value, .. } => {
+                 let id = value["id"].as_str().context("Provider item has no ID")?;
+                 let kind = value["type"]
+                     .as_str()
+@@ -137,6 +145,7 @@ impl State {
+                     id,
+                     Item {
+                         kind: kind.to_owned(),
++                        present: true,
+                         role: bounded("role")?,
+                         call_id: bounded("call_id")?,
+                         approval_request_id: bounded("approval_request_id")?,
+@@ -180,6 +189,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.call_id.clone()),
+                         approval_request_id: None,
+@@ -195,6 +205,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.handoff_id.clone()),
+                         approval_request_id: None,
+@@ -216,6 +227,7 @@ impl State {
+                     &call.item_id,
+                     Item {
+                         kind: "function_call".into(),
++                        present: true,
+                         role: None,
+                         call_id: Some(call.call_id.clone()),
+                         approval_request_id: None,
+@@ -253,6 +265,22 @@ impl State {
+             })
+         }))
+     }
++    pub(super) fn is_deleted(&self, id: &str) -> bool {
++        self.recent_deleted.iter().any(|known| known.id == id)
++            || self.items.get(id).is_some_and(|item| !item.present)
++    }
++    pub(super) fn can_retrieve(&self, id: &str) -> bool {
++        !self.is_deleted(id) && (!self.deleted_ids_evicted || self.items.contains_key(id))
++    }
++    pub(super) fn can_recreate_message(&self, id: &str) -> bool {
++        self.recent_deleted
++            .iter()
++            .any(|known| known.id == id && known.recreatable_message)
++    }
++    pub(super) fn allow_recreation(&mut self, id: &str) {
++        self.recent_deleted
++            .retain(|known| known.id != id || !known.recreatable_message);
++    }
+     pub(super) fn settle_call(&mut self, call_id: &str) {
+         for item in self
+             .items
+@@ -267,13 +295,15 @@ impl State {
+             .items
+             .get(id)
+             .ok_or_else(|| CodexErr::InvalidRequest("Unknown provider conversation item".into()))?;
+-        if !Self::valid_id(id) || self.pending.is_some() {
++        if !item.present || !Self::valid_id(id) || self.pending.is_some() {
+             return Err(CodexErr::InvalidRequest(
+                 "Invalid item or another deletion is pending".into(),
+             ));
+         }
+         let supported = match item.kind.as_str() {
+-            "message" => item.done && matches!(item.role.as_deref(), Some("user" | "assistant")),
++            "message" => {
++                item.done && matches!(item.role.as_deref(), Some("user" | "assistant" | "system"))
++            }
+             "function_call" | "function_call_output" => item.done && item.effect_done,
+             "mcp_call" | "mcp_tool_call" | "mcp_list_tools" => item.done && item.effect_done,
+             "mcp_approval_response" => item.done && item.approval_request_id.is_some(),
+@@ -303,11 +333,54 @@ impl State {
+         self.pending = Some(Pending {
+             item_id: id,
+             acknowledged: false,
++            recreatable_message: false,
+             deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+             reply,
+         });
+         true
+     }
++    pub(super) fn begin_history_message(&mut self, id: String, reply: DeleteReply) -> bool {
++        let recreatable_message = self
++            .items
++            .get(&id)
++            .is_some_and(|item| item.kind == "message");
++        if !self.begin(id, reply) {
++            return false;
++        }
++        if let Some(pending) = &mut self.pending {
++            pending.recreatable_message = recreatable_message;
++        }
++        true
++    }
++    pub(super) fn pending_matches(&self, id: &str) -> bool {
++        self.pending
++            .as_ref()
++            .is_some_and(|pending| pending.item_id == id)
++    }
++    fn record_deleted(&mut self, id: &str, recreatable_message: bool) {
++        if self.recent_deleted.iter().any(|known| known.id == id) {
++            return;
++        }
++        if self.recent_deleted.len() == 128 {
++            self.recent_deleted.pop_front();
++            self.deleted_ids_evicted = true;
++        }
++        self.recent_deleted.push_back(DeletedItem {
++            id: id.to_owned(),
++            recreatable_message,
++        });
++    }
++    pub(super) fn observe_deleted(&mut self, id: &str) -> anyhow::Result<bool> {
++        anyhow::ensure!(Self::valid_id(id), "Invalid provider conversation item ID");
++        if self.is_deleted(id) {
++            return Ok(false);
++        }
++        if let Some(item) = self.items.get_mut(id) {
++            item.present = false;
++        }
++        self.record_deleted(id, false);
++        Ok(true)
++    }
+     pub(super) fn acknowledge(&mut self, id: &str) -> bool {
+         let Some(pending) = self
+             .pending
+@@ -327,10 +400,7 @@ impl State {
+             if result.is_ok() {
+                 self.items.remove(id);
+                 self.order.retain(|known| known != id);
+-                if self.recent_deleted.len() == 128 {
+-                    self.recent_deleted.pop_front();
+-                }
+-                self.recent_deleted.push_back(id.to_owned());
++                self.record_deleted(id, pending.recreatable_message);
+             }
+             pending.reply.finish(result);
+         }
+@@ -343,6 +413,7 @@ impl State {
+         self.items.clear();
+         self.order.clear();
+         self.recent_deleted.clear();
++        self.deleted_ids_evicted = false;
+         self.recent_noop_completions.clear();
+     }
+ }
+@@ -352,9 +423,12 @@ mod tests {
+     use super::*;
+     fn message(state: &mut State, id: &str, role: &str) {
+         state
+-            .observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
+-                "id": id, "type": "message", "role": role, "status": "completed"
+-            })))
++            .observe(&RealtimeEvent::ConversationItemAdded {
++                item: serde_json::json!({
++                    "id": id, "type": "message", "role": role, "status": "completed"
++                }),
++                previous_item_id: None,
++            })
+             .unwrap();
+     }
+     fn reply() -> (DeleteReply, tokio::sync::oneshot::Receiver<CodexResult<()>>) {
+@@ -405,9 +479,9 @@ mod tests {
+         message(&mut state, "instructions", "developer");
+         assert!(state.validate("instructions").is_err());
+         state
+-            .observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
++            .observe(&RealtimeEvent::ConversationItemAdded {item:serde_json::json!({
+                 "id": "streaming", "type": "message", "role": "assistant", "status": "in_progress"
+-            })))
++            }), previous_item_id:None})
+             .unwrap();
+         assert!(state.validate("streaming").is_err());
+     }
+@@ -419,9 +493,12 @@ mod tests {
+             ("result", "function_call_output"),
+         ] {
+             state
+-                .observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
+-                    "id": id, "type": kind, "call_id": "native-call", "status": "completed"
+-                })))
++                .observe(&RealtimeEvent::ConversationItemAdded {
++                    item: serde_json::json!({
++                        "id": id, "type": kind, "call_id": "native-call", "status": "completed"
++                    }),
++                    previous_item_id: None,
++                })
+                 .unwrap();
+         }
+         assert!(state.validate("result").is_err());
+@@ -440,6 +517,45 @@ mod tests {
+         assert!(state.validate(&format!("item-{}", ITEM_LIMIT + 7)).is_ok());
+     }
+     #[tokio::test]
++    async fn repeated_deletion_observation_preserves_owned_recovery() {
++        let mut state = State::default();
++        message(&mut state, "editable", "user");
++        let (reply, receiver) = reply();
++        assert!(state.begin_history_message("editable".into(), reply));
++        assert!(state.pending_matches("editable"));
++        assert!(state.acknowledge("editable"));
++        assert!(state.pending_matches("editable"));
++        assert!(!state.acknowledge("editable"));
++        state.finish("editable", Ok(()));
++        assert!(receiver.await.unwrap().is_ok());
++        assert!(state.can_recreate_message("editable"));
++        assert!(!state.observe_deleted("editable").unwrap());
++        assert!(state.can_recreate_message("editable"));
++    }
++    #[test]
++    fn external_deletion_preserves_unresolved_effect_metadata() {
++        let mut state = State::default();
++        state.observe(&RealtimeEvent::ConversationItemAdded {
++            item: serde_json::json!({"id":"tool", "type":"function_call", "call_id":"pending-call", "status":"in_progress"}),
++            previous_item_id: None,
++        }).unwrap();
++        assert!(state.observe_deleted("tool").unwrap());
++        assert!(!state.items["tool"].present);
++        assert!(!state.items["tool"].done);
++        assert!(!state.items["tool"].effect_done);
++        state
++            .observe(&RealtimeEvent::ConversationItemDone {
++                item_id: "tool".into(),
++            })
++            .unwrap();
++        assert!(!state.items["tool"].present);
++        assert!(!state.items["tool"].effect_done);
++        state.settle_call("pending-call");
++        assert!(state.items["tool"].effect_done);
++        assert!(!state.can_retrieve("tool"));
++        assert!(!state.can_recreate_message("tool"));
++    }
++    #[tokio::test]
+     async fn repeated_successful_pruning_releases_live_capacity() {
+         let mut state = State::default();
+         for n in 0..ITEM_LIMIT + 8 {
+@@ -453,6 +569,13 @@ mod tests {
+         }
+         assert!(state.items.is_empty());
+         assert_eq!(state.recent_deleted.len(), 128);
++        assert!(state.deleted_ids_evicted);
++        assert!(!state.can_retrieve("item-0"));
++        assert!(!state.can_retrieve("unobserved-sip-item"));
++        message(&mut state, "still-live", "user");
++        assert!(state.can_retrieve("still-live"));
++        state.retire();
++        assert!(state.can_retrieve("unobserved-sip-item"));
+     }
+ }
+
+@@ -475,9 +598,9 @@ mod reserved_and_approval_tests {
+             .unwrap();
+         assert!(state.validate("background-item").is_err());
+         state.settle_call("background-call");
+-        state.observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
++        state.observe(&RealtimeEvent::ConversationItemAdded {item:serde_json::json!({
+             "id":"background-output", "type":"function_call_output", "call_id":"background-call", "status":"completed"
+-        }))).unwrap();
++        }), previous_item_id:None}).unwrap();
+         assert!(state.validate("background-item").is_ok());
+         assert!(state.validate("background-output").is_ok());
+     }
+@@ -503,7 +626,10 @@ mod reserved_and_approval_tests {
+             serde_json::json!({"id":"mcp-item","type":"mcp_call","approval_request_id":"approval","status":"in_progress"}),
+         ] {
+             state
+-                .observe(&RealtimeEvent::ConversationItemAdded(item))
++                .observe(&RealtimeEvent::ConversationItemAdded {
++                    item: item,
++                    previous_item_id: None,
++                })
+                 .unwrap();
+         }
+         assert!(state.validate("approval").is_err());
+@@ -547,18 +673,18 @@ mod late_output_tests {
+         state.finish("silent-item", Ok(()));
+         assert!(rx.await.unwrap().is_ok());
+         assert!(!state.items.contains_key("silent-item"));
+-        state.observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
++        state.observe(&RealtimeEvent::ConversationItemAdded {item:serde_json::json!({
+             "id":"late-output", "type":"function_call_output", "call_id":"silent-call", "status":"completed"
+-        }))).unwrap();
++        }), previous_item_id:None}).unwrap();
+         assert!(state.validate("late-output").is_ok());
+         assert!(state.recent_noop_completions.is_empty());
+     }
+     #[test]
+     fn existing_native_completion_receipt_can_settle_output_after_item_eviction() {
+         let mut state = State::default();
+-        state.observe(&RealtimeEvent::ConversationItemAdded(serde_json::json!({
++        state.observe(&RealtimeEvent::ConversationItemAdded {item:serde_json::json!({
+             "id":"late-output", "type":"function_call_output", "call_id":"native-call", "status":"completed"
+-        }))).unwrap();
++        }), previous_item_id:None}).unwrap();
+         assert!(state.validate("late-output").is_err());
+         // Fanout requires the existing SDK positive output_published receipt before this call.
+         state.settle_call("native-call");
+diff --git a/codex-rs/core/src/realtime_conversation/provider_history.rs b/codex-rs/core/src/realtime_conversation/provider_history.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..44998634da52145deeb6beb50ef088cbbc32530a
+--- /dev/null
++++ b/codex-rs/core/src/realtime_conversation/provider_history.rs
+@@ -0,0 +1,1384 @@
++//! Current-generation provider identities and acknowledged history operations.
++//! Item bodies, including media, live only for an explicit retrieval operation.
++use super::*;
++use base64::Engine as _;
++use image::ImageDecoder as _;
++use serde_json::Value;
++use std::collections::VecDeque;
++const LIMIT: usize = 4096;
++const ID_BYTES: usize = 512;
++const MAX_IMAGE_DIMENSION: u32 = 4096;
++const MAX_IMAGE_DECODE_BYTES: u64 = 64 * 1024 * 1024;
++
++type Reply<T> = tokio::sync::oneshot::Sender<CodexResult<T>>;
++#[derive(Debug)]
++pub(crate) enum Request {
++    Item { id: String, reply: Reply<Value> },
++    List { reply: Reply<Vec<Value>> },
++    Update { items: Vec<Value>, reply: Reply<()> },
++}
++#[derive(Debug)]
++pub(super) enum Action {
++    Retrieve(String),
++    Delete(String),
++    Create {
++        item: Value,
++        previous: Option<String>,
++    },
++}
++#[derive(Debug)]
++struct Pending {
++    request: Option<Request>,
++    retained_bytes: usize,
++    ids: VecDeque<String>,
++    snapshot: Vec<Value>,
++    actions: VecDeque<Action>,
++    waiting: Option<Action>,
++    deadline: tokio::time::Instant,
++}
++#[derive(Debug)]
++pub(super) struct State {
++    order: Vec<String>,
++    boundary: Option<String>,
++    incomplete: bool,
++    pending: Option<Pending>,
++}
++impl Default for State {
++    fn default() -> Self {
++        Self {
++            order: Vec::new(),
++            boundary: Some("root".into()),
++            incomplete: false,
++            pending: None,
++        }
++    }
++}
++fn invalid(message: &str) -> CodexErr {
++    CodexErr::InvalidRequest(message.into())
++}
++fn valid_id(id: &str) -> bool {
++    !id.is_empty() && id.len() <= ID_BYTES && id != "root"
++}
++fn item_id(item: &Value) -> CodexResult<&str> {
++    item["id"]
++        .as_str()
++        .filter(|id| valid_id(id))
++        .ok_or_else(|| invalid("Provider history item requires a valid ID"))
++}
++pub(super) fn validate_request_ids(
++    request: &Request,
++    deletion: &item_deletion::State,
++) -> CodexResult<()> {
++    let deleted = match request {
++        Request::Item { id, .. } => !deletion.can_retrieve(id),
++        Request::Update { items, .. } => items.iter().any(|item| {
++            item["id"].as_str().is_some_and(|id| {
++                deletion.is_deleted(id)
++                    && (!deletion.can_recreate_message(id) || !mutable_message(item))
++            })
++        }),
++        Request::List { .. } => false,
++    };
++    if deleted {
++        return Err(invalid(
++            "Provider history cannot use a deleted item ID or an unverified ID after deletion receipts were evicted",
++        ));
++    }
++    Ok(())
++}
++fn valid_base64(value: &str) -> bool {
++    base64::engine::general_purpose::STANDARD
++        .decode(value)
++        .is_ok_and(|bytes| !bytes.is_empty())
++}
++fn valid_image_data_uri(value: &str, remaining: &mut u64) -> CodexResult<bool> {
++    let Some((header, data)) = value.split_once(',') else {
++        return Ok(false);
++    };
++    let Some(header) = header.strip_prefix("data:") else {
++        return Ok(false);
++    };
++    let Some((mime, encoding)) = header.split_once(';') else {
++        return Ok(false);
++    };
++    let format = if mime.eq_ignore_ascii_case("image/png") {
++        image::ImageFormat::Png
++    } else if mime.eq_ignore_ascii_case("image/jpeg") {
++        image::ImageFormat::Jpeg
++    } else {
++        return Ok(false);
++    };
++    if !encoding.eq_ignore_ascii_case("base64") {
++        return Ok(false);
++    }
++    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
++        return Ok(false);
++    };
++    if bytes.is_empty() {
++        return Ok(false);
++    }
++    let mut limits = image::Limits::default();
++    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
++    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
++    limits.max_alloc = Some(MAX_IMAGE_DECODE_BYTES);
++    let mut header =
++        image::ImageReader::with_format(std::io::Cursor::new(bytes.as_slice()), format);
++    header.limits(limits.clone());
++    let Ok(decoder) = header.into_decoder() else {
++        return Ok(false);
++    };
++    *remaining = remaining
++        .checked_sub(decoder.total_bytes())
++        .ok_or_else(|| invalid("Provider history image decoding exceeds its 64 MiB work budget"))?;
++    drop(decoder);
++    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
++    reader.limits(limits);
++    Ok(reader.decode().is_ok())
++}
++
++fn mutable_message(item: &Value) -> bool {
++    item["type"] == "message"
++        && matches!(item["role"].as_str(), Some("user" | "assistant" | "system"))
++}
++fn same_message(a: &Value, b: &Value) -> bool {
++    let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else {
++        return a == b;
++    };
++    a.iter()
++        .filter(|(key, _)| key.as_str() != "status")
++        .all(|(key, value)| b.get(key) == Some(value))
++        && a.keys().filter(|key| key.as_str() != "status").count()
++            == b.keys().filter(|key| key.as_str() != "status").count()
++}
++fn validate_creation(item: &Value, remaining: &mut u64) -> CodexResult<bool> {
++    if !mutable_message(item) {
++        return Ok(false);
++    }
++    let role = item["role"].as_str().unwrap();
++    let Some(content) = item["content"].as_array() else {
++        return Ok(false);
++    };
++    if content.is_empty() {
++        return Ok(false);
++    }
++    for part in content {
++        let valid = match (role, part["type"].as_str()) {
++            ("system" | "user", Some("input_text")) | ("assistant", Some("output_text")) => {
++                part["text"].as_str().is_some()
++            }
++            ("user", Some("input_image")) => {
++                let Some(image) = part["image_url"].as_str() else {
++                    return Ok(false);
++                };
++                valid_image_data_uri(image, remaining)?
++                    && !part.get("detail").is_some_and(|detail| {
++                        !matches!(detail.as_str(), Some("auto" | "low" | "high"))
++                    })
++            }
++            ("user", Some("input_audio")) => {
++                part["audio"].as_str().is_some_and(valid_base64)
++                    && !part
++                        .get("transcript")
++                        .is_some_and(|text| text.as_str().is_none())
++            }
++            _ => false,
++        };
++        if !valid {
++            return Ok(false);
++        }
++    }
++    Ok(true)
++}
++
++fn creation_item(item: &Value, remaining: &mut u64) -> CodexResult<Value> {
++    if !validate_creation(item, remaining)? {
++        return Err(invalid(
++            "Unsupported provider message role/content combination",
++        ));
++    }
++    let parts = item["content"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|part| {
++            let names: &[&str] = match part["type"].as_str().unwrap() {
++                "input_image" => &["type", "image_url", "detail"],
++                "input_audio" => &["type", "audio", "transcript"],
++                _ => &["type", "text"],
++            };
++            Value::Object(
++                names
++                    .iter()
++                    .filter_map(|name| {
++                        part.get(*name)
++                            .map(|value| ((*name).to_owned(), value.clone()))
++                    })
++                    .collect(),
++            )
++        })
++        .collect::<Vec<_>>();
++    Ok(
++        serde_json::json!({"id": item["id"], "type": "message", "role": item["role"], "content": parts}),
++    )
++}
++
++// Server receipts may omit optional media or add defaults. Only contradictory
++// writable fields that are actually present establish a different item.
++fn creation_receipt_conflicts(expected: &Value, actual: &Value) -> bool {
++    for field in ["type", "role"] {
++        if actual
++            .get(field)
++            .is_some_and(|value| !value.is_null() && value != &expected[field])
++        {
++            return true;
++        }
++    }
++    let Some(content) = actual.get("content").filter(|value| !value.is_null()) else {
++        return false;
++    };
++    let (Some(expected), Some(actual)) = (expected["content"].as_array(), content.as_array())
++    else {
++        return true;
++    };
++    expected.len() != actual.len()
++        || expected.iter().zip(actual).any(|(expected, actual)| {
++            let Some(fields) = expected.as_object() else {
++                return true;
++            };
++            !actual.is_object()
++                || fields.iter().any(|(name, expected)| {
++                    actual
++                        .get(name)
++                        .is_some_and(|value| !value.is_null() && value != expected)
++                })
++        })
++}
++
++/// Preserve authoritative tool/control rows and their stable anchors. Within each
++/// anchor segment, retain unchanged rows in relative order and edit only the other rows.
++fn edits(
++    current: &[Value],
++    desired: &[Value],
++    boundary: Option<&str>,
++) -> CodexResult<VecDeque<Action>> {
++    let mut remaining_image_work = MAX_IMAGE_DECODE_BYTES;
++    let mut ids = HashSet::new();
++    for item in desired {
++        if !ids.insert(item_id(item)?.to_owned()) {
++            return Err(invalid("Provider history IDs must be unique"));
++        }
++    }
++    let old_anchors: Vec<_> = current
++        .iter()
++        .filter(|item| !mutable_message(item))
++        .collect();
++    let new_anchors: Vec<_> = desired
++        .iter()
++        .filter(|item| !mutable_message(item))
++        .collect();
++    if old_anchors != new_anchors {
++        return Err(invalid(
++            "Provider tool and control items must retain their exact IDs, contents, and order",
++        ));
++    }
++    let segments = |items: &[Value]| -> CodexResult<HashMap<String, usize>> {
++        let mut segment = 0;
++        let mut result = HashMap::new();
++        for item in items {
++            if mutable_message(item) {
++                result.insert(item_id(item)?.to_owned(), segment);
++            } else {
++                segment += 1;
++            }
++        }
++        Ok(result)
++    };
++    let old_segments = segments(current)?;
++    for (id, segment) in segments(desired)? {
++        if old_segments.get(&id).is_some_and(|old| *old != segment) {
++            return Err(invalid(
++                "Messages cannot move across authoritative tool or control anchors",
++            ));
++        }
++    }
++    let mut deletes = VecDeque::new();
++    let mut creates = VecDeque::new();
++    let mut old_start = 0;
++    let mut new_start = 0;
++    let mut previous = boundary.map(str::to_owned);
++    for anchor in old_anchors
++        .into_iter()
++        .map(Some)
++        .chain(std::iter::once(None))
++    {
++        let old_end = anchor.map_or(current.len(), |anchor| {
++            current[old_start..]
++                .iter()
++                .position(|item| item == anchor)
++                .unwrap()
++                + old_start
++        });
++        let new_end = anchor.map_or(desired.len(), |anchor| {
++            desired[new_start..]
++                .iter()
++                .position(|item| item == anchor)
++                .unwrap()
++                + new_start
++        });
++        let old = &current[old_start..old_end];
++        let new = &desired[new_start..new_end];
++        // Preserve unchanged rows that the provider does not permit us to recreate.
++        // Their order bounds the ordinary text retention scan within this authority segment.
++        let by_id: HashMap<_, _> = old
++            .iter()
++            .enumerate()
++            .map(|(index, item)| Ok((item_id(item)?, (index, item))))
++            .collect::<CodexResult<_>>()?;
++        let mut mandatory = Vec::new();
++        for (new_index, item) in new.iter().enumerate() {
++            if let Some(&(old_index, known)) = by_id.get(item_id(item)?) {
++                if same_message(known, item) && !validate_creation(item, &mut remaining_image_work)?
++                {
++                    if mandatory
++                        .last()
++                        .is_some_and(|&(_, previous)| previous >= old_index)
++                    {
++                        return Err(invalid("Provider-only media cannot change relative order"));
++                    }
++                    mandatory.push((new_index, old_index));
++                }
++            }
++        }
++        let mut cursor = 0;
++        let mut new_cursor = 0;
++        let mut retained = HashSet::new();
++        for (new_bound, old_bound) in mandatory
++            .iter()
++            .copied()
++            .chain(std::iter::once((new.len(), old.len())))
++        {
++            for item in &new[new_cursor..new_bound] {
++                if let Some(&(index, known)) = by_id.get(item_id(item)?) {
++                    if index >= cursor && index < old_bound && same_message(known, item) {
++                        cursor = index + 1;
++                        retained.insert(item_id(item)?.to_owned());
++                    }
++                }
++            }
++            if new_bound < new.len() {
++                retained.insert(item_id(&new[new_bound])?.to_owned());
++                cursor = old_bound + 1;
++            }
++            new_cursor = new_bound + 1;
++        }
++        for item in old {
++            if !retained.contains(item_id(item)?) {
++                deletes.push_back(Action::Delete(item_id(item)?.to_owned()));
++            }
++        }
++        for item in new {
++            let id = item_id(item)?.to_owned();
++            if !retained.contains(&id) {
++                if previous.is_none()
++                    && (anchor.is_some()
++                        || new
++                            .iter()
++                            .any(|row| retained.contains(item_id(row).unwrap())))
++                {
++                    return Err(invalid(
++                        "Provider history predecessor is unknown; cannot insert before retained items",
++                    ));
++                }
++                creates.push_back(Action::Create {
++                    item: creation_item(item, &mut remaining_image_work)?,
++                    previous: previous.clone(),
++                });
++            }
++            previous = Some(id);
++        }
++        if let Some(anchor) = anchor {
++            previous = Some(item_id(anchor)?.to_owned());
++        }
++        old_start = old_end + 1;
++        new_start = new_end + 1;
++    }
++    deletes.extend(creates);
++    Ok(deletes)
++}
++impl State {
++    pub(super) fn set_boundary(&mut self, known_root: bool) {
++        self.boundary = known_root.then(|| "root".to_owned());
++    }
++    pub(super) fn deletions(&self) -> impl Iterator<Item = &str> {
++        self.pending
++            .iter()
++            .flat_map(|pending| pending.waiting.iter().chain(pending.actions.iter()))
++            .filter_map(|action| match action {
++                Action::Delete(id) => Some(id.as_str()),
++                _ => None,
++            })
++    }
++    pub(super) fn busy(&self) -> bool {
++        self.pending.is_some()
++    }
++    pub(super) fn editing(&self) -> bool {
++        self.pending
++            .as_ref()
++            .is_some_and(|pending| matches!(pending.request, Some(Request::Update { .. })))
++    }
++    pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
++        self.pending.as_ref().and_then(|pending| {
++            if pending.request.is_none() && matches!(pending.waiting, Some(Action::Retrieve(_))) {
++                None
++            } else {
++                Some(pending.deadline)
++            }
++        })
++    }
++    pub(super) fn expire_read(&mut self) -> bool {
++        if self.pending.as_ref().is_some_and(|pending| {
++            pending.deadline <= tokio::time::Instant::now()
++                && matches!(pending.waiting, Some(Action::Retrieve(_)))
++        }) {
++            self.interrupt(invalid("Provider history retrieval timed out"));
++            true
++        } else {
++            false
++        }
++    }
++    pub(super) fn observe_added(
++        &mut self,
++        item: &Value,
++        previous: Option<Option<&str>>,
++    ) -> CodexResult<()> {
++        let id = item_id(item)?.to_owned();
++        let previous = previous.map(|previous| previous.filter(|id| *id != "root"));
++        if previous.flatten() == Some(id.as_str()) {
++            self.mark_order_unknown();
++            self.record_id(&id, false)?;
++            return Ok(());
++        }
++        let expected_create = self.expected_create(&id);
++        let contradictory = self.expected_create_previous(&id).is_some_and(|expected| {
++            expected.as_deref().is_some_and(|expected| {
++                previous.is_some_and(|actual| actual.unwrap_or("root") != expected)
++            })
++        });
++        if (previous.is_none() && !expected_create) || contradictory {
++            self.mark_order_unknown();
++        }
++        if self.order.is_empty() {
++            if let Some(previous) = previous {
++                if previous.is_some_and(|id| !valid_id(id)) {
++                    return Err(invalid("Invalid provider history predecessor"));
++                }
++                self.boundary = Some(previous.unwrap_or("root").to_owned());
++            }
++        }
++        self.record_id(&id, previous.is_some() || expected_create)?;
++        if let Some(previous) = previous {
++            let Some(old_index) = self.order.iter().position(|known| known == &id) else {
++                return Ok(());
++            };
++            self.order.remove(old_index);
++            let index = if previous.is_none() {
++                (self.boundary.as_deref() == Some("root")).then_some(0)
++            } else if previous == self.boundary.as_deref() {
++                Some(0)
++            } else {
++                self.order
++                    .iter()
++                    .position(|known| Some(known.as_str()) == previous)
++                    .map(|index| index + 1)
++            };
++            if let Some(index) = index {
++                if old_index != index && self.editing() && !self.expected_create(&id) {
++                    self.interrupt(invalid(
++                        "Provider conversation changed during history replacement",
++                    ));
++                }
++                self.order.insert(index, id);
++            } else {
++                self.order.insert(old_index, id);
++                self.incomplete = true;
++                if self.editing() {
++                    self.interrupt(invalid("Provider conversation position is unknown"));
++                }
++            }
++        }
++        Ok(())
++    }
++    fn expected_create_previous(&self, id: &str) -> Option<&Option<String>> {
++        self.pending
++            .as_ref()
++            .and_then(|pending| match &pending.waiting {
++                Some(Action::Create { item, previous }) if item["id"].as_str() == Some(id) => {
++                    Some(previous)
++                }
++                _ => None,
++            })
++    }
++    fn expected_create(&self, id: &str) -> bool {
++        self.expected_create_previous(id).is_some()
++    }
++    fn mark_order_unknown(&mut self) {
++        self.incomplete = true;
++        if self.editing() {
++            self.interrupt(invalid(
++                "Provider conversation position is unknown or contradictory",
++            ));
++        }
++    }
++    pub(super) fn observe_id(&mut self, id: &str) -> CodexResult<()> {
++        self.record_id(id, false)
++    }
++    fn record_id(&mut self, id: &str, positioned: bool) -> CodexResult<()> {
++        if !valid_id(id) {
++            return Err(invalid("Invalid provider item ID"));
++        }
++        let id = id.to_owned();
++        if self.editing() && !self.order.contains(&id) && !self.expected_create(&id) {
++            self.interrupt(invalid(
++                "Provider conversation changed during history replacement",
++            ));
++        }
++        if !self.order.contains(&id) {
++            if !positioned && !self.expected_create(&id) {
++                self.mark_order_unknown();
++            }
++            if self.order.len() == LIMIT {
++                self.incomplete = true;
++            } else {
++                self.order.push(id);
++            }
++        }
++        Ok(())
++    }
++    pub(super) fn start(&mut self, request: Request) -> CodexResult<Option<Action>> {
++        if self.busy() {
++            finish_request(
++                request,
++                Err(invalid("Another provider history operation is pending")),
++            );
++            return Ok(None);
++        }
++        if self.incomplete && !matches!(request, Request::Item { .. }) {
++            finish_request(
++                request,
++                Err(invalid(
++                    "Provider history does not have a complete ordered current-generation identity view",
++                )),
++            );
++            return Ok(None);
++        }
++        let ids = match &request {
++            Request::Item { id, .. } => {
++                if !valid_id(id) {
++                    finish_request(request, Err(invalid("Invalid provider item ID")));
++                    return Ok(None);
++                }
++                VecDeque::from([id.clone()])
++            }
++            Request::List { .. } | Request::Update { .. } => self.order.iter().cloned().collect(),
++        };
++        if let Request::Update { items, .. } = &request {
++            if items.len() > LIMIT {
++                finish_request(
++                    request,
++                    Err(invalid("Provider history contains too many items")),
++                );
++                return Ok(None);
++            }
++        }
++        let mut retained_bytes = 0;
++        if let Request::Update { items, .. } = &request {
++            for item in items {
++                if codex_api::charge_realtime_json_storage(item, &mut retained_bytes).is_err() {
++                    finish_request(
++                        request,
++                        Err(invalid(
++                            "Provider history exceeds its 8 MiB estimated storage limit",
++                        )),
++                    );
++                    return Ok(None);
++                }
++            }
++        }
++        self.pending = Some(Pending {
++            request: Some(request),
++            retained_bytes,
++            ids,
++            snapshot: vec![],
++            actions: VecDeque::new(),
++            waiting: None,
++            deadline: tokio::time::Instant::now() + Duration::from_secs(10),
++        });
++        self.advance()
++    }
++    pub(super) fn retrieved(&mut self, item: Value) -> CodexResult<Option<Action>> {
++        if !self
++            .pending
++            .as_ref()
++            .is_some_and(|pending| matches!(pending.waiting, Some(Action::Retrieve(_))))
++        {
++            return Ok(None);
++        }
++        let id = match item_id(&item) {
++            Ok(id) => id,
++            Err(error) => {
++                self.interrupt(error);
++                return Ok(None);
++            }
++        };
++        let Some(pending) = self.pending.as_mut() else {
++            return Ok(None);
++        };
++        if !matches!(&pending.waiting, Some(Action::Retrieve(expected)) if expected == id) {
++            return Ok(None);
++        }
++        // This matching receipt is consumed even if retaining its body exceeds the budget.
++        pending.waiting = None;
++        if pending.request.is_some() {
++            codex_api::charge_realtime_json_storage(&item, &mut pending.retained_bytes).map_err(
++                |_| invalid("Provider history exceeds its 8 MiB estimated storage limit"),
++            )?;
++            pending.snapshot.push(item);
++        }
++        self.advance()
++    }
++    pub(super) fn created(
++        &mut self,
++        item: &Value,
++        position_observed: bool,
++    ) -> CodexResult<Option<Action>> {
++        if !self
++            .pending
++            .as_ref()
++            .is_some_and(|pending| matches!(pending.waiting, Some(Action::Create { .. })))
++        {
++            return Ok(None);
++        }
++        let id = match item_id(item) {
++            Ok(id) => id.to_owned(),
++            Err(error) => {
++                self.interrupt(error);
++                return Ok(None);
++            }
++        };
++        let Some(pending) = self.pending.as_mut() else {
++            return Ok(None);
++        };
++        let Some(Action::Create {
++            item: expected,
++            previous,
++        }) = &pending.waiting
++        else {
++            return Ok(None);
++        };
++        if item_id(expected)? != id {
++            return Ok(None);
++        }
++        if creation_receipt_conflicts(expected, item) {
++            self.interrupt(invalid(
++                "Provider create receipt conflicts with the requested message",
++            ));
++            return Ok(None);
++        }
++        if !position_observed {
++            let previous = previous.clone();
++            self.order.retain(|known| known != &id);
++            let index = if previous.is_none() {
++                self.order.len()
++            } else if previous.as_deref() == Some("root") {
++                0
++            } else if self.boundary.as_ref() == previous.as_ref() {
++                0
++            } else {
++                self.order
++                    .iter()
++                    .position(|known| Some(known) == previous.as_ref())
++                    .ok_or_else(|| invalid("Provider history anchor disappeared"))?
++                    + 1
++            };
++            self.order.insert(index, id);
++        }
++        pending.waiting = None;
++        self.advance()
++    }
++    pub(super) fn observe_deleted(&mut self, id: &str) {
++        self.order.retain(|known| known != id);
++        if self.boundary.as_deref() == Some(id) {
++            self.incomplete = true;
++        }
++        let affected = self
++            .pending
++            .as_ref()
++            .is_some_and(|pending| match &pending.request {
++                Some(Request::Item { id: requested, .. }) => requested == id,
++                Some(Request::List { .. } | Request::Update { .. }) => true,
++                None => false,
++            });
++        if affected {
++            self.interrupt(invalid(
++                "Provider item was deleted during history operation",
++            ));
++        }
++    }
++    pub(super) fn deleted(&mut self, id: &str) -> CodexResult<bool> {
++        self.order.retain(|known| known != id);
++        let Some(pending) = self.pending.as_mut() else {
++            return Ok(false);
++        };
++        if !matches!(&pending.waiting, Some(Action::Delete(expected)) if expected == id) {
++            return Ok(false);
++        }
++        pending.waiting = None;
++        Ok(true)
++    }
++    pub(super) fn advance(&mut self) -> CodexResult<Option<Action>> {
++        let Some(pending) = self.pending.as_mut() else {
++            return Ok(None);
++        };
++        if pending.waiting.is_some() {
++            return Ok(None);
++        }
++        if pending.request.is_none() {
++            self.pending.take();
++            return Ok(None);
++        }
++        if let Some(id) = pending.ids.pop_front() {
++            pending.waiting = Some(Action::Retrieve(id.clone()));
++            pending.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
++            return Ok(Some(Action::Retrieve(id)));
++        }
++        if let Some(Request::Update { items, .. }) = &pending.request {
++            if pending.actions.is_empty() && !pending.snapshot.is_empty() {
++                pending.actions = edits(&pending.snapshot, items, self.boundary.as_deref())?;
++                pending.snapshot.clear();
++            } else if pending.actions.is_empty() && self.order.is_empty() {
++                pending.actions = edits(&[], items, self.boundary.as_deref())?;
++            }
++        }
++        if let Some(action) = pending.actions.pop_front() {
++            pending.waiting = Some(match &action {
++                Action::Retrieve(id) => Action::Retrieve(id.clone()),
++                Action::Delete(id) => Action::Delete(id.clone()),
++                Action::Create { item, previous } => Action::Create {
++                    item: item.clone(),
++                    previous: previous.clone(),
++                },
++            });
++            pending.deadline = tokio::time::Instant::now() + Duration::from_secs(10);
++            return Ok(Some(action));
++        }
++        let pending = self.pending.take().unwrap();
++        match pending.request.unwrap() {
++            Request::Item { reply, .. } => {
++                let _ = reply.send(
++                    pending
++                        .snapshot
++                        .into_iter()
++                        .next()
++                        .ok_or_else(|| invalid("Provider item retrieval was empty")),
++                );
++            }
++            Request::List { reply } => {
++                let _ = reply.send(Ok(pending.snapshot));
++            }
++            Request::Update { reply, .. } => {
++                let _ = reply.send(Ok(()));
++            }
++        }
++        Ok(None)
++    }
++    pub(super) fn interrupt(&mut self, error: CodexErr) {
++        if let Some(pending) = &mut self.pending {
++            if let Some(request) = pending.request.take() {
++                finish_request(request, Err(error));
++            }
++            pending.ids.clear();
++            pending.snapshot.clear();
++            pending.actions.clear();
++            pending.retained_bytes = 0;
++            if pending.waiting.is_none() {
++                self.pending.take();
++            }
++        }
++    }
++    pub(super) fn fail(&mut self, error: CodexErr) {
++        if let Some(pending) = self.pending.take() {
++            if let Some(request) = pending.request {
++                finish_request(request, Err(error));
++            }
++        }
++    }
++    pub(super) fn retire(&mut self) {
++        self.fail(CodexErr::TurnAborted);
++        self.order.clear();
++    }
++}
++fn finish_request(request: Request, result: CodexResult<()>) {
++    let error = result.err().unwrap_or(CodexErr::TurnAborted);
++    match request {
++        Request::Item { reply, .. } => {
++            let _ = reply.send(Err(error));
++        }
++        Request::List { reply } => {
++            let _ = reply.send(Err(error));
++        }
++        Request::Update { reply, .. } => {
++            let _ = reply.send(Err(error));
++        }
++    }
++}
++
++pub(crate) fn reject(request: Request, error: CodexErr) {
++    finish_request(request, Err(error));
++}
++
++#[cfg(test)]
++mod tests {
++    fn creation_item(item: &Value) -> CodexResult<Value> {
++        let mut remaining = MAX_IMAGE_DECODE_BYTES;
++        super::creation_item(item, &mut remaining)
++    }
++    fn valid_image_data_uri(value: &str) -> bool {
++        let mut remaining = MAX_IMAGE_DECODE_BYTES;
++        super::valid_image_data_uri(value, &mut remaining).unwrap_or(false)
++    }
++
++    #[test]
++    fn external_boundary_deletion_invalidates_order_without_inventing_root() {
++        let mut state = super::State::default();
++        state.boundary = Some("hidden-prefix".into());
++        state.order.push("observed".into());
++        state.observe_deleted("hidden-prefix");
++        assert!(state.incomplete);
++        assert_eq!(state.order, vec!["observed"]);
++        assert_eq!(state.boundary.as_deref(), Some("hidden-prefix"));
++    }
++
++    use super::*;
++    use serde_json::json;
++    fn message(id: &str, text: &str) -> Value {
++        json!({"id":id,"type":"message","role":"user","content":[{"type":"input_text","text":text}]})
++    }
++    #[tokio::test]
++    async fn explicit_retrieval_returns_full_media_and_retirement_releases_waiter() {
++        let mut state = State::default();
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        assert!(
++            matches!(state.start(Request::Item{id:"audio".into(),reply}).unwrap(),Some(Action::Retrieve(id)) if id=="audio")
++        );
++        assert!(
++            state
++                .retrieved(message("unrelated", "ignored"))
++                .unwrap()
++                .is_none()
++        );
++        let media = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"AA==","transcript":"hello"},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]});
++        assert!(state.retrieved(media.clone()).unwrap().is_none());
++        assert_eq!(receipt.await.unwrap().unwrap(), media);
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state.start(Request::List { reply }).unwrap();
++        assert!(receipt.await.unwrap().unwrap().is_empty());
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state
++            .start(Request::Item {
++                id: "audio".into(),
++                reply,
++            })
++            .unwrap();
++        state.retire();
++        assert!(receipt.await.unwrap().is_err());
++    }
++    #[tokio::test]
++    async fn update_waits_for_retrieval_then_deletion_then_creation_receipts() {
++        let first = message("first", "keep");
++        let old = message("old", "remove");
++        let new = message("new", "correct");
++        let mut state = State::default();
++        state.observe_added(&first, Some(None)).unwrap();
++        state.observe_added(&old, Some(Some("first"))).unwrap();
++        let (reply, mut receipt) = tokio::sync::oneshot::channel();
++        assert!(
++            matches!(state.start(Request::Update{items:vec![first.clone(),new.clone()],reply}).unwrap(),Some(Action::Retrieve(id)) if id=="first")
++        );
++        assert!(
++            matches!(state.retrieved(first.clone()).unwrap(),Some(Action::Retrieve(id)) if id=="old")
++        );
++        assert!(matches!(state.retrieved(old).unwrap(),Some(Action::Delete(id)) if id=="old"));
++        assert!(receipt.try_recv().is_err());
++        assert!(!state.deleted("unrelated").unwrap());
++        assert!(state.deleted("old").unwrap());
++        assert!(
++            matches!(state.advance().unwrap(),Some(Action::Create {item,previous}) if item==new && previous.as_deref()==Some("first"))
++        );
++        assert!(receipt.try_recv().is_err());
++        state.observe_added(&new, Some(Some("first"))).unwrap();
++        state.created(&new, true).unwrap();
++        assert!(receipt.await.unwrap().is_ok());
++        assert_eq!(state.order, vec!["first", "new"]);
++    }
++    #[test]
++    fn tool_rows_are_exact_stable_anchors_and_message_reordering_is_supported() {
++        let a = message("a", "A");
++        let b = message("b", "B");
++        let tool = json!({"id":"tool","type":"function_call","call_id":"native","name":"run","arguments":"{}"});
++        let current = vec![a.clone(), b.clone(), tool.clone()];
++        let mut plan = edits(
++            &current,
++            &[b.clone(), a.clone(), tool.clone()],
++            Some("root"),
++        )
++        .unwrap();
++        assert!(matches!(plan.pop_front(),Some(Action::Delete(id)) if id=="a"));
++        assert!(
++            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==a && previous.as_deref()==Some("b"))
++        );
++        assert!(plan.is_empty());
++        assert!(
++            edits(
++                &current,
++                &[tool.clone(), a.clone(), b.clone()],
++                Some("root")
++            )
++            .is_err()
++        );
++        let mut manufactured = tool.clone();
++        manufactured["arguments"] = json!("changed");
++        assert!(
++            edits(
++                &current,
++                &[a.clone(), b.clone(), manufactured],
++                Some("root")
++            )
++            .is_err()
++        );
++        assert!(edits(&current, &[a, b], Some("root")).is_err());
++    }
++    #[test]
++    fn correcting_or_inserting_before_unchanged_assistant_audio_preserves_its_item() {
++        let user = message("user", "original");
++        let audio = json!({"id":"assistant-audio","type":"message","role":"assistant",
++            "content":[{"type":"audio","audio":"AQI=","transcript":"Accepted spoken answer"}]});
++        let corrected = message("user", "corrected");
++        let mut plan = edits(
++            &[user, audio.clone()],
++            &[corrected.clone(), audio.clone()],
++            Some("root"),
++        )
++        .unwrap();
++        assert!(matches!(plan.pop_front(),Some(Action::Delete(id)) if id=="user"));
++        assert!(
++            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==corrected && previous.as_deref()==Some("root"))
++        );
++        assert!(plan.is_empty());
++        let inserted = message("inserted", "before audio");
++        let mut plan = edits(&[audio.clone()], &[inserted.clone(), audio], Some("root")).unwrap();
++        assert!(
++            matches!(plan.pop_front(),Some(Action::Create {item,previous}) if item==inserted && previous.as_deref()==Some("root"))
++        );
++        assert!(plan.is_empty());
++    }
++
++    #[test]
++    fn deleted_receipts_ignore_late_done_and_reject_reusing_tool_identity() {
++        let sdk = SdkRealtimeState::new("history-test".into());
++        let item = message("deleted-message", "accepted");
++        sdk.history
++            .lock()
++            .unwrap()
++            .observe_added(&item, Some(None))
++            .unwrap();
++        let mut deletion = sdk.item_deletion.lock().unwrap();
++        let mut terminal = item.clone();
++        terminal["status"] = json!("completed");
++        deletion
++            .observe(&RealtimeEvent::ConversationItemAdded {
++                item: terminal,
++                previous_item_id: None,
++            })
++            .unwrap();
++        let (reply, _receipt) = tokio::sync::oneshot::channel();
++        assert!(deletion.begin(
++            "deleted-message".into(),
++            item_deletion::DeleteReply::new(reply)
++        ));
++        assert!(deletion.acknowledge("deleted-message"));
++        deletion.finish("deleted-message", Ok(()));
++        drop(deletion);
++        sdk.history
++            .lock()
++            .unwrap()
++            .deleted("deleted-message")
++            .unwrap();
++        sdk.observe_history_item_id("deleted-message").unwrap();
++        assert!(sdk.history.lock().unwrap().order.is_empty());
++        sdk.item_deletion
++            .lock()
++            .unwrap()
++            .allow_recreation("deleted-message");
++        sdk.history
++            .lock()
++            .unwrap()
++            .observe_added(&item, Some(None))
++            .unwrap();
++        sdk.observe_history_item_id("deleted-message").unwrap();
++        assert_eq!(sdk.history.lock().unwrap().order, vec!["deleted-message"]);
++        let mut deletion = sdk.item_deletion.lock().unwrap();
++        deletion.observe(&RealtimeEvent::ConversationItemAdded { item: json!({"id":"deleted-tool", "type":"function_call", "call_id":"native-call", "status":"completed"}), previous_item_id: None }).unwrap();
++        deletion.settle_call("native-call");
++        let (reply, _receipt) = tokio::sync::oneshot::channel();
++        assert!(deletion.begin(
++            "deleted-tool".into(),
++            item_deletion::DeleteReply::new(reply)
++        ));
++        assert!(deletion.acknowledge("deleted-tool"));
++        deletion.finish("deleted-tool", Ok(()));
++        for id in ["deleted-tool", "new-message"] {
++            let (reply, _) = tokio::sync::oneshot::channel();
++            let update = Request::Update {
++                items: vec![message(id, "new")],
++                reply,
++            };
++            assert_eq!(
++                validate_request_ids(&update, &deletion).is_ok(),
++                id == "new-message"
++            );
++            let (reply, _) = tokio::sync::oneshot::channel();
++            let item = Request::Item {
++                id: id.into(),
++                reply,
++            };
++            assert_eq!(
++                validate_request_ids(&item, &deletion).is_ok(),
++                id == "new-message"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn cancelling_host_waiter_does_not_retire_admitted_remote_receipt() {
++        let mut state = State::default();
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state
++            .start(Request::Item {
++                id: "same".into(),
++                reply,
++            })
++            .unwrap();
++        drop(receipt);
++        assert!(state.busy());
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state
++            .start(Request::Item {
++                id: "same".into(),
++                reply,
++            })
++            .unwrap();
++        assert!(receipt.await.unwrap().is_err());
++        state.retrieved(message("same", "settled")).unwrap();
++        assert!(!state.busy());
++    }
++    #[test]
++    fn creation_projects_only_writable_fields_and_validates_roles() {
++        for (role, kind) in [
++            ("system", "input_audio"),
++            ("system", "input_image"),
++            ("assistant", "input_audio"),
++            ("assistant", "input_image"),
++            ("assistant", "text"),
++            ("user", "output_text"),
++        ] {
++            let item = json!({"id":"invalid","type":"message","role":role,"content":[{"type":kind,"text":"x","audio":"AA==","image_url":"data:image/png;base64,AA=="}]});
++            assert!(creation_item(&item).is_err());
++        }
++        let item = json!({"id":"assistant","type":"message","role":"assistant","object":"realtime.item","status":"completed","provider_only":"ignored","content":[{"type":"output_text","text":"accepted","provider_only":"ignored"}]});
++        assert_eq!(
++            creation_item(&item).unwrap(),
++            json!({"id":"assistant","type":"message","role":"assistant","content":[{"type":"output_text","text":"accepted"}]})
++        );
++    }
++    #[test]
++    fn moving_text_before_unchanged_audio_preserves_media() {
++        let a = message("a", "A");
++        let b = message("b", "B");
++        let audio = json!({"id":"audio","type":"message","role":"assistant","content":[{"type":"output_audio","audio":"AA==","transcript":"spoken"}]});
++        let mut actions = edits(
++            &[a.clone(), audio.clone(), b.clone()],
++            &[b.clone(), a, audio],
++            Some("root"),
++        )
++        .unwrap();
++        assert!(matches!(actions.pop_front(),Some(Action::Delete(id)) if id=="b"));
++        assert!(
++            matches!(actions.pop_front(),Some(Action::Create{item,previous}) if item==b && previous.as_deref()==Some("root"))
++        );
++        assert!(actions.is_empty());
++    }
++    #[test]
++    fn unknown_predecessor_never_implies_root_and_empty_view_can_append() {
++        let old = message("old", "old");
++        let new = message("new", "new");
++        let mut actions = edits(&[], &[new.clone()], None).unwrap();
++        assert!(matches!(
++            actions.pop_front(),
++            Some(Action::Create { previous: None, .. })
++        ));
++        assert!(edits(&[old.clone()], &[new.clone(), old.clone()], None).is_err());
++        let mut actions = edits(&[old], &[new], Some("hidden-prefix")).unwrap();
++        assert!(matches!(actions.pop_front(), Some(Action::Delete(_))));
++        assert!(
++            matches!(actions.pop_front(),Some(Action::Create{previous:Some(id),..}) if id=="hidden-prefix")
++        );
++        let mut state = State::default();
++        state.set_boundary(false);
++        state
++            .observe_added(&message("first", "first"), None)
++            .unwrap();
++        assert_eq!(state.boundary, None);
++        let mut state = State::default();
++        state.set_boundary(false);
++        state
++            .observe_added(&message("first", "first"), Some(None))
++            .unwrap();
++        assert_eq!(state.boundary.as_deref(), Some("root"));
++    }
++    #[tokio::test]
++    async fn cumulative_snapshot_storage_is_bounded_and_failure_releases_waiter() {
++        let mut state = State::default();
++        state
++            .observe_added(&message("one", "one"), Some(None))
++            .unwrap();
++        state
++            .observe_added(&message("two", "two"), Some(Some("one")))
++            .unwrap();
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state.start(Request::List { reply }).unwrap();
++        let media = |id| json!({"id":id,"type":"message","role":"user","content":[{"type":"input_audio","audio":"A".repeat(1_100_000)}]});
++        assert!(
++            matches!(state.retrieved(media("one")).unwrap(),Some(Action::Retrieve(id)) if id=="two")
++        );
++        let error = state.retrieved(media("two")).unwrap_err();
++        state.fail(error);
++        assert!(receipt.await.unwrap().is_err());
++        assert!(!state.busy());
++    }
++    #[tokio::test]
++    async fn interruption_settles_host_but_drains_written_create_before_reuse() {
++        let old = message("old", "old");
++        let new = message("new", "new");
++        let mut state = State::default();
++        state.observe_added(&old, Some(None)).unwrap();
++        let (reply, receipt) = tokio::sync::oneshot::channel();
++        state
++            .start(Request::Update {
++                items: vec![new.clone(), old.clone()],
++                reply,
++            })
++            .unwrap();
++        assert!(matches!(
++            state.retrieved(old).unwrap(),
++            Some(Action::Create { .. })
++        ));
++        state.interrupt(invalid("response started"));
++        assert!(receipt.await.unwrap().is_err());
++        assert!(state.busy());
++        assert!(!state.editing());
++        assert!(state.deadline().is_some());
++        assert!(!state.expire_read());
++        state.observe_added(&new, Some(None)).unwrap();
++        state.created(&new, true).unwrap();
++        assert!(!state.busy());
++        assert_eq!(state.order, vec!["new", "old"]);
++    }
++    #[tokio::test]
++    async fn new_provider_item_interrupts_edit_and_drains_retrieval() {
++        for added_event in [false, true] {
++            let old = message("old", "old");
++            let mut state = State::default();
++            state.observe_added(&old, Some(None)).unwrap();
++            let (reply, receipt) = tokio::sync::oneshot::channel();
++            assert!(matches!(
++                state.start(Request::Update {
++                    items: vec![message("old", "corrected")], reply,
++                }).unwrap(), Some(Action::Retrieve(id)) if id == "old"
++            ));
++            let arrived = message("arrived", "new speech");
++            if added_event {
++                state.observe_added(&arrived, Some(Some("old"))).unwrap();
++            } else {
++                state.observe_id("arrived").unwrap();
++            }
++            assert!(receipt.await.unwrap().is_err());
++            assert!(state.busy());
++            assert!(!state.editing());
++            assert!(state.retrieved(old).unwrap().is_none());
++            assert!(!state.busy());
++            assert_eq!(state.order, vec!["old", "arrived"]);
++        }
++    }
++    #[tokio::test]
++    async fn retrieval_timeout_retains_receipt_without_blocking_voice_deadline() {
++        for update in [false, true] {
++            let old = message("old", "old");
++            let mut state = State::default();
++            state.observe_added(&old, Some(None)).unwrap();
++            let (reply, receipt) = tokio::sync::oneshot::channel();
++            let task = if update {
++                state
++                    .start(Request::Update {
++                        items: vec![old.clone()],
++                        reply,
++                    })
++                    .unwrap()
++            } else {
++                // Use the same reply shape for a read-only history list.
++                drop(reply);
++                let (list_reply, list_receipt) = tokio::sync::oneshot::channel();
++                let task = state.start(Request::List { reply: list_reply }).unwrap();
++                state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
++                assert!(state.expire_read());
++                assert!(list_receipt.await.unwrap().is_err());
++                task
++            };
++            assert!(matches!(task, Some(Action::Retrieve(id)) if id == "old"));
++            if update {
++                state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
++                assert!(state.expire_read());
++                assert!(receipt.await.unwrap().is_err());
++            }
++            assert!(state.busy());
++            assert!(state.deadline().is_none());
++            assert!(state.retrieved(old).unwrap().is_none());
++            assert!(!state.busy());
++        }
++    }
++    #[test]
++    fn explicit_predecessors_order_observed_items_and_reposition_prior_ids() {
++        let mut state = State::default();
++        state.observe_added(&message("a", "a"), Some(None)).unwrap();
++        state
++            .observe_added(&message("b", "b"), Some(Some("a")))
++            .unwrap();
++        state.observe_id("c").unwrap();
++        state
++            .observe_added(&message("c", "c"), Some(Some("a")))
++            .unwrap();
++        assert_eq!(state.order, vec!["a", "c", "b"]);
++        assert!(state.incomplete);
++    }
++    #[test]
++    fn unresolved_predecessor_or_hidden_prefix_gap_blocks_ordered_operations() {
++        for previous in [None, Some("different-hidden")] {
++            let mut state = State::default();
++            state.set_boundary(false);
++            state
++                .observe_added(&message("first", "first"), Some(Some("hidden")))
++                .unwrap();
++            state
++                .observe_added(&message("new", "new"), Some(previous))
++                .unwrap();
++            assert!(state.incomplete);
++            assert_eq!(state.order.len(), 2);
++        }
++    }
++    #[test]
++    fn media_creation_requires_realtime_data_shapes() {
++        for image in [
++            "https://example.invalid/picture.png",
++            "data:image/webp;base64,AQID",
++            "data:image/png;base64,invalid!",
++            "data:image/jpeg,AAAA",
++            "data:image/png;base64,",
++            "data:image/png;base64,AQID",
++            "data:image/jpeg;base64,AQID",
++        ] {
++            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":image}]});
++            assert!(creation_item(&item).is_err());
++        }
++        for (mime, format) in [
++            ("png", image::ImageFormat::Png),
++            ("jpeg", image::ImageFormat::Jpeg),
++        ] {
++            let mut output = std::io::Cursor::new(Vec::new());
++            image::DynamicImage::new_rgb8(1, 1)
++                .write_to(&mut output, format)
++                .unwrap();
++            let encoded = base64::engine::general_purpose::STANDARD.encode(output.into_inner());
++            let item = json!({"id":"image","type":"message","role":"user","content":[{"type":"input_image","image_url":format!("data:image/{mime};base64,{encoded}")}]});
++            assert!(creation_item(&item).is_ok());
++        }
++        let audio = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"invalid!"}]});
++        assert!(creation_item(&audio).is_err());
++        assert!(
++            edits(&[audio.clone()], &[audio], Some("root"))
++                .unwrap()
++                .is_empty()
++        );
++    }
++    #[test]
++    fn image_dimensions_are_bounded_before_full_decode() {
++        for width in [4096, 4097] {
++            let mut output = std::io::Cursor::new(Vec::new());
++            image::DynamicImage::new_luma8(width, 1)
++                .write_to(&mut output, image::ImageFormat::Png)
++                .unwrap();
++            let encoded = base64::engine::general_purpose::STANDARD.encode(output.into_inner());
++            assert_eq!(
++                valid_image_data_uri(&format!("data:image/png;base64,{encoded}")),
++                width == 4096
++            );
++        }
++    }
++    #[test]
++    fn creation_receipts_compare_present_fields_and_allow_omitted_media() {
++        let expected = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","audio":"AAA=","transcript":"requested"}]});
++        let omitted = json!({"id":"audio","object":"realtime.item","status":"completed","type":"message","role":"user","content":[{"type":"input_audio","audio":null,"transcript":null}]});
++        assert!(!creation_receipt_conflicts(&expected, &omitted));
++        let conflict = json!({"id":"audio","type":"message","role":"user","content":[{"type":"input_audio","transcript":"different"}]});
++        assert!(creation_receipt_conflicts(&expected, &conflict));
++        let empty = json!({"id":"empty","type":"message","role":"user","content":[{"type":"input_audio","audio":""}]});
++        assert!(creation_item(&empty).is_err());
++    }
++    #[test]
++    fn absent_position_marks_unsolicited_observations_incomplete() {
++        for added in [false, true] {
++            let mut state = State::default();
++            if added {
++                state
++                    .observe_added(&message("unknown", "unknown"), None)
++                    .unwrap();
++            } else {
++                state.observe_id("unknown").unwrap();
++            }
++            assert!(state.incomplete);
++        }
++    }
++    #[test]
++    fn root_position_alias_and_self_predecessor_are_distinct_from_item_identity() {
++        for root in [None, Some("root")] {
++            let mut state = State::default();
++            state
++                .observe_added(&message("first", "first"), Some(root))
++                .unwrap();
++            assert_eq!(state.boundary.as_deref(), Some("root"));
++            assert!(!state.incomplete);
++        }
++        for prior in [false, true] {
++            let mut state = State::default();
++            if prior {
++                state
++                    .observe_added(&message("first", "first"), Some(None))
++                    .unwrap();
++            }
++            state
++                .observe_added(&message("self", "self"), Some(Some("self")))
++                .unwrap();
++            assert!(state.incomplete);
++            assert_ne!(state.boundary.as_deref(), Some("self"));
++        }
++        assert!(!valid_id("root"));
++    }
++}
+diff --git a/codex-rs/core/src/realtime_conversation_tests.rs b/codex-rs/core/src/realtime_conversation_tests.rs
+index 0ea0371b184f9fb8e928b52bf508f8476d874a82..89507467e35de4d37bbe6c9a7eb8d317e7e04edc 100644
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -4961,15 +4961,10 @@ async fn sdk_sip_config_uses_native_source_and_serializer_without_reserving_voic
+     let mut params = prepared_voice_params();
+     params.prompt = Some(Some("Use this accepted application instruction".into()));
+     let settings = codex_api::RealtimeV2SessionSettings::default();
+-    let actual = super::handle_config_sdk(
+-        &session,
+-        params.clone(),
+-        Some(settings.clone()),
+-        None,
+-        None,
+-    )
+-    .await
+-    .unwrap();
++    let actual =
++        super::handle_config_sdk(&session, params.clone(), Some(settings.clone()), None, None)
++            .await
++            .unwrap();
+     let draft = super::tool_task::capture_realtime_source_draft(&session)
+         .await
+         .unwrap();
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index a58224e1e026c057ecc6e73711140734c4943ce3..d44d8ae5cca942bc2fbb0fd7f5a4acfe4a19c5e3 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -522,7 +522,7 @@ pub(super) async fn submission_loop(
+                             settings,
+                             function_tools,
+                             expected_selection_id,
+-                                )
++                        )
+                         .await,
+                     );
+                     false
+@@ -717,6 +717,47 @@ pub(super) async fn submission_loop(
+                     .await;
+                     false
+                 }
++                Op::RealtimeConversationRetrieveItemSdk {
++                    generation,
++                    item_id,
++                    reply,
++                } => {
++                    crate::realtime_conversation::handle_history_sdk(
++                        &sess,
++                        generation,
++                        crate::realtime_conversation::provider_history::Request::Item {
++                            id: item_id,
++                            reply,
++                        },
++                    )
++                    .await;
++                    false
++                }
++                Op::RealtimeConversationRetrieveHistorySdk { generation, reply } => {
++                    crate::realtime_conversation::handle_history_sdk(
++                        &sess,
++                        generation,
++                        crate::realtime_conversation::provider_history::Request::List { reply },
++                    )
++                    .await;
++                    false
++                }
++                Op::RealtimeConversationUpdateHistorySdk {
++                    generation,
++                    items,
++                    reply,
++                } => {
++                    crate::realtime_conversation::handle_history_sdk(
++                        &sess,
++                        generation,
++                        crate::realtime_conversation::provider_history::Request::Update {
++                            items,
++                            reply,
++                        },
++                    )
++                    .await;
++                    false
++                }
+                 Op::RealtimeConversationDeleteItemSdk {
+                     generation,
+                     item_id,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 50f5ebb0e5bcabf0bb87fd7f04b99eb454e35c4d..540945db8c89115b4ce8d65ff2def63d05c35f9f 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -645,6 +645,15 @@ pub struct RealtimeConversationItemObservation {
+     pub call_id: Option<String>,
+ }
+
++fn deserialize_realtime_previous_item_id<'de, D>(
++    deserializer: D,
++) -> Result<Option<Option<String>>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    Option::<String>::deserialize(deserializer).map(Some)
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub enum RealtimeEvent {
+     SessionUpdated {
+@@ -660,7 +669,16 @@ pub enum RealtimeEvent {
+     ResponseCreated(RealtimeResponseCreated),
+     ResponseCancelled(RealtimeResponseCancelled),
+     ResponseDone(RealtimeResponseDone),
+-    ConversationItemAdded(Value),
++    ConversationItemAdded {
++        item: Value,
++        #[serde(
++            default,
++            skip_serializing_if = "Option::is_none",
++            deserialize_with = "deserialize_realtime_previous_item_id"
++        )]
++        previous_item_id: Option<Option<String>>,
++    },
++    ConversationItemRetrieved(Value),
+     ConversationItemObserved(RealtimeConversationItemObservation),
+     ConversationItemDeleted {
+         item_id: String,
+@@ -971,6 +989,21 @@ pub enum Op {
+         reply: oneshot::Sender<CodexResult<()>>,
+     },
+
++    RealtimeConversationRetrieveItemSdk {
++        generation: String,
++        item_id: String,
++        reply: oneshot::Sender<CodexResult<Value>>,
++    },
++    RealtimeConversationRetrieveHistorySdk {
++        generation: String,
++        reply: oneshot::Sender<CodexResult<Vec<Value>>>,
++    },
++    RealtimeConversationUpdateHistorySdk {
++        generation: String,
++        items: Vec<Value>,
++        reply: oneshot::Sender<CodexResult<()>>,
++    },
++
+     /// SDK-owned Realtime operation, fenced by connection generation.
+     /// Delete one current-generation provider item; reply follows provider acknowledgement.
+     RealtimeConversationDeleteItemSdk {
+@@ -1364,6 +1397,15 @@ impl Op {
+             Self::RealtimeConversationAudioCommitSdk { .. } => {
+                 "realtime_conversation_audio_commit_sdk"
+             }
++            Self::RealtimeConversationRetrieveItemSdk { .. } => {
++                "realtime_conversation_retrieve_item_sdk"
++            }
++            Self::RealtimeConversationRetrieveHistorySdk { .. } => {
++                "realtime_conversation_retrieve_history_sdk"
++            }
++            Self::RealtimeConversationUpdateHistorySdk { .. } => {
++                "realtime_conversation_update_history_sdk"
++            }
+             Self::RealtimeConversationDeleteItemSdk { .. } => {
+                 "realtime_conversation_delete_item_sdk"
+             }
+@@ -7075,3 +7117,28 @@ mod response_observation_tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod realtime_previous_item_tests {
++    use super::*;
++    #[test]
++    fn item_predecessor_roundtrip_preserves_missing_root_and_id() {
++        for previous_item_id in [None, Some(None), Some(Some("predecessor".into()))] {
++            let event = RealtimeEvent::ConversationItemAdded {
++                item: serde_json::json!({"id":"item"}),
++                previous_item_id: previous_item_id.clone(),
++            };
++            let encoded = serde_json::to_value(&event).unwrap();
++            assert_eq!(
++                encoded["ConversationItemAdded"]
++                    .get("previous_item_id")
++                    .is_some(),
++                previous_item_id.is_some()
++            );
++            assert_eq!(
++                serde_json::from_value::<RealtimeEvent>(encoded).unwrap(),
++                event
++            );
++        }
++    }
++}
