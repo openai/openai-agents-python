@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
 from collections.abc import Awaitable
+from pathlib import Path
 
 import pytest
 from aiohttp import web
@@ -23,8 +27,10 @@ from agents import (
     ToolOutputText,
     TurnStoppedError,
     function_tool,
+    telemetry,
 )
 from tests._asyncio import timeout
+from tests.native_fixtures import ResponsesFixture, assistant_output
 
 
 async def test_custom_model_core_executes_tool_and_supplies_result_to_next_response() -> None:
@@ -931,3 +937,86 @@ async def test_chat_effective_request_controls(control: str) -> None:
         assert any("Original instructions." in text for text in content)
     else:
         assert all(seen[0][key] == value for key, value in extras.items())
+
+
+@pytest.mark.parametrize("tracing_disabled", [False, True])
+def test_no_tool_one_shot_run_selects_custom_model_before_native_sampling(tracing_disabled):
+    # Native telemetry configuration belongs to a fresh process, before its first Session.
+    env = dict(os.environ)
+    root = Path(__file__).resolve().parents[3]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(root / "src"),
+            str(root / "packages/codex/src"),
+            str(root / "packages/codex"),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+    for name in (
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "SSL_CERT_FILE",
+    ):
+        env.pop(name, None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio, sys; "
+            "from tests.test_native_model_backend import _no_tool_one_shot_case; "
+            "asyncio.run(_no_tool_one_shot_case(sys.argv[1] == 'True'))",
+            str(tracing_disabled),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _no_tool_one_shot_case(tracing_disabled: bool) -> None:
+    await telemetry.configure()
+    telemetry.set_tracing_disabled(tracing_disabled)
+    try:
+        seen: list[ModelRequest] = []
+
+        class Model:
+            def complete(self, request: ModelRequest) -> ModelResponse:
+                seen.append(request)
+                return ModelResponse(
+                    [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "custom one-shot result"}],
+                        }
+                    ]
+                )
+
+        responses = ResponsesFixture()
+        responses.respond(assistant_output("unexpected HTTP fallback"))
+        app = web.Application()
+        app.router.add_post("/v1/responses", responses.handle)
+        async with TestServer(app) as server, timeout(20):
+            async with NativeProvider(
+                base_url=str(server.make_url("/v1")), model_backend=Model()
+            ) as provider:
+                agent = Agent(instructions="Answer briefly.", provider=provider)
+                result = await agent.run("First no-tool request.")
+                assert result.final_output == "custom one-shot result"
+                assert len(seen) == 1
+                assert any("First no-tool request." in str(item) for item in seen[0].body["input"])
+                assert responses.requests == []
+                repeated = await agent.run("Second no-tool request.")
+                assert repeated.final_output == "custom one-shot result"
+                assert len(seen) == 2
+                assert responses.requests == []
+    finally:
+        telemetry.set_tracing_disabled(False)
