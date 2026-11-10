@@ -607,7 +607,7 @@
   <a href="#cloningcopying-agents" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体克隆与复制
+        智能体克隆/复制
       
     </span>
   </a>
@@ -1018,7 +1018,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -1166,7 +1166,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1306,7 +1306,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1877,7 +1877,7 @@
   <a href="#cloningcopying-agents" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体克隆与复制
+        智能体克隆/复制
       
     </span>
   </a>
@@ -1975,11 +1975,11 @@
 
 
 <h1 id="_1">智能体</h1>
-<p>智能体是应用中的核心构建块。智能体是配置了指令、工具和可选运行时行为（如任务转移、安全防护措施和 structured outputs）的大语言模型（LLM）。</p>
-<p>如果你要定义或自定义单个基础 <code>Agent</code>，而不是 <code>SandboxAgent</code>，请使用本页面。如果你正在决定多个智能体应如何协作，请阅读<a href="../multi_agent/">智能体编排</a>。如果智能体应在具有清单定义文件和沙箱原生能力的隔离工作区中运行，请阅读<a href="../sandbox/guide/">沙箱智能体概念</a>。</p>
-<p>对于OpenAI模型，SDK 默认使用 Responses API，但这里的区别在于编排：<code>Agent</code> 加上 <code>Runner</code>，可让 SDK 为你管理轮次、工具、安全防护措施、任务转移和会话。如果你希望自行控制该循环，请改为直接使用 Responses API。</p>
+<p>智能体是应用中的核心构建模块。智能体是一个配置了指令、工具和可选运行时行为（例如任务转移、安全防护措施和 structured outputs）的大语言模型（LLM）。</p>
+<p>如果你想定义或自定义单个基础 <code>Agent</code>，而不是 <code>SandboxAgent</code>，请使用本页面。如果你正在决定多个智能体应如何协作，请阅读<a href="../multi_agent/">智能体编排</a>。如果智能体需要在隔离的工作区中运行，并使用清单定义的文件和沙箱原生功能，请阅读<a href="../sandbox/guide/">沙箱智能体概念</a>。</p>
+<p>对于OpenAI模型，SDK 默认使用 Responses API，但这里的区别在于编排：<code>Agent</code> 与 <code>Runner</code> 结合使用后，SDK 可以为你管理轮次、工具、安全防护措施、任务转移和会话。如果你想自行管理该循环，请改为直接使用 Responses API。</p>
 <h2 id="choose-the-next-guide">后续指南选择</h2>
-<p>可将本页面作为定义智能体的中心入口。根据你接下来需要做出的决策，跳转至相应的相邻指南。</p>
+<p>将本页面作为智能体定义的入口。根据你接下来需要做出的决策，前往相应的相关指南。</p>
 <table>
 <thead>
 <tr>
@@ -1989,11 +1989,11 @@
 </thead>
 <tbody>
 <tr>
-<td>选择模型或提供商设置</td>
+<td>选择模型或提供商配置</td>
 <td><a href="../models/">模型</a></td>
 </tr>
 <tr>
-<td>为智能体添加能力</td>
+<td>为智能体添加功能</td>
 <td><a href="../tools/">工具</a></td>
 </tr>
 <tr>
@@ -2001,7 +2001,7 @@
 <td><a href="../sandbox_agents/">沙箱智能体快速入门</a></td>
 </tr>
 <tr>
-<td>在管理器式编排与任务转移之间进行选择</td>
+<td>在管理器式编排与任务转移之间做出选择</td>
 <td><a href="../multi_agent/">智能体编排</a></td>
 </tr>
 <tr>
@@ -2009,7 +2009,7 @@
 <td><a href="../handoffs/">任务转移</a></td>
 </tr>
 <tr>
-<td>运行轮次、流式传输事件或管理对话状态</td>
+<td>运行轮次、以流式方式传输事件或管理对话状态</td>
 <td><a href="../running_agents/">运行智能体</a></td>
 </tr>
 <tr>
@@ -2023,7 +2023,7 @@
 </tbody>
 </table>
 <h2 id="basic-configuration">基本配置</h2>
-<p>智能体最常用的属性包括：</p>
+<p>智能体最常用的属性如下：</p>
 <table>
 <thead>
 <tr>
@@ -2051,12 +2051,12 @@
 <tr>
 <td><code>handoff_description</code></td>
 <td>否</td>
-<td>当此智能体作为任务转移目标提供时显示的简短说明。</td>
+<td>将此智能体作为任务转移目标提供时显示的简短描述。</td>
 </tr>
 <tr>
 <td><code>handoffs</code></td>
 <td>否</td>
-<td>将对话委派给专业智能体。请参阅<a href="../handoffs/">任务转移</a>。</td>
+<td>将对话委派给专家智能体。请参阅<a href="../handoffs/">任务转移</a>。</td>
 </tr>
 <tr>
 <td><code>model</code></td>
@@ -2076,37 +2076,37 @@
 <tr>
 <td><code>mcp_servers</code></td>
 <td>否</td>
-<td>为智能体提供基于 MCP 的工具的 MCP 服务器。请参阅 <a href="../mcp/">MCP 指南</a>。</td>
+<td>为智能体提供 MCP 支持工具的 MCP 服务器。请参阅 <a href="../mcp/">MCP 指南</a>。</td>
 </tr>
 <tr>
 <td><code>mcp_config</code></td>
 <td>否</td>
-<td>微调 MCP 工具的准备方式，例如将其 schema 转换为严格模式，以及设置 MCP 失败信息的格式。请参阅 <a href="../mcp/#agent-level-mcp-configuration">MCP 指南</a>。</td>
+<td>微调 MCP 工具的准备方式，例如将其架构转换为严格模式，以及设置 MCP 失败信息的格式。请参阅 <a href="../mcp/#agent-level-mcp-configuration">MCP 指南</a>。</td>
 </tr>
 <tr>
 <td><code>input_guardrails</code></td>
 <td>否</td>
-<td>针对此智能体链的第一个用户输入运行的安全防护措施。请参阅<a href="../guardrails/">安全防护措施</a>。</td>
+<td>对此智能体链的首个用户输入运行的安全防护措施。请参阅<a href="../guardrails/">安全防护措施</a>。</td>
 </tr>
 <tr>
 <td><code>output_guardrails</code></td>
 <td>否</td>
-<td>针对此智能体的最终输出运行的安全防护措施。请参阅<a href="../guardrails/">安全防护措施</a>。</td>
+<td>对此智能体的最终输出运行的安全防护措施。请参阅<a href="../guardrails/">安全防护措施</a>。</td>
 </tr>
 <tr>
 <td><code>output_type</code></td>
 <td>否</td>
-<td>用于替代纯文本的 structured outputs 类型。请参阅<a href="#output-types">输出类型</a>。</td>
+<td>用于替代纯文本的结构化输出类型。请参阅<a href="#output-types">输出类型</a>。</td>
 </tr>
 <tr>
 <td><code>hooks</code></td>
 <td>否</td>
-<td>智能体作用域内的生命周期回调。请参阅<a href="#lifecycle-events-hooks">生命周期事件（钩子）</a>。</td>
+<td>智能体作用域的生命周期回调。请参阅<a href="#lifecycle-events-hooks">生命周期事件（钩子）</a>。</td>
 </tr>
 <tr>
 <td><code>tool_use_behavior</code></td>
 <td>否</td>
-<td>控制是将工具结果送回模型继续循环，还是结束运行。请参阅<a href="#tool-use-behavior">工具使用行为</a>。</td>
+<td>控制工具结果是返回模型继续循环，还是结束运行。请参阅<a href="#tool-use-behavior">工具使用行为</a>。</td>
 </tr>
 <tr>
 <td><code>reset_tool_choice</code></td>
@@ -2118,32 +2118,34 @@
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="nd">@tool</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;returns weather info for the specified city.&quot;&quot;&quot;</span>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Haiku agent&quot;</span><span class="p">,</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Always respond in haiku form&quot;</span><span class="p">,</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-nano&quot;</span><span class="p">,</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="p">)</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="nd">@tool</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;returns weather info for the specified city.&quot;&quot;&quot;</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Haiku agent&quot;</span><span class="p">,</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Always respond in haiku form&quot;</span><span class="p">,</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;gpt-5-nano&quot;</span><span class="p">,</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>本节中的所有内容均适用于 <code>Agent</code>。<code>SandboxAgent</code> 基于相同理念构建，并额外添加了 <code>default_manifest</code>、<code>base_instructions</code>、<code>capabilities</code> 和 <code>run_as</code>，用于工作区作用域内的运行。请参阅<a href="../sandbox/guide/">沙箱智能体概念</a>。</p>
+<p>本节中的所有内容均适用于 <code>Agent</code>。<code>SandboxAgent</code> 基于相同理念构建，并添加了 <code>default_manifest</code>、<code>base_instructions</code>、<code>capabilities</code> 和 <code>run_as</code>，用于工作区作用域的运行。请参阅<a href="../sandbox/guide/">沙箱智能体概念</a>。</p>
 <h2 id="prompt-templates">提示词模板</h2>
-<p>通过设置 <code>prompt</code>，你可以引用在OpenAI平台中创建的提示词模板。当通过 Responses API 访问OpenAI模型时，此功能可用。</p>
-<p>要使用此功能，请执行以下操作：</p>
+<p>你可以通过设置 <code>prompt</code>，引用在OpenAI平台中创建的提示词模板。通过 Responses API 访问OpenAI模型时可使用此功能。</p>
+<p>使用步骤如下：</p>
 <ol>
 <li>前往 https://platform.openai.com/playground/prompts</li>
-<li>创建一个新的提示词变量 <code>poem_style</code>。</li>
+<li>创建新的提示词变量 <code>poem_style</code>。</li>
 <li>
 <p>创建包含以下内容的系统提示词：</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>Write a poem in {{poem_style}}
 </span></code></pre></div>
 </li>
 <li>
-<p>使用 <code>--prompt-id</code> 标志运行代码示例。</p>
+<p>使用 <code>--prompt-id</code> 标志运行示例。</p>
 </li>
 </ol>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
@@ -2157,58 +2159,62 @@
 </span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="p">},</span>
 </span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>你也可以在运行时动态生成提示词：</p>
+<p>你还可以在运行时动态生成提示词：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">GenerateDynamicPromptData</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="nd">@dataclass</span>
-</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="k">class</span><span class="w"> </span><span class="nc">PromptContext</span><span class="p">:</span>
-</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">prompt_id</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">poem_style</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="nd">@dataclass</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">PromptContext</span><span class="p">:</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">prompt_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="n">poem_style</span><span class="p">:</span> <span class="nb">str</span>
 </span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>
-</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">build_prompt</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">GenerateDynamicPromptData</span><span class="p">):</span>
-</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">PromptContext</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">context</span>
-</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="k">return</span> <span class="p">{</span>
-</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>        <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">prompt_id</span><span class="p">,</span>
-</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>        <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="s2">&quot;1&quot;</span><span class="p">,</span>
-</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="s2">&quot;variables&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;poem_style&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">poem_style</span><span class="p">},</span>
-</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>    <span class="p">}</span>
-</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">build_prompt</span><span class="p">(</span><span class="n">data</span><span class="p">:</span> <span class="n">GenerateDynamicPromptData</span><span class="p">):</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">PromptContext</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">context</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>    <span class="k">return</span> <span class="p">{</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>        <span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">prompt_id</span><span class="p">,</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="s2">&quot;1&quot;</span><span class="p">,</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>        <span class="s2">&quot;variables&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;poem_style&quot;</span><span class="p">:</span> <span class="n">ctx</span><span class="o">.</span><span class="n">poem_style</span><span class="p">},</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>    <span class="p">}</span>
 </span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>
-</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Prompted assistant&quot;</span><span class="p">,</span> <span class="n">prompt</span><span class="o">=</span><span class="n">build_prompt</span><span class="p">)</span>
-</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
-</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>    <span class="n">agent</span><span class="p">,</span>
-</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>    <span class="s2">&quot;Say hello&quot;</span><span class="p">,</span>
-</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>    <span class="n">context</span><span class="o">=</span><span class="n">PromptContext</span><span class="p">(</span><span class="n">prompt_id</span><span class="o">=</span><span class="s2">&quot;pmpt_123&quot;</span><span class="p">,</span> <span class="n">poem_style</span><span class="o">=</span><span class="s2">&quot;limerick&quot;</span><span class="p">),</span>
-</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a><span class="p">)</span>
+</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>
+</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Prompted assistant&quot;</span><span class="p">,</span> <span class="n">prompt</span><span class="o">=</span><span class="n">build_prompt</span><span class="p">)</span>
+</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>    <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>    <span class="s2">&quot;Say hello&quot;</span><span class="p">,</span>
+</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>    <span class="n">context</span><span class="o">=</span><span class="n">PromptContext</span><span class="p">(</span><span class="n">prompt_id</span><span class="o">=</span><span class="s2">&quot;pmpt_123&quot;</span><span class="p">,</span> <span class="n">poem_style</span><span class="o">=</span><span class="s2">&quot;limerick&quot;</span><span class="p">),</span>
+</span><span id="__span-3-26"><a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="context">上下文</h2>
-<p>智能体以其 <code>context</code> 类型作为泛型参数。上下文是一种依赖注入工具：它是由你创建并传递给 <code>Runner.run()</code> 的对象，随后会传递给每个智能体、工具、任务转移等，并作为智能体运行所需依赖项和状态的集合。你可以提供任何 Python 对象作为上下文。</p>
-<p>有关完整的 <code>RunContextWrapper</code> 接口、共享用量追踪、嵌套的 <code>tool_input</code> 以及序列化注意事项，请阅读<a href="../context/">上下文指南</a>。</p>
+<p>智能体的 <code>context</code> 类型是泛型。上下文是一种依赖注入工具：它是由你创建并传递给 <code>Runner.run()</code> 的对象，随后会传递给每个智能体、工具和任务转移等组件，并作为智能体运行所需依赖项和状态的集合。你可以使用任意 Python 对象作为上下文。</p>
+<p>请阅读<a href="../context/">上下文指南</a>，了解完整的 <code>RunContextWrapper</code> 接口、共享用量追踪、嵌套的 <code>tool_input</code> 以及序列化注意事项。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="nd">@dataclass</span>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">class</span><span class="w"> </span><span class="nc">Purchase</span><span class="p">:</span>
-</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>    <span class="nb">id</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
-</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="nd">@dataclass</span>
-</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserContext</span><span class="p">:</span>
-</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="n">is_pro_user</span><span class="p">:</span> <span class="nb">bool</span>
-</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>
-</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_purchases</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Purchase</span><span class="p">]:</span>
-</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>        <span class="c1"># implement your logic here</span>
-</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>        <span class="k">return</span> <span class="p">[]</span>
-</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>
-</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">](</span>
-</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>    <span class="o">...</span><span class="p">,</span>
-</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="p">)</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="nd">@dataclass</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="k">class</span><span class="w"> </span><span class="nc">Purchase</span><span class="p">:</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>    <span class="nb">id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="nd">@dataclass</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserContext</span><span class="p">:</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>    <span class="n">is_pro_user</span><span class="p">:</span> <span class="nb">bool</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_purchases</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Purchase</span><span class="p">]:</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>        <span class="c1"># implement your logic here</span>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>        <span class="k">return</span> <span class="p">[]</span>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">](</span>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>    <span class="o">...</span><span class="p">,</span>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="output-types">输出类型</h2>
-<p>默认情况下，智能体生成纯文本（即 <code>str</code>）输出。如果你希望智能体生成特定类型的输出，可以使用 <code>output_type</code> 参数。常见选择是使用 <a href="https://docs.pydantic.dev/">Pydantic</a> 对象，但我们支持任何可以封装在 Pydantic <a href="https://docs.pydantic.dev/latest/api/type_adapter/">TypeAdapter</a> 中的类型，例如 dataclass、列表、TypedDict 等。</p>
+<p>默认情况下，智能体生成纯文本（即 <code>str</code>）输出。如果你希望智能体生成特定类型的输出，可以使用 <code>output_type</code> 参数。常见做法是使用 <a href="https://docs.pydantic.dev/">Pydantic</a> 对象，但我们支持可封装在 Pydantic <a href="https://docs.pydantic.dev/latest/api/type_adapter/">TypeAdapter</a> 中的任何类型，例如数据类、列表、TypedDict 等。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pydantic</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseModel</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
@@ -2218,25 +2224,26 @@
 </span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="n">date</span><span class="p">:</span> <span class="nb">str</span>
 </span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="n">participants</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span>
 </span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>
-</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Calendar extractor&quot;</span><span class="p">,</span>
-</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Extract calendar events from text&quot;</span><span class="p">,</span>
-</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">CalendarEvent</span><span class="p">,</span>
-</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="p">)</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Calendar extractor&quot;</span><span class="p">,</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Extract calendar events from text&quot;</span><span class="p">,</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">CalendarEvent</span><span class="p">,</span>
+</span><span id="__span-5-15"><a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="p">)</span>
 </span></code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>传入 <code>output_type</code> 后，即表示要求模型使用 <a href="https://platform.openai.com/docs/guides/structured-outputs">structured outputs</a>，而不是常规纯文本响应。</p>
+<p>传入 <code>output_type</code> 后，模型将使用 <a href="https://platform.openai.com/docs/guides/structured-outputs">structured outputs</a>，而不是常规纯文本响应。</p>
 </div>
 <h2 id="multi-agent-system-design-patterns">多智能体系统设计模式</h2>
 <p>多智能体系统有多种设计方式，但我们通常会看到两种具有广泛适用性的模式：</p>
 <ol>
 <li>管理器（agents as tools）：中央管理器/编排器将专业子智能体作为工具调用，并保留对对话的控制权。</li>
-<li>任务转移：对等智能体将控制权转移给接管对话的专业智能体。这是一种去中心化模式。</li>
+<li>任务转移：对等智能体将控制权移交给接管对话的专业智能体。这是一种去中心化模式。</li>
 </ol>
-<p>有关更多详细信息，请参阅<a href="https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf">智能体构建实用指南</a>。</p>
+<p>更多详情，请参阅<a href="https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf">构建智能体的实用指南</a>。</p>
 <h3 id="manager-agents-as-tools">管理器（agents as tools）</h3>
-<p><code>customer_facing_agent</code> 负责处理所有用户交互，并调用作为工具公开的专业子智能体。请在<a href="../tools/#agents-as-tools">工具</a>文档中了解更多信息。</p>
+<p><code>customer_facing_agent</code> 负责处理所有用户交互，并调用以工具形式提供的专业子智能体。请阅读<a href="../tools/#agents-as-tools">工具</a>文档了解更多信息。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
 </span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">booking_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
@@ -2256,12 +2263,12 @@
 </span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>        <span class="n">refund_agent</span><span class="o">.</span><span class="n">as_tool</span><span class="p">(</span>
 </span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>            <span class="n">tool_name</span><span class="o">=</span><span class="s2">&quot;refund_expert&quot;</span><span class="p">,</span>
 </span><span id="__span-6-19"><a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>            <span class="n">tool_description</span><span class="o">=</span><span class="s2">&quot;Handles refund questions and requests.&quot;</span><span class="p">,</span>
-</span><span id="__span-6-20"><a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>        <span class="p">)</span>
+</span><span id="__span-6-20"><a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a>        <span class="p">),</span>
 </span><span id="__span-6-21"><a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a>    <span class="p">],</span>
 </span><span id="__span-6-22"><a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="p">)</span>
 </span></code></pre></div>
 <h3 id="handoffs">任务转移</h3>
-<p>配置的任务转移目标是智能体可以委派任务的子智能体。发生任务转移时，被委派的智能体会接收对话历史记录并接管对话。此模式支持模块化的专业智能体，使其能够出色完成单一任务。请在<a href="../handoffs/">任务转移</a>文档中了解更多信息。</p>
+<p>配置的任务转移目标是智能体可以委派任务的子智能体。发生任务转移时，受委派的智能体会收到对话历史记录并接管对话。此模式支持模块化的专业智能体，使其能够出色完成单一任务。请阅读<a href="../handoffs/">任务转移</a>文档了解更多信息。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">booking_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
@@ -2278,19 +2285,18 @@
 </span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="dynamic-instructions">动态指令</h2>
-<p>在大多数情况下，你可以在创建智能体时提供指令。不过，你也可以通过函数提供动态指令。该函数将接收智能体和上下文，并且必须返回提示词。普通函数和 <code>async</code> 函数均可接受。</p>
+<p>在大多数情况下，你可以在创建智能体时提供指令。不过，你也可以通过函数提供动态指令。该函数将接收智能体和上下文，并且必须返回提示词。常规函数和 <code>async</code> 函数均受支持。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunContextWrapper</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
-</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">def</span><span class="w"> </span><span class="nf">dynamic_instructions</span><span class="p">(</span>
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">context</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserContext</span><span class="p">],</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">]</span>
-</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user&#39;s name is </span><span class="si">{</span><span class="n">context</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">. Help them with their questions.&quot;</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="k">def</span><span class="w"> </span><span class="nf">dynamic_instructions</span><span class="p">(</span><span class="n">context</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserContext</span><span class="p">],</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user&#39;s name is </span><span class="si">{</span><span class="n">context</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">. Help them with their questions.&quot;</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>
 </span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>
-</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
-</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">](</span>
-</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
-</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">instructions</span><span class="o">=</span><span class="n">dynamic_instructions</span><span class="p">,</span>
-</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="p">)</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserContext</span><span class="p">](</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">instructions</span><span class="o">=</span><span class="n">dynamic_instructions</span><span class="p">,</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="lifecycle-events-hooks">生命周期事件（钩子）</h2>
 <p>有时，你可能希望观察智能体的生命周期。例如，你可能希望在特定事件发生时记录事件日志、预取数据或记录用量。</p>
@@ -2301,17 +2307,17 @@
 
   
       module-attribute
-  " href="../../ref/lifecycle/#agents.lifecycle.RunHooks"><code>RunHooks</code></a> 观察整个 <code>Runner.run(...)</code> 调用，包括向其他智能体进行的任务转移。</li>
+  " href="../../ref/lifecycle/#agents.lifecycle.RunHooks"><code>RunHooks</code></a> 用于观察整个 <code>Runner.run(...)</code> 调用，包括向其他智能体进行的任务转移。</li>
 <li><a class="autorefs autorefs-internal" title="AgentHooks
 
 
   
       module-attribute
-  " href="../../ref/lifecycle/#agents.lifecycle.AgentHooks"><code>AgentHooks</code></a> 通过 <code>agent.hooks</code> 附加到特定智能体实例。</li>
+  " href="../../ref/lifecycle/#agents.lifecycle.AgentHooks"><code>AgentHooks</code></a> 通过 <code>agent.hooks</code> 附加到特定的智能体实例。</li>
 </ul>
 <p>回调上下文也会随事件而变化：</p>
 <ul>
-<li>智能体开始/结束钩子接收 <a class="autorefs autorefs-internal" title="AgentHookContext
+<li>智能体启动/结束钩子接收 <a class="autorefs autorefs-internal" title="AgentHookContext
 
 
   
@@ -2326,12 +2332,12 @@
 </ul>
 <p>典型的钩子触发时机如下：</p>
 <ul>
-<li><code>on_agent_start</code>：特定智能体开始运行时；<code>on_agent_end</code>：该智能体完成最终输出时。</li>
-<li><code>on_llm_start</code> / <code>on_llm_end</code>：紧邻每次模型调用的前后触发。</li>
-<li><code>on_tool_start</code> / <code>on_tool_end</code>：在每次本地工具调用前后触发。对于函数工具，钩子 <code>context</code> 通常是 <code>ToolContext</code>，因此你可以检查工具调用元数据，例如 <code>tool_call_id</code>。</li>
+<li><code>on_agent_start</code>：特定智能体开始运行时；<code>on_agent_end</code>：该智能体完成最终输出生成时。</li>
+<li><code>on_llm_start</code> / <code>on_llm_end</code>：紧邻每次模型调用的前后。</li>
+<li><code>on_tool_start</code> / <code>on_tool_end</code>：每次本地工具调用的前后。对于函数工具，钩子 <code>context</code> 通常是 <code>ToolContext</code>，因此你可以检查工具调用元数据，例如 <code>tool_call_id</code>。</li>
 <li><code>on_handoff</code>：控制权从一个智能体转移到另一个智能体时。</li>
 </ul>
-<p>如果希望为整个工作流设置一个统一观察器，请使用 <code>RunHooks</code>；如果希望将生命周期回调限定到特定智能体，请使用 <code>AgentHooks</code>。</p>
+<p>如果你希望为整个工作流设置单一观察器，请使用 <code>RunHooks</code>；如果你希望将生命周期回调限定在特定智能体的作用域内，请使用 <code>AgentHooks</code>。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunHooks</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
 </span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
@@ -2352,9 +2358,9 @@
 </span></code></pre></div>
 <p>有关完整的回调接口，请参阅<a href="../ref/lifecycle/">生命周期 API 参考</a>。</p>
 <h2 id="guardrails">安全防护措施</h2>
-<p>安全防护措施允许你在智能体运行的同时并行检查/验证用户输入，并在智能体生成输出后对其进行检查/验证。例如，你可以筛查用户输入和智能体输出是否与任务相关。请在<a href="../guardrails/">安全防护措施</a>文档中了解更多信息。</p>
-<h2 id="cloningcopying-agents">智能体克隆与复制</h2>
-<p>通过在智能体上使用 <code>clone()</code> 方法，你可以复制一个智能体，并可选择更改任意属性。</p>
+<p>安全防护措施允许你在智能体运行的同时并行检查/验证用户输入，并在智能体生成输出后对其进行检查/验证。例如，你可以筛查用户输入和智能体输出的相关性。请阅读<a href="../guardrails/">安全防护措施</a>文档了解更多信息。</p>
+<h2 id="cloningcopying-agents">智能体克隆/复制</h2>
+<p>通过对智能体使用 <code>clone()</code> 方法，你可以复制一个智能体，并可选择更改任何所需属性。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">pirate_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Pirate&quot;</span><span class="p">,</span>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Write like a pirate&quot;</span><span class="p">,</span>
@@ -2366,6 +2372,7 @@
 </span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Write like a robot&quot;</span><span class="p">,</span>
 </span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="p">)</span>
 </span></code></pre></div>
+<p><code>clone()</code> 使用 <code>dataclasses.replace</code>，因此执行的是浅复制。任何未被覆盖的列表属性（例如 <code>tools</code>、<code>handoffs</code>、<code>mcp_servers</code>、<code>input_guardrails</code> 或 <code>output_guardrails</code>）仍然是原始智能体所持有的同一个列表。因此，通过任一智能体修改该列表都会影响两个智能体。若要让克隆出的智能体拥有独立的列表容器，请传入一个新列表，例如 <code>pirate_agent.clone(tools=[*pirate_agent.tools, extra_tool])</code>。复制到该新列表中的条目仍然是相同的工具或任务转移对象，除非你也替换这些条目。</p>
 <h2 id="forcing-tool-use">强制使用工具</h2>
 <p>提供工具列表并不总是意味着 LLM 会使用工具。你可以通过设置 <a class="autorefs autorefs-internal" title="tool_choice
 
@@ -2373,124 +2380,129 @@
   
       class-attribute
       instance-attribute
-  " href="../../ref/model_settings/#agents.model_settings.ModelSettings.tool_choice"><code>ModelSettings.tool_choice</code></a> 强制使用工具。有效值包括：</p>
+  " href="../../ref/model_settings/#agents.model_settings.ModelSettings.tool_choice"><code>ModelSettings.tool_choice</code></a> 强制使用工具。有效值如下：</p>
 <ol>
-<li><code>auto</code>，允许 LLM 决定是否使用工具。</li>
-<li><code>required</code>，要求 LLM 使用工具（但它可以智能决定使用哪个工具）。</li>
+<li><code>auto</code>，允许 LLM 自行决定是否使用工具。</li>
+<li><code>required</code>，要求 LLM 使用工具（但它可以智能地决定使用哪个工具）。</li>
 <li><code>none</code>，要求 LLM _不_使用工具。</li>
 <li>设置特定字符串，例如 <code>my_tool</code>，要求 LLM 使用该特定工具。</li>
 </ol>
-<p>使用 OpenAI Responses 工具搜索时，具名工具选项受到更多限制：不能通过 <code>tool_choice</code> 指定纯命名空间名称或仅延迟加载的工具，且 <code>tool_choice="tool_search"</code> 不会指定 <a class="autorefs autorefs-internal" title="ToolSearchTool
+<p>使用 OpenAI Responses 工具搜索时，具名工具选项限制更多：你无法使用 <code>tool_choice</code> 指定纯命名空间名称或仅延迟加载的工具，而且 <code>tool_choice="tool_search"</code> 无法指定 <a class="autorefs autorefs-internal" title="ToolSearchTool
 
 
   
       dataclass
-  " href="../../ref/tool/#agents.tool.ToolSearchTool"><code>ToolSearchTool</code></a>。在这些情况下，建议使用 <code>auto</code> 或 <code>required</code>。有关 Responses 特有的限制，请参阅<a href="../tools/#hosted-tool-search">托管工具搜索</a>。</p>
+  " href="../../ref/tool/#agents.tool.ToolSearchTool"><code>ToolSearchTool</code></a>。在这些情况下，优先使用 <code>auto</code> 或 <code>required</code>。有关 Responses 特有的限制，请参阅<a href="../tools/#hosted-tool-search">托管工具搜索</a>。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ModelSettings</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>
-</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="nd">@tool</span>
-</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
-</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
-</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>
-</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
-</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-11-13"><a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">tool_choice</span><span class="o">=</span><span class="s2">&quot;get_weather&quot;</span><span class="p">)</span>
-</span><span id="__span-11-14"><a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a><span class="p">)</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="nd">@tool</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
+</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>
+</span><span id="__span-11-10"><a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+</span><span id="__span-11-11"><a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-11-12"><a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-11-13"><a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
+</span><span id="__span-11-14"><a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-11-15"><a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a>    <span class="n">model_settings</span><span class="o">=</span><span class="n">ModelSettings</span><span class="p">(</span><span class="n">tool_choice</span><span class="o">=</span><span class="s2">&quot;get_weather&quot;</span><span class="p">),</span>
+</span><span id="__span-11-16"><a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="tool-use-behavior">工具使用行为</h2>
 <p><code>Agent</code> 配置中的 <code>tool_use_behavior</code> 参数控制工具输出的处理方式：</p>
 <ul>
-<li><code>"run_llm_again"</code>：默认行为。运行工具后，由 LLM 处理结果并生成最终响应。</li>
-<li><code>"stop_on_first_tool"</code>：将第一次工具调用的输出用作最终响应，不再由 LLM 进行后续处理。</li>
+<li><code>"run_llm_again"</code>：默认值。运行工具后，由 LLM 处理结果并生成最终响应。</li>
+<li><code>"stop_on_first_tool"</code>：将第一次工具调用的输出用作最终响应，不再由 LLM 进一步处理。</li>
 </ul>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="nd">@tool</span>
-</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
-</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
-</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>
-</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
-</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="s2">&quot;stop_on_first_tool&quot;</span>
-</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="p">)</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="nd">@tool</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="s2">&quot;stop_on_first_tool&quot;</span><span class="p">,</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="p">)</span>
 </span></code></pre></div>
 <ul>
-<li><code>StopAtTools(stop_at_tool_names=[...])</code>：如果调用了任一指定工具，则停止运行，并将其输出用作最终响应。</li>
+<li><code>StopAtTools(stop_at_tool_names=[...])</code>：如果调用了任何指定工具，则停止运行，并将其输出用作最终响应。</li>
 </ul>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.agent</span><span class="w"> </span><span class="kn">import</span> <span class="n">StopAtTools</span>
 </span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>
-</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="nd">@tool</span>
-</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
-</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
-</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>
-</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="nd">@tool</span>
-</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="k">def</span><span class="w"> </span><span class="nf">sum_numbers</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Adds two numbers.&quot;&quot;&quot;</span>
-</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a>    <span class="k">return</span> <span class="n">a</span> <span class="o">+</span> <span class="n">b</span>
-</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a>
-</span><span id="__span-13-15"><a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-13-16"><a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Stop At Stock Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-13-17"><a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Get weather or sum numbers.&quot;</span><span class="p">,</span>
-</span><span id="__span-13-18"><a id="__codelineno-13-18" name="__codelineno-13-18" href="#__codelineno-13-18"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">,</span> <span class="n">sum_numbers</span><span class="p">],</span>
-</span><span id="__span-13-19"><a id="__codelineno-13-19" name="__codelineno-13-19" href="#__codelineno-13-19"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="n">StopAtTools</span><span class="p">(</span><span class="n">stop_at_tool_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;get_weather&quot;</span><span class="p">])</span>
-</span><span id="__span-13-20"><a id="__codelineno-13-20" name="__codelineno-13-20" href="#__codelineno-13-20"></a><span class="p">)</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="nd">@tool</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a>
+</span><span id="__span-13-11"><a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a>
+</span><span id="__span-13-12"><a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a><span class="nd">@tool</span>
+</span><span id="__span-13-13"><a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">sum_numbers</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+</span><span id="__span-13-14"><a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Adds two numbers.&quot;&quot;&quot;</span>
+</span><span id="__span-13-15"><a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a>    <span class="k">return</span> <span class="n">a</span> <span class="o">+</span> <span class="n">b</span>
+</span><span id="__span-13-16"><a id="__codelineno-13-16" name="__codelineno-13-16" href="#__codelineno-13-16"></a>
+</span><span id="__span-13-17"><a id="__codelineno-13-17" name="__codelineno-13-17" href="#__codelineno-13-17"></a>
+</span><span id="__span-13-18"><a id="__codelineno-13-18" name="__codelineno-13-18" href="#__codelineno-13-18"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-13-19"><a id="__codelineno-13-19" name="__codelineno-13-19" href="#__codelineno-13-19"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Stop At Stock Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-13-20"><a id="__codelineno-13-20" name="__codelineno-13-20" href="#__codelineno-13-20"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Get weather or sum numbers.&quot;</span><span class="p">,</span>
+</span><span id="__span-13-21"><a id="__codelineno-13-21" name="__codelineno-13-21" href="#__codelineno-13-21"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">,</span> <span class="n">sum_numbers</span><span class="p">],</span>
+</span><span id="__span-13-22"><a id="__codelineno-13-22" name="__codelineno-13-22" href="#__codelineno-13-22"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="n">StopAtTools</span><span class="p">(</span><span class="n">stop_at_tool_names</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;get_weather&quot;</span><span class="p">]),</span>
+</span><span id="__span-13-23"><a id="__codelineno-13-23" name="__codelineno-13-23" href="#__codelineno-13-23"></a><span class="p">)</span>
 </span></code></pre></div>
 <ul>
-<li><code>ToolsToFinalOutputFunction</code>：自定义函数，用于处理工具结果，并决定是以最终输出结束运行，还是让 LLM 继续处理。</li>
+<li><code>ToolsToFinalOutputFunction</code>：自定义函数，用于处理工具结果，并决定是以最终输出结束运行，还是继续由 LLM 处理。</li>
 </ul>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">FunctionToolResult</span><span class="p">,</span> <span class="n">RunContextWrapper</span>
 </span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.agent</span><span class="w"> </span><span class="kn">import</span> <span class="n">ToolsToFinalOutputResult</span>
 </span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">List</span><span class="p">,</span> <span class="n">Any</span>
 </span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>
-</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="nd">@tool</span>
-</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
-</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
-</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a>
-</span><span id="__span-14-11"><a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a><span class="k">def</span><span class="w"> </span><span class="nf">custom_tool_handler</span><span class="p">(</span>
-</span><span id="__span-14-12"><a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a>    <span class="n">context</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-14-13"><a id="__codelineno-14-13" name="__codelineno-14-13" href="#__codelineno-14-13"></a>    <span class="n">tool_results</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">FunctionToolResult</span><span class="p">]</span>
-</span><span id="__span-14-14"><a id="__codelineno-14-14" name="__codelineno-14-14" href="#__codelineno-14-14"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">:</span>
-</span><span id="__span-14-15"><a id="__codelineno-14-15" name="__codelineno-14-15" href="#__codelineno-14-15"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Processes tool results to decide final output.&quot;&quot;&quot;</span>
-</span><span id="__span-14-16"><a id="__codelineno-14-16" name="__codelineno-14-16" href="#__codelineno-14-16"></a>    <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">tool_results</span><span class="p">:</span>
-</span><span id="__span-14-17"><a id="__codelineno-14-17" name="__codelineno-14-17" href="#__codelineno-14-17"></a>        <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">output</span> <span class="ow">and</span> <span class="s2">&quot;sunny&quot;</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="p">:</span>
-</span><span id="__span-14-18"><a id="__codelineno-14-18" name="__codelineno-14-18" href="#__codelineno-14-18"></a>            <span class="k">return</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">(</span>
-</span><span id="__span-14-19"><a id="__codelineno-14-19" name="__codelineno-14-19" href="#__codelineno-14-19"></a>                <span class="n">is_final_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
-</span><span id="__span-14-20"><a id="__codelineno-14-20" name="__codelineno-14-20" href="#__codelineno-14-20"></a>                <span class="n">final_output</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Final weather: </span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="si">}</span><span class="s2">&quot;</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="nd">@tool</span>
+</span><span id="__span-14-8"><a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-14-9"><a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Returns weather info for the specified city.&quot;&quot;&quot;</span>
+</span><span id="__span-14-10"><a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny&quot;</span>
+</span><span id="__span-14-11"><a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a>
+</span><span id="__span-14-12"><a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a>
+</span><span id="__span-14-13"><a id="__codelineno-14-13" name="__codelineno-14-13" href="#__codelineno-14-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">custom_tool_handler</span><span class="p">(</span>
+</span><span id="__span-14-14"><a id="__codelineno-14-14" name="__codelineno-14-14" href="#__codelineno-14-14"></a>    <span class="n">context</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">tool_results</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">FunctionToolResult</span><span class="p">]</span>
+</span><span id="__span-14-15"><a id="__codelineno-14-15" name="__codelineno-14-15" href="#__codelineno-14-15"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">:</span>
+</span><span id="__span-14-16"><a id="__codelineno-14-16" name="__codelineno-14-16" href="#__codelineno-14-16"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Processes tool results to decide final output.&quot;&quot;&quot;</span>
+</span><span id="__span-14-17"><a id="__codelineno-14-17" name="__codelineno-14-17" href="#__codelineno-14-17"></a>    <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">tool_results</span><span class="p">:</span>
+</span><span id="__span-14-18"><a id="__codelineno-14-18" name="__codelineno-14-18" href="#__codelineno-14-18"></a>        <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">output</span> <span class="ow">and</span> <span class="s2">&quot;sunny&quot;</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="p">:</span>
+</span><span id="__span-14-19"><a id="__codelineno-14-19" name="__codelineno-14-19" href="#__codelineno-14-19"></a>            <span class="k">return</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">(</span>
+</span><span id="__span-14-20"><a id="__codelineno-14-20" name="__codelineno-14-20" href="#__codelineno-14-20"></a>                <span class="n">is_final_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">final_output</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Final weather: </span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">output</span><span class="si">}</span><span class="s2">&quot;</span>
 </span><span id="__span-14-21"><a id="__codelineno-14-21" name="__codelineno-14-21" href="#__codelineno-14-21"></a>            <span class="p">)</span>
-</span><span id="__span-14-22"><a id="__codelineno-14-22" name="__codelineno-14-22" href="#__codelineno-14-22"></a>    <span class="k">return</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">(</span>
-</span><span id="__span-14-23"><a id="__codelineno-14-23" name="__codelineno-14-23" href="#__codelineno-14-23"></a>        <span class="n">is_final_output</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-</span><span id="__span-14-24"><a id="__codelineno-14-24" name="__codelineno-14-24" href="#__codelineno-14-24"></a>        <span class="n">final_output</span><span class="o">=</span><span class="kc">None</span>
-</span><span id="__span-14-25"><a id="__codelineno-14-25" name="__codelineno-14-25" href="#__codelineno-14-25"></a>    <span class="p">)</span>
-</span><span id="__span-14-26"><a id="__codelineno-14-26" name="__codelineno-14-26" href="#__codelineno-14-26"></a>
-</span><span id="__span-14-27"><a id="__codelineno-14-27" name="__codelineno-14-27" href="#__codelineno-14-27"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-14-28"><a id="__codelineno-14-28" name="__codelineno-14-28" href="#__codelineno-14-28"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-14-29"><a id="__codelineno-14-29" name="__codelineno-14-29" href="#__codelineno-14-29"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
-</span><span id="__span-14-30"><a id="__codelineno-14-30" name="__codelineno-14-30" href="#__codelineno-14-30"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-14-31"><a id="__codelineno-14-31" name="__codelineno-14-31" href="#__codelineno-14-31"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="n">custom_tool_handler</span>
-</span><span id="__span-14-32"><a id="__codelineno-14-32" name="__codelineno-14-32" href="#__codelineno-14-32"></a><span class="p">)</span>
+</span><span id="__span-14-22"><a id="__codelineno-14-22" name="__codelineno-14-22" href="#__codelineno-14-22"></a>    <span class="k">return</span> <span class="n">ToolsToFinalOutputResult</span><span class="p">(</span><span class="n">is_final_output</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">final_output</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-14-23"><a id="__codelineno-14-23" name="__codelineno-14-23" href="#__codelineno-14-23"></a>
+</span><span id="__span-14-24"><a id="__codelineno-14-24" name="__codelineno-14-24" href="#__codelineno-14-24"></a>
+</span><span id="__span-14-25"><a id="__codelineno-14-25" name="__codelineno-14-25" href="#__codelineno-14-25"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-14-26"><a id="__codelineno-14-26" name="__codelineno-14-26" href="#__codelineno-14-26"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-14-27"><a id="__codelineno-14-27" name="__codelineno-14-27" href="#__codelineno-14-27"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Retrieve weather details.&quot;</span><span class="p">,</span>
+</span><span id="__span-14-28"><a id="__codelineno-14-28" name="__codelineno-14-28" href="#__codelineno-14-28"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-14-29"><a id="__codelineno-14-29" name="__codelineno-14-29" href="#__codelineno-14-29"></a>    <span class="n">tool_use_behavior</span><span class="o">=</span><span class="n">custom_tool_handler</span><span class="p">,</span>
+</span><span id="__span-14-30"><a id="__codelineno-14-30" name="__codelineno-14-30" href="#__codelineno-14-30"></a><span class="p">)</span>
 </span></code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>为防止无限循环，框架会在工具调用后自动将 <code>tool_choice</code> 重置为“auto”。此行为可通过 <a class="autorefs autorefs-internal" title="reset_tool_choice
+<p>为防止无限循环，框架会在工具调用后自动将 <code>tool_choice</code> 重置为 "auto"。可以通过 <a class="autorefs autorefs-internal" title="reset_tool_choice
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/agent/#agents.agent.Agent.reset_tool_choice"><code>agent.reset_tool_choice</code></a> 配置。产生无限循环的原因是工具结果会发送给 LLM，而 LLM 随后会由于 <code>tool_choice</code> 再次生成工具调用，如此无限重复。</p>
+  " href="../../ref/agent/#agents.agent.Agent.reset_tool_choice"><code>agent.reset_tool_choice</code></a> 配置此行为。之所以会发生无限循环，是因为工具结果会发送给 LLM，而 LLM 随后又会由于 <code>tool_choice</code> 生成另一个工具调用，如此无限重复。</p>
 </div>
 
 

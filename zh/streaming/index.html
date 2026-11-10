@@ -811,7 +811,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -959,7 +959,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1207,7 +1207,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1778,69 +1778,70 @@
 
 <h1 id="_1">流式传输</h1>
 <p>流式传输允许你订阅智能体运行过程中的更新。这对于向最终用户展示进度更新和部分响应非常有用。</p>
-<p>要进行流式传输，你可以调用 <a class="autorefs autorefs-internal" title="run_streamed
+<p>要进行流式传输，可以调用 <a class="autorefs autorefs-internal" title="run_streamed
 
 
   
       classmethod
-  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed()</code></a>，它会返回一个 <a class="autorefs autorefs-internal" title="RunResultStreaming
+  " href="../../ref/run/#agents.run.Runner.run_streamed"><code>Runner.run_streamed()</code></a>，它会返回 <a class="autorefs autorefs-internal" title="RunResultStreaming
 
 
   
       dataclass
-  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a>。调用 <code>result.stream_events()</code> 可获得由 <a class="autorefs autorefs-internal" title="StreamEvent
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a>。调用 <code>result.stream_events()</code> 会得到由 <a class="autorefs autorefs-internal" title="StreamEvent
 
 
   
       module-attribute
   " href="../../ref/stream_events/#agents.stream_events.StreamEvent"><code>StreamEvent</code></a> 对象组成的异步流，具体说明如下。</p>
-<p>持续使用 <code>result.stream_events()</code> 进行消费，直到异步迭代器结束。只有迭代器结束后，流式运行才算完成；会话持久化、审批记录维护或历史压缩等后处理可能会在最后一个可见 token 到达后才完成。当循环退出时，<code>result.is_complete</code> 会反映最终的运行状态。</p>
+<p>持续消费 <code>result.stream_events()</code>，直到异步迭代器结束。流式运行只有在迭代器结束后才算完成；会话持久化、审批记录维护或历史记录压缩等后处理操作，可能会在最后一个可见 token 到达后才完成。循环退出时，<code>result.is_complete</code> 会反映最终的运行状态。</p>
 <h2 id="raw-response-events">原始响应事件</h2>
 <p><a class="autorefs autorefs-internal" title="RawResponsesStreamEvent
 
 
   
       dataclass
-  " href="../../ref/stream_events/#agents.stream_events.RawResponsesStreamEvent"><code>RawResponsesStreamEvent</code></a> 对象封装了直接从 LLM 传递的原始事件。每个对象的 <code>data</code> 字段都包含一个 OpenAI Responses API 事件，其类型可能是 <code>response.created</code> 或 <code>response.output_text.delta</code>。如果你希望响应消息一经生成就立即以流式方式发送给用户，这些事件会非常有用。</p>
-<p>计算机工具的原始事件与已存储结果保持相同的预览版与正式发布版之分。预览版流程会流式传输带有一个 <code>action</code> 的 <code>computer_call</code> 条目，而 <code>gpt-5.5</code> 可以流式传输带有批量 <code>actions[]</code> 的 <code>computer_call</code> 条目。更高层级的 <a class="autorefs autorefs-internal" title="RunItemStreamEvent
+  " href="../../ref/stream_events/#agents.stream_events.RawResponsesStreamEvent"><code>RawResponsesStreamEvent</code></a> 对象封装了直接从 LLM 传递的原始事件。每个对象的 <code>data</code> 字段都包含一个 OpenAI Responses API 事件，其类型可能是 <code>response.created</code> 或 <code>response.output_text.delta</code>。如果你希望响应消息生成后立即以流式方式发送给用户，这些事件会很有用。</p>
+<p>计算机工具的原始事件与存储的结果一样，保留了预览版与 GA 版之间的区别。预览版流程会流式传输包含单个 <code>action</code> 的 <code>computer_call</code> 条目，而 <code>gpt-5.5</code> 可以流式传输包含批量 <code>actions[]</code> 的 <code>computer_call</code> 条目。更高层级的 <a class="autorefs autorefs-internal" title="RunItemStreamEvent
 
 
   
       dataclass
-  " href="../../ref/stream_events/#agents.stream_events.RunItemStreamEvent"><code>RunItemStreamEvent</code></a> 接口不会为此添加计算机工具专用的特殊事件名称：这两种结构仍然都以 <code>tool_called</code> 的形式呈现，而截图结果会以封装 <code>computer_call_output</code> 条目的 <code>tool_output</code> 形式返回。</p>
+  " href="../../ref/stream_events/#agents.stream_events.RunItemStreamEvent"><code>RunItemStreamEvent</code></a> 接口不会为此添加计算机工具专用的特殊事件名称：这两种形式仍然都以 <code>tool_called</code> 的形式呈现，而截图结果则以封装 <code>computer_call_output</code> 条目的 <code>tool_output</code> 形式返回。</p>
 <p>例如，以下代码会逐 token 输出 LLM 生成的文本。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai.types.responses</span><span class="w"> </span><span class="kn">import</span> <span class="n">ResponseTextDeltaEvent</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Joker&quot;</span><span class="p">,</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful assistant.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="p">)</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_streamed</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Please tell me 5 jokes.&quot;</span><span class="p">)</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;raw_response_event&quot;</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">ResponseTextDeltaEvent</span><span class="p">):</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>            <span class="nb">print</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">delta</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Joker&quot;</span><span class="p">,</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful assistant.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="p">)</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_streamed</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Please tell me 5 jokes.&quot;</span><span class="p">)</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;raw_response_event&quot;</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">ResponseTextDeltaEvent</span><span class="p">):</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>            <span class="nb">print</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">delta</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 </span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <h2 id="streaming-and-approvals">流式传输与审批</h2>
-<p>流式传输与因工具审批而暂停的运行兼容。如果工具需要审批，<code>result.stream_events()</code> 会结束，待处理的审批则会在 <a class="autorefs autorefs-internal" title="interruptions
+<p>流式传输与因工具审批而暂停的运行兼容。如果某个工具需要审批，<code>result.stream_events()</code> 会结束，待处理的审批会显示在 <a class="autorefs autorefs-internal" title="interruptions
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> 中公开。使用 <code>result.to_state()</code> 将结果转换为 <a class="autorefs autorefs-internal" title="RunState
+  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> 中。使用 <code>result.to_state()</code> 将结果转换为 <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>，批准或拒绝中断，然后使用 <code>Runner.run_streamed(...)</code> 恢复运行。</p>
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>，批准或拒绝该中断，然后使用 <code>Runner.run_streamed(...)</code> 恢复运行。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_streamed</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Delete temporary files if they are no longer needed.&quot;</span><span class="p">)</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">async</span> <span class="k">for</span> <span class="n">_event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="k">pass</span>
@@ -1853,21 +1854,21 @@
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="k">async</span> <span class="k">for</span> <span class="n">_event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>        <span class="k">pass</span>
 </span></code></pre></div>
-<p>有关完整的暂停和恢复操作流程，请参阅<a href="../human_in_the_loop/">人在回路指南</a>。</p>
+<p>有关完整的暂停/恢复演示，请参阅<a href="../human_in_the_loop/">人在回路指南</a>。</p>
 <h2 id="cancel-streaming-after-the-current-turn">当前轮次结束后的流式传输取消</h2>
-<p>如果需要中途停止流式运行，请调用 <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>result.cancel()</code></a>。默认情况下，这会立即停止运行。要让当前轮次正常完成后再停止，请改为调用 <code>result.cancel(mode="after_turn")</code>。</p>
-<p>只有 <code>result.stream_events()</code> 结束后，流式运行才算完成。在最后一个可见 token 到达后，SDK 可能仍在持久化会话条目、确定最终审批状态或压缩历史记录。</p>
-<p>如果你正从 <a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>result.to_input_list(mode="normalized")</code></a> 手动继续，并且 <code>cancel(mode="after_turn")</code> 在某个工具轮次后停止，请使用该规范化输入重新运行 <code>result.last_agent</code>，以继续尚未完成的现有用户轮次，而不是立即追加一个新的用户轮次。</p>
+<p>如果需要中途停止流式运行，请调用 <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>result.cancel()</code></a>。默认情况下，这会立即停止运行。若要让当前轮次完整结束后再停止，请改为调用 <code>result.cancel(mode="after_turn")</code>。</p>
+<p>流式运行只有在 <code>result.stream_events()</code> 结束后才算完成。在最后一个可见 token 到达后，SDK 可能仍在持久化会话条目、最终确定审批状态或压缩历史记录。</p>
+<p>如果你要从 <a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>result.to_input_list(mode="normalized")</code></a> 手动继续，并且 <code>cancel(mode="after_turn")</code> 在某个工具轮次后停止，请使用该规范化输入重新运行 <code>result.last_agent</code>，以继续尚未完成的现有用户轮次，而不是立即追加一个新的用户轮次。</p>
 <ul>
-<li>如果在该未完成的运行恢复前收到了新的用户输入，请使用 <code>result.to_state()</code> 转换已消费完毕的结果，调用 <a class="autorefs autorefs-internal" title="add_input" href="../../ref/run_state/#agents.run_state.RunState.add_input"><code>state.add_input(...)</code></a>，然后从该状态恢复运行。运行器会在下一次模型调用前立即接纳暂存的输入；请参阅<a href="../results/#add-input-before-resuming">恢复前添加输入</a>。</li>
-<li>如果流式运行因工具审批而停止，请勿将其视为新轮次。应先将流消费完毕，检查 <code>result.interruptions</code>，然后改为从 <code>result.to_state()</code> 恢复运行。</li>
+<li>如果在尚未完成的运行恢复前收到了新的用户输入，请使用 <code>result.to_state()</code> 转换已消费完毕的结果，调用 <a class="autorefs autorefs-internal" title="add_input" href="../../ref/run_state/#agents.run_state.RunState.add_input"><code>state.add_input(...)</code></a>，然后从该状态恢复。运行器会在下一次模型调用之前立即接纳暂存的输入；请参阅<a href="../results/#add-input-before-resuming">恢复前添加输入</a>。</li>
+<li>如果流式运行因工具审批而停止，请勿将其视为新的轮次。请先完成流的消费，再检查 <code>result.interruptions</code>，然后从 <code>result.to_state()</code> 恢复。</li>
 <li>使用 <a class="autorefs autorefs-internal" title="session_input_callback
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.session_input_callback"><code>RunConfig.session_input_callback</code></a> 自定义如何在下一次模型调用前合并检索到的会话历史与新的用户输入。如果你在此处重写新轮次条目，则重写后的版本会作为该轮次的持久化内容。</li>
+  " href="../../ref/run/#agents.run.RunConfig.session_input_callback"><code>RunConfig.session_input_callback</code></a> 可以自定义如何在下一次模型调用前合并检索到的会话历史记录与新的用户输入。如果你在此处重写了新轮次的条目，则该轮次持久化保存的将是重写后的版本。</li>
 </ul>
 <h2 id="run-item-events-and-agent-events">运行条目事件与智能体事件</h2>
 <p><a class="autorefs autorefs-internal" title="RunItemStreamEvent
@@ -1875,12 +1876,12 @@
 
   
       dataclass
-  " href="../../ref/stream_events/#agents.stream_events.RunItemStreamEvent"><code>RunItemStreamEvent</code></a> 是更高层级的事件。它们会在条目完全生成后通知你。这样，你便可以按“消息已生成”“工具已运行”等粒度推送进度更新，而不是按每个 token 推送。同样，<a class="autorefs autorefs-internal" title="AgentUpdatedStreamEvent
+  " href="../../ref/stream_events/#agents.stream_events.RunItemStreamEvent"><code>RunItemStreamEvent</code></a> 是更高层级的事件。它们会在一个条目完全生成后通知你。这样一来，你便可以在“消息已生成”“工具已运行”等层级推送进度更新，而不是逐 token 推送。同样，<a class="autorefs autorefs-internal" title="AgentUpdatedStreamEvent
 
 
   
       dataclass
-  " href="../../ref/stream_events/#agents.stream_events.AgentUpdatedStreamEvent"><code>AgentUpdatedStreamEvent</code></a> 会在当前智能体发生变化时向你提供更新（例如，因任务转移而发生变化）。</p>
+  " href="../../ref/stream_events/#agents.stream_events.AgentUpdatedStreamEvent"><code>AgentUpdatedStreamEvent</code></a> 会在当前智能体发生变化时向你提供更新（例如，由任务转移引起的变化）。</p>
 <h3 id="run-item-event-names">运行条目事件名称</h3>
 <p><code>RunItemStreamEvent.name</code> 使用一组固定的语义事件名称：</p>
 <ul>
@@ -1896,10 +1897,10 @@
 <li><code>mcp_approval_response</code></li>
 <li><code>mcp_list_tools</code></li>
 </ul>
-<p>为保持向后兼容，<code>handoff_occured</code> 特意保留了拼写错误。</p>
-<p>任务转移调用只会以 <code>handoff_requested</code> 的形式发出，不会同时以 <code>tool_called</code> 的形式发出。同一轮次中的普通函数工具调用仍会发出 <code>tool_called</code>。</p>
-<p>使用托管工具检索时，当模型发出工具检索请求，会发出 <code>tool_search_called</code>；当 Responses API 返回已加载的子集时，会发出 <code>tool_search_output_created</code>。</p>
-<p>使用程序化工具调用时，系统会为生成的 <code>program</code> 以及由程序拥有的普通子工具调用发出 <code>tool_called</code>。系统会为子工具输出以及与生成的 <code>program</code> 相匹配的 <code>program_output</code> 发出 <code>tool_output</code>。由程序拥有的托管 MCP <code>mcp_approval_request</code> 和 <code>mcp_list_tools</code> 条目属于例外：它们会分别以 <code>mcp_approval_requested</code> 和 <code>mcp_list_tools</code> 的形式发出，并分别封装 <a class="autorefs autorefs-internal" title="MCPApprovalRequestItem
+<p>为了向后兼容，<code>handoff_occured</code> 被有意拼错。</p>
+<p>任务转移调用仅以 <code>handoff_requested</code> 的形式发出；它不会同时以 <code>tool_called</code> 的形式发出。同一轮次中的普通函数工具调用仍会发出 <code>tool_called</code>。</p>
+<p>使用托管工具搜索时，模型发出工具搜索请求时会发出 <code>tool_search_called</code>，而 Responses API 返回已加载的子集时会发出 <code>tool_search_output_created</code>。</p>
+<p>使用程序化工具调用时，系统会为生成的 <code>program</code> 以及由程序发起的普通子工具调用发出 <code>tool_called</code>。系统会为子工具输出以及与生成的 <code>program</code> 相匹配的 <code>program_output</code> 发出 <code>tool_output</code>。由程序发起的托管 MCP <code>mcp_approval_request</code> 和 <code>mcp_list_tools</code> 条目属于例外：它们分别以 <code>mcp_approval_requested</code> 和 <code>mcp_list_tools</code> 的形式发出，并分别封装 <a class="autorefs autorefs-internal" title="MCPApprovalRequestItem
 
 
   
@@ -1909,55 +1910,56 @@
 
   
       dataclass
-  " href="../../ref/items/#agents.items.MCPListToolsItem"><code>MCPListToolsItem</code></a>。检查原始条目的 <code>type</code> 以区分其余条目；由程序拥有的子调用还带有一个类型为 <code>program</code> 的 <code>caller</code>，其调用方 ID 用于标识父程序。</p>
+  " href="../../ref/items/#agents.items.MCPListToolsItem"><code>MCPListToolsItem</code></a>。检查原始条目的 <code>type</code> 以区分其余条目；由程序发起的子调用还会携带一个类型为 <code>program</code> 的 <code>caller</code>，其调用方 ID 用于标识父程序。</p>
 <p>例如，以下代码会忽略原始事件，并以流式方式向用户发送更新。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">ItemHelpers</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="nd">@tool</span>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">def</span><span class="w"> </span><span class="nf">how_many_jokes</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="k">return</span> <span class="n">random</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
-</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="nd">@tool</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="k">def</span><span class="w"> </span><span class="nf">how_many_jokes</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="k">return</span> <span class="n">random</span><span class="o">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
 </span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>
-</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Joker&quot;</span><span class="p">,</span>
-</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>        <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;First call the `how_many_jokes` tool, then tell that many jokes.&quot;</span><span class="p">,</span>
-</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">how_many_jokes</span><span class="p">],</span>
-</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>    <span class="p">)</span>
-</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>
-</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_streamed</span><span class="p">(</span>
-</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>        <span class="n">agent</span><span class="p">,</span>
-</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
-</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>    <span class="p">)</span>
-</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=== Run starting ===&quot;</span><span class="p">)</span>
-</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>
-</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
-</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>        <span class="c1"># We&#39;ll ignore the raw responses event deltas</span>
-</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;raw_response_event&quot;</span><span class="p">:</span>
-</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>            <span class="k">continue</span>
-</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>        <span class="c1"># When the agent updates, print that</span>
-</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>        <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;agent_updated_stream_event&quot;</span><span class="p">:</span>
-</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Agent updated: </span><span class="si">{</span><span class="n">event</span><span class="o">.</span><span class="n">new_agent</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a>            <span class="k">continue</span>
-</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>        <span class="c1"># When items are generated, print them</span>
-</span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a>        <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;run_item_stream_event&quot;</span><span class="p">:</span>
-</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>            <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;tool_call_item&quot;</span><span class="p">:</span>
-</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>                <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;-- Tool was called&quot;</span><span class="p">)</span>
-</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>            <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;tool_call_output_item&quot;</span><span class="p">:</span>
-</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-- Tool output: </span><span class="si">{</span><span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">output</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>            <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;message_output_item&quot;</span><span class="p">:</span>
-</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a>                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-- Message output:</span><span class="se">\n</span><span class="s2"> </span><span class="si">{</span><span class="n">ItemHelpers</span><span class="o">.</span><span class="n">text_message_output</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>            <span class="k">else</span><span class="p">:</span>
-</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a>                <span class="k">pass</span>  <span class="c1"># Ignore other event types</span>
-</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>
-</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=== Run complete ===&quot;</span><span class="p">)</span>
-</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Joker&quot;</span><span class="p">,</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>        <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;First call the `how_many_jokes` tool, then tell that many jokes.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">how_many_jokes</span><span class="p">],</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>    <span class="p">)</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>    <span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_streamed</span><span class="p">(</span>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>        <span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;Hello&quot;</span><span class="p">,</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    <span class="p">)</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=== Run starting ===&quot;</span><span class="p">)</span>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>    <span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream_events</span><span class="p">():</span>
+</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>        <span class="c1"># We&#39;ll ignore the raw responses event deltas</span>
+</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;raw_response_event&quot;</span><span class="p">:</span>
+</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>            <span class="k">continue</span>
+</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>        <span class="c1"># When the agent updates, print that</span>
+</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>        <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;agent_updated_stream_event&quot;</span><span class="p">:</span>
+</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a>            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Agent updated: </span><span class="si">{</span><span class="n">event</span><span class="o">.</span><span class="n">new_agent</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>            <span class="k">continue</span>
+</span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a>        <span class="c1"># When items are generated, print them</span>
+</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>        <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;run_item_stream_event&quot;</span><span class="p">:</span>
+</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>            <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;tool_call_item&quot;</span><span class="p">:</span>
+</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>                <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;-- Tool was called&quot;</span><span class="p">)</span>
+</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>            <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;tool_call_output_item&quot;</span><span class="p">:</span>
+</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-- Tool output: </span><span class="si">{</span><span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">output</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a>            <span class="k">elif</span> <span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;message_output_item&quot;</span><span class="p">:</span>
+</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>                <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;-- Message output:</span><span class="se">\n</span><span class="s2"> </span><span class="si">{</span><span class="n">ItemHelpers</span><span class="o">.</span><span class="n">text_message_output</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">item</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a>            <span class="k">else</span><span class="p">:</span>
+</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>                <span class="k">pass</span>  <span class="c1"># Ignore other event types</span>
+</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>
+</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=== Run complete ===&quot;</span><span class="p">)</span>
 </span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>
-</span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 
 

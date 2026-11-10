@@ -811,7 +811,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -959,7 +959,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1099,7 +1099,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1364,7 +1364,7 @@
   <a href="#use-local-context-for-capability-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        本地上下文在能力可见性方面的使用
+        能力可见性中的本地上下文用法
       
     </span>
   </a>
@@ -1375,7 +1375,7 @@
   <a href="#what-runcontextwrapper-exposes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        RunContextWrapper 公开的内容
+        RunContextWrapper 提供的内容
       
     </span>
   </a>
@@ -1386,7 +1386,7 @@
   <a href="#advanced-toolcontext" class="md-nav__link">
     <span class="md-ellipsis">
       
-        高级功能：ToolContext
+        高级用法：ToolContext
       
     </span>
   </a>
@@ -1402,7 +1402,7 @@
   <a href="#agentllm-context" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体/LLM 上下文
+        智能体/LLM上下文
       
     </span>
   </a>
@@ -1663,7 +1663,7 @@
   <a href="#use-local-context-for-capability-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        本地上下文在能力可见性方面的使用
+        能力可见性中的本地上下文用法
       
     </span>
   </a>
@@ -1674,7 +1674,7 @@
   <a href="#what-runcontextwrapper-exposes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        RunContextWrapper 公开的内容
+        RunContextWrapper 提供的内容
       
     </span>
   </a>
@@ -1685,7 +1685,7 @@
   <a href="#advanced-toolcontext" class="md-nav__link">
     <span class="md-ellipsis">
       
-        高级功能：ToolContext
+        高级用法：ToolContext
       
     </span>
   </a>
@@ -1701,7 +1701,7 @@
   <a href="#agentllm-context" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体/LLM 上下文
+        智能体/LLM上下文
       
     </span>
   </a>
@@ -1777,10 +1777,10 @@
 
 
 <h1 id="_1">上下文管理</h1>
-<p>上下文是一个含义多重的术语。你可能会关注两大类上下文：</p>
+<p>上下文是一个含义多样的术语。你可能需要关注两类主要的上下文：</p>
 <ol>
-<li>代码在本地可用的上下文：即工具函数运行时、<code>on_handoff</code> 等回调中、生命周期钩子中可能需要的数据和依赖项。</li>
-<li>LLM 可用的上下文：即 LLM 在生成响应时可以看到的数据。</li>
+<li>代码本地可用的上下文：这是工具函数运行、执行 <code>on_handoff</code> 等回调、调用生命周期钩子时可能需要的数据和依赖项。</li>
+<li>LLM 可用的上下文：这是 LLM 生成响应时能够看到的数据。</li>
 </ol>
 <h2 id="local-context">本地上下文</h2>
 <p>本地上下文通过 <a class="autorefs autorefs-internal" title="RunContextWrapper
@@ -1795,25 +1795,25 @@
       instance-attribute
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>context</code></a> 属性表示。其工作方式如下：</p>
 <ol>
-<li>创建任意所需的 Python 对象。常见做法是使用 dataclass 或 Pydantic 对象。</li>
-<li>将该对象传递给各种运行方法（例如 <code>Runner.run(..., context=whatever)</code>）。</li>
-<li>所有工具调用、生命周期钩子等都会收到一个包装器对象 <code>RunContextWrapper[T]</code>，其中 <code>T</code> 表示上下文对象的类型；可以通过 <code>wrapper.context</code> 访问该对象本身。</li>
+<li>创建任意 Python 对象。常见做法是使用数据类或 Pydantic 对象。</li>
+<li>将该对象传给各种运行方法（例如 <code>Runner.run(..., context=whatever)</code>）。</li>
+<li>所有工具调用、生命周期钩子等都会收到一个包装器对象 <code>RunContextWrapper[T]</code>，其中 <code>T</code> 表示上下文对象的类型；该对象本身可通过 <code>wrapper.context</code> 获取。</li>
 </ol>
-<p>对于某些特定于运行时的回调，SDK 可能会传递 <code>RunContextWrapper[T]</code> 的更专用子类。例如，<code>FunctionTool</code> 实例的生命周期钩子通常会收到 <code>ToolContext</code>，后者还会公开 <code>tool_call_id</code>、<code>tool_name</code> 和 <code>tool_arguments</code> 等工具调用元数据。</p>
-<p>需要注意的<strong>最重要</strong>事项是：对于给定的一次智能体运行，每个智能体、工具函数、生命周期等都必须使用相同的上下文_类型_。</p>
+<p>对于某些特定于运行时的回调，SDK 可能会传入 <code>RunContextWrapper[T]</code> 的更具体子类。例如，<code>FunctionTool</code> 实例的生命周期钩子通常会收到 <code>ToolContext</code>，后者还会提供 <code>tool_call_id</code>、<code>tool_name</code> 和 <code>tool_arguments</code> 等工具调用元数据。</p>
+<p>需要注意的<strong>最重要</strong>一点是：在一次智能体运行中，每个智能体、工具函数和生命周期钩子等都必须使用相同_类型_的上下文。</p>
 <p>上下文可用于：</p>
 <ul>
-<li>运行所需的上下文数据（例如用户名/uid 或关于用户的其他信息）</li>
+<li>本次运行的上下文数据（例如用户名/uid 或其他用户信息）</li>
 <li>依赖项（例如日志记录器对象、数据获取器等）</li>
 <li>辅助函数</li>
 </ul>
 <div class="admonition danger">
 <p class="admonition-title">注意</p>
-<p>上下文对象<strong>不会</strong>发送给 LLM。它完全是一个本地对象，你可以读取、写入它以及调用其方法。</p>
+<p>上下文对象<strong>不会</strong>发送给 LLM。它完全是一个本地对象，你可以读取、写入该对象，也可以调用其方法。</p>
 </div>
-<p>在单次运行中，派生包装器共享相同的底层应用上下文、审批状态和用量追踪。嵌套的 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 运行可以附加不同的 <code>tool_input</code>，但默认情况下，它们不会获得应用状态的独立副本。</p>
-<h3 id="use-local-context-for-capability-visibility">本地上下文在能力可见性方面的使用</h3>
-<p>当函数工具、MCP 工具和任务转移依赖同一请求策略时，请将策略输入或辅助函数保存在应用上下文中。每个 SDK 接口都通过各自的回调公开当前运行上下文：</p>
+<p>在单次运行中，派生包装器共享同一底层应用上下文、审批状态和用量追踪。嵌套的 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 运行可能会附加不同的 <code>tool_input</code>，但默认不会获得应用状态的独立副本。</p>
+<h3 id="use-local-context-for-capability-visibility">能力可见性中的本地上下文用法</h3>
+<p>当函数工具、MCP 工具和任务转移依赖同一请求策略时，请将策略输入或辅助函数保存在应用上下文中。SDK 的各个接口分别通过各自的回调提供当前运行上下文：</p>
 <ul>
 <li><a class="autorefs autorefs-internal" title="is_enabled
 
@@ -1836,146 +1836,158 @@
       dataclass
   " href="../ref/mcp/util/#agents.mcp.util.ToolFilterContext"><code>ToolFilterContext</code></a>，其 <code>run_context</code> 属性包含当前的 <code>RunContextWrapper</code>。</li>
 </ul>
-<p>请针对这些回调调整共享的应用策略，而不是维护单独的能力列表。这些回调用于控制 SDK 在当前运行中公开哪些能力；它们无法对模型生成的参数或资源选择进行授权。对于函数工具，请在工具实现内部实施这些决策，或在适当时使用<a href="../guardrails/#tool-guardrails">工具输入安全防护措施</a>和<a href="../human_in_the_loop/">审批</a>。MCP 服务器必须自行对受保护的操作进行授权。对于具有 <code>input_type</code> 的任务转移，请在 <code>on_handoff</code> 开始时、应用产生副作用之前检查解析后的输入；如果授权失败，应抛出异常，而不是返回结果。工具输入安全防护措施不会对任务转移运行。有关回调生命周期，请参阅<a href="../handoffs/#handoff-inputs">任务转移输入</a>。</p>
-<h3 id="what-runcontextwrapper-exposes"><code>RunContextWrapper</code> 公开的内容</h3>
+<p>请让这些回调适配共享的应用策略，而不是维护单独的能力列表。这些回调用于控制 SDK 在当前运行中公开哪些能力；它们无法授权模型生成的参数或资源选择。对于函数工具，请在工具实现内部强制执行这些决策，或酌情使用<a href="../guardrails/#tool-guardrails">工具输入安全防护措施</a>和<a href="../human_in_the_loop/">审批</a>。MCP 服务器必须自行授权其受保护的操作。对于带有 <code>input_type</code> 的任务转移，请在 <code>on_handoff</code> 开始时、应用产生副作用之前检查解析后的输入，并在授权失败时抛出异常，而不是直接返回。工具输入安全防护措施不会对任务转移运行。有关回调生命周期，请参阅<a href="../handoffs/#handoff-inputs">任务转移输入</a>。</p>
+<h3 id="what-runcontextwrapper-exposes"><code>RunContextWrapper</code> 提供的内容</h3>
 <p><a class="autorefs autorefs-internal" title="RunContextWrapper
 
 
   
       dataclass
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a> 是应用自定义上下文对象的包装器。在实际使用中，最常用的包括：</p>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a> 是应用自定义上下文对象的包装器。实际使用中，最常用的是：</p>
 <ul>
 <li><a class="autorefs autorefs-internal" title="context
 
 
   
       instance-attribute
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>wrapper.context</code></a>，用于应用自身的可变状态和依赖项。</li>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>wrapper.context</code></a>：用于应用自身的可变状态和依赖项。</li>
 <li><a class="autorefs autorefs-internal" title="usage
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.usage"><code>wrapper.usage</code></a>，用于当前运行中汇总的请求和 token 用量。</li>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.usage"><code>wrapper.usage</code></a>：用于当前运行中汇总的请求和 token 用量。</li>
 <li><a class="autorefs autorefs-internal" title="tool_input
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.tool_input"><code>wrapper.tool_input</code></a>，用于当前运行正在 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 内执行时的结构化输入。</li>
-<li><a class="autorefs autorefs-internal" title="approve_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.approve_tool"><code>wrapper.approve_tool(...)</code></a> / <a class="autorefs autorefs-internal" title="reject_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.reject_tool"><code>wrapper.reject_tool(...)</code></a>，用于以编程方式更新审批状态。</li>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper.tool_input"><code>wrapper.tool_input</code></a>：用于当前运行在 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 内执行时的结构化输入。</li>
+<li><a class="autorefs autorefs-internal" title="approve_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.approve_tool"><code>wrapper.approve_tool(...)</code></a> / <a class="autorefs autorefs-internal" title="reject_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.reject_tool"><code>wrapper.reject_tool(...)</code></a>：用于以编程方式更新审批状态。</li>
 </ul>
-<p>只有 <code>wrapper.context</code> 是应用自定义对象。其他字段均为 SDK 管理的运行时元数据。</p>
-<p>如果之后为人在回路或持久化作业工作流序列化 <a class="autorefs autorefs-internal" title="RunState
+<p>只有 <code>wrapper.context</code> 是应用自定义的对象。其他字段均为 SDK 管理的运行时元数据。</p>
+<p>如果之后要为人工介入或持久化任务工作流序列化 <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>，该运行时元数据将随状态一起保存。如果打算持久化或传输序列化状态，请避免在 <a class="autorefs autorefs-internal" title="context
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>，这些运行时元数据也会随状态一同保存。如果计划持久化或传输序列化状态，请避免在 <a class="autorefs autorefs-internal" title="context
 
 
   
       instance-attribute
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>RunContextWrapper.context</code></a> 中存放机密信息。</p>
-<p>对话状态是另一个独立问题。根据希望如何延续多个对话轮次，可以使用 <code>result.to_input_list()</code>、<code>session</code>、<code>conversation_id</code> 或 <code>previous_response_id</code>。有关如何选择，请参阅<a href="../results/">结果</a>、<a href="../running_agents/">运行智能体</a>和<a href="../sessions/">会话</a>。</p>
+<p>对话状态是另一个独立问题。请根据希望如何延续对话轮次，使用 <code>result.to_input_list()</code>、<code>session</code>、<code>conversation_id</code> 或 <code>previous_response_id</code>。有关如何选择，请参阅<a href="../results/">结果</a>、<a href="../running_agents/">运行智能体</a>和<a href="../sessions/">会话</a>。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
 </span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunContextWrapper</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="nd">@dataclass</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserInfo</span><span class="p">:</span>  <span class="c1"># (1)!</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">int</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="nd">@tool</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_age</span><span class="p">(</span><span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>  <span class="c1"># (2)!</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch the age of the user. Call this function to get user&#39;s age information.&quot;&quot;&quot;</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user </span><span class="si">{</span><span class="n">wrapper</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> is 47 years old&quot;</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">user_info</span> <span class="o">=</span> <span class="n">UserInfo</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;John&quot;</span><span class="p">,</span> <span class="n">uid</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="nd">@dataclass</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserInfo</span><span class="p">:</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="nd">@tool</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_age</span><span class="p">(</span><span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch the age of the user. Call this function to get user&#39;s age information.&quot;&quot;&quot;</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user </span><span class="si">{</span><span class="n">wrapper</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> is 47 years old&quot;</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
 </span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>
-</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">](</span>  <span class="c1"># (3)!</span>
-</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
-</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">fetch_user_age</span><span class="p">],</span>
-</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="p">)</span>
-</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
-</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (4)!</span>
-</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>        <span class="n">starting_agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
-</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;What is the age of the user?&quot;</span><span class="p">,</span>
-</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>        <span class="n">context</span><span class="o">=</span><span class="n">user_info</span><span class="p">,</span>
-</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="p">)</span>
-</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>
-</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># (5)!</span>
-</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="c1"># The user John is 47 years old.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">user_info</span> <span class="o">=</span> <span class="n">UserInfo</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;John&quot;</span><span class="p">,</span> <span class="n">uid</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">](</span>  <span class="c1"># (3)!</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">fetch_user_age</span><span class="p">],</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    <span class="p">)</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (4)!</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>        <span class="n">starting_agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;What is the age of the user?&quot;</span><span class="p">,</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>        <span class="n">context</span><span class="o">=</span><span class="n">user_info</span><span class="p">,</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="p">)</span>
 </span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>
-</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># (5)!</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="c1"># The user John is 47 years old.</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <ol>
-<li>这是上下文对象。此处使用了 dataclass，但也可以使用任何类型。</li>
-<li>这是一个工具。可以看到，它接受一个 <code>RunContextWrapper[UserInfo]</code>。工具实现会从上下文中读取数据。</li>
-<li>我们使用泛型 <code>UserInfo</code> 标记智能体，以便类型检查器捕获错误（例如，当我们尝试传入一个使用不同上下文类型的工具时）。</li>
-<li>上下文会传递给 <code>run</code> 函数。</li>
+<li>这是上下文对象。此处使用了数据类，但你可以使用任意类型。</li>
+<li>这是一个工具。可以看到，它接收一个 <code>RunContextWrapper[UserInfo]</code>。该工具的实现会读取上下文。</li>
+<li>我们为智能体标注泛型 <code>UserInfo</code>，以便类型检查器捕获错误（例如，尝试传入使用不同上下文类型的工具时）。</li>
+<li>上下文会传给 <code>run</code> 函数。</li>
 <li>智能体正确调用工具并获取年龄。</li>
 </ol>
 <hr />
-<h3 id="advanced-toolcontext">高级功能：<code>ToolContext</code></h3>
+<h3 id="advanced-toolcontext">高级用法：<code>ToolContext</code></h3>
 <p>在某些情况下，你可能希望访问有关正在执行的工具的额外元数据，例如工具名称、调用 ID 或原始参数字符串。<br />
 为此，可以使用 <a class="autorefs autorefs-internal" title="ToolContext
 
 
   
       dataclass
-  " href="../../ref/tool_context/#agents.tool_context.ToolContext"><code>ToolContext</code></a> 类，该类扩展了 <code>RunContextWrapper</code>。</p>
+  " href="../../ref/tool_context/#agents.tool_context.ToolContext"><code>ToolContext</code></a> 类，它扩展了 <code>RunContextWrapper</code>。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Annotated</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pydantic</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseModel</span><span class="p">,</span> <span class="n">Field</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.tool_context</span><span class="w"> </span><span class="kn">import</span> <span class="n">ToolContext</span>
 </span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">WeatherContext</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">Weather</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="n">city</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The city name&quot;</span><span class="p">)</span>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    <span class="n">temperature_range</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The temperature range in Celsius&quot;</span><span class="p">)</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">conditions</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The weather conditions&quot;</span><span class="p">)</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="nd">@tool</span>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">ctx</span><span class="p">:</span> <span class="n">ToolContext</span><span class="p">[</span><span class="n">WeatherContext</span><span class="p">],</span> <span class="n">city</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;The city to get the weather for&quot;</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Weather</span><span class="p">:</span>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[debug] Tool context: (name: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">, call_id: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_call_id</span><span class="si">}</span><span class="s2">, args: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_arguments</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="k">return</span> <span class="n">Weather</span><span class="p">(</span><span class="n">city</span><span class="o">=</span><span class="n">city</span><span class="p">,</span> <span class="n">temperature_range</span><span class="o">=</span><span class="s2">&quot;14-20C&quot;</span><span class="p">,</span> <span class="n">conditions</span><span class="o">=</span><span class="s2">&quot;Sunny with wind.&quot;</span><span class="p">)</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful agent that can tell the weather of a given city.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">WeatherContext</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">class</span><span class="w"> </span><span class="nc">Weather</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">city</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The city name&quot;</span><span class="p">)</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">temperature_range</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The temperature range in Celsius&quot;</span><span class="p">)</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">conditions</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The weather conditions&quot;</span><span class="p">)</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="nd">@tool</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">ToolContext</span><span class="p">[</span><span class="n">WeatherContext</span><span class="p">],</span> <span class="n">city</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;The city to get the weather for&quot;</span><span class="p">]</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Weather</span><span class="p">:</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="nb">print</span><span class="p">(</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>        <span class="sa">f</span><span class="s2">&quot;[debug] Tool context: (name: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">, call_id: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_call_id</span><span class="si">}</span><span class="s2">, args: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_arguments</span><span class="si">}</span><span class="s2">)&quot;</span>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>    <span class="p">)</span>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    <span class="k">return</span> <span class="n">Weather</span><span class="p">(</span><span class="n">city</span><span class="o">=</span><span class="n">city</span><span class="p">,</span> <span class="n">temperature_range</span><span class="o">=</span><span class="s2">&quot;14-20C&quot;</span><span class="p">,</span> <span class="n">conditions</span><span class="o">=</span><span class="s2">&quot;Sunny with wind.&quot;</span><span class="p">)</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful agent that can tell the weather of a given city.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a><span class="p">)</span>
 </span></code></pre></div>
 <p><code>ToolContext</code> 提供与 <code>RunContextWrapper</code> 相同的 <code>.context</code> 属性，<br />
-以及以下特定于当前工具调用的额外字段：</p>
+此外还提供当前工具调用特有的字段：</p>
 <ul>
-<li><code>tool_name</code> – 正在调用的工具名称  </li>
+<li><code>tool_name</code> – 被调用工具的名称  </li>
 <li><code>tool_call_id</code> – 此工具调用的唯一标识符  </li>
-<li><code>tool_arguments</code> – 传递给工具的原始参数字符串  </li>
-<li><code>tool_namespace</code> – 工具调用的 Responses 命名空间，适用于通过 <code>tool_namespace()</code> 或其他命名空间化接口加载工具的情况  </li>
+<li><code>tool_arguments</code> – 传给工具的原始参数字符串  </li>
+<li><code>tool_namespace</code> – 工具调用的 Responses 命名空间，仅当工具通过 <code>tool_namespace()</code> 或其他带命名空间的接口加载时提供  </li>
 <li><code>qualified_tool_name</code> – 存在命名空间时，以该命名空间限定的工具名称  </li>
 </ul>
 <p>如果执行期间需要工具级元数据，请使用 <code>ToolContext</code>。<br />
-对于智能体与工具之间的常规上下文共享，<code>RunContextWrapper</code> 仍然足够。由于 <code>ToolContext</code> 扩展了 <code>RunContextWrapper</code>，因此当嵌套的 <code>Agent.as_tool()</code> 运行提供结构化输入时，它也可以公开 <code>.tool_input</code>。</p>
+对于智能体与工具之间的一般上下文共享，<code>RunContextWrapper</code> 仍然足够。由于 <code>ToolContext</code> 扩展了 <code>RunContextWrapper</code>，因此当嵌套的 <code>Agent.as_tool()</code> 运行提供结构化输入时，它也可以提供 <code>.tool_input</code>。</p>
 <hr />
-<h2 id="agentllm-context">智能体/LLM 上下文</h2>
-<p>调用 LLM 时，它<strong>唯一</strong>能看到的数据来自对话历史记录。这意味着，如果希望让 LLM 获得某些新数据，就必须以某种方式将其加入该历史记录。可以通过以下几种方式实现：</p>
+<h2 id="agentllm-context">智能体/LLM上下文</h2>
+<p>调用 LLM 时，它<strong>唯一</strong>能看到的数据来自对话历史记录。这意味着，如果希望 LLM 能够访问某些新数据，必须以可将其纳入对话历史记录的方式提供这些数据。可通过以下几种方式实现：</p>
 <ol>
-<li>可以将其添加到智能体的 <code>instructions</code> 中。这也称为“system prompt”或“开发者消息”。system prompt 可以是静态字符串，也可以是接收上下文并输出字符串的动态函数。这是一种适合提供始终有用的信息的常用方法（例如用户姓名或当前日期）。</li>
-<li>调用 <code>Runner.run</code> 函数时，将其添加到 <code>input</code> 中。这与 <code>instructions</code> 方法类似，但可以使消息在<a href="https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command">指令层级</a>中处于较低层级。</li>
-<li>通过 <code>FunctionTool</code> 实例公开这些数据。这适用于_按需_上下文：LLM 自行决定何时需要某些数据，并可以调用工具获取这些数据。</li>
-<li>使用检索或网络检索。这些特殊工具能够从文件或数据库中获取相关数据（检索），或者从网络获取相关数据（网络检索）。这有助于让响应以相关上下文数据为依据。</li>
+<li>可以将数据添加到智能体的 <code>instructions</code> 中。这也称为“系统提示词”或“开发者消息”。系统提示词可以是静态字符串，也可以是接收上下文并输出字符串的动态函数。这是提供始终有用的信息（例如用户名或当前日期）的常用方法。</li>
+<li>调用 <code>Runner.run</code> 函数时，将数据添加到 <code>input</code>。这与 <code>instructions</code> 方法类似，但可以让消息在<a href="https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command">命令链</a>中处于更低层级。</li>
+<li>通过 <code>FunctionTool</code> 实例公开数据。这适用于_按需_上下文：LLM 自行决定何时需要某些数据，并可调用工具获取这些数据。</li>
+<li>使用检索或网络检索。这些特殊工具能够从文件或数据库中获取相关数据（检索），或从网络中获取相关数据（网络检索）。这有助于让响应以相关上下文数据为依据。</li>
 </ol>
 
 

@@ -811,7 +811,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -1089,7 +1089,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1229,7 +1229,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1821,25 +1821,26 @@
 
 
 <h1 id="_1">安全防护措施</h1>
-<p>安全防护措施支持对用户输入和智能体输出进行检查与验证。例如，假设有一个智能体使用非常智能（因此速度较慢、成本较高）的模型来协助处理客户请求。你不会希望恶意用户要求该模型帮助他们完成数学作业。因此，可以使用快速、低成本的模型运行安全防护措施。如果安全防护措施检测到恶意使用，便可立即引发错误，从而节省时间和成本。阻塞执行可以保证高成本模型不会启动；在并行执行模式下，高成本模型可能在安全防护措施完成之前就已经启动。有关详细信息，请参阅下文的“执行模式”。</p>
+<p>安全防护措施可用于检查和验证用户输入及智能体输出。例如，假设你有一个使用非常智能（因此速度较慢且成本较高）的模型来协助处理客户请求的智能体。你不会希望恶意用户要求该模型帮助他们完成数学作业。因此，你可以使用快速且成本较低的模型运行安全防护措施。如果安全防护措施检测到恶意使用行为，就可以立即引发错误，从而节省时间和成本。阻塞执行可保证高成本模型不会启动；而使用并行执行时，高成本模型可能会在安全防护措施完成之前就已启动。有关详细信息，请参阅下文的“执行模式”。</p>
 <p>安全防护措施分为两种：</p>
 <ol>
 <li>输入安全防护措施针对初始用户输入运行</li>
-<li>输出安全防护措施针对最终智能体输出运行</li>
+<li>输出安全防护措施针对智能体最终输出运行</li>
 </ol>
 <h2 id="workflow-boundaries">工作流边界</h2>
-<p>安全防护措施会附加到智能体和工具上，但并非都会在工作流中的相同节点运行：</p>
+<p>安全防护措施会附加到智能体和工具，但并非所有安全防护措施都会在工作流中的相同位置运行：</p>
 <ul>
 <li><strong>输入安全防护措施</strong>仅针对链中的第一个智能体运行。</li>
 <li><strong>输出安全防护措施</strong>仅针对生成最终输出的智能体运行。</li>
-<li><strong>工具安全防护措施</strong>会针对每次受保护的函数工具调用运行，包括服务器已配置安全防护措施的本地 MCP 工具；输入安全防护措施在执行前运行，输出安全防护措施在执行后运行。</li>
+<li><strong>工具安全防护措施</strong>针对每次受保护的函数工具调用运行，包括服务器已配置安全防护措施的本地 MCP 工具；输入安全防护措施在执行前运行，输出安全防护措施在执行后运行。</li>
 </ul>
-<p>如果工作流包含管理器、任务转移或受委派的专用智能体，并且你需要在每次自定义函数工具调用之前和/或之后执行检查，请使用工具安全防护措施，而不要仅依赖智能体级别的输入/输出安全防护措施。</p>
+<p>如果你需要在包含管理者、任务转移或受委派专门智能体的工作流中，于每次自定义函数工具调用前和/或调用后执行检查，请使用工具安全防护措施，而不要仅依赖智能体级别的输入/输出安全防护措施。</p>
 <h2 id="input-guardrails">输入安全防护措施</h2>
+<p>安全防护措施可以直接调用外部分类器，无需运行另一个智能体。有关原生 OpenAI Decisions 客户端的代码示例，请参阅 <a href="../models/#decisions-api">Decisions API</a>。</p>
 <p>输入安全防护措施分 3 个步骤运行：</p>
 <ol>
-<li>首先，安全防护措施接收传递给智能体的相同输入。</li>
-<li>接下来，安全防护措施函数运行并生成 <a class="autorefs autorefs-internal" title="GuardrailFunctionOutput
+<li>首先，安全防护措施接收传递给智能体的同一份输入。</li>
+<li>接下来，运行安全防护措施函数以生成 <a class="autorefs autorefs-internal" title="GuardrailFunctionOutput
 
 
   
@@ -1850,32 +1851,32 @@
   
       dataclass
   " href="../../ref/guardrail/#agents.guardrail.InputGuardrailResult"><code>InputGuardrailResult</code></a> 中</li>
-<li>最后，检查 <a class="autorefs autorefs-internal" title="tripwire_triggered
+<li>最后，我们检查 <a class="autorefs autorefs-internal" title="tripwire_triggered
 
 
   
       instance-attribute
-  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput.tripwire_triggered"><code>.tripwire_triggered</code></a> 是否为 true。如果为 true，则引发 <a class="autorefs autorefs-internal" title="InputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.InputGuardrailTripwireTriggered"><code>InputGuardrailTripwireTriggered</code></a> 异常，以便你恰当地响应用户或处理异常。</li>
+  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput.tripwire_triggered"><code>.tripwire_triggered</code></a> 是否为 true。如果为 true，则会引发 <a class="autorefs autorefs-internal" title="InputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.InputGuardrailTripwireTriggered"><code>InputGuardrailTripwireTriggered</code></a> 异常，以便你恰当地响应用户或处理异常。</li>
 </ol>
-<div class="admonition 注意">
-<p class="admonition-title">注意</p>
-<p>输入安全防护措施旨在针对用户输入运行，因此仅当智能体是<em>第一个</em>智能体时，其安全防护措施才会运行。你可能会疑惑，为什么 <code>guardrails</code> 属性位于智能体上，而不是传递给 <code>Runner.run</code>？这是因为安全防护措施通常与实际的智能体相关——不同的智能体会运行不同的安全防护措施，因此将相关代码放在一起有助于提高可读性。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>输入安全防护措施旨在针对用户输入运行，因此，只有当某个智能体是<em>第一个</em>智能体时，才会运行该智能体的安全防护措施。你可能会疑惑，为什么 <code>guardrails</code> 属性位于智能体上，而不是传递给 <code>Runner.run</code>？这是因为安全防护措施通常与实际的智能体相关——你会为不同智能体运行不同的安全防护措施，因此将相关代码放在一起有助于提高可读性。</p>
 </div>
 <h3 id="execution-modes">执行模式</h3>
 <p>输入安全防护措施支持两种执行模式：</p>
 <ul>
 <li>
-<p><strong>并行执行</strong>（默认，<code>run_in_parallel=True</code>）：安全防护措施与智能体同时运行。由于二者同时启动，因此这种模式可以实现最低延迟。不过，如果安全防护措施的触发器被触发，智能体在被取消之前可能已经消耗了 token 并执行了工具。</p>
+<p><strong>并行执行</strong>（默认，<code>run_in_parallel=True</code>）：安全防护措施与智能体并发执行。由于二者同时启动，这种模式可提供最佳延迟表现。不过，如果安全防护措施的触发器被触发，智能体在被取消之前可能已经消耗了 token 并执行了工具。</p>
 </li>
 <li>
-<p><strong>阻塞执行</strong>（<code>run_in_parallel=False</code>）：安全防护措施在智能体启动<em>之前</em>运行并完成。如果安全防护措施的触发器被触发，智能体将完全不会执行，从而避免消耗 token 和执行工具。此模式非常适合优化成本，以及需要避免工具调用产生潜在副作用的场景。</p>
+<p><strong>阻塞执行</strong>（<code>run_in_parallel=False</code>）：安全防护措施在智能体启动<em>之前</em>运行并完成。如果安全防护措施的触发器被触发，智能体将完全不会执行，从而避免消耗 token 和执行工具。这种模式非常适合优化成本，以及希望避免工具调用产生潜在副作用的场景。</p>
 </li>
 </ul>
 <h2 id="output-guardrails">输出安全防护措施</h2>
 <p>输出安全防护措施分 3 个步骤运行：</p>
 <ol>
 <li>首先，安全防护措施接收智能体生成的输出。</li>
-<li>接下来，安全防护措施函数运行并生成 <a class="autorefs autorefs-internal" title="GuardrailFunctionOutput
+<li>接下来，运行安全防护措施函数以生成 <a class="autorefs autorefs-internal" title="GuardrailFunctionOutput
 
 
   
@@ -1886,48 +1887,48 @@
   
       dataclass
   " href="../../ref/guardrail/#agents.guardrail.OutputGuardrailResult"><code>OutputGuardrailResult</code></a> 中</li>
-<li>最后，检查 <a class="autorefs autorefs-internal" title="tripwire_triggered
+<li>最后，我们检查 <a class="autorefs autorefs-internal" title="tripwire_triggered
 
 
   
       instance-attribute
-  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput.tripwire_triggered"><code>.tripwire_triggered</code></a> 是否为 true。如果为 true，则引发 <a class="autorefs autorefs-internal" title="OutputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.OutputGuardrailTripwireTriggered"><code>OutputGuardrailTripwireTriggered</code></a> 异常，以便你恰当地响应用户或处理异常。</li>
+  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput.tripwire_triggered"><code>.tripwire_triggered</code></a> 是否为 true。如果为 true，则会引发 <a class="autorefs autorefs-internal" title="OutputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.OutputGuardrailTripwireTriggered"><code>OutputGuardrailTripwireTriggered</code></a> 异常，以便你恰当地响应用户或处理异常。</li>
 </ol>
-<div class="admonition 注意">
-<p class="admonition-title">注意</p>
-<p>输出安全防护措施旨在针对最终智能体输出运行，因此仅当智能体是<em>最后一个</em>智能体时，其安全防护措施才会运行。与输入安全防护措施类似，这样设计是因为安全防护措施通常与实际的智能体相关——不同的智能体会运行不同的安全防护措施，因此将相关代码放在一起有助于提高可读性。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>输出安全防护措施旨在针对智能体的最终输出运行，因此，只有当某个智能体是<em>最后一个</em>智能体时，才会运行该智能体的安全防护措施。与输入安全防护措施类似，我们这样做是因为安全防护措施通常与实际的智能体相关——你会为不同智能体运行不同的安全防护措施，因此将相关代码放在一起有助于提高可读性。</p>
 <p>输出安全防护措施始终在智能体完成后运行，因此不支持 <code>run_in_parallel</code> 参数。</p>
 </div>
-<p>输出触发器和安全防护措施函数引发的异常具有不同的会话行为。触发器会拒绝候选最终输出。触发器触发时，运行器会要求已配置的会话持久化已完成的工具调用和工具输出项，以及重放这些调用所需的任何推理上下文，同时排除被拒绝的候选最终输出。运行器会将此触发器规则同时应用于流式和非流式运行。当安全防护措施函数引发异常而不是返回触发器结果时，运行器会将判定视为未知，并在抛出安全防护措施异常之前，要求已配置的会话持久化已完成的最终轮次项目。如果该会话写入也失败，则会话写入错误具有更高优先级。流式运行采用与非流式运行相同的持久化顺序，并从 <code>stream_events()</code> 引发终止异常。在输出安全防护措施运行期间立即调用 <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>RunResultStreaming.cancel()</code></a>，会取消正在运行的安全防护措施，并且不会启动最终轮次的会话写入。</p>
-<p>终止型函数工具输出需要额外处理，因为在智能体级别的输出安全防护措施检查该值之前，工具已经运行。当 <a class="autorefs autorefs-internal" title="tool_use_behavior
+<p>输出触发器与安全防护措施函数引发的异常具有不同的会话行为。触发器会拒绝候选最终输出。当触发器触发时，运行器会要求已配置的会话持久化已经完成的工具调用和工具输出项，以及重放这些调用所需的任何推理上下文，同时排除被拒绝的候选最终输出。运行器会将此触发器规则同时应用于流式和非流式运行。如果安全防护措施函数引发异常，而不是返回触发器结果，运行器会将判定结果视为未知，并要求已配置的会话先持久化已完成的最终轮次项目，再将安全防护措施异常向外抛出。如果该会话写入也失败，则优先处理会话写入错误。流式运行使用与非流式运行相同的持久化顺序，并从 <code>stream_events()</code> 引发终止异常。如果在输出安全防护措施运行期间立即调用 <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>RunResultStreaming.cancel()</code></a>，则会取消正在进行的安全防护措施，并且不会启动最终轮次的会话写入。</p>
+<p>终止性的函数工具输出需要额外处理，因为在智能体级别的输出安全防护措施检查该值之前，工具已经运行完毕。当 <a class="autorefs autorefs-internal" title="tool_use_behavior
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/agent/#agents.agent.Agent.tool_use_behavior"><code>Agent.tool_use_behavior</code></a> 将该工具结果用作最终输出，而输出触发器将其拒绝时，只有在 SDK 能够根据已验证字段重建函数调用/输出对的情况下，才会保留可有效重放的函数调用/输出对。保留的 <code>function_call_output</code> 载荷会替换为默认文本 <code>"Output withheld by an output guardrail."</code>；原始工具输出载荷不会保留在会话、<code>RunState</code>、流式结果状态或沙箱内存输入中。SDK 会保留重放所需的已验证函数调用元数据，包括函数参数，因此这些元数据可能包含也曾出现在被拒绝输出中的数据。当前响应的 <a class="autorefs autorefs-internal" title="OutputGuardrailResult
+  " href="../../ref/agent/#agents.agent.Agent.tool_use_behavior"><code>Agent.tool_use_behavior</code></a> 将该工具结果作为最终输出，而输出触发器拒绝该结果时，只有在 SDK 能够根据已验证字段重新构建函数调用/输出对的情况下，才会保留可用于重放的函数调用/输出对。保留的 <code>function_call_output</code> 载荷会被替换为默认文本 <code>"Output withheld by an output guardrail."</code>；原始工具输出载荷不会保留在会话、<code>RunState</code>、流式结果状态或沙箱内存输入中。SDK 会保留重放所需且经过验证的函数调用元数据，包括函数参数，因此这些元数据可能包含同样出现在被拒绝输出中的数据。当前响应中的 <a class="autorefs autorefs-internal" title="OutputGuardrailResult
 
 
   
       dataclass
-  " href="../../ref/guardrail/#agents.guardrail.OutputGuardrailResult"><code>OutputGuardrailResult</code></a> 对象也会将 <code>agent_output</code> 替换为最终确定的占位文本，并清除 <code>output_info</code>。当前响应的 <a class="autorefs autorefs-internal" title="ToolOutputGuardrailResult
+  " href="../../ref/guardrail/#agents.guardrail.OutputGuardrailResult"><code>OutputGuardrailResult</code></a> 对象也会将 <code>agent_output</code> 替换为最终确定的占位文本，并清除 <code>output_info</code>。当前响应中的 <a class="autorefs autorefs-internal" title="ToolOutputGuardrailResult
 
 
   
       dataclass
-  " href="../../ref/tool_guardrails/#agents.tool_guardrails.ToolOutputGuardrailResult"><code>ToolOutputGuardrailResult</code></a> 对象会保留允许/拒绝行为类型，但将承载载荷的 <code>output_info</code> 和拒绝消息替换为相同的占位文本。之前已接受的轮次和安全防护措施结果保持不变。如果响应包含推理内容或 SDK 无法安全清理的其他结构，SDK 会丢弃完整的当前响应后缀，而不会保留被拒绝的输出载荷。引发异常的安全防护措施函数并未返回拒绝判定，因此已完成的终止型工具轮次会遵循上述异常持久化行为。</p>
-<p>当应用程序需要不同的不含数据的占位文本时，请将 <a class="autorefs autorefs-internal" title="output_guardrail_blocked_message
+  " href="../../ref/tool_guardrails/#agents.tool_guardrails.ToolOutputGuardrailResult"><code>ToolOutputGuardrailResult</code></a> 对象会保留允许/拒绝行为类型，但会将承载载荷的 <code>output_info</code> 和拒绝消息替换为同一占位文本。此前已接受的轮次和安全防护措施结果保持不变。如果响应包含推理内容或 SDK 无法安全清理的其他结构，SDK 将丢弃当前响应的完整后缀，而不是保留被拒绝的输出载荷。引发异常的安全防护措施函数并未返回拒绝判定，因此已完成的终止工具轮次会遵循上述异常持久化行为。</p>
+<p>当应用需要使用其他不含数据的占位文本时，请将 <a class="autorefs autorefs-internal" title="output_guardrail_blocked_message
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/run/#agents.run.RunConfig.output_guardrail_blocked_message"><code>RunConfig.output_guardrail_blocked_message</code></a> 设置为非空字符串或同步格式化函数。格式化函数接收 <a class="autorefs autorefs-internal" title="OutputGuardrailBlockedMessageArgs
+  " href="../../ref/run/#agents.run.RunConfig.output_guardrail_blocked_message"><code>RunConfig.output_guardrail_blocked_message</code></a> 设置为非空字符串或同步格式化函数。格式化函数会接收 <a class="autorefs autorefs-internal" title="OutputGuardrailBlockedMessageArgs
 
 
   
       dataclass
-  " href="../ref/run_config/#agents.run_config.OutputGuardrailBlockedMessageArgs"><code>OutputGuardrailBlockedMessageArgs</code></a>，其中包含 SDK 默认值、安全防护措施名称、智能体和当前运行上下文。它永远不会接收被拒绝的工具输出或安全防护措施 <code>output_info</code>。返回的文本会在 SDK 保留已清理的终止型工具轮次的所有位置持久化并重放，因此请确保其中不含敏感数据，也不要从运行上下文中复制机密信息。如果格式化函数引发异常、返回 <code>None</code>、返回空值或非字符串值，或者生成可等待对象，SDK 将使用默认占位文本。构造 <code>RunConfig</code> 时会拒绝异步格式化函数。</p>
+  " href="../ref/run_config/#agents.run_config.OutputGuardrailBlockedMessageArgs"><code>OutputGuardrailBlockedMessageArgs</code></a>，其中包含 SDK 默认值、安全防护措施名称、智能体和当前活动的运行上下文。它绝不会接收被拒绝的工具输出或安全防护措施 <code>output_info</code>。返回的文本会在 SDK 保留经过清理的终止工具轮次的所有位置持久化并重放，因此请确保其中不包含敏感数据，也不要从运行上下文复制机密信息。如果格式化函数引发异常、返回 <code>None</code>、返回空值或非字符串值，或者生成可等待对象，SDK 将使用默认占位文本。构造 <code>RunConfig</code> 时，异步格式化函数会被拒绝。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">OutputGuardrailBlockedMessageArgs</span><span class="p">,</span> <span class="n">RunConfig</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
@@ -1938,10 +1939,10 @@
 </span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="n">run_config</span> <span class="o">=</span> <span class="n">RunConfig</span><span class="p">(</span><span class="n">output_guardrail_blocked_message</span><span class="o">=</span><span class="n">blocked_message</span><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="tool-guardrails">工具安全防护措施</h2>
-<p>工具安全防护措施封装了 <strong><code>FunctionTool</code> 实例</strong>，支持在这些工具执行前后验证或阻止对它们的调用。它们在工具本身上配置，并在每次调用该工具时运行。</p>
+<p>工具安全防护措施会封装 <strong><code>FunctionTool</code> 实例</strong>，使你能够在这些工具执行前后验证或阻止对它们的调用。工具安全防护措施在工具本身上配置，并在每次调用该工具时运行。</p>
 <ul>
-<li>输入工具安全防护措施在工具执行前运行，可以跳过调用、将输出替换为一条消息或触发触发器。</li>
-<li>输出工具安全防护措施在工具执行后运行，可以替换输出或触发触发器。</li>
+<li>输入工具安全防护措施在工具执行前运行，可以跳过调用、用消息替换输出或引发触发器。</li>
+<li>输出工具安全防护措施在工具执行后运行，可以替换输出或引发触发器。</li>
 <li>如果函数工具需要审批，输入工具安全防护措施通常会在审批后、执行前立即运行。如果希望这些输入检查在发出待审批中断之前运行，请将 <a class="autorefs autorefs-internal" title="tool_execution
 
 
@@ -1953,21 +1954,21 @@
 
   
       dataclass
-  " href="../ref/run_config/#agents.run_config.ToolExecutionConfig"><code>ToolExecutionConfig(pre_approval_tool_input_guardrails=True)</code></a>。通过此审批前检查的调用仍会在审批后、工具执行前再次接受检查。</li>
-<li>工具安全防护措施使用 <code>FunctionTool</code> 执行管线。你可以将它们直接附加到使用 <code>tool</code> 或 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a> 创建的自定义工具上。还可以在本地 MCP 服务器上设置 <code>tool_input_guardrails</code> 和 <code>tool_output_guardrails</code>；SDK 会将这些列表附加到该服务器公开的每个工具上。任务转移通过 SDK 的任务转移管线运行，而不是通过函数工具管线运行，因此工具安全防护措施不适用于任务转移调用本身。托管工具（<code>WebSearchTool</code>、<code>FileSearchTool</code>、<code>HostedMCPTool</code>、<code>CodeInterpreterTool</code>、<code>ImageGenerationTool</code>）和内置执行工具（<code>ComputerTool</code>、<code>ShellTool</code>、<code>ApplyPatchTool</code>、<code>LocalShellTool</code>）不使用此安全防护措施管线，并且 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 目前不会直接公开工具安全防护措施选项。有关本地 MCP 配置，请参阅 <a href="../mcp/#tool-guardrails">MCP 服务器工具安全防护措施</a>。</li>
+  " href="../ref/run_config/#agents.run_config.ToolExecutionConfig"><code>ToolExecutionConfig(pre_approval_tool_input_guardrails=True)</code></a>。通过此次审批前检查的调用仍会在审批后、工具执行前再次接受检查。</li>
+<li>工具安全防护措施使用 <code>FunctionTool</code> 执行管线。你可以将其直接附加到使用 <code>tool</code> 或 <a class="autorefs autorefs-internal" title="function_tool" href="../../ref/tool/#agents.tool.function_tool"><code>function_tool</code></a> 创建的自定义工具。你也可以在本地 MCP 服务器上设置 <code>tool_input_guardrails</code> 和 <code>tool_output_guardrails</code>；SDK 会将这些列表附加到该服务器公开的每个工具。任务转移通过 SDK 的任务转移管线运行，而不是通过函数工具管线运行，因此工具安全防护措施不适用于任务转移调用本身。托管工具（<code>WebSearchTool</code>、<code>FileSearchTool</code>、<code>HostedMCPTool</code>、<code>CodeInterpreterTool</code>、<code>ImageGenerationTool</code>）和内置执行工具（<code>ComputerTool</code>、<code>ShellTool</code>、<code>ApplyPatchTool</code>、<code>LocalShellTool</code>）不使用此安全防护措施管线，并且 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 目前不直接提供工具安全防护措施选项。有关本地 MCP 配置，请参阅 <a href="../mcp/#tool-guardrails">MCP 服务器工具安全防护措施</a>。</li>
 </ul>
-<p>有关详细信息，请参阅下方的代码片段。</p>
+<p>有关详细信息，请参阅下面的代码片段。</p>
 <h2 id="tripwires">触发器</h2>
-<p>如果智能体输入或输出未通过安全防护措施检查，安全防护措施可以通过触发器发出信号。运行器会立即引发 <code>InputGuardrailTripwireTriggered</code> 或 <code>OutputGuardrailTripwireTriggered</code> 异常，并停止智能体执行。工具安全防护措施使用对应的 <code>ToolInputGuardrailTripwireTriggered</code> 和 <code>ToolOutputGuardrailTripwireTriggered</code> 异常。</p>
-<p>对于智能体级别的触发器，异常的 <code>guardrail_result</code> 用于标识触发该触发器的安全防护措施。对于运行器引发的输入触发器，<code>exception.run_data.input_guardrail_results</code> 包含运行停止前已完成的所有输入安全防护措施结果，包括触发该触发器的结果。输出触发器通过 <code>exception.run_data.output_guardrail_results</code> 提供相应的累积结果。</p>
-<p>工具触发器异常则直接公开触发异常的 <code>guardrail</code> 和 <code>output</code>。其 <code>run_data.tool_input_guardrail_results</code> 和 <code>run_data.tool_output_guardrail_results</code> 列表会保留失败前已完成轮次所累积的结果；触发异常的结果可通过异常的 <code>output</code> 获取。其他由运行器管理的失败（例如 <code>MaxTurnsExceeded</code>）也会在这些列表中保留已完成的工具安全防护措施结果。<code>stream_events()</code> 引发异常后，流式结果会公开相同的智能体和工具安全防护措施累积结果列表。当异常在运行器管理的执行路径之外引发时，<code>run_data</code> 可以是 <code>None</code>。</p>
+<p>如果智能体输入或输出未通过安全防护措施，安全防护措施可以使用触发器发出信号。运行器会立即引发 <code>InputGuardrailTripwireTriggered</code> 或 <code>OutputGuardrailTripwireTriggered</code> 异常，并停止智能体执行。工具安全防护措施使用相应的 <code>ToolInputGuardrailTripwireTriggered</code> 和 <code>ToolOutputGuardrailTripwireTriggered</code> 异常。</p>
+<p>对于智能体级别的触发器，异常的 <code>guardrail_result</code> 用于标识触发该触发器的安全防护措施。对于运行器引发的输入触发器，<code>exception.run_data.input_guardrail_results</code> 包含运行停止前已完成的所有输入安全防护措施结果，其中包括触发该触发器的结果。输出触发器通过 <code>exception.run_data.output_guardrail_results</code> 提供相应的累积结果。</p>
+<p>工具触发器异常则会直接公开触发异常的 <code>guardrail</code> 和 <code>output</code>。其 <code>run_data.tool_input_guardrail_results</code> 和 <code>run_data.tool_output_guardrail_results</code> 列表会保留失败前已完成轮次中累积的结果；触发异常的结果可通过异常的 <code>output</code> 获取。其他由运行器管理的故障（例如 <code>MaxTurnsExceeded</code>）也会在这些列表中保留已完成的工具安全防护措施结果。<code>stream_events()</code> 引发异常后，流式结果会公开相同的智能体及工具安全防护措施累积结果列表。如果异常是在运行器管理的执行路径之外引发的，<code>run_data</code> 可以是 <code>None</code>。</p>
 <h2 id="implementing-a-guardrail">安全防护措施的实现</h2>
 <p>你需要提供一个接收输入并返回 <a class="autorefs autorefs-internal" title="GuardrailFunctionOutput
 
 
   
       dataclass
-  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput"><code>GuardrailFunctionOutput</code></a> 的函数。在此代码示例中，我们将通过在底层运行一个智能体来实现。</p>
+  " href="../../ref/guardrail/#agents.guardrail.GuardrailFunctionOutput"><code>GuardrailFunctionOutput</code></a> 的函数。在此示例中，我们将在底层运行一个智能体来实现这一点。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pydantic</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseModel</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">Agent</span><span class="p">,</span>
@@ -1979,43 +1980,46 @@
 </span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="p">)</span>
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">input_guardrail</span>
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">class</span><span class="w"> </span><span class="nc">MathHomeworkOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">is_math_homework</span><span class="p">:</span> <span class="nb">bool</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">reasoning</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="n">guardrail_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span> <span class="c1"># (1)!</span>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Guardrail check&quot;</span><span class="p">,</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Check if the user is asking you to do their math homework.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MathHomeworkOutput</span><span class="p">,</span>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="p">)</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>
-</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>
-</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a><span class="nd">@input_guardrail</span>
-</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">math_guardrail</span><span class="p">(</span> <span class="c1"># (2)!</span>
-</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="kc">None</span><span class="p">],</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">,</span> <span class="nb">input</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">list</span><span class="p">[</span><span class="n">TResponseInputItem</span><span class="p">]</span>
-</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">GuardrailFunctionOutput</span><span class="p">:</span>
-</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">guardrail_agent</span><span class="p">,</span> <span class="nb">input</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">context</span><span class="p">)</span>
-</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a>
-</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    <span class="k">return</span> <span class="n">GuardrailFunctionOutput</span><span class="p">(</span>
-</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>        <span class="n">output_info</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">,</span> <span class="c1"># (3)!</span>
-</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>        <span class="n">tripwire_triggered</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="o">.</span><span class="n">is_math_homework</span><span class="p">,</span>
-</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a>    <span class="p">)</span>
-</span><span id="__span-1-33"><a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>
-</span><span id="__span-1-34"><a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a>
-</span><span id="__span-1-35"><a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>  <span class="c1"># (4)!</span>
-</span><span id="__span-1-36"><a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Customer support agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-37"><a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a customer support agent. You help customers with their questions.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-38"><a id="__codelineno-1-38" name="__codelineno-1-38" href="#__codelineno-1-38"></a>    <span class="n">input_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">math_guardrail</span><span class="p">],</span>
-</span><span id="__span-1-39"><a id="__codelineno-1-39" name="__codelineno-1-39" href="#__codelineno-1-39"></a><span class="p">)</span>
-</span><span id="__span-1-40"><a id="__codelineno-1-40" name="__codelineno-1-40" href="#__codelineno-1-40"></a>
-</span><span id="__span-1-41"><a id="__codelineno-1-41" name="__codelineno-1-41" href="#__codelineno-1-41"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-1-42"><a id="__codelineno-1-42" name="__codelineno-1-42" href="#__codelineno-1-42"></a>    <span class="c1"># This should trip the guardrail</span>
-</span><span id="__span-1-43"><a id="__codelineno-1-43" name="__codelineno-1-43" href="#__codelineno-1-43"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-1-44"><a id="__codelineno-1-44" name="__codelineno-1-44" href="#__codelineno-1-44"></a>        <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello, can you help me solve for x: 2x + 3 = 11?&quot;</span><span class="p">)</span>
-</span><span id="__span-1-45"><a id="__codelineno-1-45" name="__codelineno-1-45" href="#__codelineno-1-45"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Guardrail didn&#39;t trip - this is unexpected&quot;</span><span class="p">)</span>
-</span><span id="__span-1-46"><a id="__codelineno-1-46" name="__codelineno-1-46" href="#__codelineno-1-46"></a>
-</span><span id="__span-1-47"><a id="__codelineno-1-47" name="__codelineno-1-47" href="#__codelineno-1-47"></a>    <span class="k">except</span> <span class="n">InputGuardrailTripwireTriggered</span><span class="p">:</span>
-</span><span id="__span-1-48"><a id="__codelineno-1-48" name="__codelineno-1-48" href="#__codelineno-1-48"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Math homework guardrail tripped&quot;</span><span class="p">)</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="k">class</span><span class="w"> </span><span class="nc">MathHomeworkOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">is_math_homework</span><span class="p">:</span> <span class="nb">bool</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">reasoning</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="n">guardrail_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Guardrail check&quot;</span><span class="p">,</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Check if the user is asking you to do their math homework.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MathHomeworkOutput</span><span class="p">,</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="p">)</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a><span class="nd">@input_guardrail</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">math_guardrail</span><span class="p">(</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="kc">None</span><span class="p">],</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">,</span> <span class="nb">input</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">list</span><span class="p">[</span><span class="n">TResponseInputItem</span><span class="p">]</span>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">GuardrailFunctionOutput</span><span class="p">:</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">guardrail_agent</span><span class="p">,</span> <span class="nb">input</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">context</span><span class="p">)</span>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>    <span class="k">return</span> <span class="n">GuardrailFunctionOutput</span><span class="p">(</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a>        <span class="n">output_info</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">,</span>  <span class="c1"># (3)!</span>
+</span><span id="__span-1-33"><a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>        <span class="n">tripwire_triggered</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="o">.</span><span class="n">is_math_homework</span><span class="p">,</span>
+</span><span id="__span-1-34"><a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a>    <span class="p">)</span>
+</span><span id="__span-1-35"><a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a>
+</span><span id="__span-1-36"><a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>
+</span><span id="__span-1-37"><a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>  <span class="c1"># (4)!</span>
+</span><span id="__span-1-38"><a id="__codelineno-1-38" name="__codelineno-1-38" href="#__codelineno-1-38"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Customer support agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-39"><a id="__codelineno-1-39" name="__codelineno-1-39" href="#__codelineno-1-39"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a customer support agent. You help customers with their questions.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-40"><a id="__codelineno-1-40" name="__codelineno-1-40" href="#__codelineno-1-40"></a>    <span class="n">input_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">math_guardrail</span><span class="p">],</span>
+</span><span id="__span-1-41"><a id="__codelineno-1-41" name="__codelineno-1-41" href="#__codelineno-1-41"></a><span class="p">)</span>
+</span><span id="__span-1-42"><a id="__codelineno-1-42" name="__codelineno-1-42" href="#__codelineno-1-42"></a>
+</span><span id="__span-1-43"><a id="__codelineno-1-43" name="__codelineno-1-43" href="#__codelineno-1-43"></a>
+</span><span id="__span-1-44"><a id="__codelineno-1-44" name="__codelineno-1-44" href="#__codelineno-1-44"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-1-45"><a id="__codelineno-1-45" name="__codelineno-1-45" href="#__codelineno-1-45"></a>    <span class="c1"># This should trip the guardrail</span>
+</span><span id="__span-1-46"><a id="__codelineno-1-46" name="__codelineno-1-46" href="#__codelineno-1-46"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-1-47"><a id="__codelineno-1-47" name="__codelineno-1-47" href="#__codelineno-1-47"></a>        <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello, can you help me solve for x: 2x + 3 = 11?&quot;</span><span class="p">)</span>
+</span><span id="__span-1-48"><a id="__codelineno-1-48" name="__codelineno-1-48" href="#__codelineno-1-48"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Guardrail didn&#39;t trip - this is unexpected&quot;</span><span class="p">)</span>
+</span><span id="__span-1-49"><a id="__codelineno-1-49" name="__codelineno-1-49" href="#__codelineno-1-49"></a>
+</span><span id="__span-1-50"><a id="__codelineno-1-50" name="__codelineno-1-50" href="#__codelineno-1-50"></a>    <span class="k">except</span> <span class="n">InputGuardrailTripwireTriggered</span><span class="p">:</span>
+</span><span id="__span-1-51"><a id="__codelineno-1-51" name="__codelineno-1-51" href="#__codelineno-1-51"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Math homework guardrail tripped&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <ol>
 <li>我们将在安全防护措施函数中使用此智能体。</li>
@@ -2033,45 +2037,52 @@
 </span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="n">Runner</span><span class="p">,</span>
 </span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="p">)</span>
 </span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">output_guardrail</span>
-</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">MessageOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span> <span class="c1"># (1)!</span>
-</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>    <span class="n">response</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>
-</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="k">class</span><span class="w"> </span><span class="nc">MathOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span> <span class="c1"># (2)!</span>
-</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    <span class="n">reasoning</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>    <span class="n">is_math</span><span class="p">:</span> <span class="nb">bool</span>
-</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>
-</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="n">guardrail_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Guardrail check&quot;</span><span class="p">,</span>
-</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Check if the output includes any math.&quot;</span><span class="p">,</span>
-</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MathOutput</span><span class="p">,</span>
-</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a><span class="p">)</span>
-</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>
-</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a><span class="nd">@output_guardrail</span>
-</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">math_guardrail</span><span class="p">(</span>  <span class="c1"># (3)!</span>
-</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">,</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">output</span><span class="p">:</span> <span class="n">MessageOutput</span>
-</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">GuardrailFunctionOutput</span><span class="p">:</span>
-</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">guardrail_agent</span><span class="p">,</span> <span class="n">output</span><span class="o">.</span><span class="n">response</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">context</span><span class="p">)</span>
-</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>
-</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>    <span class="k">return</span> <span class="n">GuardrailFunctionOutput</span><span class="p">(</span>
-</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>        <span class="n">output_info</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">,</span>
-</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a>        <span class="n">tripwire_triggered</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="o">.</span><span class="n">is_math</span><span class="p">,</span>
-</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>    <span class="p">)</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="k">class</span><span class="w"> </span><span class="nc">MessageOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="n">response</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="k">class</span><span class="w"> </span><span class="nc">MathOutput</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>    <span class="n">reasoning</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a>    <span class="n">is_math</span><span class="p">:</span> <span class="nb">bool</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a><span class="n">guardrail_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Guardrail check&quot;</span><span class="p">,</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Check if the output includes any math.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MathOutput</span><span class="p">,</span>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a><span class="p">)</span>
+</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>
+</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>
+</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a><span class="nd">@output_guardrail</span>
+</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">math_guardrail</span><span class="p">(</span>  <span class="c1"># (3)!</span>
+</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">,</span> <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">output</span><span class="p">:</span> <span class="n">MessageOutput</span>
+</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">GuardrailFunctionOutput</span><span class="p">:</span>
+</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">guardrail_agent</span><span class="p">,</span> <span class="n">output</span><span class="o">.</span><span class="n">response</span><span class="p">,</span> <span class="n">context</span><span class="o">=</span><span class="n">ctx</span><span class="o">.</span><span class="n">context</span><span class="p">)</span>
 </span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a>
-</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span> <span class="c1"># (4)!</span>
-</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Customer support agent&quot;</span><span class="p">,</span>
-</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a customer support agent. You help customers with their questions.&quot;</span><span class="p">,</span>
-</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>    <span class="n">output_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">math_guardrail</span><span class="p">],</span>
-</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MessageOutput</span><span class="p">,</span>
-</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a><span class="p">)</span>
-</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>
-</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>    <span class="c1"># This should trip the guardrail</span>
-</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>    <span class="k">try</span><span class="p">:</span>
-</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>        <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello, can you help me solve for x: 2x + 3 = 11?&quot;</span><span class="p">)</span>
-</span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Guardrail didn&#39;t trip - this is unexpected&quot;</span><span class="p">)</span>
+</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>    <span class="k">return</span> <span class="n">GuardrailFunctionOutput</span><span class="p">(</span>
+</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a>        <span class="n">output_info</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">,</span>
+</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>        <span class="n">tripwire_triggered</span><span class="o">=</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="o">.</span><span class="n">is_math</span><span class="p">,</span>
+</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>    <span class="p">)</span>
+</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>
+</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a>
+</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>  <span class="c1"># (4)!</span>
+</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Customer support agent&quot;</span><span class="p">,</span>
+</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a customer support agent. You help customers with their questions.&quot;</span><span class="p">,</span>
+</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>    <span class="n">output_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">math_guardrail</span><span class="p">],</span>
+</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>    <span class="n">output_type</span><span class="o">=</span><span class="n">MessageOutput</span><span class="p">,</span>
+</span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a><span class="p">)</span>
 </span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>
-</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>    <span class="k">except</span> <span class="n">OutputGuardrailTripwireTriggered</span><span class="p">:</span>
-</span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Math output guardrail tripped&quot;</span><span class="p">)</span>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>
+</span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-2-49"><a id="__codelineno-2-49" name="__codelineno-2-49" href="#__codelineno-2-49"></a>    <span class="c1"># This should trip the guardrail</span>
+</span><span id="__span-2-50"><a id="__codelineno-2-50" name="__codelineno-2-50" href="#__codelineno-2-50"></a>    <span class="k">try</span><span class="p">:</span>
+</span><span id="__span-2-51"><a id="__codelineno-2-51" name="__codelineno-2-51" href="#__codelineno-2-51"></a>        <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;Hello, can you help me solve for x: 2x + 3 = 11?&quot;</span><span class="p">)</span>
+</span><span id="__span-2-52"><a id="__codelineno-2-52" name="__codelineno-2-52" href="#__codelineno-2-52"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Guardrail didn&#39;t trip - this is unexpected&quot;</span><span class="p">)</span>
+</span><span id="__span-2-53"><a id="__codelineno-2-53" name="__codelineno-2-53" href="#__codelineno-2-53"></a>
+</span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a>    <span class="k">except</span> <span class="n">OutputGuardrailTripwireTriggered</span><span class="p">:</span>
+</span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a>        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Math output guardrail tripped&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <ol>
 <li>这是实际智能体的输出类型。</li>
@@ -2079,7 +2090,7 @@
 <li>这是接收智能体输出并返回结果的安全防护措施函数。</li>
 <li>这是定义工作流的实际智能体。</li>
 </ol>
-<p>最后，以下是工具安全防护措施的代码示例。</p>
+<p>最后，下面是工具安全防护措施的代码示例。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">Agent</span><span class="p">,</span>
@@ -2088,36 +2099,37 @@
 </span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">)</span>
 </span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span><span class="p">,</span> <span class="n">tool_input_guardrail</span><span class="p">,</span> <span class="n">tool_output_guardrail</span>
 </span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>
-</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="nd">@tool_input_guardrail</span>
-</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="k">def</span><span class="w"> </span><span class="nf">block_secrets</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
-</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="n">args</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">tool_arguments</span> <span class="ow">or</span> <span class="s2">&quot;</span><span class="si">{}</span><span class="s2">&quot;</span><span class="p">)</span>
-</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="k">if</span> <span class="s2">&quot;sk-&quot;</span> <span class="ow">in</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
-</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>        <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">reject_content</span><span class="p">(</span>
-</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>            <span class="s2">&quot;Remove secrets before calling this tool.&quot;</span>
-</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>        <span class="p">)</span>
-</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>    <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">allow</span><span class="p">()</span>
-</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="nd">@tool_input_guardrail</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="k">def</span><span class="w"> </span><span class="nf">block_secrets</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="n">args</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">tool_arguments</span> <span class="ow">or</span> <span class="s2">&quot;</span><span class="si">{}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="k">if</span> <span class="s2">&quot;sk-&quot;</span> <span class="ow">in</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">args</span><span class="p">):</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>        <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">reject_content</span><span class="p">(</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>            <span class="s2">&quot;Remove secrets before calling this tool.&quot;</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>        <span class="p">)</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>    <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">allow</span><span class="p">()</span>
 </span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>
-</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="nd">@tool_output_guardrail</span>
-</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="k">def</span><span class="w"> </span><span class="nf">redact_output</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
-</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">output</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
-</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>    <span class="k">if</span> <span class="s2">&quot;sk-&quot;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
-</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>        <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">reject_content</span><span class="p">(</span><span class="s2">&quot;Output contained sensitive data.&quot;</span><span class="p">)</span>
-</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>    <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">allow</span><span class="p">()</span>
-</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>
+</span><span id="__span-3-19"><a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>
+</span><span id="__span-3-20"><a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="nd">@tool_output_guardrail</span>
+</span><span id="__span-3-21"><a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="k">def</span><span class="w"> </span><span class="nf">redact_output</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
+</span><span id="__span-3-22"><a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>    <span class="n">text</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">output</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">)</span>
+</span><span id="__span-3-23"><a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>    <span class="k">if</span> <span class="s2">&quot;sk-&quot;</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+</span><span id="__span-3-24"><a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>        <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">reject_content</span><span class="p">(</span><span class="s2">&quot;Output contained sensitive data.&quot;</span><span class="p">)</span>
+</span><span id="__span-3-25"><a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>    <span class="k">return</span> <span class="n">ToolGuardrailFunctionOutput</span><span class="o">.</span><span class="n">allow</span><span class="p">()</span>
 </span><span id="__span-3-26"><a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>
-</span><span id="__span-3-27"><a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a><span class="nd">@tool</span><span class="p">(</span>
-</span><span id="__span-3-28"><a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>    <span class="n">tool_input_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">block_secrets</span><span class="p">],</span>
-</span><span id="__span-3-29"><a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>    <span class="n">tool_output_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">redact_output</span><span class="p">],</span>
-</span><span id="__span-3-30"><a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a><span class="p">)</span>
-</span><span id="__span-3-31"><a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a><span class="k">def</span><span class="w"> </span><span class="nf">classify_text</span><span class="p">(</span><span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-3-32"><a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Classify text for internal routing.&quot;&quot;&quot;</span>
-</span><span id="__span-3-33"><a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;length:</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
-</span><span id="__span-3-34"><a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>
+</span><span id="__span-3-27"><a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>
+</span><span id="__span-3-28"><a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a><span class="nd">@tool</span><span class="p">(</span>
+</span><span id="__span-3-29"><a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>    <span class="n">tool_input_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">block_secrets</span><span class="p">],</span>
+</span><span id="__span-3-30"><a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>    <span class="n">tool_output_guardrails</span><span class="o">=</span><span class="p">[</span><span class="n">redact_output</span><span class="p">],</span>
+</span><span id="__span-3-31"><a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a><span class="p">)</span>
+</span><span id="__span-3-32"><a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a><span class="k">def</span><span class="w"> </span><span class="nf">classify_text</span><span class="p">(</span><span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-3-33"><a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Classify text for internal routing.&quot;&quot;&quot;</span>
+</span><span id="__span-3-34"><a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;length:</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span>
 </span><span id="__span-3-35"><a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>
-</span><span id="__span-3-36"><a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Classifier&quot;</span><span class="p">,</span> <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">classify_text</span><span class="p">])</span>
-</span><span id="__span-3-37"><a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;hello world&quot;</span><span class="p">)</span>
-</span><span id="__span-3-38"><a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span><span id="__span-3-36"><a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>
+</span><span id="__span-3-37"><a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Classifier&quot;</span><span class="p">,</span> <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">classify_text</span><span class="p">])</span>
+</span><span id="__span-3-38"><a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a><span class="n">result</span> <span class="o">=</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run_sync</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;hello world&quot;</span><span class="p">)</span>
+</span><span id="__span-3-39"><a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
 </span></code></pre></div>
 
 

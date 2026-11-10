@@ -31,7 +31,7 @@
     
     
       
-        <title>構成 - OpenAI Agents SDK</title>
+        <title>設定 - OpenAI Agents SDK</title>
       
     
     
@@ -121,7 +121,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              構成
+              設定
             
           </span>
         </div>
@@ -348,7 +348,7 @@
   <span class="md-ellipsis">
     
   
-    構成
+    設定
   
 
     
@@ -366,7 +366,7 @@
   <span class="md-ellipsis">
     
   
-    構成
+    設定
   
 
     
@@ -395,7 +395,7 @@
   <a href="#configuration-objects-and-dictionaries" class="md-nav__link">
     <span class="md-ellipsis">
       
-        構成オブジェクトと辞書
+        設定オブジェクトと辞書
       
     </span>
   </a>
@@ -418,7 +418,7 @@
   <a href="#custom-http-clients-with-openai-v3" class="md-nav__link">
     <span class="md-ellipsis">
       
-        openai v3 でのカスタム HTTP クライアント
+        openai v3 対応のカスタム HTTP クライアント
       
     </span>
   </a>
@@ -468,7 +468,7 @@
   <a href="#sensitive-data-in-logs-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ログと診断情報に含まれる機密データ
+        ログと診断に含まれる機密データ
       
     </span>
   </a>
@@ -1673,7 +1673,7 @@
   <a href="#configuration-objects-and-dictionaries" class="md-nav__link">
     <span class="md-ellipsis">
       
-        構成オブジェクトと辞書
+        設定オブジェクトと辞書
       
     </span>
   </a>
@@ -1696,7 +1696,7 @@
   <a href="#custom-http-clients-with-openai-v3" class="md-nav__link">
     <span class="md-ellipsis">
       
-        openai v3 でのカスタム HTTP クライアント
+        openai v3 対応のカスタム HTTP クライアント
       
     </span>
   </a>
@@ -1746,7 +1746,7 @@
   <a href="#sensitive-data-in-logs-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ログと診断情報に含まれる機密データ
+        ログと診断に含まれる機密データ
       
     </span>
   </a>
@@ -1786,19 +1786,19 @@
   
 
 
-<h1 id="_1">構成</h1>
-<p>このページでは、デフォルトの OpenAI キーまたはクライアント、デフォルトの OpenAI API 形式、トレーシングのエクスポートに関するデフォルト設定、ログ動作など、通常はアプリケーションの起動時に一度だけ設定する SDK 全体のデフォルトについて説明します。</p>
-<p>これらのデフォルトはサンドボックスベースのワークフローにも適用されますが、サンドボックスワークスペース、サンドボックスクライアント、セッションの再利用は個別に構成します。</p>
-<p>代わりに特定のエージェントまたは実行を構成する必要がある場合は、以下から始めてください。</p>
+<h1 id="_1">設定</h1>
+<p>このページでは、アプリケーションの起動時に通常一度だけ設定する SDK 全体のデフォルトについて説明します。たとえば、デフォルトの OpenAI キーまたはクライアント、デフォルトの OpenAI API 形式、トレーシングのエクスポート設定のデフォルト、ログ動作などです。</p>
+<p>これらのデフォルトはサンドボックスベースのワークフローにも適用されますが、サンドボックスワークスペース、サンドボックスクライアント、セッションの再利用は個別に設定します。</p>
+<p>代わりに特定のエージェントまたは実行を設定する必要がある場合は、以下から始めてください。</p>
 <ul>
-<li>通常の <code>Agent</code> に対する指示、ツール、出力型、ハンドオフ、ガードレールについては、<a href="../agents/">エージェント</a>を参照してください。</li>
+<li>通常の <code>Agent</code> における instructions、tools、出力型、ハンドオフ、ガードレールについては、<a href="../agents/">エージェント</a>を参照してください。</li>
 <li><code>RunConfig</code>、セッション、会話状態のオプションについては、<a href="../running_agents/">エージェントの実行</a>を参照してください。</li>
 <li><code>SandboxRunConfig</code>、マニフェスト、ケイパビリティ、サンドボックスクライアント固有のワークスペース設定については、<a href="../sandbox/guide/">サンドボックスエージェント</a>を参照してください。</li>
-<li>モデルの選択とプロバイダーの構成については、<a href="../models/">モデル</a>を参照してください。</li>
-<li>実行単位のトレーシングメタデータとカスタムトレースプロセッサーについては、<a href="../tracing/">トレーシング</a>を参照してください。</li>
+<li>モデルの選択とプロバイダー設定については、<a href="../models/">モデル</a>を参照してください。</li>
+<li>実行ごとのトレーシングメタデータとカスタムトレースプロセッサーについては、<a href="../tracing/">トレーシング</a>を参照してください。</li>
 </ul>
-<h2 id="configuration-objects-and-dictionaries">構成オブジェクトと辞書</h2>
-<p>SDK で定義される構成パラメーターは通常、型付きの設定オブジェクト、または同じフィールドを含む辞書のいずれかを受け付けます。これは、型アノテーションに辞書が含まれるエージェント、実行、モデル、セッション、サンドボックス、音声の各構成境界に適用されます。SDK で定義されたネストされた設定型にも辞書を使用できます。</p>
+<h2 id="configuration-objects-and-dictionaries">設定オブジェクトと辞書</h2>
+<p>SDK で定義されている設定パラメーターは、通常、型付きの設定オブジェクト、または同じフィールドを含む辞書のいずれかを受け取ります。これは、型アノテーションに辞書が含まれる、エージェント、実行、モデル、セッション、サンドボックス、音声の各設定境界に適用されます。SDK で定義されているネストされた設定型にも辞書を使用できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
@@ -1810,25 +1810,25 @@
 </span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="p">},</span>
 </span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>SDK は、これらの辞書を対応する設定オブジェクトに正規化します。SDK で定義されたデータクラス構成型に不明なフィールドがあると <code>TypeError</code> が発生するため、オプション名の入力ミスを早期に検出できます。特定の境界が辞書を受け付けるかどうかを確認するには、そのパラメーターの型アノテーションまたは API リファレンスを確認してください。</p>
+<p>SDK は、これらの辞書を対応する設定オブジェクトへ正規化します。SDK で定義されたデータクラス設定型に未知のフィールドがある場合は <code>TypeError</code> が発生するため、オプション名のスペルミスを早期に検出できます。特定の境界が辞書を受け取るかどうかは、パラメーターの型アノテーションまたは API リファレンスで確認してください。</p>
 <h2 id="api-keys-and-clients">API キーとクライアント</h2>
-<p>デフォルトでは、SDK は LLM リクエストとトレーシングに <code>OPENAI_API_KEY</code> 環境変数を使用します。キーは SDK が最初に OpenAI クライアントを作成するときに解決されるため（遅延初期化）、最初のモデル呼び出しの前に環境変数を設定してください。アプリの起動前にその環境変数を設定できない場合は、<a class="autorefs autorefs-internal" title="set_default_openai_key" href="../../ref/#agents.set_default_openai_key">set_default_openai_key()</a> 関数を使用してキーを設定できます。</p>
+<p>デフォルトでは、SDK は LLM リクエストとトレーシングに <code>OPENAI_API_KEY</code> 環境変数を使用します。キーは、SDK が初めて OpenAI クライアントを作成するときに解決されるため（遅延初期化）、最初のモデル呼び出しより前に環境変数を設定してください。アプリケーションの起動前にその環境変数を設定できない場合は、<a class="autorefs autorefs-internal" title="set_default_openai_key" href="../../ref/#agents.set_default_openai_key">set_default_openai_key()</a> 関数を使用してキーを設定できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_key</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">set_default_openai_key</span><span class="p">(</span><span class="s2">&quot;sk-...&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<p>また、使用する OpenAI クライアントを構成することもできます。デフォルトでは、SDK は環境変数の API キーまたは上記で設定したデフォルトキーを使用して <code>AsyncOpenAI</code> インスタンスを作成します。<a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client">set_default_openai_client()</a> 関数を使用すると、これを変更できます。</p>
+<p>また、使用する OpenAI クライアントを設定することもできます。デフォルトでは、SDK は環境変数の API キーまたは上記で設定したデフォルトキーを使用して、<code>AsyncOpenAI</code> インスタンスを作成します。<a class="autorefs autorefs-internal" title="set_default_openai_client" href="../../ref/#agents.set_default_openai_client">set_default_openai_client()</a> 関数を使用すると、この動作を変更できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncOpenAI</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_client</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
 </span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">custom_client</span> <span class="o">=</span> <span class="n">AsyncOpenAI</span><span class="p">(</span><span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">)</span>
 </span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">set_default_openai_client</span><span class="p">(</span><span class="n">custom_client</span><span class="p">)</span>
 </span></code></pre></div>
-<p>明示的なクライアントを <a class="autorefs autorefs-internal" title="OpenAIProvider" href="../../ref/models/openai_provider/#agents.models.openai_provider.OpenAIProvider"><code>OpenAIProvider</code></a> に渡す場合、そのクライアントが接続設定とアカウント設定を管理します。<code>OpenAIProvider</code> に <code>api_key</code>、<code>base_url</code>、<code>websocket_base_url</code>、<code>organization</code>、<code>project</code> も渡さないでください。<code>openai_client</code> とこれらの引数のいずれかを組み合わせると、重複した値が暗黙に無視されるのではなく、<a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> が発生します。意図した値は <code>AsyncOpenAI</code> の構築時に設定してください。</p>
-<p><code>openai_client</code> を省略した場合、<code>api_key</code>、<code>base_url</code>、<code>websocket_base_url</code>、<code>organization</code>、<code>project</code> がすべて <code>None</code> のときに限り、<code>OpenAIProvider</code> は SDK 全体のデフォルトクライアントを再利用します。空文字列を含め、これらのオプションのいずれかを渡すと、プロバイダーは独自のクライアントを作成し、プロバイダーオプションが SDK 全体のデフォルトクライアントより優先されます。プロバイダーが <code>set_default_openai_client()</code> によって設定されたクライアントを継承する必要がある場合は、すべてのプロバイダーオプションを <code>None</code> のままにしてください。</p>
-<p><a class="autorefs autorefs-internal" title="OpenAIVoiceModelProvider" href="../../ref/voice/models/openai_model_provider/#agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider"><code>OpenAIVoiceModelProvider</code></a> は、<code>api_key</code>、<code>base_url</code>、<code>organization</code>、<code>project</code> に対して、同じ所有権と優先順位のルールを使用します。明示的な <code>openai_client</code> を、これら 4 つのオプションのいずれかと組み合わせることはできません。</p>
-<h3 id="custom-http-clients-with-openai-v3"><code>openai</code> v3 でのカスタム HTTP クライアント</h3>
-<p>バージョン 0.21.0 では <code>openai&gt;=3.0.0,&lt;4</code> が必要です。デフォルトの OpenAI プロバイダーは HTTPX2 を使用するため、ほとんどのアプリケーションでは HTTP クライアントを直接構成する必要はありません。アプリケーションから <code>AsyncOpenAI</code> に <code>http_client=</code> を渡す場合は、カスタムクライアントとそのトランスポート関連オプションに HTTPX2 の型を使用してください。</p>
+<p>明示的なクライアントを <a class="autorefs autorefs-internal" title="OpenAIProvider" href="../../ref/models/openai_provider/#agents.models.openai_provider.OpenAIProvider"><code>OpenAIProvider</code></a> に渡す場合、そのクライアントが接続設定とアカウント設定を管理します。<code>api_key</code>、<code>base_url</code>、<code>websocket_base_url</code>、<code>organization</code>、<code>project</code> を <code>OpenAIProvider</code> に同時に渡さないでください。<code>openai_client</code> をこれらの引数のいずれかと組み合わせると、重複した値が暗黙的に無視されるのではなく、<a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> が発生します。意図する値は <code>AsyncOpenAI</code> の構築時に設定してください。</p>
+<p><code>openai_client</code> を省略した場合、<code>OpenAIProvider</code> が SDK 全体のデフォルトクライアントを再利用するのは、<code>api_key</code>、<code>base_url</code>、<code>websocket_base_url</code>、<code>organization</code>、<code>project</code> がすべて <code>None</code> の場合に限られます。空文字列を含め、これらのオプションのいずれかを渡すと、プロバイダーは独自のクライアントを作成し、そのプロバイダーオプションが SDK 全体のデフォルトクライアントより優先されます。プロバイダーが <code>set_default_openai_client()</code> で設定されたクライアントを継承する必要がある場合は、すべてのプロバイダーオプションを <code>None</code> のままにしてください。</p>
+<p><a class="autorefs autorefs-internal" title="OpenAIVoiceModelProvider" href="../../ref/voice/models/openai_model_provider/#agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider"><code>OpenAIVoiceModelProvider</code></a> では、<code>api_key</code>、<code>base_url</code>、<code>organization</code>、<code>project</code> に同じ所有権と優先順位の規則が適用されます。明示的な <code>openai_client</code> をこれら 4 つのオプションのいずれかと組み合わせることはできません。</p>
+<h3 id="custom-http-clients-with-openai-v3"><code>openai</code> v3 対応のカスタム HTTP クライアント</h3>
+<p>バージョン 0.21.0 では <code>openai&gt;=3.0.0,&lt;4</code> が必要です。デフォルトの OpenAI プロバイダーは HTTPX2 を使用するため、ほとんどのアプリケーションでは HTTP クライアントを直接設定する必要はありません。アプリケーションが <code>http_client=</code> を <code>AsyncOpenAI</code> に渡す場合は、カスタムクライアントとそのトランスポート関連オプションに HTTPX2 の型を使用してください。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">httpx2</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncOpenAI</span><span class="p">,</span> <span class="n">DefaultAsyncHttpx2Client</span>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
@@ -1843,25 +1843,25 @@
 </span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">)</span>
 </span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="n">set_default_openai_client</span><span class="p">(</span><span class="n">custom_client</span><span class="p">)</span>
 </span></code></pre></div>
-<p>同じ移行が、カスタムトランスポート、認証、イベントフック、モックトランスポート、URL、リクエスト、レスポンス、トランスポート例外処理にも適用されます。それぞれの <code>httpx2</code> 相当のものを使用してください。Agents SDK は、任意の従来の <code>httpx</code> オブジェクトを HTTPX2 に変換しません。アプリケーションが <code>httpx</code> を明示的にインストールすると、OpenAI Python SDK は従来のクライアント向けに一時的な互換性確保の手段を提供しますが、新規コードおよび移行済みコードでは HTTPX2 を使用する必要があります。</p>
-<p>この OpenAI クライアント境界は、ローカル MCP トランスポートのカスタマイズとは別のものです。MCP Python SDK v1 は独自の従来の <code>httpx</code> 依存関係を使用し、MCP Python SDK v2 は <code>httpx2</code> を使用します。<a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 と v2</a>を参照してください。</p>
-<p>環境変数ベースのエンドポイント構成を使用する場合、デフォルトの OpenAI プロバイダーは <code>OPENAI_BASE_URL</code> も読み取ります。Responses の WebSocket トランスポートを有効にすると、WebSocket の <code>/responses</code> エンドポイント用に <code>OPENAI_WEBSOCKET_BASE_URL</code> も読み取ります。</p>
+<p>同じ移行は、カスタムトランスポート、認証、イベントフック、モックトランスポート、URL、リクエスト、レスポンス、トランスポート例外の処理にも適用されます。それぞれに対応する <code>httpx2</code> を使用してください。Agents SDK は、任意の旧式の <code>httpx</code> オブジェクトを HTTPX2 に変換しません。アプリケーションが <code>httpx</code> を明示的にインストールした場合、OpenAI Python SDK は旧式クライアント向けの一時的な互換手段を提供しますが、新規コードおよび移行後のコードでは HTTPX2 を使用してください。</p>
+<p>この OpenAI クライアントの境界は、ローカル MCP トランスポートのカスタマイズとは別です。MCP Python SDK v1 は独自の旧式 <code>httpx</code> 依存関係を使用し、MCP Python SDK v2 は <code>httpx2</code> を使用します。詳細は <a href="../mcp/#mcp-python-sdk-v1-and-v2">MCP Python SDK v1 と v2</a>を参照してください。</p>
+<p>環境変数によるエンドポイント設定を使用する場合、デフォルトの OpenAI プロバイダーは <code>OPENAI_BASE_URL</code> も読み取ります。Responses の WebSocket トランスポートを有効にすると、WebSocket の <code>/responses</code> エンドポイント用に <code>OPENAI_WEBSOCKET_BASE_URL</code> も読み取ります。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_BASE_URL</span><span class="o">=</span><span class="s2">&quot;https://your-openai-compatible-endpoint.example/v1&quot;</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_WEBSOCKET_BASE_URL</span><span class="o">=</span><span class="s2">&quot;wss://your-openai-compatible-endpoint.example/v1&quot;</span>
 </span></code></pre></div>
-<p>最後に、使用する OpenAI API をカスタマイズすることもできます。デフォルトでは、OpenAI Responses API を使用します。<a class="autorefs autorefs-internal" title="set_default_openai_api" href="../../ref/#agents.set_default_openai_api">set_default_openai_api()</a> 関数を使用すると、これをオーバーライドして Chat Completions API を使用できます。</p>
+<p>最後に、使用する OpenAI API もカスタマイズできます。デフォルトでは OpenAI Responses API を使用します。<a class="autorefs autorefs-internal" title="set_default_openai_api" href="../../ref/#agents.set_default_openai_api">set_default_openai_api()</a> 関数を使用すると、これをオーバーライドして Chat Completions API を使用できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_api</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">set_default_openai_api</span><span class="p">(</span><span class="s2">&quot;chat_completions&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="openai-provider-defaults">OpenAI プロバイダーのデフォルト</h2>
-<p>SDK の OpenAI バックエンドを使用するプロバイダーも、モデル名の文字列をモデルに対応付ける際に、SDK 全体のデフォルトを読み取ります。OpenAI Responses モデルでデフォルトで WebSocket トランスポートを使用するには、<a class="autorefs autorefs-internal" title="set_default_openai_responses_transport" href="../../ref/#agents.set_default_openai_responses_transport"><code>set_default_openai_responses_transport()</code></a> を使用します。</p>
+<p>SDK の OpenAI バックエンドを使用するプロバイダーは、モデル名の文字列をモデルにマッピングするときに、SDK 全体のデフォルトも読み取ります。OpenAI Responses モデルでデフォルトとして WebSocket トランスポートを使用するには、<a class="autorefs autorefs-internal" title="set_default_openai_responses_transport" href="../../ref/#agents.set_default_openai_responses_transport"><code>set_default_openai_responses_transport()</code></a> を使用します。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_responses_transport</span>
 </span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
 </span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">set_default_openai_responses_transport</span><span class="p">(</span><span class="s2">&quot;websocket&quot;</span><span class="p">)</span>
 </span></code></pre></div>
 <p>これは、デフォルトの OpenAI プロバイダーがモデル名を解決した結果として得られる OpenAI Responses モデルに影響します。プロバイダーレベルの設定、接続の再利用、キープアライブオプション、カスタム WebSocket エンドポイントについては、<a href="../models/#responses-websocket-transport">Responses WebSocket トランスポート</a>を参照してください。</p>
-<p>OpenAI の設定でプロバイダーレベルのエージェント登録メタデータが必要な場合は、起動時にデフォルトのハーネス ID を一度構成します。</p>
+<p>OpenAI の設定でプロバイダーレベルのエージェント登録メタデータが必要な場合は、起動時にデフォルトのハーネス ID を一度設定します。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_default_openai_harness</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">set_default_openai_harness</span><span class="p">(</span><span class="s2">&quot;your-harness-id&quot;</span><span class="p">)</span>
@@ -1869,34 +1869,34 @@
 <p>完全な登録オブジェクトを渡すこともできます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAIAgentRegistrationConfig</span><span class="p">,</span> <span class="n">set_default_openai_agent_registration</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
-</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">set_default_openai_agent_registration</span><span class="p">(</span>
-</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">OpenAIAgentRegistrationConfig</span><span class="p">(</span><span class="n">harness_id</span><span class="o">=</span><span class="s2">&quot;your-harness-id&quot;</span><span class="p">)</span>
-</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="p">)</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">set_default_openai_agent_registration</span><span class="p">(</span><span class="n">OpenAIAgentRegistrationConfig</span><span class="p">(</span><span class="n">harness_id</span><span class="o">=</span><span class="s2">&quot;your-harness-id&quot;</span><span class="p">))</span>
 </span></code></pre></div>
-<p>SDK のデフォルトが設定されていない場合、SDK の OpenAI バックエンドを使用するプロバイダーは <code>OPENAI_AGENT_HARNESS_ID</code> 環境変数にフォールバックします。ハーネス ID が構成されている場合、<code>RunConfig.trace_metadata</code> にそのキーがすでに存在しない限り、SDK はトレースメタデータに <code>agent_harness_id</code> として追加します。</p>
+<p>SDK のデフォルトが設定されていない場合、SDK の OpenAI バックエンドを使用するプロバイダーは <code>OPENAI_AGENT_HARNESS_ID</code> 環境変数にフォールバックします。ハーネス ID が設定されている場合、<code>RunConfig.trace_metadata</code> にそのキーがすでに存在しない限り、SDK はそれをトレースメタデータへ <code>agent_harness_id</code> として追加します。</p>
 <h2 id="tracing">トレーシング</h2>
-<p>トレーシングはデフォルトで有効です。デフォルトでは、上記のセクションにあるモデルリクエストと同じ OpenAI API キー、つまり環境変数または設定したデフォルトキーを使用します。トレーシングに使用する API キーを個別に設定するには、<a class="autorefs autorefs-internal" title="set_tracing_export_api_key" href="../../ref/#agents.set_tracing_export_api_key"><code>set_tracing_export_api_key</code></a> 関数を使用します。</p>
+<p>トレーシングはデフォルトで有効です。デフォルトでは、上記のセクションでモデルリクエストに使用するものと同じ OpenAI API キー、つまり環境変数または設定したデフォルトキーを使用します。トレーシングに使用する API キーは、<a class="autorefs autorefs-internal" title="set_tracing_export_api_key" href="../../ref/#agents.set_tracing_export_api_key"><code>set_tracing_export_api_key</code></a> 関数を使用して個別に設定できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_tracing_export_api_key</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
 </span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">set_tracing_export_api_key</span><span class="p">(</span><span class="s2">&quot;sk-...&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<p>モデルの通信で 1 つのキーまたはクライアントを使用し、トレーシングでは別の OpenAI キーを使用する必要がある場合は、デフォルトのキーまたはクライアントを設定するときに <code>use_for_tracing=False</code> を渡し、その後トレーシングを個別に構成します。カスタムクライアントを使用していない場合は、<a class="autorefs autorefs-internal" title="set_default_openai_key" href="../../ref/#agents.set_default_openai_key"><code>set_default_openai_key()</code></a> でも同じ方法を使用できます。</p>
+<p>モデルの通信にあるキーまたはクライアントを使用し、トレーシングには別の OpenAI キーを使用する場合は、デフォルトのキーまたはクライアントを設定するときに <code>use_for_tracing=False</code> を渡してから、トレーシングを個別に設定します。カスタムクライアントを使用していない場合は、<a class="autorefs autorefs-internal" title="set_default_openai_key" href="../../ref/#agents.set_default_openai_key"><code>set_default_openai_key()</code></a> でも同じ方法を使用できます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncOpenAI</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>    <span class="n">set_default_openai_client</span><span class="p">,</span>
 </span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">set_tracing_export_api_key</span><span class="p">,</span>
 </span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="p">)</span>
 </span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>
-</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="n">custom_client</span> <span class="o">=</span> <span class="n">AsyncOpenAI</span><span class="p">(</span><span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://your-openai-compatible-endpoint.example/v1&quot;</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="s2">&quot;provider-key&quot;</span><span class="p">)</span>
-</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="n">set_default_openai_client</span><span class="p">(</span><span class="n">custom_client</span><span class="p">,</span> <span class="n">use_for_tracing</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
-</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>
-</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="n">set_tracing_export_api_key</span><span class="p">(</span><span class="s2">&quot;sk-tracing&quot;</span><span class="p">)</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="n">custom_client</span> <span class="o">=</span> <span class="n">AsyncOpenAI</span><span class="p">(</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">base_url</span><span class="o">=</span><span class="s2">&quot;https://your-openai-compatible-endpoint.example/v1&quot;</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="s2">&quot;provider-key&quot;</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="p">)</span>
+</span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="n">set_default_openai_client</span><span class="p">(</span><span class="n">custom_client</span><span class="p">,</span> <span class="n">use_for_tracing</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>
+</span><span id="__span-10-12"><a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="n">set_tracing_export_api_key</span><span class="p">(</span><span class="s2">&quot;sk-tracing&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<p>デフォルトのエクスポーターを使用して、特定の組織またはプロジェクトにトレースを関連付ける必要がある場合は、アプリの起動前に次の環境変数を設定します。</p>
+<p>デフォルトのエクスポーターを使用して、トレースを特定の組織またはプロジェクトに関連付ける必要がある場合は、アプリケーションの起動前に以下の環境変数を設定してください。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_ORG_ID</span><span class="o">=</span><span class="s2">&quot;org_...&quot;</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_PROJECT_ID</span><span class="o">=</span><span class="s2">&quot;proj_...&quot;</span>
 </span></code></pre></div>
-<p>グローバルエクスポーターを変更せずに、実行ごとにトレーシング API キーを設定することもできます。</p>
+<p>グローバルエクスポーターを変更せずに、実行ごとのトレーシング API キーを設定することもできます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">RunConfig</span>
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
 </span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
@@ -1905,12 +1905,12 @@
 </span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">tracing</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;api_key&quot;</span><span class="p">:</span> <span class="s2">&quot;sk-tracing-123&quot;</span><span class="p">}),</span>
 </span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="p">)</span>
 </span></code></pre></div>
-<p><a class="autorefs autorefs-internal" title="set_tracing_disabled" href="../../ref/#agents.set_tracing_disabled"><code>set_tracing_disabled()</code></a> 関数を使用して、トレーシングを完全に無効にすることもできます。</p>
+<p><a class="autorefs autorefs-internal" title="set_tracing_disabled" href="../../ref/#agents.set_tracing_disabled"><code>set_tracing_disabled()</code></a> 関数を使用すると、トレーシングを完全に無効にすることもできます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_tracing_disabled</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
 </span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">set_tracing_disabled</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
 </span></code></pre></div>
-<p>トレーシングを有効なまま維持しつつ、機密情報を含む可能性のある入出力をトレースペイロードから除外するには、<a class="autorefs autorefs-internal" title="trace_include_sensitive_data
+<p>トレーシングを有効にしたまま、機密情報が含まれる可能性のある入力や出力をトレースペイロードから除外するには、<a class="autorefs autorefs-internal" title="trace_include_sensitive_data
 
 
   
@@ -1925,21 +1925,21 @@
 </span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>    <span class="n">run_config</span><span class="o">=</span><span class="n">RunConfig</span><span class="p">(</span><span class="n">trace_include_sensitive_data</span><span class="o">=</span><span class="kc">False</span><span class="p">),</span>
 </span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>アプリの起動前に次の環境変数を設定することで、コードを使わずにデフォルトを変更することもできます。</p>
+<p>アプリケーションの起動前に以下の環境変数を設定すると、コードを変更せずにデフォルトを変更することもできます。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA</span><span class="o">=</span><span class="m">0</span>
 </span></code></pre></div>
 <p>トレーシングのすべての制御については、<a href="../tracing/">トレーシングガイド</a>を参照してください。</p>
 <h2 id="debug-logging">デバッグログ</h2>
-<p>SDK は 2 つの Python ロガー（<code>openai.agents</code> と <code>openai.agents.tracing</code>）を定義しますが、デフォルトではハンドラーをアタッチしません。ログは、アプリケーションの Python ロギング構成に従います。</p>
+<p>SDK は 2 つの Python ロガー（<code>openai.agents</code> と <code>openai.agents.tracing</code>）を定義しますが、デフォルトではハンドラーを追加しません。ログは、アプリケーションの Python ロギング設定に従います。</p>
 <p>詳細ログを有効にするには、<a class="autorefs autorefs-internal" title="enable_verbose_stdout_logging" href="../../ref/#agents.enable_verbose_stdout_logging"><code>enable_verbose_stdout_logging()</code></a> 関数を使用します。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">enable_verbose_stdout_logging</span>
 </span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>
 </span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="n">enable_verbose_stdout_logging</span><span class="p">()</span>
 </span></code></pre></div>
-<p>また、ハンドラー、フィルター、フォーマッターなどを追加して、ログをカスタマイズすることもできます。詳細については、<a href="https://docs.python.org/3/howto/logging.html">Python ロギングガイド</a>を参照してください。</p>
+<p>または、ハンドラー、フィルター、フォーマッターなどを追加して、ログをカスタマイズできます。詳細は <a href="https://docs.python.org/3/howto/logging.html">Python ロギングガイド</a>を参照してください。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
 </span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>
-</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;openai.agents&quot;</span><span class="p">)</span> <span class="c1"># or openai.agents.tracing for the Tracing logger</span>
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;openai.agents&quot;</span><span class="p">)</span>  <span class="c1"># or openai.agents.tracing for the Tracing logger</span>
 </span><span id="__span-17-4"><a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>
 </span><span id="__span-17-5"><a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a><span class="c1"># To make all logs show up</span>
 </span><span id="__span-17-6"><a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="n">logger</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
@@ -1952,17 +1952,17 @@
 </span><span id="__span-17-13"><a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a><span class="c1"># You can customize this as needed, but this will output to `stderr` by default</span>
 </span><span id="__span-17-14"><a id="__codelineno-17-14" name="__codelineno-17-14" href="#__codelineno-17-14"></a><span class="n">logger</span><span class="o">.</span><span class="n">addHandler</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">StreamHandler</span><span class="p">())</span>
 </span></code></pre></div>
-<h3 id="sensitive-data-in-logs-and-diagnostics">ログと診断情報に含まれる機密データ</h3>
-<p>一部のログや診断例外には、機密データが含まれる場合があります（たとえば、モデルやツールの入出力）。</p>
-<p>デフォルトでは、SDK は LLM の入出力やツールの入出力を <strong>ログに記録しません</strong> 。これらの保護は以下によって制御されます。</p>
+<h3 id="sensitive-data-in-logs-and-diagnostics">ログと診断に含まれる機密データ</h3>
+<p>一部のログや診断例外には、機密データが含まれる場合があります。たとえば、モデルやツールの入力と出力などです。</p>
+<p>デフォルトでは、SDK は LLM の入力/出力やツールの入力/出力を <strong>ログに記録しません</strong>。これらの保護は、以下によって制御されます。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nv">OPENAI_AGENTS_DONT_LOG_MODEL_DATA</span><span class="o">=</span><span class="m">1</span>
 </span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="nv">OPENAI_AGENTS_DONT_LOG_TOOL_DATA</span><span class="o">=</span><span class="m">1</span>
 </span></code></pre></div>
-<p>デバッグのためにこのデータを一時的に含める必要がある場合は、アプリの起動前にいずれかの変数を <code>0</code>（または <code>false</code>）に設定します。</p>
+<p>デバッグのためにこのデータを一時的に含める必要がある場合は、アプリケーションの起動前に、いずれかの変数を <code>0</code>（または <code>false</code>）に設定します。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_AGENTS_DONT_LOG_MODEL_DATA</span><span class="o">=</span><span class="m">0</span>
 </span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_AGENTS_DONT_LOG_TOOL_DATA</span><span class="o">=</span><span class="m">0</span>
 </span></code></pre></div>
-<p>これらのフラグは、影響を受けるエラーでペイロードを含む診断の詳細を保持するかどうかも制御します。たとえば、ツールデータの編集が有効な場合、<code>FunctionTool</code> の無効な引数によって、基礎となる検証エラーを例外チェーンに含まない汎用的な <code>ModelBehaviorError</code> が発生します。いずれかの変数を <code>0</code> に設定すると、ログ、例外メッセージ、例外チェーン、その他の診断コンテキストに未加工のモデルデータまたはツールデータが公開される可能性があるため、管理された開発環境でのみ有効にしてください。</p>
+<p>これらのフラグは、影響を受ける失敗で、ペイロードを含む診断詳細を保持するかどうかも制御します。たとえば、ツールデータの秘匿化が有効な場合、<code>FunctionTool</code> に無効な引数を渡すと、基となる検証エラーを例外チェーンに含めず、汎用的な <code>ModelBehaviorError</code> が発生します。いずれかの変数を <code>0</code> に設定すると、モデルまたはツールの生データが、ログ、例外メッセージ、例外チェーン、その他の診断コンテキストに公開される可能性があります。そのため、管理された開発環境でのみ有効にしてください。</p>
 
 
 

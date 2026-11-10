@@ -372,12 +372,12 @@
   <a href="#create-a-project-and-virtual-environment" class="md-nav__link">
     <span class="md-ellipsis">
       
-        项目与虚拟环境的创建
+        项目和虚拟环境的创建
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="项目与虚拟环境的创建">
+    <nav class="md-nav" aria-label="项目和虚拟环境的创建">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -422,7 +422,7 @@
   <a href="#create-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        首个智能体的创建
+        第一个智能体的创建
       
     </span>
   </a>
@@ -433,7 +433,7 @@
   <a href="#run-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        首个智能体的运行
+        第一个智能体的运行
       
     </span>
   </a>
@@ -444,7 +444,7 @@
   <a href="#give-your-agent-tools" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体工具的提供
+        智能体工具的添加
       
     </span>
   </a>
@@ -499,7 +499,7 @@
   <a href="#view-your-traces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        追踪的查看
+        追踪记录的查看
       
     </span>
   </a>
@@ -1005,7 +1005,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -1153,7 +1153,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1293,7 +1293,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1737,12 +1737,12 @@
   <a href="#create-a-project-and-virtual-environment" class="md-nav__link">
     <span class="md-ellipsis">
       
-        项目与虚拟环境的创建
+        项目和虚拟环境的创建
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="项目与虚拟环境的创建">
+    <nav class="md-nav" aria-label="项目和虚拟环境的创建">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1787,7 +1787,7 @@
   <a href="#create-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        首个智能体的创建
+        第一个智能体的创建
       
     </span>
   </a>
@@ -1798,7 +1798,7 @@
   <a href="#run-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        首个智能体的运行
+        第一个智能体的运行
       
     </span>
   </a>
@@ -1809,7 +1809,7 @@
   <a href="#give-your-agent-tools" class="md-nav__link">
     <span class="md-ellipsis">
       
-        智能体工具的提供
+        智能体工具的添加
       
     </span>
   </a>
@@ -1864,7 +1864,7 @@
   <a href="#view-your-traces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        追踪的查看
+        追踪记录的查看
       
     </span>
   </a>
@@ -1911,8 +1911,8 @@
 
 
 <h1 id="_1">快速入门</h1>
-<h2 id="create-a-project-and-virtual-environment">项目与虚拟环境的创建</h2>
-<p>你只需要执行一次。</p>
+<h2 id="create-a-project-and-virtual-environment">项目和虚拟环境的创建</h2>
+<p>此操作只需执行一次。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>mkdir<span class="w"> </span>my_project
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">cd</span><span class="w"> </span>my_project
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv
@@ -1929,19 +1929,19 @@
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents<span class="w"> </span><span class="c1"># or `uv add openai-agents`, etc</span>
 </span></code></pre></div>
 <h3 id="set-an-openai-api-key">OpenAI API 密钥的设置</h3>
-<p>如果你还没有密钥，请按照<a href="https://platform.openai.com/docs/quickstart#create-and-export-an-api-key">这些说明</a>创建 OpenAI API 密钥。</p>
-<p>这些命令会为当前终端会话设置密钥。</p>
+<p>如果您还没有密钥，请按照<a href="https://platform.openai.com/docs/quickstart#create-and-export-an-api-key">这些说明</a>创建 OpenAI API 密钥。</p>
+<p>以下命令会为当前终端会话设置密钥。</p>
 <p>在 macOS 或 Linux 上：</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>sk-...
 </span></code></pre></div>
 <p>在 Windows PowerShell 上：</p>
 <div class="language-powershell highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nv">$env:OPENAI_API_KEY</span> <span class="p">=</span> <span class="s2">&quot;sk-...&quot;</span>
 </span></code></pre></div>
-<p>在 Windows 命令提示符上：</p>
+<p>在 Windows 命令提示符中：</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>set &quot;OPENAI_API_KEY=sk-...&quot;
 </span></code></pre></div>
-<h2 id="create-your-first-agent">首个智能体的创建</h2>
-<p>智能体由 instructions、名称以及特定模型等可选配置定义。</p>
+<h2 id="create-your-first-agent">第一个智能体的创建</h2>
+<p>智能体通过 instructions、名称以及特定模型等可选配置来定义。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
@@ -1949,7 +1949,7 @@
 </span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You answer history questions clearly and concisely.&quot;</span><span class="p">,</span>
 </span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="run-your-first-agent">首个智能体的运行</h2>
+<h2 id="run-your-first-agent">第一个智能体的运行</h2>
 <p>使用 <a class="autorefs autorefs-internal" title="Runner" href="../../ref/run/#agents.run.Runner"><code>Runner</code></a> 执行智能体，并获取返回的 <a class="autorefs autorefs-internal" title="RunResult
 
 
@@ -1964,41 +1964,43 @@
 </span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You answer history questions clearly and concisely.&quot;</span><span class="p">,</span>
 </span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">)</span>
 </span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
-</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;When did the Roman Empire fall?&quot;</span><span class="p">)</span>
-</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
-</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>
-</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;When did the Roman Empire fall?&quot;</span><span class="p">)</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p>对于第二轮对话，你可以将 <code>result.to_input_list()</code> 传回 <code>Runner.run(...)</code>，附加一个<a href="../sessions/">会话</a>，或者使用 <code>conversation_id</code> / <code>previous_response_id</code> 复用 OpenAI 服务端管理的状态。<a href="../running_agents/">运行智能体</a>指南会比较这些方法。</p>
-<p>可按以下经验法则选择：</p>
+<p>对于第二轮交互，您可以将 <code>result.to_input_list()</code> 传回 <code>Runner.run(...)</code>、附加一个<a href="../sessions/">会话</a>，或者使用 <code>conversation_id</code> / <code>previous_response_id</code> 复用由OpenAI服务器管理的状态。<a href="../running_agents/">智能体运行</a>指南对这些方法进行了比较。</p>
+<p>可以采用以下经验法则：</p>
 <table>
 <thead>
 <tr>
-<th>如果你想要...</th>
-<th>从...开始</th>
+<th>如果您希望……</th>
+<th>可以从……开始</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>完全手动控制和与提供商无关的历史记录</td>
+<td>完全手动控制，并使用与提供商无关的历史记录</td>
 <td><code>result.to_input_list()</code></td>
 </tr>
 <tr>
-<td>由 SDK 为你加载和保存历史记录</td>
+<td>让 SDK 为您加载和保存历史记录</td>
 <td><a href="../sessions/"><code>session=...</code></a></td>
 </tr>
 <tr>
-<td>由 OpenAI 管理的服务端延续</td>
+<td>使用由OpenAI管理的服务器端续接</td>
 <td><code>previous_response_id</code> 或 <code>conversation_id</code></td>
 </tr>
 </tbody>
 </table>
-<p>有关权衡取舍和确切行为，请参阅<a href="../running_agents/#choose-a-memory-strategy">运行智能体</a>。</p>
-<p>当任务主要存在于提示词、工具和对话状态中时，使用普通的 <code>Agent</code> 加 <code>Runner</code>。如果智能体需要在隔离的工作区中检查或修改真实文件，请转到<a href="../sandbox_agents/">沙盒智能体快速入门</a>。</p>
-<h2 id="give-your-agent-tools">智能体工具的提供</h2>
-<p>你可以为智能体提供工具，用于查找信息或执行操作。</p>
+<p>有关权衡因素和确切行为，请参阅<a href="../running_agents/#choose-a-memory-strategy">智能体运行</a>。</p>
+<p>当任务主要依赖提示词、工具和对话状态时，请使用普通的 <code>Agent</code> 搭配 <code>Runner</code>。如果智能体需要在隔离的工作区中检查或修改真实文件，请直接参阅<a href="../sandbox_agents/">沙盒智能体快速入门</a>。</p>
+<h2 id="give-your-agent-tools">智能体工具的添加</h2>
+<p>您可以为智能体提供工具，以查询信息或执行操作。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
@@ -2029,13 +2031,13 @@
 </span><span id="__span-9-28"><a id="__codelineno-9-28" name="__codelineno-9-28" href="#__codelineno-9-28"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <h2 id="add-a-few-more-agents">更多智能体的添加</h2>
-<p>在选择多智能体模式之前，请决定最终答案应由谁负责：</p>
+<p>在选择多智能体模式之前，请先确定由谁负责最终答案：</p>
 <ul>
-<li><strong>任务转移</strong>：专家智能体会接管该轮对话中的相应部分。</li>
-<li><strong>Agents as tools</strong>：编排者保持控制，并将专家智能体作为工具调用。</li>
+<li><strong>任务转移</strong>：由专家接管该轮交互中相应部分的对话。</li>
+<li><strong>Agents as tools</strong>：编排器保持控制权，并将专家作为工具调用。</li>
 </ul>
-<p>本快速入门继续使用<strong>任务转移</strong>，因为这是最短的入门示例。有关管理者式模式，请参阅<a href="../multi_agent/">智能体编排</a>和<a href="../tools/#agents-as-tools">工具：agents as tools</a>。</p>
-<p>其他智能体也可以用同样的方式定义。<code>handoff_description</code> 会为路由智能体提供有关何时委派的额外上下文。</p>
+<p>本快速入门将继续介绍<strong>任务转移</strong>，因为这是最简短的入门示例。有关管理器风格的模式，请参阅<a href="../multi_agent/">智能体编排</a>和<a href="../tools/#agents-as-tools">工具：agents as tools</a>。</p>
+<p>其他智能体可以用相同方式定义。<code>handoff_description</code> 会为路由智能体提供额外上下文，帮助其判断何时进行委派。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">history_tutor_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
@@ -2051,7 +2053,7 @@
 </span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="define-your-handoffs">任务转移的定义</h2>
-<p>在智能体上，你可以定义一组可选的外部任务转移选项，供它在解决任务时选择。</p>
+<p>您可以在智能体上定义一组传出任务转移选项，供其在解决任务时选择。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage Agent&quot;</span><span class="p">,</span>
 </span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Route each homework question to the right specialist.&quot;</span><span class="p">,</span>
@@ -2059,7 +2061,7 @@
 </span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="run-the-agent-orchestration">智能体编排的运行</h2>
-<p>运行器会处理各个智能体的执行、所有任务转移以及所有工具调用。</p>
+<p>运行器负责执行各个智能体、处理所有任务转移以及所有工具调用。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
@@ -2077,19 +2079,19 @@
 </span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <h2 id="reference-examples">参考代码示例</h2>
-<p>仓库包含相同核心模式的完整脚本：</p>
+<p>代码仓库中包含实现相同核心模式的完整脚本：</p>
 <ul>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py"><code>examples/basic/hello_world.py</code></a> 用于首次运行。</li>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py"><code>examples/basic/tools.py</code></a> 用于工具调用。</li>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py"><code>examples/agent_patterns/routing.py</code></a> 用于多智能体路由。</li>
+<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py"><code>examples/basic/hello_world.py</code></a>，用于首次运行。</li>
+<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py"><code>examples/basic/tools.py</code></a>，用于函数工具。</li>
+<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py"><code>examples/agent_patterns/routing.py</code></a>，用于多智能体路由。</li>
 </ul>
-<h2 id="view-your-traces">追踪的查看</h2>
-<p>若要回顾智能体运行期间发生的情况，请前往 <a href="https://platform.openai.com/traces">OpenAI Dashboard 中的追踪查看器</a>，查看智能体运行的追踪。</p>
+<h2 id="view-your-traces">追踪记录的查看</h2>
+<p>如需回顾智能体运行期间发生的情况，请前往 <a href="https://platform.openai.com/traces">OpenAI 控制面板中的追踪查看器</a>，查看智能体运行的追踪记录。</p>
 <h2 id="next-steps">后续步骤</h2>
-<p>了解如何构建更复杂的智能体式流程：</p>
+<p>了解如何构建更复杂的智能体工作流：</p>
 <ul>
 <li>了解如何配置<a href="../agents/">智能体</a>。</li>
-<li>了解<a href="../running_agents/">运行智能体</a>和<a href="../sessions/">会话</a>。</li>
+<li>了解<a href="../running_agents/">智能体运行</a>和<a href="../sessions/">会话</a>。</li>
 <li>如果工作应在真实工作区内进行，请了解<a href="../sandbox_agents/">沙盒智能体</a>。</li>
 <li>了解<a href="../tools/">工具</a>、<a href="../guardrails/">安全防护措施</a>和<a href="../models/">模型</a>。</li>
 </ul>

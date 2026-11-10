@@ -696,7 +696,7 @@
   <span class="md-ellipsis">
     
   
-    실시간 에이전트 가이드
+    Realtime agents 가이드
   
 
     
@@ -1362,7 +1362,7 @@
   <a href="#use-local-context-for-capability-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기능 표시 여부를 위한 로컬 컨텍스트 사용
+        기능 노출을 위한 로컬 컨텍스트 사용
       
     </span>
   </a>
@@ -1373,7 +1373,7 @@
   <a href="#what-runcontextwrapper-exposes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        RunContextWrapper에서 제공하는 항목
+        RunContextWrapper 제공 항목
       
     </span>
   </a>
@@ -1661,7 +1661,7 @@
   <a href="#use-local-context-for-capability-visibility" class="md-nav__link">
     <span class="md-ellipsis">
       
-        기능 표시 여부를 위한 로컬 컨텍스트 사용
+        기능 노출을 위한 로컬 컨텍스트 사용
       
     </span>
   </a>
@@ -1672,7 +1672,7 @@
   <a href="#what-runcontextwrapper-exposes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        RunContextWrapper에서 제공하는 항목
+        RunContextWrapper 제공 항목
       
     </span>
   </a>
@@ -1775,10 +1775,10 @@
 
 
 <h1 id="_1">컨텍스트 관리</h1>
-<p>컨텍스트는 여러 의미로 사용되는 용어입니다. 고려해야 할 컨텍스트에는 크게 두 가지 유형이 있습니다.</p>
+<p>컨텍스트는 여러 의미로 사용되는 용어입니다. 고려해야 할 컨텍스트에는 크게 두 가지 범주가 있습니다.</p>
 <ol>
-<li>코드에서 로컬로 사용할 수 있는 컨텍스트: 도구 함수 실행 시, <code>on_handoff</code> 같은 콜백 내에서, 수명 주기 훅 등에서 필요할 수 있는 데이터와 종속성입니다.</li>
-<li>LLM에서 사용할 수 있는 컨텍스트: 응답을 생성할 때 LLM이 확인하는 데이터입니다.</li>
+<li>코드에서 로컬로 사용할 수 있는 컨텍스트: 도구 함수가 실행될 때, <code>on_handoff</code> 같은 콜백에서, 수명 주기 훅 등에서 필요할 수 있는 데이터와 종속성입니다.</li>
+<li>LLM에서 사용할 수 있는 컨텍스트: LLM이 응답을 생성할 때 확인하는 데이터입니다.</li>
 </ol>
 <h2 id="local-context">로컬 컨텍스트</h2>
 <p>이는 <a class="autorefs autorefs-internal" title="RunContextWrapper
@@ -1794,24 +1794,24 @@
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>context</code></a> 속성으로 표현됩니다. 작동 방식은 다음과 같습니다.</p>
 <ol>
 <li>원하는 Python 객체를 생성합니다. 일반적으로 데이터 클래스나 Pydantic 객체를 사용합니다.</li>
-<li>해당 객체를 다양한 실행 메서드(예: <code>Runner.run(..., context=whatever)</code>)에 전달합니다.</li>
-<li>모든 도구 호출, 수명 주기 훅 등에는 래퍼 객체 <code>RunContextWrapper[T]</code>가 전달됩니다. 여기서 <code>T</code>는 컨텍스트 객체의 타입을 나타내며, 객체 자체는 <code>wrapper.context</code>을 통해 사용할 수 있습니다.</li>
+<li>해당 객체를 다양한 실행 메서드에 전달합니다(예: <code>Runner.run(..., context=whatever)</code>).</li>
+<li>모든 도구 호출, 수명 주기 훅 등에는 래퍼 객체 <code>RunContextWrapper[T]</code>가 전달됩니다. 여기서 <code>T</code>는 컨텍스트 객체의 유형을 나타내며, 객체 자체는 <code>wrapper.context</code>을 통해 사용할 수 있습니다.</li>
 </ol>
-<p>일부 런타임별 콜백에는 SDK가 <code>RunContextWrapper[T]</code>의 보다 특화된 하위 클래스를 전달할 수 있습니다. 예를 들어 <code>FunctionTool</code> 인스턴스의 수명 주기 훅은 일반적으로 <code>ToolContext</code>를 받으며, 이를 통해 <code>tool_call_id</code>, <code>tool_name</code>, <code>tool_arguments</code> 같은 도구 호출 메타데이터도 사용할 수 있습니다.</p>
-<p>알아야 할 <strong>가장 중요한</strong> 사항은 특정 에이전트 실행에 사용되는 모든 에이전트, 도구 함수, 수명 주기 등이 동일한 컨텍스트 _타입_을 사용해야 한다는 것입니다.</p>
+<p>일부 런타임별 콜백에서는 SDK가 <code>RunContextWrapper[T]</code>의 더 특화된 하위 클래스를 전달할 수 있습니다. 예를 들어 <code>FunctionTool</code> 인스턴스의 수명 주기 훅은 일반적으로 <code>ToolContext</code>를 받으며, 이를 통해 <code>tool_call_id</code>, <code>tool_name</code>, <code>tool_arguments</code> 같은 도구 호출 메타데이터도 사용할 수 있습니다.</p>
+<p>알아야 할 <strong>가장 중요한</strong> 사항은 주어진 에이전트 실행에서 사용하는 모든 에이전트, 도구 함수, 수명 주기 항목 등이 동일한 컨텍스트 _유형_을 사용해야 한다는 것입니다.</p>
 <p>컨텍스트는 다음과 같은 용도로 사용할 수 있습니다.</p>
 <ul>
-<li>실행에 필요한 컨텍스트 데이터(예: 사용자 이름/uid 또는 사용자에 관한 기타 정보)</li>
+<li>실행을 위한 컨텍스트 데이터(예: 사용자 이름/uid 또는 사용자에 관한 기타 정보)</li>
 <li>종속성(예: 로거 객체, 데이터 가져오기 도구 등)</li>
-<li>도우미 함수</li>
+<li>헬퍼 함수</li>
 </ul>
 <div class="admonition danger">
 <p class="admonition-title">참고</p>
-<p>컨텍스트 객체는 LLM으로 <strong>전송되지 않습니다</strong>. 컨텍스트 객체는 읽고 쓰거나 메서드를 호출할 수 있는 순수한 로컬 객체입니다.</p>
+<p>컨텍스트 객체는 LLM으로 전송되지 <strong>않습니다</strong>. 이는 읽고 쓰거나 메서드를 호출할 수 있는 순수한 로컬 객체입니다.</p>
 </div>
-<p>단일 실행 내에서 파생된 래퍼는 동일한 기본 애플리케이션 컨텍스트, 승인 상태, 사용량 추적을 공유합니다. 중첩된 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에는 다른 <code>tool_input</code>가 연결될 수 있지만, 기본적으로 애플리케이션 상태의 격리된 복사본을 제공하지는 않습니다.</p>
-<h3 id="use-local-context-for-capability-visibility">기능 표시 여부를 위한 로컬 컨텍스트 사용</h3>
-<p>함수 도구, MCP 도구, 핸드오프가 동일한 요청 정책에 의존하는 경우 정책 입력이나 도우미를 애플리케이션 컨텍스트에 유지합니다. 각 SDK 표면은 자체 콜백을 통해 현재 실행 컨텍스트를 노출합니다.</p>
+<p>단일 실행 내에서 파생된 래퍼는 기반 애플리케이션 컨텍스트, 승인 상태, 사용량 추적을 공유합니다. 중첩된 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 실행에는 다른 <code>tool_input</code>가 연결될 수 있지만, 기본적으로 애플리케이션 상태의 격리된 복사본이 제공되지는 않습니다.</p>
+<h3 id="use-local-context-for-capability-visibility">기능 노출을 위한 로컬 컨텍스트 사용</h3>
+<p>함수 도구, MCP 도구, 핸드오프가 동일한 요청 정책에 종속되는 경우 정책 입력값이나 헬퍼를 애플리케이션 컨텍스트에 보관합니다. 각 SDK 인터페이스는 자체 콜백을 통해 현재 실행 컨텍스트를 제공합니다.</p>
 <ul>
 <li><a class="autorefs autorefs-internal" title="is_enabled
 
@@ -1834,16 +1834,16 @@
       dataclass
   " href="../ref/mcp/util/#agents.mcp.util.ToolFilterContext"><code>ToolFilterContext</code></a>을 받으며, 이 객체의 <code>run_context</code> 속성에는 현재 <code>RunContextWrapper</code>가 포함됩니다.</li>
 </ul>
-<p>별도의 기능 목록을 유지하는 대신 공유 애플리케이션 정책을 이러한 콜백에 맞게 적용합니다. 콜백은 현재 실행에서 SDK가 노출하는 기능을 제어하지만, 모델이 생성한 인수나 리소스 선택을 승인할 수는 없습니다. 함수 도구의 경우 도구 구현 내부에서 이러한 결정을 적용하거나, 적절한 경우 <a href="../guardrails/#tool-guardrails">도구 입력 가드레일</a>과 <a href="../human_in_the_loop/">승인</a>을 사용합니다. MCP 서버는 자체적으로 보호된 작업을 승인해야 합니다. <code>input_type</code>이 있는 핸드오프의 경우 애플리케이션에 부수 효과가 발생하기 전에 <code>on_handoff</code> 시작 부분에서 파싱된 입력을 검사하고, 승인에 실패하면 값을 반환하는 대신 예외를 발생시킵니다. 도구 입력 가드레일은 핸드오프에 적용되지 않습니다. 콜백 수명 주기는 <a href="../handoffs/#handoff-inputs">핸드오프 입력</a>을 참고하세요.</p>
-<h3 id="what-runcontextwrapper-exposes"><code>RunContextWrapper</code>에서 제공하는 항목</h3>
+<p>별도의 기능 목록을 유지하는 대신 공유 애플리케이션 정책을 이러한 콜백에 맞게 적용합니다. 콜백은 SDK가 현재 실행에 노출하는 기능을 제어하지만, 모델이 생성한 인수나 리소스 선택을 인가할 수는 없습니다. 함수 도구의 경우 이러한 결정은 도구 구현 내부에서 강제하거나, 적절한 경우 <a href="../guardrails/#tool-guardrails">도구 입력 가드레일</a>과 <a href="../human_in_the_loop/">승인</a>을 사용합니다. MCP 서버는 보호되는 작업을 자체적으로 인가해야 합니다. <code>input_type</code>이 설정된 핸드오프의 경우 애플리케이션 부수 효과가 발생하기 전에 <code>on_handoff</code> 시작 시 파싱된 입력을 확인하고, 인가에 실패하면 값을 반환하지 말고 예외를 발생시킵니다. 도구 입력 가드레일은 핸드오프에 적용되지 않습니다. 콜백 수명 주기는 <a href="../handoffs/#handoff-inputs">핸드오프 입력</a>을 참조하세요.</p>
+<h3 id="what-runcontextwrapper-exposes"><code>RunContextWrapper</code> 제공 항목</h3>
 <p><a class="autorefs autorefs-internal" title="RunContextWrapper
 
 
   
       dataclass
-  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a>은 애플리케이션에서 정의한 컨텍스트 객체를 감싸는 래퍼입니다. 실제로 가장 자주 사용하는 항목은 다음과 같습니다.</p>
+  " href="../../ref/run_context/#agents.run_context.RunContextWrapper"><code>RunContextWrapper</code></a>은 애플리케이션에서 정의한 컨텍스트 객체를 감싸는 래퍼입니다. 실제로는 다음 항목을 가장 자주 사용합니다.</p>
 <ul>
-<li>자체 가변 애플리케이션 상태와 종속성을 위한 <a class="autorefs autorefs-internal" title="context
+<li>자체적으로 변경 가능한 애플리케이션 상태와 종속성을 위한 <a class="autorefs autorefs-internal" title="context
 
 
   
@@ -1856,75 +1856,79 @@
       class-attribute
       instance-attribute
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.usage"><code>wrapper.usage</code></a></li>
-<li>현재 실행이 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 내에서 실행 중일 때 구조화된 입력을 위한 <a class="autorefs autorefs-internal" title="tool_input
+<li>현재 실행이 <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> 내부에서 수행될 때 구조화된 입력을 제공하는 <a class="autorefs autorefs-internal" title="tool_input
 
 
   
       class-attribute
       instance-attribute
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.tool_input"><code>wrapper.tool_input</code></a></li>
-<li>프로그래밍 방식으로 승인 상태를 업데이트해야 할 때 사용하는 <a class="autorefs autorefs-internal" title="approve_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.approve_tool"><code>wrapper.approve_tool(...)</code></a> / <a class="autorefs autorefs-internal" title="reject_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.reject_tool"><code>wrapper.reject_tool(...)</code></a></li>
+<li>승인 상태를 프로그래밍 방식으로 업데이트해야 할 때 사용하는 <a class="autorefs autorefs-internal" title="approve_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.approve_tool"><code>wrapper.approve_tool(...)</code></a> / <a class="autorefs autorefs-internal" title="reject_tool" href="../../ref/run_context/#agents.run_context.RunContextWrapper.reject_tool"><code>wrapper.reject_tool(...)</code></a></li>
 </ul>
 <p><code>wrapper.context</code>만 애플리케이션에서 정의한 객체입니다. 나머지 필드는 SDK가 관리하는 런타임 메타데이터입니다.</p>
-<p>나중에 휴먼인더루프 또는 지속성 있는 작업 워크플로를 위해 <a class="autorefs autorefs-internal" title="RunState
+<p>나중에 휴먼인더루프 (HITL) 또는 지속성 작업 워크플로를 위해 <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>을 직렬화하면 해당 런타임 메타데이터도 상태와 함께 저장됩니다. 직렬화된 상태를 영구 보관하거나 전송하려는 경우 <a class="autorefs autorefs-internal" title="context
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a>을 직렬화하면 해당 런타임 메타데이터도 상태와 함께 저장됩니다. 직렬화된 상태를 유지하거나 전송할 계획이라면 <a class="autorefs autorefs-internal" title="context
 
 
   
       instance-attribute
   " href="../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>RunContextWrapper.context</code></a>에 비밀 정보를 넣지 마세요.</p>
-<p>대화 상태는 별도로 고려해야 합니다. 대화 턴을 이어가는 방식에 따라 <code>result.to_input_list()</code>, <code>session</code>, <code>conversation_id</code>, <code>previous_response_id</code> 중 하나를 사용합니다. 이에 관한 결정은 <a href="../results/">결과</a>, <a href="../running_agents/">에이전트 실행</a>, <a href="../sessions/">세션</a>을 참고하세요.</p>
+<p>대화 상태는 별도로 다뤄야 합니다. 대화 턴을 이어가는 방식에 따라 <code>result.to_input_list()</code>, <code>session</code>, <code>conversation_id</code>, <code>previous_response_id</code> 중 하나를 사용합니다. 자세한 결정 기준은 <a href="../results/">결과</a>, <a href="../running_agents/">에이전트 실행</a>, <a href="../sessions/">세션</a>을 참조하세요.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
 </span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">RunContextWrapper</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
-</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="nd">@dataclass</span>
-</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserInfo</span><span class="p">:</span>  <span class="c1"># (1)!</span>
-</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">int</span>
-</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="nd">@tool</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_age</span><span class="p">(</span><span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>  <span class="c1"># (2)!</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch the age of the user. Call this function to get user&#39;s age information.&quot;&quot;&quot;</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user </span><span class="si">{</span><span class="n">wrapper</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> is 47 years old&quot;</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="n">user_info</span> <span class="o">=</span> <span class="n">UserInfo</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;John&quot;</span><span class="p">,</span> <span class="n">uid</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="nd">@dataclass</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="k">class</span><span class="w"> </span><span class="nc">UserInfo</span><span class="p">:</span>  <span class="c1"># (1)!</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">uid</span><span class="p">:</span> <span class="nb">int</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="nd">@tool</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">fetch_user_age</span><span class="p">(</span><span class="n">wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>  <span class="c1"># (2)!</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fetch the age of the user. Call this function to get user&#39;s age information.&quot;&quot;&quot;</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The user </span><span class="si">{</span><span class="n">wrapper</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> is 47 years old&quot;</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
 </span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>
-</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">](</span>  <span class="c1"># (3)!</span>
-</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
-</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">fetch_user_age</span><span class="p">],</span>
-</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="p">)</span>
-</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
-</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (4)!</span>
-</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>        <span class="n">starting_agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
-</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;What is the age of the user?&quot;</span><span class="p">,</span>
-</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>        <span class="n">context</span><span class="o">=</span><span class="n">user_info</span><span class="p">,</span>
-</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="p">)</span>
-</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>
-</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># (5)!</span>
-</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="c1"># The user John is 47 years old.</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">user_info</span> <span class="o">=</span> <span class="n">UserInfo</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;John&quot;</span><span class="p">,</span> <span class="n">uid</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">[</span><span class="n">UserInfo</span><span class="p">](</span>  <span class="c1"># (3)!</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>        <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">fetch_user_age</span><span class="p">],</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    <span class="p">)</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>  <span class="c1"># (4)!</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>        <span class="n">starting_agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>        <span class="nb">input</span><span class="o">=</span><span class="s2">&quot;What is the age of the user?&quot;</span><span class="p">,</span>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>        <span class="n">context</span><span class="o">=</span><span class="n">user_info</span><span class="p">,</span>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a>    <span class="p">)</span>
 </span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>
-</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>  <span class="c1"># (5)!</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="c1"># The user John is 47 years old.</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
 <ol>
-<li>컨텍스트 객체입니다. 여기서는 데이터 클래스를 사용했지만, 어떤 타입이든 사용할 수 있습니다.</li>
-<li>도구입니다. 이 도구가 <code>RunContextWrapper[UserInfo]</code>을 받는 것을 확인할 수 있습니다. 도구 구현은 컨텍스트에서 데이터를 읽습니다.</li>
-<li>타입 검사기가 오류를 포착할 수 있도록 에이전트에 제네릭 <code>UserInfo</code>을 지정합니다. 예를 들어 다른 컨텍스트 타입을 받는 도구를 전달하려 하면 오류를 포착할 수 있습니다.</li>
+<li>컨텍스트 객체입니다. 여기서는 데이터 클래스를 사용했지만 어떤 유형이든 사용할 수 있습니다.</li>
+<li>도구입니다. <code>RunContextWrapper[UserInfo]</code>을 받는 것을 확인할 수 있습니다. 도구 구현은 컨텍스트에서 데이터를 읽습니다.</li>
+<li>에이전트에 제네릭 <code>UserInfo</code>을 지정하여, 다른 컨텍스트 유형을 받는 도구를 전달하는 경우와 같은 오류를 타입 검사기가 감지할 수 있게 합니다.</li>
 <li>컨텍스트가 <code>run</code> 함수에 전달됩니다.</li>
-<li>에이전트가 도구를 올바르게 호출하여 나이를 가져옵니다.</li>
+<li>에이전트가 도구를 올바르게 호출하고 나이를 가져옵니다.</li>
 </ol>
 <hr />
 <h3 id="advanced-toolcontext">고급: <code>ToolContext</code></h3>
-<p>경우에 따라 실행 중인 도구의 이름, 호출 ID 또는 raw 인수 문자열 같은 추가 메타데이터에 접근해야 할 수 있습니다.<br />
-이때 <code>RunContextWrapper</code>를 확장한 <a class="autorefs autorefs-internal" title="ToolContext
+<p>경우에 따라 실행 중인 도구의 이름, 호출 ID, 가공되지 않은 인수 문자열 같은 추가 메타데이터에 접근해야 할 수 있습니다.<br />
+이때 <code>RunContextWrapper</code>를 확장하는 <a class="autorefs autorefs-internal" title="ToolContext
 
 
   
@@ -1936,44 +1940,52 @@
 </span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.decorators</span><span class="w"> </span><span class="kn">import</span> <span class="n">tool</span>
 </span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.tool_context</span><span class="w"> </span><span class="kn">import</span> <span class="n">ToolContext</span>
 </span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">WeatherContext</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="k">class</span><span class="w"> </span><span class="nc">Weather</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="n">city</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The city name&quot;</span><span class="p">)</span>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    <span class="n">temperature_range</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The temperature range in Celsius&quot;</span><span class="p">)</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">conditions</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The weather conditions&quot;</span><span class="p">)</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="nd">@tool</span>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">ctx</span><span class="p">:</span> <span class="n">ToolContext</span><span class="p">[</span><span class="n">WeatherContext</span><span class="p">],</span> <span class="n">city</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;The city to get the weather for&quot;</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Weather</span><span class="p">:</span>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[debug] Tool context: (name: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">, call_id: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_call_id</span><span class="si">}</span><span class="s2">, args: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_arguments</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="k">return</span> <span class="n">Weather</span><span class="p">(</span><span class="n">city</span><span class="o">=</span><span class="n">city</span><span class="p">,</span> <span class="n">temperature_range</span><span class="o">=</span><span class="s2">&quot;14-20C&quot;</span><span class="p">,</span> <span class="n">conditions</span><span class="o">=</span><span class="s2">&quot;Sunny with wind.&quot;</span><span class="p">)</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful agent that can tell the weather of a given city.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="p">)</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">WeatherContext</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="k">class</span><span class="w"> </span><span class="nc">Weather</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">city</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The city name&quot;</span><span class="p">)</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">temperature_range</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The temperature range in Celsius&quot;</span><span class="p">)</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">conditions</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Field</span><span class="p">(</span><span class="n">description</span><span class="o">=</span><span class="s2">&quot;The weather conditions&quot;</span><span class="p">)</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="nd">@tool</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="n">ctx</span><span class="p">:</span> <span class="n">ToolContext</span><span class="p">[</span><span class="n">WeatherContext</span><span class="p">],</span> <span class="n">city</span><span class="p">:</span> <span class="n">Annotated</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="s2">&quot;The city to get the weather for&quot;</span><span class="p">]</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Weather</span><span class="p">:</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a>    <span class="nb">print</span><span class="p">(</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>        <span class="sa">f</span><span class="s2">&quot;[debug] Tool context: (name: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">, call_id: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_call_id</span><span class="si">}</span><span class="s2">, args: </span><span class="si">{</span><span class="n">ctx</span><span class="o">.</span><span class="n">tool_arguments</span><span class="si">}</span><span class="s2">)&quot;</span>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a>    <span class="p">)</span>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    <span class="k">return</span> <span class="n">Weather</span><span class="p">(</span><span class="n">city</span><span class="o">=</span><span class="n">city</span><span class="p">,</span> <span class="n">temperature_range</span><span class="o">=</span><span class="s2">&quot;14-20C&quot;</span><span class="p">,</span> <span class="n">conditions</span><span class="o">=</span><span class="s2">&quot;Sunny with wind.&quot;</span><span class="p">)</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Weather Agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You are a helpful agent that can tell the weather of a given city.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a><span class="p">)</span>
 </span></code></pre></div>
 <p><code>ToolContext</code>은 <code>RunContextWrapper</code>과 동일한 <code>.context</code> 속성을 제공하며,<br />
-현재 도구 호출에 해당하는 다음과 같은 추가 필드도 제공합니다.</p>
+현재 도구 호출에 특화된 다음과 같은 추가 필드도 제공합니다.</p>
 <ul>
 <li><code>tool_name</code> – 호출되는 도구의 이름  </li>
 <li><code>tool_call_id</code> – 이 도구 호출의 고유 식별자  </li>
-<li><code>tool_arguments</code> – 도구에 전달된 raw 인수 문자열  </li>
-<li><code>tool_namespace</code> – 도구가 <code>tool_namespace()</code> 또는 네임스페이스가 있는 다른 표면을 통해 로드된 경우 도구 호출의 Responses 네임스페이스  </li>
-<li><code>qualified_tool_name</code> – 네임스페이스를 사용할 수 있는 경우 네임스페이스로 한정된 도구 이름  </li>
+<li><code>tool_arguments</code> – 도구에 전달된 가공되지 않은 인수 문자열  </li>
+<li><code>tool_namespace</code> – 도구가 <code>tool_namespace()</code> 또는 네임스페이스를 사용하는 다른 인터페이스를 통해 로드된 경우 도구 호출의 Responses 네임스페이스  </li>
+<li><code>qualified_tool_name</code> – 네임스페이스가 있는 경우 해당 네임스페이스로 한정된 도구 이름  </li>
 </ul>
-<p>실행 중 도구 수준 메타데이터가 필요하면 <code>ToolContext</code>를 사용합니다.<br />
-에이전트와 도구 간의 일반적인 컨텍스트 공유에는 <code>RunContextWrapper</code>만으로 충분합니다. <code>ToolContext</code>은 <code>RunContextWrapper</code>을 확장하므로, 중첩된 <code>Agent.as_tool()</code> 실행에서 구조화된 입력이 제공된 경우 <code>.tool_input</code>도 노출할 수 있습니다.</p>
+<p>실행 중에 도구 수준 메타데이터가 필요하면 <code>ToolContext</code>를 사용합니다.<br />
+에이전트와 도구 사이에서 일반적인 컨텍스트를 공유하는 용도로는 <code>RunContextWrapper</code>만으로 충분합니다. <code>ToolContext</code>은 <code>RunContextWrapper</code>을 확장하므로, 중첩된 <code>Agent.as_tool()</code> 실행에서 구조화된 입력을 제공한 경우 <code>.tool_input</code>도 노출할 수 있습니다.</p>
 <hr />
 <h2 id="agentllm-context">에이전트/LLM 컨텍스트</h2>
-<p>LLM이 호출될 때 확인할 수 있는 <strong>유일한</strong> 데이터는 대화 기록에 있는 데이터입니다. 따라서 LLM에서 새로운 데이터를 사용할 수 있게 하려면 해당 데이터를 대화 기록에서 사용할 수 있는 방식으로 제공해야 합니다. 이를 위한 방법은 몇 가지가 있습니다.</p>
+<p>LLM이 호출될 때 확인할 수 있는 <strong>유일한</strong> 데이터는 대화 기록에 포함된 데이터입니다. 따라서 LLM에서 새로운 데이터를 사용할 수 있게 하려면 해당 데이터가 대화 기록에 포함되도록 해야 합니다. 이를 위한 방법은 다음과 같습니다.</p>
 <ol>
-<li>에이전트의 <code>instructions</code>에 추가할 수 있습니다. 이는 "시스템 프롬프트" 또는 "개발자 메시지"라고도 합니다. 시스템 프롬프트는 정적 문자열일 수도 있고, 컨텍스트를 받아 문자열을 출력하는 동적 함수일 수도 있습니다. 항상 유용한 정보(예: 사용자의 이름 또는 현재 날짜)를 제공하는 일반적인 방법입니다.</li>
-<li><code>Runner.run</code> 함수를 호출할 때 <code>input</code>에 추가합니다. 이는 <code>instructions</code> 방식과 유사하지만, <a href="https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command">명령 체계</a>에서 우선순위가 더 낮은 메시지를 사용할 수 있습니다.</li>
-<li><code>FunctionTool</code> 인스턴스를 통해 노출합니다. 이는 <em>필요할 때만</em> 제공되는 컨텍스트에 유용합니다. LLM이 특정 데이터가 필요한 시점을 판단하고 도구를 호출하여 해당 데이터를 가져올 수 있습니다.</li>
-<li>검색 또는 웹 검색을 사용합니다. 이러한 특수 도구는 파일이나 데이터베이스(검색) 또는 웹(웹 검색)에서 관련 데이터를 가져올 수 있습니다. 이는 관련 컨텍스트 데이터를 기반으로 응답의 근거를 마련하는 데 유용합니다.</li>
+<li>에이전트 <code>instructions</code>에 추가할 수 있습니다. 이는 "system prompt" 또는 "개발자 메시지"라고도 합니다. system prompt는 정적 문자열일 수도 있고, 컨텍스트를 받아 문자열을 출력하는 동적 함수일 수도 있습니다. 항상 유용한 정보(예: 사용자 이름이나 현재 날짜)에 일반적으로 사용하는 방식입니다.</li>
+<li><code>Runner.run</code> 함수를 호출할 때 <code>input</code>에 추가합니다. 이는 <code>instructions</code> 방식과 유사하지만, <a href="https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command">명령 체계</a>에서 더 낮은 위치의 메시지를 사용할 수 있습니다.</li>
+<li><code>FunctionTool</code> 인스턴스를 통해 노출합니다. 이는 <em>필요할 때 제공되는</em> 컨텍스트에 유용합니다. LLM이 데이터가 필요한 시점을 판단하고 도구를 호출하여 해당 데이터를 가져올 수 있습니다.</li>
+<li>검색 또는 웹 검색을 사용합니다. 이는 파일이나 데이터베이스에서 관련 데이터를 가져오는 검색 또는 웹에서 데이터를 가져오는 웹 검색을 수행할 수 있는 특수 도구입니다. 이는 관련 컨텍스트 데이터에 응답의 "근거를 두는" 데 유용합니다.</li>
 </ol>
 
 

@@ -339,7 +339,7 @@
   <span class="md-ellipsis">
     
   
-    構成
+    設定
   
 
     
@@ -1804,14 +1804,14 @@
 
 <h1 id="_1">クイックスタート</h1>
 <h2 id="prerequisites">前提条件</h2>
-<p>Agents SDKの基本的な<a href="../../quickstart/">クイックスタート手順</a>に従い、仮想環境をセットアップしていることを確認してください。次に、SDK からオプションの音声依存関係をインストールします。</p>
+<p>Agents SDKの基本的な<a href="../../quickstart/">クイックスタート手順</a>に従い、仮想環境をセットアップしていることを確認してください。その後、SDK からオプションの音声依存関係をインストールします。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;openai-agents[voice]&#39;</span>
 </span></code></pre></div>
 <p>以下のデモコードでは、マイクとスピーカーの I/O に <a href="https://pypi.org/project/sounddevice/"><code>sounddevice</code></a> も使用します。これは <code>voice</code> extra には含まれていません。</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span>sounddevice
 </span></code></pre></div>
 <h2 id="concepts">概念</h2>
-<p>理解しておくべき主な概念は <a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a> です。これは次の 3 ステップのプロセスです。</p>
+<p>理解しておくべき主な概念は <a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a> で、次の 3 段階のプロセスです。</p>
 <ol>
 <li>音声テキスト変換モデルを実行して、音声をテキストに変換します。</li>
 <li>通常はエージェントワークフローであるコードを実行して、結果を生成します。</li>
@@ -1841,7 +1841,7 @@
     classDef highlight fill:#ffcc66,stroke:#333,stroke-width:1px,font-weight:700;
 </code></pre>
 <h2 id="agents">エージェント</h2>
-<p>まず、複数のエージェントをセットアップします。この SDK でエージェントを構築したことがあれば、見慣れた内容です。2 つのエージェント、設定済みのハンドオフ、ツールを 1 つ用意します。</p>
+<p>まず、いくつかのエージェントをセットアップします。この SDK でエージェントを構築した経験があれば、馴染みのある内容です。ここでは、2 つのエージェント、設定済みのハンドオフ、および 1 つのツールを使用します。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
@@ -1877,9 +1877,10 @@
 </span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="voice-pipeline">音声パイプライン</h2>
-<p>ワークフローに <a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a> を使用して、シンプルな音声パイプラインをセットアップします。</p>
+<p><a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a> をワークフローとして使用し、シンプルな音声パイプラインをセットアップします。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice</span><span class="w"> </span><span class="kn">import</span> <span class="n">SingleAgentVoiceWorkflow</span><span class="p">,</span> <span class="n">VoicePipeline</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span><span class="n">workflow</span><span class="o">=</span><span class="n">SingleAgentVoiceWorkflow</span><span class="p">(</span><span class="n">agent</span><span class="p">))</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span><span class="n">workflow</span><span class="o">=</span><span class="n">SingleAgentVoiceWorkflow</span><span class="p">(</span><span class="n">agent</span><span class="p">))</span>
 </span></code></pre></div>
 <h2 id="run-the-pipeline">パイプラインの実行</h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>

@@ -420,7 +420,7 @@
   <a href="#create-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        첫 에이전트 생성
+        첫 번째 에이전트 생성
       
     </span>
   </a>
@@ -431,7 +431,7 @@
   <a href="#run-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        첫 에이전트 실행
+        첫 번째 에이전트 실행
       
     </span>
   </a>
@@ -453,7 +453,7 @@
   <a href="#add-a-few-more-agents" class="md-nav__link">
     <span class="md-ellipsis">
       
-        에이전트 몇 개 더 추가
+        에이전트 추가
       
     </span>
   </a>
@@ -486,7 +486,7 @@
   <a href="#reference-examples" class="md-nav__link">
     <span class="md-ellipsis">
       
-        참조 예제
+        참조 코드 예제
       
     </span>
   </a>
@@ -497,7 +497,7 @@
   <a href="#view-your-traces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        트레이스 보기
+        트레이스 확인
       
     </span>
   </a>
@@ -890,7 +890,7 @@
   <span class="md-ellipsis">
     
   
-    실시간 에이전트 가이드
+    Realtime agents 가이드
   
 
     
@@ -1785,7 +1785,7 @@
   <a href="#create-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        첫 에이전트 생성
+        첫 번째 에이전트 생성
       
     </span>
   </a>
@@ -1796,7 +1796,7 @@
   <a href="#run-your-first-agent" class="md-nav__link">
     <span class="md-ellipsis">
       
-        첫 에이전트 실행
+        첫 번째 에이전트 실행
       
     </span>
   </a>
@@ -1818,7 +1818,7 @@
   <a href="#add-a-few-more-agents" class="md-nav__link">
     <span class="md-ellipsis">
       
-        에이전트 몇 개 더 추가
+        에이전트 추가
       
     </span>
   </a>
@@ -1851,7 +1851,7 @@
   <a href="#reference-examples" class="md-nav__link">
     <span class="md-ellipsis">
       
-        참조 예제
+        참조 코드 예제
       
     </span>
   </a>
@@ -1862,7 +1862,7 @@
   <a href="#view-your-traces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        트레이스 보기
+        트레이스 확인
       
     </span>
   </a>
@@ -1916,7 +1916,7 @@
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv
 </span></code></pre></div>
 <h3 id="activate-the-virtual-environment">가상 환경 활성화</h3>
-<p>새 터미널 세션을 시작할 때마다 이 작업을 수행하세요.</p>
+<p>새 터미널 세션을 시작할 때마다 수행합니다.</p>
 <p>macOS 또는 Linux:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
 </span></code></pre></div>
@@ -1927,18 +1927,18 @@
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>pip<span class="w"> </span>install<span class="w"> </span>openai-agents<span class="w"> </span><span class="c1"># or `uv add openai-agents`, etc</span>
 </span></code></pre></div>
 <h3 id="set-an-openai-api-key">OpenAI API 키 설정</h3>
-<p>API 키가 없다면 <a href="https://platform.openai.com/docs/quickstart#create-and-export-an-api-key">이 지침</a>에 따라 OpenAI API 키를 생성하세요.</p>
-<p>이 명령은 현재 터미널 세션에 키를 설정합니다.</p>
+<p>키가 없다면 <a href="https://platform.openai.com/docs/quickstart#create-and-export-an-api-key">다음 안내</a>에 따라 OpenAI API 키를 생성하세요.</p>
+<p>다음 명령은 현재 터미널 세션에 키를 설정합니다.</p>
 <p>macOS 또는 Linux:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>sk-...
 </span></code></pre></div>
 <p>Windows PowerShell:</p>
 <div class="language-powershell highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nv">$env:OPENAI_API_KEY</span> <span class="p">=</span> <span class="s2">&quot;sk-...&quot;</span>
 </span></code></pre></div>
-<p>Windows Command Prompt:</p>
+<p>Windows 명령 프롬프트:</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>set &quot;OPENAI_API_KEY=sk-...&quot;
 </span></code></pre></div>
-<h2 id="create-your-first-agent">첫 에이전트 생성</h2>
+<h2 id="create-your-first-agent">첫 번째 에이전트 생성</h2>
 <p>에이전트는 instructions, 이름, 특정 모델과 같은 선택적 구성으로 정의됩니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
@@ -1947,13 +1947,13 @@
 </span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You answer history questions clearly and concisely.&quot;</span><span class="p">,</span>
 </span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="run-your-first-agent">첫 에이전트 실행</h2>
-<p><a class="autorefs autorefs-internal" title="Runner" href="../../ref/run/#agents.run.Runner"><code>Runner</code></a>를 사용해 에이전트를 실행하고 <a class="autorefs autorefs-internal" title="RunResult
+<h2 id="run-your-first-agent">첫 번째 에이전트 실행</h2>
+<p><a class="autorefs autorefs-internal" title="Runner" href="../../ref/run/#agents.run.Runner"><code>Runner</code></a>을 사용하여 에이전트를 실행하고 <a class="autorefs autorefs-internal" title="RunResult
 
 
   
       dataclass
-  " href="../../ref/result/#agents.result.RunResult"><code>RunResult</code></a>를 반환받습니다.</p>
+  " href="../../ref/result/#agents.result.RunResult"><code>RunResult</code></a>을 반환받습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
@@ -1962,39 +1962,41 @@
 </span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You answer history questions clearly and concisely.&quot;</span><span class="p">,</span>
 </span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">)</span>
 </span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
-</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
-</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;When did the Roman Empire fall?&quot;</span><span class="p">)</span>
-</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
-</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>
-</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">():</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="s2">&quot;When did the Roman Empire fall?&quot;</span><span class="p">)</span>
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">final_output</span><span class="p">)</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p>두 번째 턴에서는 <code>result.to_input_list()</code>를 다시 <code>Runner.run(...)</code>에 전달하거나, <a href="../sessions/">세션</a>을 연결하거나, <code>conversation_id</code> / <code>previous_response_id</code>를 사용해 OpenAI 서버 관리 상태를 재사용할 수 있습니다. <a href="../running_agents/">에이전트 실행</a> 가이드에서는 이러한 접근 방식을 비교합니다.</p>
-<p>다음 경험칙을 사용하세요.</p>
+<p>두 번째 턴에서는 <code>result.to_input_list()</code>을 <code>Runner.run(...)</code>에 다시 전달하거나, <a href="../sessions/">세션</a>을 연결하거나, <code>conversation_id</code> / <code>previous_response_id</code>을 사용해 OpenAI 서버 관리 상태를 재사용할 수 있습니다. <a href="../running_agents/">에이전트 실행</a> 가이드에서는 이러한 접근 방식을 비교합니다.</p>
+<p>다음 기준을 활용하세요.</p>
 <table>
 <thead>
 <tr>
-<th>원하는 경우...</th>
-<th>시작점...</th>
+<th>원하는 사항</th>
+<th>시작 방법</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>전체 수동 제어와 제공자에 독립적인 기록</td>
+<td>완전한 수동 제어 및 제공자 독립적인 기록</td>
 <td><code>result.to_input_list()</code></td>
 </tr>
 <tr>
-<td>SDK가 기록을 로드하고 저장하도록 함</td>
+<td>SDK를 통한 기록 불러오기 및 저장</td>
 <td><a href="../sessions/"><code>session=...</code></a></td>
 </tr>
 <tr>
-<td>OpenAI가 관리하는 서버 측 이어가기</td>
+<td>OpenAI가 관리하는 서버 측 연속 실행</td>
 <td><code>previous_response_id</code> 또는 <code>conversation_id</code></td>
 </tr>
 </tbody>
 </table>
-<p>절충점과 정확한 동작은 <a href="../running_agents/#choose-a-memory-strategy">에이전트 실행</a>을 참고하세요.</p>
-<p>작업이 주로 프롬프트, 도구, 대화 상태 안에서 이루어진다면 일반 <code>Agent</code>와 <code>Runner</code>를 사용하세요. 에이전트가 격리된 워크스페이스에서 실제 파일을 검사하거나 수정해야 한다면 <a href="../sandbox_agents/">샌드박스 에이전트 빠른 시작</a>으로 이동하세요.</p>
+<p>장단점과 정확한 동작은 <a href="../running_agents/#choose-a-memory-strategy">에이전트 실행</a>을 참조하세요.</p>
+<p>작업이 주로 프롬프트, 도구, 대화 상태로 구성되는 경우 일반 <code>Agent</code>과 <code>Runner</code>을 함께 사용하세요. 에이전트가 격리된 작업 공간에서 실제 파일을 검사하거나 수정해야 한다면 <a href="../sandbox_agents/">샌드박스 에이전트 빠른 시작</a>으로 이동하세요.</p>
 <h2 id="give-your-agent-tools">에이전트에 도구 제공</h2>
 <p>에이전트에 정보를 조회하거나 작업을 수행할 수 있는 도구를 제공할 수 있습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
@@ -2026,14 +2028,14 @@
 </span><span id="__span-9-27"><a id="__codelineno-9-27" name="__codelineno-9-27" href="#__codelineno-9-27"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-9-28"><a id="__codelineno-9-28" name="__codelineno-9-28" href="#__codelineno-9-28"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<h2 id="add-a-few-more-agents">에이전트 몇 개 더 추가</h2>
-<p>멀티 에이전트 패턴을 선택하기 전에, 최종 답변을 누가 담당할지 결정하세요.</p>
+<h2 id="add-a-few-more-agents">에이전트 추가</h2>
+<p>다중 에이전트 패턴을 선택하기 전에 최종 답변을 누가 담당할지 결정하세요.</p>
 <ul>
-<li><strong>핸드오프</strong>: 해당 턴의 해당 부분에 대해 전문가가 대화를 이어받습니다.</li>
-<li><strong>Agents as tools</strong>: 오케스트레이터가 제어를 유지하며 전문가를 도구로 호출합니다.</li>
+<li><strong>핸드오프</strong>: 전문 에이전트가 해당 턴의 일부에 대한 대화를 넘겨받습니다.</li>
+<li><strong>Agents as tools</strong>: 오케스트레이터가 제어권을 유지하면서 전문 에이전트를 도구로 호출합니다.</li>
 </ul>
-<p>이 빠른 시작에서는 첫 예제로 가장 짧기 때문에 <strong>핸드오프</strong>를 계속 사용합니다. 매니저 스타일 패턴은 <a href="../multi_agent/">에이전트 오케스트레이션</a> 및 <a href="../tools/#agents-as-tools">도구: agents as tools</a>를 참고하세요.</p>
-<p>추가 에이전트도 같은 방식으로 정의할 수 있습니다. <code>handoff_description</code>은 라우팅 에이전트가 언제 위임할지에 대한 추가 컨텍스트를 제공합니다.</p>
+<p>이 빠른 시작에서는 첫 번째 예제로 가장 간단한 <strong>핸드오프</strong>를 계속 사용합니다. 관리자 스타일 패턴은 <a href="../multi_agent/">에이전트 오케스트레이션</a> 및 <a href="../tools/#agents-as-tools">도구: Agents as tools</a>을 참조하세요.</p>
+<p>추가 에이전트도 같은 방식으로 정의할 수 있습니다. <code>handoff_description</code>은 라우팅 에이전트에 언제 위임해야 하는지에 대한 추가 컨텍스트를 제공합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
 </span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
 </span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">history_tutor_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
@@ -2049,7 +2051,7 @@
 </span><span id="__span-10-13"><a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="define-your-handoffs">핸드오프 정의</h2>
-<p>에이전트에서는 작업을 해결하는 동안 선택할 수 있는 발신 핸드오프 옵션 목록을 정의할 수 있습니다.</p>
+<p>에이전트에는 작업을 해결하는 동안 선택할 수 있는 발신 핸드오프 옵션 목록을 정의할 수 있습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
 </span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage Agent&quot;</span><span class="p">,</span>
 </span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Route each homework question to the right specialist.&quot;</span><span class="p">,</span>
@@ -2057,7 +2059,7 @@
 </span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="run-the-agent-orchestration">에이전트 오케스트레이션 실행</h2>
-<p>러너는 개별 에이전트 실행, 모든 핸드오프, 모든 도구 호출을 처리합니다.</p>
+<p>러너는 개별 에이전트 실행, 모든 핸드오프 및 모든 도구 호출을 처리합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
 </span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>
@@ -2074,21 +2076,21 @@
 </span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<h2 id="reference-examples">참조 예제</h2>
-<p>저장소에는 동일한 핵심 패턴에 대한 전체 스크립트가 포함되어 있습니다.</p>
+<h2 id="reference-examples">참조 코드 예제</h2>
+<p>리포지토리에는 동일한 핵심 패턴을 보여 주는 전체 스크립트가 포함되어 있습니다.</p>
 <ul>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py"><code>examples/basic/hello_world.py</code></a>: 첫 실행</li>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py"><code>examples/basic/tools.py</code></a>: 함수 도구</li>
-<li><a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py"><code>examples/agent_patterns/routing.py</code></a>: 멀티 에이전트 라우팅</li>
+<li>첫 번째 실행을 위한 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/hello_world.py"><code>examples/basic/hello_world.py</code></a></li>
+<li>함수 도구를 위한 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/basic/tools.py"><code>examples/basic/tools.py</code></a></li>
+<li>다중 에이전트 라우팅을 위한 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns/routing.py"><code>examples/agent_patterns/routing.py</code></a></li>
 </ul>
-<h2 id="view-your-traces">트레이스 보기</h2>
-<p>에이전트 실행 중 발생한 일을 검토하려면 <a href="https://platform.openai.com/traces">OpenAI Dashboard의 Trace viewer</a>로 이동해 에이전트 실행 트레이스를 확인하세요.</p>
+<h2 id="view-your-traces">트레이스 확인</h2>
+<p>에이전트 실행 중 발생한 작업을 검토하려면 <a href="https://platform.openai.com/traces">OpenAI 대시보드의 트레이스 뷰어</a>로 이동하여 에이전트 실행의 트레이스를 확인하세요.</p>
 <h2 id="next-steps">다음 단계</h2>
-<p>더 복잡한 에이전트형 흐름을 구축하는 방법을 알아보세요.</p>
+<p>더 복잡한 에이전트 워크플로를 구축하는 방법을 알아보세요.</p>
 <ul>
 <li><a href="../agents/">에이전트</a> 구성 방법 알아보기</li>
 <li><a href="../running_agents/">에이전트 실행</a> 및 <a href="../sessions/">세션</a> 알아보기</li>
-<li>실제 워크스페이스 안에서 작업이 이루어져야 하는 경우 <a href="../sandbox_agents/">샌드박스 에이전트</a> 알아보기</li>
+<li>실제 작업 공간에서 작업해야 하는 경우 <a href="../sandbox_agents/">샌드박스 에이전트</a> 알아보기</li>
 <li><a href="../tools/">도구</a>, <a href="../guardrails/">가드레일</a>, <a href="../models/">모델</a> 알아보기</li>
 </ul>
 

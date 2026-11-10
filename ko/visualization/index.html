@@ -696,7 +696,7 @@
   <span class="md-ellipsis">
     
   
-    실시간 에이전트 가이드
+    Realtime agents 가이드
   
 
     
@@ -1529,7 +1529,7 @@
   <a href="#understanding-the-visualization" class="md-nav__link">
     <span class="md-ellipsis">
       
-        시각화 이해
+        시각화 구성 요소
       
     </span>
   </a>
@@ -1540,12 +1540,12 @@
   <a href="#customizing-the-graph" class="md-nav__link">
     <span class="md-ellipsis">
       
-        그래프 사용자 정의
+        그래프 사용자 지정
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="그래프 사용자 정의">
+    <nav class="md-nav" aria-label="그래프 사용자 지정">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1716,7 +1716,7 @@
   <a href="#understanding-the-visualization" class="md-nav__link">
     <span class="md-ellipsis">
       
-        시각화 이해
+        시각화 구성 요소
       
     </span>
   </a>
@@ -1727,12 +1727,12 @@
   <a href="#customizing-the-graph" class="md-nav__link">
     <span class="md-ellipsis">
       
-        그래프 사용자 정의
+        그래프 사용자 지정
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="그래프 사용자 정의">
+    <nav class="md-nav" aria-label="그래프 사용자 지정">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1833,16 +1833,16 @@
 <h1 id="_1">에이전트 시각화</h1>
 <p>에이전트 시각화를 사용하면 <strong>Graphviz</strong>를 통해 에이전트와 다른 에이전트, 도구 및 MCP 서버 간 연결을 구조화된 그래픽으로 표현할 수 있습니다. 이는 애플리케이션 내에서 에이전트, 도구 및 핸드오프가 상호작용하는 방식을 이해하는 데 유용합니다.</p>
 <h2 id="installation">설치</h2>
-<p>선택적 <code>viz</code> 종속성 그룹을 설치합니다.</p>
+<p>선택적 <code>viz</code> 의존성 그룹을 설치합니다.</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;openai-agents[viz]&quot;</span>
 </span></code></pre></div>
 <h2 id="generating-a-graph">그래프 생성</h2>
-<p><code>draw_graph</code> 함수를 사용하여 에이전트 시각화를 생성할 수 있습니다. 이 함수는 다음과 같은 방향 그래프를 생성합니다.</p>
+<p><code>draw_graph</code> 함수를 사용하여 에이전트 시각화를 생성할 수 있습니다. 이 함수는 다음과 같은 방향성 그래프를 생성합니다.</p>
 <ul>
 <li><strong>에이전트</strong>는 노란색 상자로 표시됩니다.</li>
 <li><strong>MCP 서버</strong>는 회색 상자로 표시됩니다.</li>
 <li><strong>도구</strong>는 녹색 타원으로 표시됩니다.</li>
-<li><strong>핸드오프</strong>는 한 에이전트에서 다른 에이전트로 향하는 방향 간선으로 표시됩니다.</li>
+<li><strong>핸드오프</strong>는 한 에이전트에서 다른 에이전트로 향하는 방향성 간선으로 표시됩니다.</li>
 </ul>
 <h3 id="example-usage">사용 예시</h3>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
@@ -1852,68 +1852,70 @@
 </span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.mcp.server</span><span class="w"> </span><span class="kn">import</span> <span class="n">MCPServerStdio</span>
 </span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.extensions.visualization</span><span class="w"> </span><span class="kn">import</span> <span class="n">draw_graph</span>
 </span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="nd">@tool</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny.&quot;</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
-</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="n">spanish_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Spanish agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak Spanish.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="p">)</span>
-</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
-</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
-</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="p">)</span>
-</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>
-</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="n">current_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="vm">__file__</span><span class="p">))</span>
-</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a><span class="n">samples_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">current_dir</span><span class="p">,</span> <span class="s2">&quot;sample_files&quot;</span><span class="p">)</span>
-</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="n">mcp_server</span> <span class="o">=</span> <span class="n">MCPServerStdio</span><span class="p">(</span>
-</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Filesystem Server, via npx&quot;</span><span class="p">,</span>
-</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a>    <span class="n">params</span><span class="o">=</span><span class="p">{</span>
-</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>        <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;npx&quot;</span><span class="p">,</span>
-</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a>        <span class="s2">&quot;args&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;-y&quot;</span><span class="p">,</span> <span class="s2">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p">,</span> <span class="n">samples_dir</span><span class="p">],</span>
-</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>    <span class="p">},</span>
-</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a><span class="p">)</span>
-</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>
-</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
-</span><span id="__span-1-33"><a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
-</span><span id="__span-1-34"><a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Handoff to the appropriate agent based on the language of the request.&quot;</span><span class="p">,</span>
-</span><span id="__span-1-35"><a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a>    <span class="n">handoffs</span><span class="o">=</span><span class="p">[</span><span class="n">handoff</span><span class="p">(</span><span class="n">spanish_agent</span><span class="p">),</span> <span class="n">handoff</span><span class="p">(</span><span class="n">english_agent</span><span class="p">)],</span>
-</span><span id="__span-1-36"><a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
-</span><span id="__span-1-37"><a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a>    <span class="n">mcp_servers</span><span class="o">=</span><span class="p">[</span><span class="n">mcp_server</span><span class="p">],</span>
-</span><span id="__span-1-38"><a id="__codelineno-1-38" name="__codelineno-1-38" href="#__codelineno-1-38"></a><span class="p">)</span>
-</span><span id="__span-1-39"><a id="__codelineno-1-39" name="__codelineno-1-39" href="#__codelineno-1-39"></a>
-</span><span id="__span-1-40"><a id="__codelineno-1-40" name="__codelineno-1-40" href="#__codelineno-1-40"></a><span class="n">draw_graph</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">)</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="nd">@tool</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_weather</span><span class="p">(</span><span class="n">city</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;The weather in </span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2"> is sunny.&quot;</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="n">spanish_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Spanish agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak Spanish.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="p">)</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="n">english_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;English agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;You only speak English&quot;</span><span class="p">,</span>
+</span><span id="__span-1-22"><a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="p">)</span>
+</span><span id="__span-1-23"><a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+</span><span id="__span-1-24"><a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="n">current_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="vm">__file__</span><span class="p">))</span>
+</span><span id="__span-1-25"><a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a><span class="n">samples_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">current_dir</span><span class="p">,</span> <span class="s2">&quot;sample_files&quot;</span><span class="p">)</span>
+</span><span id="__span-1-26"><a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="n">mcp_server</span> <span class="o">=</span> <span class="n">MCPServerStdio</span><span class="p">(</span>
+</span><span id="__span-1-27"><a id="__codelineno-1-27" name="__codelineno-1-27" href="#__codelineno-1-27"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Filesystem Server, via npx&quot;</span><span class="p">,</span>
+</span><span id="__span-1-28"><a id="__codelineno-1-28" name="__codelineno-1-28" href="#__codelineno-1-28"></a>    <span class="n">params</span><span class="o">=</span><span class="p">{</span>
+</span><span id="__span-1-29"><a id="__codelineno-1-29" name="__codelineno-1-29" href="#__codelineno-1-29"></a>        <span class="s2">&quot;command&quot;</span><span class="p">:</span> <span class="s2">&quot;npx&quot;</span><span class="p">,</span>
+</span><span id="__span-1-30"><a id="__codelineno-1-30" name="__codelineno-1-30" href="#__codelineno-1-30"></a>        <span class="s2">&quot;args&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;-y&quot;</span><span class="p">,</span> <span class="s2">&quot;@modelcontextprotocol/server-filesystem&quot;</span><span class="p">,</span> <span class="n">samples_dir</span><span class="p">],</span>
+</span><span id="__span-1-31"><a id="__codelineno-1-31" name="__codelineno-1-31" href="#__codelineno-1-31"></a>    <span class="p">},</span>
+</span><span id="__span-1-32"><a id="__codelineno-1-32" name="__codelineno-1-32" href="#__codelineno-1-32"></a><span class="p">)</span>
+</span><span id="__span-1-33"><a id="__codelineno-1-33" name="__codelineno-1-33" href="#__codelineno-1-33"></a>
+</span><span id="__span-1-34"><a id="__codelineno-1-34" name="__codelineno-1-34" href="#__codelineno-1-34"></a><span class="n">triage_agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span>
+</span><span id="__span-1-35"><a id="__codelineno-1-35" name="__codelineno-1-35" href="#__codelineno-1-35"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Triage agent&quot;</span><span class="p">,</span>
+</span><span id="__span-1-36"><a id="__codelineno-1-36" name="__codelineno-1-36" href="#__codelineno-1-36"></a>    <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Handoff to the appropriate agent based on the language of the request.&quot;</span><span class="p">,</span>
+</span><span id="__span-1-37"><a id="__codelineno-1-37" name="__codelineno-1-37" href="#__codelineno-1-37"></a>    <span class="n">handoffs</span><span class="o">=</span><span class="p">[</span><span class="n">handoff</span><span class="p">(</span><span class="n">spanish_agent</span><span class="p">),</span> <span class="n">handoff</span><span class="p">(</span><span class="n">english_agent</span><span class="p">)],</span>
+</span><span id="__span-1-38"><a id="__codelineno-1-38" name="__codelineno-1-38" href="#__codelineno-1-38"></a>    <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">get_weather</span><span class="p">],</span>
+</span><span id="__span-1-39"><a id="__codelineno-1-39" name="__codelineno-1-39" href="#__codelineno-1-39"></a>    <span class="n">mcp_servers</span><span class="o">=</span><span class="p">[</span><span class="n">mcp_server</span><span class="p">],</span>
+</span><span id="__span-1-40"><a id="__codelineno-1-40" name="__codelineno-1-40" href="#__codelineno-1-40"></a><span class="p">)</span>
+</span><span id="__span-1-41"><a id="__codelineno-1-41" name="__codelineno-1-41" href="#__codelineno-1-41"></a>
+</span><span id="__span-1-42"><a id="__codelineno-1-42" name="__codelineno-1-42" href="#__codelineno-1-42"></a><span class="n">draw_graph</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">)</span>
 </span></code></pre></div>
 <p><img alt="에이전트 그래프" src="../../assets/images/graph.png" /></p>
-<p>이 코드는 <strong>트리아지 에이전트</strong>의 구조와 하위 에이전트 및 도구와의 연결을 시각적으로 나타내는 그래프를 생성합니다.</p>
-<p><code>draw_graph()</code>는 <code>handoffs</code>에 직접 제공되거나 <code>handoff(agent)</code>를 통해 등록된 대상 에이전트를 재귀적으로 확장합니다. 두 형식 모두 그래프에 각 대상의 도구, MCP 서버 및 후속 핸드오프가 포함됩니다. 사용 가능한 대상 <code>Agent</code>이 없는 사용자 정의 <code>Handoff</code>는 이름이 지정된 목적지로만 렌더링되므로, 그래프는 해당 목적지 뒤에 있는 리소스를 확장할 수 없습니다.</p>
-<p>그래프 노드는 표시된 이름이 아니라 기반이 되는 에이전트, 도구, MCP 서버 또는 사용자 정의 핸드오프 객체로 식별됩니다. 이름이 같은 서로 다른 객체는 동일한 레이블이 표시되는 별도의 노드로 유지되며, 각 간선은 해당 객체에 연결됩니다.</p>
-<h2 id="understanding-the-visualization">시각화 이해</h2>
+<p>그러면 <strong>트리아지 에이전트</strong>의 구조와 하위 에이전트 및 도구와의 연결을 시각적으로 나타내는 그래프가 생성됩니다.</p>
+<p><code>draw_graph()</code>는 <code>handoffs</code>에 직접 제공되거나 <code>handoff(agent)</code>를 통해 등록된 대상 에이전트를 재귀적으로 확장합니다. 두 방식 모두 그래프에 각 대상의 도구, MCP 서버 및 후속 핸드오프가 포함됩니다. 사용 가능한 대상 <code>Agent</code>이 없는 사용자 지정 <code>Handoff</code>는 이름이 지정된 목적지로만 렌더링되므로, 그래프에서 해당 목적지에 연결된 리소스를 확장할 수 없습니다.</p>
+<p>그래프 노드는 표시된 이름이 아니라 기반 에이전트, 도구, MCP 서버 또는 사용자 지정 핸드오프 객체로 식별됩니다. 이름이 같은 서로 다른 객체는 동일한 표시 레이블을 가진 별도의 노드로 유지되며, 각 간선은 해당 객체에 연결됩니다.</p>
+<h2 id="understanding-the-visualization">시각화 구성 요소</h2>
 <p>생성된 그래프에는 다음이 포함됩니다.</p>
 <ul>
 <li>진입점을 나타내는 <strong>시작 노드</strong>(<code>__start__</code>)</li>
 <li>노란색으로 채워진 <strong>직사각형</strong>으로 표시되는 에이전트</li>
 <li>녹색으로 채워진 <strong>타원</strong>으로 표시되는 도구</li>
 <li>회색으로 채워진 <strong>직사각형</strong>으로 표시되는 MCP 서버</li>
-<li>상호작용을 나타내는 방향 간선:</li>
+<li>상호작용을 나타내는 방향성 간선:</li>
 <li>에이전트 간 핸드오프를 나타내는 <strong>실선 화살표</strong></li>
 <li>도구 호출을 나타내는 <strong>점선 화살표</strong></li>
 <li>MCP 서버 호출을 나타내는 <strong>파선 화살표</strong></li>
-<li>실행이 종료되는 지점을 나타내는 <strong>종료 노드</strong>(<code>__end__</code>)</li>
+<li>실행이 종료되는 위치를 나타내는 <strong>종료 노드</strong>(<code>__end__</code>)</li>
 </ul>
-<p><strong>참고:</strong> MCP 서버는 이 동작이 검증된 <strong>v0.2.8</strong>을 포함하여 최신 버전의 <code>agents</code> 패키지에서 렌더링됩니다. 시각화에 MCP 상자가 표시되지 않는 경우 최신 릴리스로 업그레이드하세요.</p>
-<h2 id="customizing-the-graph">그래프 사용자 정의</h2>
+<p><strong>참고:</strong> MCP 서버는 이 동작이 검증된 <strong>v0.2.8</strong>을 포함하여 최신 버전의 <code>agents</code> 패키지에서 렌더링됩니다. 시각화에 MCP 상자가 표시되지 않으면 최신 릴리스로 업그레이드하세요.</p>
+<h2 id="customizing-the-graph">그래프 사용자 지정</h2>
 <h3 id="showing-the-graph">그래프 표시</h3>
-<p>기본적으로 <code>draw_graph</code>은 그래프를 인라인으로 표시합니다. 그래프를 별도 창에 표시하려면 다음과 같이 작성합니다.</p>
+<p>기본적으로 <code>draw_graph</code>는 그래프를 인라인으로 표시합니다. 그래프를 별도의 창에 표시하려면 다음과 같이 작성합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">draw_graph</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">()</span>
 </span></code></pre></div>
 <h3 id="saving-the-graph">그래프 저장</h3>
-<p>기본적으로 <code>draw_graph</code>은 그래프를 인라인으로 표시합니다. 파일로 저장하려면 파일 이름을 지정합니다.</p>
+<p>기본적으로 <code>draw_graph</code>는 그래프를 인라인으로 표시합니다. 파일로 저장하려면 파일 이름을 지정합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">draw_graph</span><span class="p">(</span><span class="n">triage_agent</span><span class="p">,</span> <span class="n">filename</span><span class="o">=</span><span class="s2">&quot;agent_graph&quot;</span><span class="p">)</span>
 </span></code></pre></div>
-<p>그러면 작업 디렉터리에 <code>agent_graph.png</code>가 생성됩니다.</p>
+<p>그러면 작업 디렉터리에 <code>agent_graph.png</code>이 생성됩니다.</p>
 
 
 

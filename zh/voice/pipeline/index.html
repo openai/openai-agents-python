@@ -31,7 +31,7 @@
     
     
       
-        <title>管线与工作流 - OpenAI Agents SDK</title>
+        <title>管道与工作流 - OpenAI Agents SDK</title>
       
     
     
@@ -125,7 +125,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              管线与工作流
+              管道与工作流
             
           </span>
         </div>
@@ -822,7 +822,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -840,7 +840,7 @@
   <span class="md-ellipsis">
     
   
-    管线与工作流
+    管道与工作流
   
 
     
@@ -869,12 +869,12 @@
   <a href="#configuring-a-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        管线配置
+        管道配置
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="管线配置">
+    <nav class="md-nav" aria-label="管道配置">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -908,7 +908,7 @@
   <a href="#running-a-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        管线运行
+        管道运行
       
     </span>
   </a>
@@ -942,7 +942,7 @@
   <a href="#interruptions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        中断处理
+        中断
       
     </span>
   </a>
@@ -1097,7 +1097,7 @@
   <span class="md-ellipsis">
     
   
-    运行智能体
+    智能体运行
   
 
     
@@ -1237,7 +1237,7 @@
   <span class="md-ellipsis">
     
   
-    人工介入
+    人在回路
   
 
     
@@ -1681,12 +1681,12 @@
   <a href="#configuring-a-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        管线配置
+        管道配置
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="管线配置">
+    <nav class="md-nav" aria-label="管道配置">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1720,7 +1720,7 @@
   <a href="#running-a-pipeline" class="md-nav__link">
     <span class="md-ellipsis">
       
-        管线运行
+        管道运行
       
     </span>
   </a>
@@ -1754,7 +1754,7 @@
   <a href="#interruptions" class="md-nav__link">
     <span class="md-ellipsis">
       
-        中断处理
+        中断
       
     </span>
   </a>
@@ -1852,8 +1852,8 @@
   
 
 
-<h1 id="_1">管线与工作流</h1>
-<p><a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a> 是一个可轻松将智能体工作流转化为语音应用的类。你只需传入要运行的工作流，管线就会负责转录输入音频、检测音频何时结束、在适当时机调用工作流，并将工作流输出重新转换为音频。</p>
+<h1 id="_1">管道与工作流</h1>
+<p><a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a> 类可让您轻松地将智能体工作流转变为语音应用。您传入要运行的工作流，管道会负责转录输入音频、检测音频何时结束、在适当的时间调用工作流，并将工作流输出重新转换为音频。</p>
 <pre class="mermaid"><code>graph LR
     %% Input
     A["🎤 Audio Input"]
@@ -1877,11 +1877,11 @@
     %% Custom styling
     classDef highlight fill:#ffcc66,stroke:#333,stroke-width:1px,font-weight:700;
 </code></pre>
-<h2 id="configuring-a-pipeline">管线配置</h2>
-<p>创建管线时，你可以设置以下几项：</p>
+<h2 id="configuring-a-pipeline">管道配置</h2>
+<p>创建管道时，您可以设置以下几项：</p>
 <ol>
 <li><a class="autorefs autorefs-internal" title="VoiceWorkflowBase" href="../../../ref/voice/workflow/#agents.voice.workflow.VoiceWorkflowBase"><code>workflow</code></a>，即每次转录新音频时运行的代码。</li>
-<li>所使用的 <a class="autorefs autorefs-internal" title="STTModel" href="../../../ref/voice/model/#agents.voice.model.STTModel"><code>speech-to-text</code></a> 和 <a class="autorefs autorefs-internal" title="TTSModel" href="../../../ref/voice/model/#agents.voice.model.TTSModel"><code>text-to-speech</code></a> 模型。</li>
+<li>使用的 <a class="autorefs autorefs-internal" title="STTModel" href="../../../ref/voice/model/#agents.voice.model.STTModel"><code>speech-to-text</code></a> 和 <a class="autorefs autorefs-internal" title="TTSModel" href="../../../ref/voice/model/#agents.voice.model.TTSModel"><code>text-to-speech</code></a> 模型。</li>
 <li><a class="autorefs autorefs-internal" title="VoicePipelineConfig
 
 
@@ -1890,12 +1890,12 @@
   " href="../../../ref/voice/pipeline_config/#agents.voice.pipeline_config.VoicePipelineConfig"><code>config</code></a>，可用于配置以下内容：<ul>
 <li>模型提供商，可将模型名称映射到模型</li>
 <li>追踪，包括是否禁用追踪、是否上传音频文件、工作流名称、追踪 ID 等</li>
-<li>TTS 和 STT 模型的设置，例如提示词、语言和使用的数据类型</li>
+<li>TTS 和 STT 模型的设置，例如提示词、语言和使用的数据类型。</li>
 </ul>
 </li>
 </ol>
 <h3 id="pass-application-context-to-a-single-agent-workflow">单智能体工作流的应用上下文传递</h3>
-<p>当语音智能体、其工具或其生命周期钩子需要应用状态或依赖项时，将 <code>context</code> 传递给 <a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a>：</p>
+<p>当语音智能体、其工具或生命周期钩子需要应用状态或依赖项时，请将 <code>context</code> 传递给 <a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a>：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
@@ -1919,7 +1919,7 @@
 
   
       instance-attribute
-  " href="../../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>RunContextWrapper.context</code></a> 接收该对象。上下文始终保留在你的应用本地，不会发送给模型。有关类型和生命周期的指导，请参阅<a href="../../context/">上下文管理</a>。</p>
+  " href="../../../ref/run_context/#agents.run_context.RunContextWrapper.context"><code>RunContextWrapper.context</code></a> 接收它。上下文仅保留在您的应用中，不会发送给模型。有关类型和生命周期的指导，请参阅<a href="../../context/">上下文管理</a>。</p>
 <h3 id="configure-openai-speech-models">OpenAI语音模型配置</h3>
 <p>通过 <code>VoicePipelineConfig</code> 传递 <a class="autorefs autorefs-internal" title="STTModelSettings
 
@@ -1945,8 +1945,8 @@
 </span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">)</span>
 </span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span><span class="n">workflow</span><span class="o">=</span><span class="n">workflow</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">)</span>
 </span></code></pre></div>
-<p>对于完整的音频输入，<code>STTModelSettings.language</code> 和 <code>prompt</code> 会传递给转录请求。对于 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a>，配置 WebSocket 会话时，OpenAI转录会话还会接收 <code>language</code>、<code>prompt</code>，以及仅用于流式传输的 <code>languages</code> 和 <code>keywords</code> 设置。<code>gpt-transcribe</code> 和 <code>gpt-live-transcribe</code> 使用 <code>languages</code>（预期输入语言列表）以及 <code>keywords</code>（音频中可能出现的字面术语列表）。设置 <code>languages</code> 后，它的优先级高于 <code>language</code>。否则，这两个模型会将 SDK 中单一的 <code>language</code> 值作为仅含一个元素的 <code>languages</code> 列表接收。其他转录模型仍会接收单值 <code>language</code> 字段。请使用 API 支持的语言代码，并使用 <code>prompt</code> 描述录音或其场景，而不是重复说明转录任务。关键词是转录提示，并非必须输出的内容。请参阅OpenAI的<a href="https://developers.openai.com/api/docs/guides/transcription#improve-transcription-quality">转录上下文指南</a>。</p>
-<p>对于可在多种预期语言之间切换的流式转录，请显式配置仅用于流式传输的字段：</p>
+<p>对于完整音频输入，<code>STTModelSettings.language</code> 和 <code>prompt</code> 会传递给转录请求。对于 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a>，配置 WebSocket 会话时，OpenAI转录会话还会接收 <code>language</code>、<code>prompt</code>，以及仅用于流式传输的 <code>languages</code> 和 <code>keywords</code> 设置。<code>gpt-transcribe</code> 和 <code>gpt-live-transcribe</code> 使用 <code>languages</code>（预期输入语言列表）和 <code>keywords</code>（音频中可能出现的字面术语列表）。设置 <code>languages</code> 后，其优先级高于 <code>language</code>。否则，这两个模型会接收单个 SDK <code>language</code> 值，并将其作为只包含一个元素的 <code>languages</code> 列表。其他转录模型仍会接收单值 <code>language</code> 字段。请使用 API 支持的语言代码，并使用 <code>prompt</code> 描述录音或其场景，而不是重复说明转录任务。关键词是转录提示，并非必须出现在输出中。请参阅OpenAI<a href="https://developers.openai.com/api/docs/guides/transcription#improve-transcription-quality">转录上下文指南</a>。</p>
+<p>对于可在预期语言之间切换的流式转录，请显式配置仅用于流式传输的字段：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">config</span> <span class="o">=</span> <span class="n">VoicePipelineConfig</span><span class="p">(</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">stt_settings</span><span class="o">=</span><span class="n">STTModelSettings</span><span class="p">(</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        <span class="n">languages</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;en&quot;</span><span class="p">,</span> <span class="s2">&quot;es&quot;</span><span class="p">],</span>
@@ -1955,39 +1955,39 @@
 </span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="p">),</span>
 </span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="p">)</span>
 </span></code></pre></div>
-<p><code>TTSModelSettings.dtype</code> 接受可解析为原生 <code>int16</code> 或 <code>float32</code> 的 NumPy dtype 拼写形式，包括 <code>np.int16</code>、<code>np.float32</code>、<code>"int16"</code>、<code>"float32"</code>，以及 <code>"f4"</code> 等别名。当管线转换流式 TTS 音频时，其他 dtype 和非原生字节序会引发 <a class="autorefs autorefs-internal" title="UserError" href="../../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a>。</p>
-<p>支持的内置 <code>TTSModelSettings.voice</code> 值包括 <code>alloy</code>、<code>ash</code>、<code>ballad</code>、<code>coral</code>、<code>echo</code>、<code>fable</code>、<code>onyx</code>、<code>nova</code>、<code>sage</code>、<code>shimmer</code>、<code>verse</code>、<code>marin</code> 和 <code>cedar</code>。语音的可用性取决于所选的文本转语音模型；有关各模型当前支持的语音，请参阅OpenAI的<a href="https://developers.openai.com/api/docs/guides/text-to-speech#voice-options">语音选项</a>。有权使用OpenAI自定义语音的组织也可以改为传入自定义语音 ID：</p>
+<p><code>TTSModelSettings.dtype</code> 接受可解析为原生 <code>int16</code> 或 <code>float32</code> 的 NumPy dtype 拼写形式，包括 <code>np.int16</code>、<code>np.float32</code>、<code>"int16"</code>、<code>"float32"</code>，以及 <code>"f4"</code> 等别名。当管道转换流式 TTS 音频时，其他 dtype 和非原生字节序会引发 <a class="autorefs autorefs-internal" title="UserError" href="../../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a>。</p>
+<p>内置支持的 <code>TTSModelSettings.voice</code> 值包括 <code>alloy</code>、<code>ash</code>、<code>ballad</code>、<code>coral</code>、<code>echo</code>、<code>fable</code>、<code>onyx</code>、<code>nova</code>、<code>sage</code>、<code>shimmer</code>、<code>verse</code>、<code>marin</code> 和 <code>cedar</code>。声音是否可用取决于所选的文本转语音模型；有关当前各模型支持的声音，请参阅OpenAI<a href="https://developers.openai.com/api/docs/guides/text-to-speech#voice-options">声音选项</a>。有权使用OpenAI自定义声音的组织可以改为传入自定义声音 ID：</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">config</span> <span class="o">=</span> <span class="n">VoicePipelineConfig</span><span class="p">(</span>
 </span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">tts_settings</span><span class="o">=</span><span class="n">TTSModelSettings</span><span class="p">(</span>
 </span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>        <span class="n">voice</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;id&quot;</span><span class="p">:</span> <span class="s2">&quot;voice_123abc&quot;</span><span class="p">},</span>
 </span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="p">),</span>
 </span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>自定义语音仅向符合条件的客户开放，并且必须先通过 OpenAI API 创建才能使用。有关访问权限、同意和创建要求，请参阅OpenAI的<a href="https://developers.openai.com/api/docs/guides/text-to-speech#custom-voices">自定义语音指南</a>。</p>
-<p><a class="autorefs autorefs-internal" title="OpenAIVoiceModelProvider" href="../../../ref/voice/models/openai_model_provider/#agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider"><code>OpenAIVoiceModelProvider</code></a> 使用其配置的 <code>AsyncOpenAI</code> 客户端处理非流式转录请求、TTS 请求和流式 STT 连接。流式 STT WebSocket 连接会从该客户端获取端点、身份验证信息、默认标头和默认查询参数。有关提供商归属和优先级规则，请参阅 <a href="../../config/#api-keys-and-clients">API 密钥和客户端</a>。</p>
-<h2 id="running-a-pipeline">管线运行</h2>
-<p>你可以通过 <a class="autorefs autorefs-internal" title="run
+<p>自定义声音仅向符合条件的客户开放，并且必须先通过OpenAI API 创建才能使用。有关访问权限、同意和创建要求，请参阅OpenAI<a href="https://developers.openai.com/api/docs/guides/text-to-speech#custom-voices">自定义声音指南</a>。</p>
+<p><a class="autorefs autorefs-internal" title="OpenAIVoiceModelProvider" href="../../../ref/voice/models/openai_model_provider/#agents.voice.models.openai_model_provider.OpenAIVoiceModelProvider"><code>OpenAIVoiceModelProvider</code></a> 使用其配置的 <code>AsyncOpenAI</code> 客户端处理非流式转录请求、TTS 请求和流式 STT 连接。流式 STT WebSocket 连接会从该客户端获取端点、身份验证和默认请求头，以及默认查询参数。有关提供商所有权和优先级规则，请参阅 <a href="../../config/#api-keys-and-clients">API 密钥与客户端</a>。</p>
+<h2 id="running-a-pipeline">管道运行</h2>
+<p>您可以通过 <a class="autorefs autorefs-internal" title="run
 
 
   
       async
-  " href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline.run"><code>run()</code></a> 方法运行管线。该方法支持传入以下两种形式的音频输入：</p>
+  " href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline.run"><code>run()</code></a> 方法运行管道。该方法允许您传入以下两种形式的音频输入：</p>
 <ol>
-<li>当你有完整的音频输入，并且只希望针对该音频生成结果时，可使用 <a class="autorefs autorefs-internal" title="AudioInput
+<li>如果您已有完整的音频输入，并且只想为其生成结果，请使用 <a class="autorefs autorefs-internal" title="AudioInput
 
 
   
       dataclass
-  " href="../../../ref/voice/input/#agents.voice.input.AudioInput"><code>AudioInput</code></a>。这适用于无需检测说话者何时结束发言的情况，例如处理预录音频，或在可以明确判断用户何时结束发言的按键说话应用中。</li>
-<li>当你可能需要检测用户何时结束发言时，可使用 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a>。它允许你在检测到音频分块时将其推送至管线，语音管线会通过一个称为“活动检测”的过程，在适当时机自动运行智能体工作流。</li>
+  " href="../../../ref/voice/input/#agents.voice.input.AudioInput"><code>AudioInput</code></a>。当您不需要检测说话者何时结束讲话时，这非常有用；例如，使用预先录制的音频，或在用户结束讲话的时间点很明确的按键通话应用中。</li>
+<li>当您可能需要检测用户何时结束讲话时，请使用 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a>。它允许您在检测到音频分块时将其推送至管道，语音管道会通过称为“活动检测”的过程，在适当的时间自动运行智能体工作流。</li>
 </ol>
 <h2 id="results">结果</h2>
-<p>语音管线的运行结果是 <a class="autorefs autorefs-internal" title="StreamedAudioResult" href="../../../ref/voice/result/#agents.voice.result.StreamedAudioResult"><code>StreamedAudioResult</code></a>。该对象支持在事件发生时对其进行流式传输。<a class="autorefs autorefs-internal" title="VoiceStreamEvent
+<p>语音管道运行的结果是 <a class="autorefs autorefs-internal" title="StreamedAudioResult" href="../../../ref/voice/result/#agents.voice.result.StreamedAudioResult"><code>StreamedAudioResult</code></a>。通过此对象，您可以在事件发生时以流式方式接收事件。<a class="autorefs autorefs-internal" title="VoiceStreamEvent
 
 
   
       module-attribute
-  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEvent"><code>VoiceStreamEvent</code></a> 包括以下几种类型：</p>
+  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEvent"><code>VoiceStreamEvent</code></a> 包含以下几种类型：</p>
 <ol>
 <li><a class="autorefs autorefs-internal" title="VoiceStreamEventAudio
 
@@ -2000,7 +2000,7 @@
 
   
       dataclass
-  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEventLifecycle"><code>VoiceStreamEventLifecycle</code></a>，用于通知轮次开始或结束等生命周期事件。</li>
+  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEventLifecycle"><code>VoiceStreamEventLifecycle</code></a>，通知您轮次开始或结束等生命周期事件。</li>
 <li><a class="autorefs autorefs-internal" title="VoiceStreamEventError
 
 
@@ -2013,7 +2013,7 @@
 
   
       async
-  " href="../../../ref/voice/result/#agents.voice.result.StreamedAudioResult.stream"><code>StreamedAudioResult.stream()</code></a> 时会引发终止性管线错误。如果语音转文本的转录会话在其他方面均正常的运行结束后未能关闭，流会引发该关闭错误，而不是无限期等待。如果轮次已经失败，并且关闭转录会话也失败，流会保留原始轮次错误作为主要错误。</p>
+  " href="../../../ref/voice/result/#agents.voice.result.StreamedAudioResult.stream"><code>StreamedAudioResult.stream()</code></a> 时，会引发终止性的管道错误。如果语音转文本转录会话在其他流程均正常完成后仍无法关闭，流会引发该关闭错误，而不是无限期等待。如果该轮次已经失败，并且关闭转录会话也失败，流会保留原始轮次错误作为主要错误。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">pipeline</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="nb">input</span><span class="p">)</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="k">async</span> <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">stream</span><span class="p">():</span>
@@ -2028,13 +2028,13 @@
 </span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>        <span class="k">pass</span>
 </span></code></pre></div>
 <h2 id="best-practices">最佳实践</h2>
-<h3 id="interruptions">中断处理</h3>
-<p>Agents SDK目前没有为 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a> 提供任何内置的中断处理机制。相反，每个检测到的轮次都会触发工作流的一次独立运行。如果要在应用内处理中断，可以监听 <a class="autorefs autorefs-internal" title="VoiceStreamEventLifecycle
+<h3 id="interruptions">中断</h3>
+<p>Agents SDK 目前未针对 <a class="autorefs autorefs-internal" title="StreamedAudioInput" href="../../../ref/voice/input/#agents.voice.input.StreamedAudioInput"><code>StreamedAudioInput</code></a> 提供任何内置的中断处理。相反，每个检测到的轮次都会触发工作流的独立运行。如果您想在应用内处理中断，可以监听 <a class="autorefs autorefs-internal" title="VoiceStreamEventLifecycle
 
 
   
       dataclass
-  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEventLifecycle"><code>VoiceStreamEventLifecycle</code></a> 事件。<code>turn_started</code> 表示已转录一个新轮次，并且即将开始处理。<code>turn_ended</code> 会在相应轮次的所有音频均已发送后触发。你可以使用这些事件，在模型开始一个轮次时将说话者的麦克风静音，并在应用播放完与该轮次相关的所有音频后取消静音。</p>
+  " href="../../../ref/voice/events/#agents.voice.events.VoiceStreamEventLifecycle"><code>VoiceStreamEventLifecycle</code></a> 事件。<code>turn_started</code> 表示新的轮次已完成转录，并且即将开始处理。相应轮次的所有音频分发完毕后，会触发 <code>turn_ended</code>。您可以利用这些事件，在模型开始一个轮次时将说话者的麦克风静音，并在应用播放完与该轮次相关的所有音频后取消静音。</p>
 
 
 

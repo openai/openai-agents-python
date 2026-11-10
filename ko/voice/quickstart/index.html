@@ -696,7 +696,7 @@
   <span class="md-ellipsis">
     
   
-    실시간 에이전트 가이드
+    Realtime agents 가이드
   
 
     
@@ -894,7 +894,7 @@
   <a href="#put-it-all-together" class="md-nav__link">
     <span class="md-ellipsis">
       
-        전체 코드 통합
+        전체 구성
       
     </span>
   </a>
@@ -1711,7 +1711,7 @@
   <a href="#put-it-all-together" class="md-nav__link">
     <span class="md-ellipsis">
       
-        전체 코드 통합
+        전체 구성
       
     </span>
   </a>
@@ -1806,17 +1806,17 @@
 
 <h1 id="_1">빠른 시작</h1>
 <h2 id="prerequisites">사전 요구 사항</h2>
-<p>Agents SDK의 기본 <a href="../../quickstart/">빠른 시작 지침</a>을 따르고 가상 환경을 설정했는지 확인합니다. 그런 다음 SDK에서 선택적 음성 의존성을 설치합니다.</p>
+<p>Agents SDK의 기본 <a href="../../quickstart/">빠른 시작 지침</a>을 따르고 가상 환경을 설정했는지 확인합니다. 그런 다음 SDK의 선택적 음성 종속성을 설치합니다:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;openai-agents[voice]&#39;</span>
 </span></code></pre></div>
-<p>아래 데모 코드는 마이크 및 스피커 I/O에 <a href="https://pypi.org/project/sounddevice/"><code>sounddevice</code></a>도 사용하며, 이는 <code>voice</code> extra에 포함되지 않습니다.</p>
+<p>아래 데모 코드는 마이크와 스피커 I/O를 위해 <a href="https://pypi.org/project/sounddevice/"><code>sounddevice</code></a>도 사용하며, 이 패키지는 <code>voice</code> extra에 포함되지 않습니다:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span>sounddevice
 </span></code></pre></div>
 <h2 id="concepts">개념</h2>
-<p>알아야 할 주요 개념은 3단계 프로세스인 <a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a>입니다.</p>
+<p>알아야 할 핵심 개념은 3단계 프로세스인 <a class="autorefs autorefs-internal" title="VoicePipeline" href="../../../ref/voice/pipeline/#agents.voice.pipeline.VoicePipeline"><code>VoicePipeline</code></a>입니다:</p>
 <ol>
 <li>음성-텍스트 변환 모델을 실행하여 오디오를 텍스트로 변환합니다.</li>
-<li>일반적으로 에이전틱 워크플로인 코드를 실행하여 결과를 생성합니다.</li>
+<li>일반적으로 에이전트 워크플로인 코드를 실행하여 결과를 생성합니다.</li>
 <li>텍스트-음성 변환 모델을 실행하여 결과 텍스트를 다시 오디오로 변환합니다.</li>
 </ol>
 <pre class="mermaid"><code>graph LR
@@ -1843,7 +1843,7 @@
     classDef highlight fill:#ffcc66,stroke:#333,stroke-width:1px,font-weight:700;
 </code></pre>
 <h2 id="agents">에이전트</h2>
-<p>먼저 에이전트를 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 두 개의 에이전트, 구성된 핸드오프, 도구 하나를 사용합니다.</p>
+<p>먼저 몇 가지 에이전트를 설정하겠습니다. 이 SDK로 에이전트를 구축해 본 적이 있다면 익숙한 과정일 것입니다. 에이전트 2개, 구성된 핸드오프, 도구 1개를 사용합니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span>
@@ -1879,9 +1879,10 @@
 </span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a><span class="p">)</span>
 </span></code></pre></div>
 <h2 id="voice-pipeline">음성 파이프라인</h2>
-<p><a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a>을 워크플로로 사용하여 간단한 음성 파이프라인을 설정합니다.</p>
+<p><a class="autorefs autorefs-internal" title="SingleAgentVoiceWorkflow" href="../../../ref/voice/workflow/#agents.voice.workflow.SingleAgentVoiceWorkflow"><code>SingleAgentVoiceWorkflow</code></a>을 워크플로로 사용하여 간단한 음성 파이프라인을 설정하겠습니다.</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents.voice</span><span class="w"> </span><span class="kn">import</span> <span class="n">SingleAgentVoiceWorkflow</span><span class="p">,</span> <span class="n">VoicePipeline</span>
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span><span class="n">workflow</span><span class="o">=</span><span class="n">SingleAgentVoiceWorkflow</span><span class="p">(</span><span class="n">agent</span><span class="p">))</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">VoicePipeline</span><span class="p">(</span><span class="n">workflow</span><span class="o">=</span><span class="n">SingleAgentVoiceWorkflow</span><span class="p">(</span><span class="n">agent</span><span class="p">))</span>
 </span></code></pre></div>
 <h2 id="run-the-pipeline">파이프라인 실행</h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
@@ -1904,7 +1905,7 @@
 </span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>    <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">type</span> <span class="o">==</span> <span class="s2">&quot;voice_stream_event_audio&quot;</span><span class="p">:</span>
 </span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a>        <span class="n">player</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
 </span></code></pre></div>
-<h2 id="put-it-all-together">전체 코드 통합</h2>
+<h2 id="put-it-all-together">전체 구성</h2>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
 </span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
@@ -1969,7 +1970,7 @@
 </span><span id="__span-5-62"><a id="__codelineno-5-62" name="__codelineno-5-62" href="#__codelineno-5-62"></a><span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
 </span><span id="__span-5-63"><a id="__codelineno-5-63" name="__codelineno-5-63" href="#__codelineno-5-63"></a>    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
 </span></code></pre></div>
-<p>이 코드 예제를 실행하면 에이전트가 사용자가 들을 수 있는 음성 오디오를 생성합니다! 직접 에이전트와 대화할 수 있는 데모는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/voice/static">examples/voice/static</a>의 코드 예제를 확인하세요.</p>
+<p>이 예제를 실행하면 에이전트가 직접 들어볼 수 있는 음성을 생성합니다! 에이전트에게 직접 말할 수 있는 데모는 <a href="https://github.com/openai/openai-agents-python/tree/main/examples/voice/static">examples/voice/static</a>의 예제를 확인하세요.</p>
 
 
 

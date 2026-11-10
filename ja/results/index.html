@@ -339,7 +339,7 @@
   <span class="md-ellipsis">
     
   
-    構成
+    設定
   
 
     
@@ -1208,7 +1208,7 @@
   <a href="#recover-a-failed-resumed-session-write" class="md-nav__link">
     <span class="md-ellipsis">
       
-        再開後に失敗した Session 書き込みの復旧
+        再開した Session の書き込み失敗からの復旧
       
     </span>
   </a>
@@ -1251,7 +1251,7 @@
   <a href="#agent-as-tool-metadata" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Agent-as-tool のメタデータ
+        エージェントをツールとして使用する場合のメタデータ
       
     </span>
   </a>
@@ -1274,7 +1274,7 @@
   <a href="#raw-responses" class="md-nav__link">
     <span class="md-ellipsis">
       
-        raw レスポンス
+        Raw レスポンス
       
     </span>
   </a>
@@ -1285,7 +1285,7 @@
   <a href="#guardrail-results" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ガードレールの実行結果
+        ガードレールの結果
       
     </span>
   </a>
@@ -1860,7 +1860,7 @@
   <a href="#recover-a-failed-resumed-session-write" class="md-nav__link">
     <span class="md-ellipsis">
       
-        再開後に失敗した Session 書き込みの復旧
+        再開した Session の書き込み失敗からの復旧
       
     </span>
   </a>
@@ -1903,7 +1903,7 @@
   <a href="#agent-as-tool-metadata" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Agent-as-tool のメタデータ
+        エージェントをツールとして使用する場合のメタデータ
       
     </span>
   </a>
@@ -1926,7 +1926,7 @@
   <a href="#raw-responses" class="md-nav__link">
     <span class="md-ellipsis">
       
-        raw レスポンス
+        Raw レスポンス
       
     </span>
   </a>
@@ -1937,7 +1937,7 @@
   <a href="#guardrail-results" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ガードレールの実行結果
+        ガードレールの結果
       
     </span>
   </a>
@@ -2031,13 +2031,13 @@
 <h1 id="_1">実行結果</h1>
 <p><code>Runner.run</code> メソッドを呼び出すと、次の 2 種類の実行結果のいずれかを受け取ります。</p>
 <ul>
-<li><code>Runner.run(...)</code> または <code>Runner.run_sync(...)</code> からの <a class="autorefs autorefs-internal" title="RunResult
+<li><code>Runner.run(...)</code> または <code>Runner.run_sync(...)</code> から返される <a class="autorefs autorefs-internal" title="RunResult
 
 
   
       dataclass
   " href="../../ref/result/#agents.result.RunResult"><code>RunResult</code></a></li>
-<li><code>Runner.run_streamed(...)</code> からの <a class="autorefs autorefs-internal" title="RunResultStreaming
+<li><code>Runner.run_streamed(...)</code> から返される <a class="autorefs autorefs-internal" title="RunResultStreaming
 
 
   
@@ -2068,7 +2068,7 @@
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a>、<a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a> など、ストリーミング固有の制御機能が追加されています。</p>
 <h2 id="choose-the-right-result-surface">適切な実行結果インターフェースの選択</h2>
-<p>ほとんどのアプリケーションで必要となる実行結果のプロパティやヘルパーは、ごくわずかです。</p>
+<p>ほとんどのアプリケーションで必要になる実行結果のプロパティやヘルパーは、ごく一部です。</p>
 <table>
 <thead>
 <tr>
@@ -2106,8 +2106,8 @@
 <td><code>agent_tool_invocation</code></td>
 </tr>
 <tr>
-<td>raw なモデル呼び出しまたはガードレールの診断情報</td>
-<td><code>raw_responses</code> とガードレール実行結果の配列</td>
+<td>raw モデル呼び出しまたはガードレールの診断情報</td>
+<td><code>raw_responses</code> とガードレール結果の配列</td>
 </tr>
 </tbody>
 </table>
@@ -2117,7 +2117,7 @@
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.final_output"><code>final_output</code></a> プロパティには、最後に実行されたエージェントの最終出力が含まれます。これは次のいずれかです。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.final_output"><code>final_output</code></a> プロパティには、最後に実行されたエージェントの最終出力が格納されます。これは次のいずれかです。</p>
 <ul>
 <li>最後のエージェントに <code>output_type</code> が定義されていなかった場合は、<code>str</code></li>
 <li>最後のエージェントに出力型が定義されていた場合は、<code>last_agent.output_type</code> 型のオブジェクト</li>
@@ -2125,11 +2125,11 @@
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p><code>final_output</code> の型は <code>Any</code> です。ハンドオフによって実行を完了するエージェントが変わる可能性があるため、SDK は可能性のある出力型すべてを静的に把握できません。</p>
+<p><code>final_output</code> は <code>Any</code> として型付けされています。ハンドオフによって実行を完了するエージェントが変わる可能性があるため、SDK は可能性のある出力型の完全な集合を静的に把握できません。</p>
 </div>
 <p>ストリーミングモードでは、ストリームの処理が完了するまで <code>final_output</code> は <code>None</code> のままです。イベントごとのフローについては、<a href="../streaming/">ストリーミング</a>を参照してください。</p>
 <h2 id="input-next-turn-history-and-new-items">入力、次ターンの履歴、新規項目</h2>
-<p>これらのインターフェースは、それぞれ異なる目的に対応します。</p>
+<p>以下のインターフェースは、それぞれ異なる目的に対応します。</p>
 <table>
 <thead>
 <tr>
@@ -2146,13 +2146,13 @@
   
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultBase.input"><code>input</code></a></td>
-<td>この実行セグメントの基本入力です。ハンドオフ入力フィルターによって履歴が書き換えられた場合は、実行の継続に使用されたフィルター適用後の入力が反映されます。</td>
-<td>この実行で実際に使用された入力の監査</td>
+<td>この実行セグメントの基本入力。ハンドオフ入力フィルターが履歴を書き換えた場合、実行が継続時に使用したフィルター済み入力が反映されます。</td>
+<td>この実行が実際に入力として使用した内容の監査</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a></td>
-<td>実行の入力項目ビューです。デフォルトの <code>mode="preserve_all"</code> では、<code>new_items</code> から変換された履歴が維持されます。ただし、SDK デフォルトのネストされたハンドオフ履歴へすでに移されたセッション項目と完全に同一の出現箇所が、再度追加されることはありません。<code>mode="normalized"</code> では、ハンドオフのフィルタリングによってモデル履歴が書き換えられた場合、正規の継続入力が優先されます。</td>
-<td>手動のチャットループ、クライアント管理の会話状態、プレーン項目による履歴の確認</td>
+<td>実行を入力項目として表現したビュー。デフォルトの <code>mode="preserve_all"</code> は <code>new_items</code> から変換された履歴を保持しますが、SDK のデフォルトのネストされたハンドオフ履歴へすでに移動済みの Session 項目と完全に同一の出現箇所を、再度追加することはありません。<code>mode="normalized"</code> は、ハンドオフフィルタリングによってモデル履歴が書き換えられた場合に、正規の継続入力を優先します。</td>
+<td>手動のチャットループ、クライアント管理の会話状態、通常の項目としての履歴の確認</td>
 </tr>
 <tr>
 <td><a class="autorefs autorefs-internal" title="new_items
@@ -2166,7 +2166,7 @@
 
   
       module-attribute
-  " href="../../ref/items/#agents.items.RunItem"><code>RunItem</code></a> ラッパーです。</td>
+  " href="../../ref/items/#agents.items.RunItem"><code>RunItem</code></a> ラッパー。</td>
 <td>ログ、UI、監査、デバッグ</td>
 </tr>
 <tr>
@@ -2176,35 +2176,35 @@
   
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a></td>
-<td>実行内の各モデル呼び出しから取得された raw な <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> オブジェクトです。</td>
+<td>実行中の各モデル呼び出しから得られた raw <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> オブジェクト。</td>
 <td>プロバイダーレベルの診断または raw レスポンスの確認</td>
 </tr>
 </tbody>
 </table>
 <p>実際には、次のように使い分けます。</p>
 <ul>
-<li>実行のプレーンな入力項目ビューが必要な場合は、<code>to_input_list()</code> を使用します。</li>
-<li>ハンドオフのフィルタリングまたはネストされたハンドオフ履歴の書き換え後に、次の <code>Runner.run(..., input=...)</code> 呼び出しで使用する正規のローカル入力が必要な場合は、<code>to_input_list(mode="normalized")</code> を使用します。</li>
+<li>実行を通常の入力項目として確認する場合は、<code>to_input_list()</code> を使用します。</li>
+<li>ハンドオフフィルタリングまたはネストされたハンドオフ履歴の書き換え後に、次の <code>Runner.run(..., input=...)</code> 呼び出し用の正規のローカル入力が必要な場合は、<code>to_input_list(mode="normalized")</code> を使用します。</li>
 <li>SDK に履歴の読み込みと保存を任せる場合は、<a href="../sessions/"><code>session=...</code></a> を使用します。</li>
-<li><code>conversation_id</code> または <code>previous_response_id</code> で OpenAIのサーバー管理状態を使用している場合、通常は <code>to_input_list()</code> を再送せず、新しいユーザー入力のみを渡して保存済みの ID を再利用します。</li>
+<li><code>conversation_id</code> または <code>previous_response_id</code> で OpenAI のサーバー管理状態を使用している場合、通常は <code>to_input_list()</code> を再送信するのではなく、新しいユーザー入力のみを渡して、保存済みの ID を再利用します。</li>
 <li>ログ、UI、監査のために変換済みの完全な履歴が必要な場合は、デフォルトの <code>to_input_list()</code> モードまたは <code>new_items</code> を使用します。</li>
 </ul>
-<p>SDK デフォルトのネストされたハンドオフ履歴でメッセージ項目がそのまま保持される場合、Sessions、<code>RunState</code>、<code>to_input_list()</code> は、内容による重複排除を行わず、所有対象となる正確な出現箇所を追跡します。同じメッセージが個別に発生した場合は別々のものとして維持され、すでに所有されている出現箇所だけが再度追加されないように処理されます。</p>
-<p>モデル出力が再実行可能な入力へ変換されるとき、<code>to_input_list()</code>、<a class="autorefs autorefs-internal" title="to_input_items" href="../../ref/items/#agents.items.ModelResponse.to_input_items"><code>ModelResponse.to_input_items()</code></a>、および各 <a class="autorefs autorefs-internal" title="to_input_item" href="../../ref/items/#agents.items.RunItemBase.to_input_item"><code>RunItemBase.to_input_item()</code></a> 呼び出しは、プロバイダー出力専用の <code>created_by</code> メタデータを削除します。これには、ネストされた <code>shell_call_output</code> チャンク上の <code>created_by</code> も含まれます。この変換では、影響を受けるマッピングが再構築され、元の raw 項目は変更されません。</p>
-<p>JavaScript SDK とは異なり、Python では、実行中に新たに生成されたモデル形式の項目のみを含む独立した <code>output</code> プロパティは公開されません。SDK メタデータが必要な場合は <code>new_items</code> を使用し、raw なモデルペイロードが必要な場合は <code>raw_responses</code> を確認してください。</p>
-<p>コンピューターツールの項目を会話入力として再送信する場合は、raw な Responses ペイロード形式が使用されます。プレビューモデルの <code>computer_call</code> 項目では単一の <code>action</code> が保持される一方、<code>gpt-5.5</code> のコンピューター呼び出しでは、バッチ化された <code>actions[]</code> を保持できます。<a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a> と <a class="autorefs autorefs-internal" title="RunState
+<p>SDK のデフォルトのネストされたハンドオフ履歴がメッセージ項目をそのまま保持する場合、Sessions、<code>RunState</code>、<code>to_input_list()</code> は、内容による重複排除ではなく、所有されている正確な出現箇所を追跡します。個別に発生した同一のメッセージは別々に保持されます。すでに所有されている出現箇所だけが、再度追加されないように処理されます。</p>
+<p>モデル出力を再実行可能な入力へ変換する際、<code>to_input_list()</code>、<a class="autorefs autorefs-internal" title="to_input_items" href="../../ref/items/#agents.items.ModelResponse.to_input_items"><code>ModelResponse.to_input_items()</code></a>、各 <a class="autorefs autorefs-internal" title="to_input_item" href="../../ref/items/#agents.items.RunItemBase.to_input_item"><code>RunItemBase.to_input_item()</code></a> 呼び出しは、プロバイダーの出力専用 <code>created_by</code> メタデータを削除します。これには、ネストされた <code>shell_call_output</code> チャンク上の <code>created_by</code> も含まれます。この変換では、影響を受けるマッピングが再構築され、元の raw 項目は変更されません。</p>
+<p>JavaScript SDK とは異なり、Python では、実行中に新たに生成されたモデル形式の項目のみを含む独立した <code>output</code> プロパティは公開されません。SDK メタデータが必要な場合は <code>new_items</code> を使用し、raw モデルペイロードが必要な場合は <code>raw_responses</code> を確認してください。</p>
+<p>コンピューターツールの項目を会話入力として再送信する場合は、raw Responses ペイロード形式を使用します。プレビューモデルの <code>computer_call</code> 項目は単一の <code>action</code> を保持しますが、<code>gpt-5.5</code> コンピューター呼び出しでは、バッチ化された <code>actions[]</code> を保持できます。<a class="autorefs autorefs-internal" title="to_input_list" href="../../ref/result/#agents.result.RunResultBase.to_input_list"><code>to_input_list()</code></a> と <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> はモデルが生成した形式をそのまま維持するため、それらの項目を会話入力として手動で再送信する場合、一時停止と再開のフロー、および保存済みトランスクリプトは、プレビュー版と GA 版の両方のコンピューターツール呼び出しで引き続き機能します。ローカルの実行結果は、引き続き <code>new_items</code> 内に <code>computer_call_output</code> 項目として表示されます。</p>
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> は、モデルが生成した形式をそのまま保持します。そのため、これらの項目を手動で会話入力として再送信する処理、一時停止と再開のフロー、保存済みトランスクリプトは、プレビュー版と GA 版の両方のコンピューターツール呼び出しで引き続き動作します。ローカルの実行結果は、引き続き <code>new_items</code> 内の <code>computer_call_output</code> 項目として表示されます。</p>
 <h3 id="new-items">新規項目</h3>
 <p><a class="autorefs autorefs-internal" title="new_items
 
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a> では、実行中に発生した内容を最も詳細に確認できます。一般的な項目型は次のとおりです。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.new_items"><code>new_items</code></a> を使用すると、実行中に起きたことを最も詳細に確認できます。一般的な項目の型は次のとおりです。</p>
 <ul>
 <li>再開されたモデル呼び出しの直前に <code>RunState.pending_input</code> から受け入れられた入力を表す <a class="autorefs autorefs-internal" title="InputItem
 
@@ -2229,7 +2229,7 @@
 
   
       dataclass
-  " href="../../ref/items/#agents.items.ToolSearchCallItem"><code>ToolSearchCallItem</code></a> および <a class="autorefs autorefs-internal" title="ToolSearchOutputItem
+  " href="../../ref/items/#agents.items.ToolSearchCallItem"><code>ToolSearchCallItem</code></a> と <a class="autorefs autorefs-internal" title="ToolSearchOutputItem
 
 
   
@@ -2240,19 +2240,19 @@
 
   
       dataclass
-  " href="../../ref/items/#agents.items.ToolCallItem"><code>ToolCallItem</code></a> および <a class="autorefs autorefs-internal" title="ToolCallOutputItem
+  " href="../../ref/items/#agents.items.ToolCallItem"><code>ToolCallItem</code></a> と <a class="autorefs autorefs-internal" title="ToolCallOutputItem
 
 
   
       dataclass
   " href="../../ref/items/#agents.items.ToolCallOutputItem"><code>ToolCallOutputItem</code></a></li>
-<li>承認待ちで一時停止したツール呼び出しを表す <a class="autorefs autorefs-internal" title="ToolApprovalItem
+<li>承認のために一時停止したツール呼び出しを表す <a class="autorefs autorefs-internal" title="ToolApprovalItem
 
 
   
       dataclass
   " href="../../ref/items/#agents.items.ToolApprovalItem"><code>ToolApprovalItem</code></a></li>
-<li>ホスト型 MCP の承認とツールカタログを表す <a class="autorefs autorefs-internal" title="MCPApprovalRequestItem
+<li>ホストされた MCP の承認とツールカタログを表す <a class="autorefs autorefs-internal" title="MCPApprovalRequestItem
 
 
   
@@ -2273,17 +2273,17 @@
 
   
       dataclass
-  " href="../../ref/items/#agents.items.HandoffCallItem"><code>HandoffCallItem</code></a> および <a class="autorefs autorefs-internal" title="HandoffOutputItem
+  " href="../../ref/items/#agents.items.HandoffCallItem"><code>HandoffCallItem</code></a> と <a class="autorefs autorefs-internal" title="HandoffOutputItem
 
 
   
       dataclass
   " href="../../ref/items/#agents.items.HandoffOutputItem"><code>HandoffOutputItem</code></a></li>
 </ul>
-<p>エージェントとの関連付け、ツール出力、ハンドオフの境界、承認の境界が必要な場合は、常に <code>to_input_list()</code> よりも <code>new_items</code> を選択してください。</p>
-<p>ホスト型ツール検索を使用する場合、モデルが生成した検索リクエストを確認するには <code>ToolSearchCallItem.raw_item</code> を、該当ターンで読み込まれた名前空間、関数、ホスト型 MCPサーバーを確認するには <code>ToolSearchOutputItem.raw_item</code> を参照してください。</p>
-<p>Programmatic Tool Calling では、生成された <code>program</code> は <code>ToolCallItem</code> であり、そのプログラムが所有する通常の子ツール呼び出しも <code>ToolCallItem</code> エントリとなり、対応する <code>program_output</code> は <code>ToolCallOutputItem</code> となります。プログラム所有のホスト型 MCP の <code>mcp_approval_request</code> 項目と <code>mcp_list_tools</code> 項目は例外であり、それぞれ <code>MCPApprovalRequestItem</code> エントリと <code>MCPListToolsItem</code> エントリになります。</p>
-<p>raw 項目は、型付きの Responses オブジェクトまたはマッピングの場合があります。特に、プログラム所有のシェル呼び出しとパッチ適用呼び出しではマッピングが使用されます。マッピングに対して安全な次の確認パターンを使用してください。</p>
+<p>エージェントとの関連付け、ツール出力、ハンドオフの境界、承認の境界が必要な場合は、<code>to_input_list()</code> ではなく <code>new_items</code> を選択してください。</p>
+<p>ホストされたツール検索を使用する場合、モデルが生成した検索リクエストを確認するには <code>ToolSearchCallItem.raw_item</code> を、該当ターンで読み込まれた名前空間、関数、ホストされた MCPサーバーを確認するには <code>ToolSearchOutputItem.raw_item</code> を調べます。</p>
+<p>プログラムによるツール呼び出しでは、生成された <code>program</code> は <code>ToolCallItem</code> になり、そのプログラムが所有する通常の子ツール呼び出しも <code>ToolCallItem</code> エントリになります。また、対応する <code>program_output</code> は <code>ToolCallOutputItem</code> になります。プログラムが所有するホストされた MCP の <code>mcp_approval_request</code> 項目と <code>mcp_list_tools</code> 項目は例外であり、それぞれ <code>MCPApprovalRequestItem</code> エントリと <code>MCPListToolsItem</code> エントリになります。</p>
+<p>raw 項目には、型付きの Responses オブジェクトまたはマッピングを使用できます。特に、プログラムが所有する shell 呼び出しと apply-patch 呼び出しではマッピングが使用されます。マッピングに対して安全な確認パターンを使用してください。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Mapping</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
@@ -2297,12 +2297,10 @@
 </span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">raw_type</span> <span class="o">=</span> <span class="n">raw_field</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">)</span>
 </span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="n">caller</span> <span class="o">=</span> <span class="n">raw_field</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;caller&quot;</span><span class="p">)</span>
 </span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="n">caller_id</span> <span class="o">=</span> <span class="p">(</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">caller</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;caller_id&quot;</span><span class="p">)</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="k">else</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="s2">&quot;caller_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="p">)</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">caller</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;caller_id&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span> <span class="k">else</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">caller</span><span class="p">,</span> <span class="s2">&quot;caller_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="p">)</span>
 </span></code></pre></div>
-<p>プログラム所有の子呼び出しでは、<code>caller</code> の <code>type</code> フィールドは <code>program</code> となり、<code>caller_id</code> は親プログラム呼び出しを識別します。</p>
+<p>プログラムが所有する子呼び出しでは、<code>caller</code> の <code>type</code> フィールドは <code>program</code> となり、<code>caller_id</code> は親プログラム呼び出しを識別します。</p>
 <h2 id="continue-or-resume-the-conversation">会話の継続と再開</h2>
 <h3 id="next-turn-agent">次ターンのエージェント</h3>
 <p><a class="autorefs autorefs-internal" title="last_agent
@@ -2311,8 +2309,8 @@
   
       abstractmethod
       property
-  " href="../../ref/result/#agents.result.RunResultBase.last_agent"><code>last_agent</code></a> には、最後に実行されたエージェントが含まれます。ハンドオフ後の次のユーザーターンでは、多くの場合、このエージェントを再利用するのが最適です。</p>
-<p>ストリーミングモードでは、実行の進行に応じて <a class="autorefs autorefs-internal" title="current_agent
+  " href="../../ref/result/#agents.result.RunResultBase.last_agent"><code>last_agent</code></a> には、最後に実行されたエージェントが格納されます。多くの場合、ハンドオフ後の次のユーザーターンで再利用するエージェントとして最適です。</p>
+<p>ストリーミングモードでは、実行の進行に伴って <a class="autorefs autorefs-internal" title="current_agent
 
 
   
@@ -2331,19 +2329,19 @@
   
       class-attribute
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> で公開されます。これには、直接呼び出されたツール、ハンドオフ後に到達したツール、またはネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行によって発生した承認が含まれる場合があります。</p>
-<p><a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResult.to_state"><code>to_state()</code></a> を呼び出して、再開可能な <a class="autorefs autorefs-internal" title="RunState
+  " href="../../ref/result/#agents.result.RunResultStreaming.interruptions"><code>RunResultStreaming.interruptions</code></a> で公開されます。これには、直接使用されたツール、ハンドオフ後に到達したツール、またはネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行によって要求された承認が含まれる場合があります。</p>
+<p>再開可能な <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> を取得し、保留中の項目を承認または拒否してから、<code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> で再開します。</p>
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> を取得するには <a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResult.to_state"><code>to_state()</code></a> を呼び出し、保留中の項目を承認または拒否してから、<code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> で再開します。</p>
 <p><a class="autorefs autorefs-internal" title="ToolCallOutputItem
 
 
   
       dataclass
-  " href="../../ref/items/#agents.items.ToolCallOutputItem"><code>ToolCallOutputItem</code></a> の出力が Pydantic モデルまたはデータクラスの場合、<code>RunState</code> はその出力を構造化データとしてシリアライズします。<code>RunState</code> は辞書、リスト、タプルも走査し、それらのコンテナ内で検出された Pydantic モデルまたはデータクラスを変換します。タプルは JSON のラウンドトリップ後にリストとして復元されます。JSON と互換性のないその他の値は文字列表現にフォールバックする場合があるため、カスタム型を正確に維持する必要がある場合は、JSON と明示的に互換性のあるデータを返してください。</p>
+  " href="../../ref/items/#agents.items.ToolCallOutputItem"><code>ToolCallOutputItem</code></a> の出力が Pydantic モデルまたは dataclass の場合、<code>RunState</code> はその出力を構造化データとしてシリアライズします。<code>RunState</code> は辞書、リスト、タプルも走査し、それらのコンテナー内で見つかった Pydantic モデルまたは dataclass を変換します。JSON のラウンドトリップ後、タプルはリストとして復元されます。JSON と互換性のないその他の値は文字列表現にフォールバックする場合があるため、カスタム型を正確に保持する必要がある場合は、明示的に JSON 互換のデータを返してください。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">agents</span><span class="w"> </span><span class="kn">import</span> <span class="n">Agent</span><span class="p">,</span> <span class="n">Runner</span>
 </span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
 </span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">agent</span> <span class="o">=</span> <span class="n">Agent</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;Assistant&quot;</span><span class="p">,</span> <span class="n">instructions</span><span class="o">=</span><span class="s2">&quot;Use tools when needed.&quot;</span><span class="p">)</span>
@@ -2355,22 +2353,22 @@
 </span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>        <span class="n">state</span><span class="o">.</span><span class="n">approve</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
 </span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">state</span><span class="p">)</span>
 </span></code></pre></div>
-<h4 id="recover-a-failed-resumed-session-write">再開後に失敗した Session 書き込みの復旧</h4>
-<p>再開された実行では、承認済みのツール処理を完了した後も、同じモデルレスポンス内のハンドオフを含め、別のモデル呼び出しへ進むことがあります。その後、完了したツール呼び出しと出力をクライアント管理の <a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> に書き込む際に失敗する場合があります。同じ <a class="autorefs autorefs-internal" title="RunState
+<h4 id="recover-a-failed-resumed-session-write">再開した Session の書き込み失敗からの復旧</h4>
+<p>再開された実行では、承認済みのツール処理が完了しても、同じモデルレスポンス内のハンドオフを含め、さらに別のモデル呼び出しが発生する場合があります。その後、完了したツール呼び出しと出力をクライアント管理の <a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> に書き込む際に失敗することがあります。同じ <a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> を保持するか、それをシリアライズして復元し、元の Session バックエンドと <code>session_id</code> を使用して <code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> を再試行してください。後続のモデル呼び出しの前に、SDK は保留中のバッチを Session 履歴と照合します。Session が完全なバッチをコミットしたものの、その確認応答に失敗した場合、SDK は履歴末尾の完全一致を認識し、バッチを再度追加しません。書き込みがコミットされていなかった場合、SDK は追加を再試行します。SDK は、完了済みのツール、ツールのガードレール、フック、ハンドオフを再実行しません。再開された実行は、完了したハンドオフによって選択されたエージェントで継続します。</p>
-<p>Session 履歴が完全に一致しない場合、復旧は安全側に倒して失敗します。元の Session バックエンドと <code>session_id</code> を使用し、再開された実行がその履歴を排他的に使用できるようにしてください。別の書き込み元が履歴の末尾を変更した場合、保留中のバッチの一部しか存在しない場合、または履歴がその他の理由で曖昧な場合、SDK は別のモデル呼び出しを行う前に <a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> を送出します。再開する前に元の Session 履歴を修復し、完了済みの処理は再実行しないでください。保留中のバッチ、選択されたエージェント、蓄積されたツールのガードレール実行結果は、復旧が完了する前に後続の承認中断が発生した場合も含め、<code>RunState</code> の JSON および文字列のラウンドトリップ後も維持されます。<a class="autorefs autorefs-internal" title="stream_events
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> を保持するか、それをシリアライズして復元し、元の Session バックエンドと <code>session_id</code> を使用して <code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> を再試行してください。次のモデル呼び出しの前に、SDK は保留中のバッチと Session 履歴を照合します。Session が完全なバッチをコミットしたものの、確認応答に失敗した場合、SDK は履歴末尾が完全に一致することを認識し、バッチを再度追加しません。書き込みがコミットされていない場合、SDK は追加処理を再試行します。SDK は、完了済みのツール、ツールガードレール、フック、ハンドオフを再実行しません。再開された実行は、完了したハンドオフによって選択されたエージェントで継続します。</p>
+<p>Session 履歴が完全に一致しない場合、復旧は安全側で失敗します。元の Session バックエンドと <code>session_id</code> を使用し、再開された実行がその履歴へ排他的にアクセスできるようにしてください。別の書き込み元が履歴末尾を変更した場合、保留中のバッチの一部しか存在しない場合、または履歴にその他の曖昧さがある場合、SDK は次のモデル呼び出しの前に <a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> を発生させます。再開する前に元の Session 履歴を修復してください。完了済みの処理を再実行しないでください。保留中のバッチ、選択されたエージェント、蓄積されたツールガードレールの結果は、復旧完了前に別の承認による中断が発生した場合も含め、<code>RunState</code> の JSON および文字列のラウンドトリップ後も保持されます。<a class="autorefs autorefs-internal" title="stream_events
 
 
   
       async
-  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> が Session 書き込みエラーを送出した後も、<a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResultStreaming.to_state"><code>RunResultStreaming.to_state()</code></a> は同じ復旧データを保持する、切り離された状態を返します。</p>
-<p>この復旧は、実行が最終出力を受け入れ、出力ガードレールと終端フックを完了した後で、その最終ターンの永続化に失敗した場合には適用されません。その状態を再実行すると終端ライフサイクルの作用が繰り返される可能性があるため、SDK は <code>RunState</code> を復旧不能としてマークします。その状態を使用した以降のすべての <code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> の試行では、Session の照合、サンドボックスの準備、モデル呼び出し、ツール、ガードレール、フックの前に <a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> が送出されます。このマーカーは <code>RunState</code> のシリアライズ後も維持されます。その状態を再試行するのではなく、新しい実行を開始してください。この境界は、終端関数ツールの出力と、履歴用に受け入れられた <code>max_turns</code> ハンドラーの出力にも適用されます。</p>
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> が Session 書き込みエラーを発生させた後、<a class="autorefs autorefs-internal" title="to_state" href="../../ref/result/#agents.result.RunResultStreaming.to_state"><code>RunResultStreaming.to_state()</code></a> も同じ復旧データを保持する切り離された状態を返します。</p>
+<p>この復旧は、実行が最終出力を受け入れ、出力ガードレールと終了時フックを完了した後、その最終ターンの永続化に失敗した場合には適用されません。その状態を再実行すると、終了時のライフサイクル効果が繰り返される可能性があるため、SDK は <code>RunState</code> を復旧不能としてマークします。その状態を使用した後続のすべての <code>Runner.run(...)</code> または <code>Runner.run_streamed(...)</code> の試行では、Session の照合、サンドボックスの準備、モデル呼び出し、ツール、ガードレール、フックが実行される前に <a class="autorefs autorefs-internal" title="UserError" href="../../ref/exceptions/#agents.exceptions.UserError"><code>UserError</code></a> が発生します。このマーカーは <code>RunState</code> のシリアライズ後も保持されます。その状態を再試行するのではなく、新しい実行を開始してください。この境界は、終了時の関数ツール出力と、履歴への保存が受け入れられた <code>max_turns</code> ハンドラー出力にも適用されます。</p>
 <h4 id="add-input-before-resuming">再開前の入力追加</h4>
-<p>実行が一時停止した後、または完了したターンの後で停止したものの、未完了の実行が次のモデル呼び出しに到達する前に新しいユーザー入力を受け取った場合は、<a class="autorefs autorefs-internal" title="add_input" href="../../ref/run_state/#agents.run_state.RunState.add_input"><code>RunState.add_input()</code></a> を使用します。文字列はユーザーメッセージとなり、複数回の呼び出しでは挿入順序が維持されます。ステージングされた入力は、シリアライズされた <code>RunState</code> の一部となるため、<code>to_json()</code> / <code>from_json()</code> および <code>to_string()</code> / <code>from_string()</code> のラウンドトリップ後も維持されます。</p>
+<p>実行が一時停止した場合、または完了したターンの後に停止したものの、未完了の実行が次のモデル呼び出しに到達する前に新しいユーザー入力が届いた場合は、<a class="autorefs autorefs-internal" title="add_input" href="../../ref/run_state/#agents.run_state.RunState.add_input"><code>RunState.add_input()</code></a> を使用します。文字列はユーザーメッセージになり、複数回の呼び出しでは挿入順序が保持されます。ステージングされた入力は、シリアライズされた <code>RunState</code> の一部であるため、<code>to_json()</code> / <code>from_json()</code> および <code>to_string()</code> / <code>from_string()</code> のラウンドトリップ後も保持されます。</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">state</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">to_state</span><span class="p">()</span>
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">state</span><span class="o">.</span><span class="n">add_input</span><span class="p">(</span><span class="s2">&quot;Also keep the generated report in the project folder.&quot;</span><span class="p">)</span>
 </span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
@@ -2379,64 +2377,64 @@
 </span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
 </span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Runner</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">state</span><span class="p">)</span>
 </span></code></pre></div>
-<p>再開時、ランナーは現在のエージェントの入力ガードレールと <a class="autorefs autorefs-internal" title="RunConfig
+<p>再開時、Runner は現在のエージェントの入力ガードレールと <a class="autorefs autorefs-internal" title="RunConfig
 
 
   
       dataclass
-  " href="../../ref/run/#agents.run.RunConfig"><code>RunConfig</code></a> の入力ガードレールの両方を、ステージングされた入力のみに適用します。クライアント管理の <a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> が設定されている場合、ランナーは受け入れられたステージング済み入力を永続的な <a class="autorefs autorefs-internal" title="InputItem
+  " href="../../ref/run/#agents.run.RunConfig"><code>RunConfig</code></a> の入力ガードレールの両方を、ステージングされた入力にのみ適用します。クライアント管理の <a class="autorefs autorefs-internal" title="Session" href="../../ref/memory/session/#agents.memory.session.Session"><code>Session</code></a> が設定されている場合、Runner は受け入れられたステージング済み入力を永続的な <a class="autorefs autorefs-internal" title="InputItem
 
 
   
       dataclass
-  " href="../../ref/items/#agents.items.InputItem"><code>InputItem</code></a> に変換し、モデルリクエストを発行する前にセッションへの書き込みを待機します。クライアント管理のセッションもサーバー管理の会話も使用しない場合、ランナーはモデルリクエストを発行する前に、受け入れられたステージング済み入力を <code>InputItem</code> に変換します。サーバー管理の会話では、サーバーリクエストが入力を受け入れるまで、その入力は保留状態のままです。シリアライズ、再開、再実行に安全な再試行を通じて、SDK は永続的な <code>InputItem</code> の出現箇所を 1 つ維持します。この SDK による出現保証は、プロバイダーへの配信を保証するものではありません。リクエストがプロバイダーに到達した可能性がある状況で再試行ポリシーが <code>RetryDecision(approve_unsafe_replay=True)</code> を返した場合、ランナーはステージング済み入力を再送することがあり、プロバイダー側の処理が繰り返される可能性があります。正常に受け入れられた入力は、<code>new_items</code> 内に <code>InputItem</code> として表示されます。切り離されたコピーを取得するには <a class="autorefs autorefs-internal" title="pending_input
+  " href="../../ref/items/#agents.items.InputItem"><code>InputItem</code></a> に変換し、モデルリクエストを発行する前に Session への書き込みを待機します。クライアント管理の Session もサーバー管理の会話も使用しない場合、Runner はモデルリクエストを発行する前に、受け入れられたステージング済み入力を <code>InputItem</code> に変換します。サーバー管理の会話では、サーバーリクエストが入力を受け入れるまで、入力は保留中のままです。シリアライズ、再開、再実行しても安全な再試行を通して、SDK は永続的な <code>InputItem</code> の出現を 1 つだけ保持します。この SDK による出現回数の保証は、プロバイダーへの配信保証ではありません。リクエストがプロバイダーに到達した可能性がある後で再試行ポリシーが <code>RetryDecision(approve_unsafe_replay=True)</code> を返した場合、Runner はステージング済み入力を再送信でき、プロバイダー側の処理が繰り返される可能性があります。正常に受け入れられた入力は、<code>new_items</code> に <code>InputItem</code> として表示されます。切り離されたコピーを取得するには <a class="autorefs autorefs-internal" title="pending_input
 
 
   
       property
-  " href="../../ref/run_state/#agents.run_state.RunState.pending_input"><code>RunState.pending_input</code></a> を読み取り、再開前にステージングされた入力をすべて破棄するには <a class="autorefs autorefs-internal" title="clear_pending_input" href="../../ref/run_state/#agents.run_state.RunState.clear_pending_input"><code>RunState.clear_pending_input()</code></a> を呼び出してください。</p>
-<p><code>RunState.add_input()</code> は、終端状態、モデルターンが残っていない状態、受け入れられたモデルレスポンスがローカル処理を待っている状態、保留中のツール実行結果によって別のモデル呼び出しの前に実行が終了する可能性がある中断状態を拒否します。このような場合は、現在の実行を完了し、新しいユーザーターンを開始してください。</p>
+  " href="../../ref/run_state/#agents.run_state.RunState.pending_input"><code>RunState.pending_input</code></a> を読み取り、再開前にすべてのステージング済み入力を破棄するには <a class="autorefs autorefs-internal" title="clear_pending_input" href="../../ref/run_state/#agents.run_state.RunState.clear_pending_input"><code>RunState.clear_pending_input()</code></a> を呼び出します。</p>
+<p><code>RunState.add_input()</code> は、終了状態、モデルターンが残っていない状態、受け入れ済みのモデルレスポンスがローカル処理を待っている状態、保留中のツール実行結果によって次のモデル呼び出し前に実行が終了する可能性がある中断状態を拒否します。このような場合は、現在の実行を完了してから、新しいユーザーターンを開始してください。</p>
 <p>ストリーミング実行では、まず <a class="autorefs autorefs-internal" title="stream_events
 
 
   
       async
-  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> の消費を完了してから、<code>result.interruptions</code> を確認し、<code>result.to_state()</code> から再開します。承認フローの全体については、<a href="../human_in_the_loop/">Human-in-the-loop</a>を参照してください。</p>
+  " href="../../ref/result/#agents.result.RunResultStreaming.stream_events"><code>stream_events()</code></a> の消費を完了し、その後 <code>result.interruptions</code> を確認して <code>result.to_state()</code> から再開してください。承認フロー全体については、<a href="../human_in_the_loop/">Human-in-the-loop</a>を参照してください。</p>
 <h3 id="server-managed-continuation">サーバー管理の継続</h3>
 <p><a class="autorefs autorefs-internal" title="last_response_id
 
 
   
       property
-  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、実行から得られた最新のモデルレスポンス ID です。OpenAI Responses API のチェーンを継続する場合は、次のターンでこれを <code>previous_response_id</code> として渡します。</p>
-<p>すでに <code>to_input_list()</code>、<code>session</code>、または <code>conversation_id</code> を使用して会話を継続している場合、通常は <code>last_response_id</code> は必要ありません。複数ステップの実行に含まれるすべてのモデルレスポンスが必要な場合は、代わりに <code>raw_responses</code> を確認してください。</p>
-<h2 id="agent-as-tool-metadata">Agent-as-tool のメタデータ</h2>
-<p>ネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行から実行結果が返された場合、<a class="autorefs autorefs-internal" title="agent_tool_invocation
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、実行から得られた最新のモデルレスポンス ID です。OpenAI Responses API のチェーンを継続する場合は、次のターンで <code>previous_response_id</code> として渡してください。</p>
+<p><code>to_input_list()</code>、<code>session</code>、<code>conversation_id</code> のいずれかを使用して会話をすでに継続している場合、通常は <code>last_response_id</code> は必要ありません。複数ステップの実行に含まれるすべてのモデルレスポンスが必要な場合は、代わりに <code>raw_responses</code> を確認してください。</p>
+<h2 id="agent-as-tool-metadata">エージェントをツールとして使用する場合のメタデータ</h2>
+<p>ネストされた <a class="autorefs autorefs-internal" title="as_tool" href="../../ref/agent/#agents.agent.Agent.as_tool"><code>Agent.as_tool()</code></a> の実行から実行結果が得られた場合、<a class="autorefs autorefs-internal" title="agent_tool_invocation
 
 
   
       property
-  " href="../../ref/result/#agents.result.RunResultBase.agent_tool_invocation"><code>agent_tool_invocation</code></a> は、それを囲む <code>Agent.as_tool()</code> 呼び出しに関するイミュータブルなメタデータを公開します。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.agent_tool_invocation"><code>agent_tool_invocation</code></a> は、それを囲む <code>Agent.as_tool()</code> 呼び出しに関する不変のメタデータを公開します。</p>
 <ul>
 <li><code>tool_name</code></li>
 <li><code>tool_call_id</code></li>
 <li><code>tool_arguments</code></li>
 </ul>
 <p>通常のトップレベル実行では、<code>agent_tool_invocation</code> は <code>None</code> です。</p>
-<p>これは、ネストされた実行結果を後処理する際に、それを囲む <code>Agent.as_tool()</code> 呼び出しのツール名、呼び出し ID、または raw な引数が必要となる可能性がある <code>custom_output_extractor</code> 内で特に役立ちます。周辺の <code>Agent.as_tool()</code> パターンについては、<a href="../tools/">ツール</a>を参照してください。</p>
-<p>そのネストされた実行のパース済み構造化入力も必要な場合は、<code>context_wrapper.tool_input</code> を読み取ります。これは、<a class="autorefs autorefs-internal" title="RunState
+<p>これは <code>custom_output_extractor</code> 内で特に有用です。ネストされた実行結果を後処理する際に、それを囲む <code>Agent.as_tool()</code> 呼び出しのツール名、呼び出し ID、raw 引数が必要になる場合があります。関連する <code>Agent.as_tool()</code> のパターンについては、<a href="../tools/">ツール</a>を参照してください。</p>
+<p>そのネストされた実行で解析済みの構造化入力も必要な場合は、<code>context_wrapper.tool_input</code> を読み取ります。これは、<a class="autorefs autorefs-internal" title="RunState
 
 
   
       dataclass
-  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> がネストされたツール入力用に汎用的にシリアライズするフィールドです。一方、<code>agent_tool_invocation</code> は、現在のネストされた呼び出しのメタデータを実行結果上で直接公開します。</p>
+  " href="../../ref/run_state/#agents.run_state.RunState"><code>RunState</code></a> がネストされたツール入力用に汎用的にシリアライズするフィールドです。一方、<code>agent_tool_invocation</code> は現在のネストされた呼び出しのメタデータを実行結果上で直接公開します。</p>
 <h2 id="streaming-lifecycle-and-diagnostics">ストリーミングのライフサイクルと診断</h2>
 <p><a class="autorefs autorefs-internal" title="RunResultStreaming
 
 
   
       dataclass
-  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a> は前述と同じ実行結果インターフェースを継承しますが、次のストリーミング固有の制御機能が追加されています。</p>
+  " href="../../ref/result/#agents.result.RunResultStreaming"><code>RunResultStreaming</code></a> は、上記と同じ実行結果インターフェースを継承しますが、ストリーミング固有の制御機能も追加します。</p>
 <ul>
 <li>セマンティックなストリームイベントを消費するための <a class="autorefs autorefs-internal" title="stream_events
 
@@ -2450,32 +2448,32 @@
   
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultStreaming.current_agent"><code>current_agent</code></a></li>
-<li>ストリーミングされた実行が完全に終了したかどうかを確認するための <a class="autorefs autorefs-internal" title="is_complete
+<li>ストリーミング実行が完全に終了したかどうかを確認するための <a class="autorefs autorefs-internal" title="is_complete
 
 
   
       class-attribute
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultStreaming.is_complete"><code>is_complete</code></a></li>
-<li>実行を即時、または現在のターンの後で停止するための <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a></li>
+<li>実行を直ちに、または現在のターンの後で停止するための <a class="autorefs autorefs-internal" title="cancel" href="../../ref/result/#agents.result.RunResultStreaming.cancel"><code>cancel(...)</code></a></li>
 </ul>
-<p>非同期イテレーターが終了するまで、<code>stream_events()</code> の消費を続けてください。そのイテレーターが終了するまではストリーミング実行は完了しておらず、最後に表示されるトークンが到着した後も、<code>final_output</code>、<code>interruptions</code>、<code>raw_responses</code> などの概要プロパティや、セッション永続化の副作用が引き続き確定処理中の場合があります。</p>
-<p><code>cancel()</code> を呼び出した場合は、キャンセルとクリーンアップが正しく完了するように、<code>stream_events()</code> の消費を続けてください。</p>
-<p>Python では、ストリーミング用の独立した <code>completed</code> Promise や <code>error</code> プロパティは公開されません。実行を終了させるストリーミングエラーは <code>stream_events()</code> によって送出され、<code>is_complete</code> は実行が終端状態に到達したかどうかを示します。</p>
-<h3 id="raw-responses">raw レスポンス</h3>
+<p>非同期イテレーターが終了するまで、<code>stream_events()</code> の消費を続けてください。そのイテレーターが終了するまでストリーミング実行は完了しません。また、最後に表示されるトークンが到着した後も、<code>final_output</code>、<code>interruptions</code>、<code>raw_responses</code> などの概要プロパティや、Session の永続化による副作用の処理が継続している場合があります。</p>
+<p><code>cancel()</code> を呼び出した場合は、キャンセルとクリーンアップが正しく完了できるように、<code>stream_events()</code> の消費を続けてください。</p>
+<p>Python では、ストリーミング用の独立した <code>completed</code> Promise や <code>error</code> プロパティは公開されません。実行を終了させるストリーミングエラーは <code>stream_events()</code> によって発生し、<code>is_complete</code> は実行が終了状態に到達したかどうかを示します。</p>
+<h3 id="raw-responses">Raw レスポンス</h3>
 <p><a class="autorefs autorefs-internal" title="raw_responses
 
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a> には、実行中に収集された raw なモデルレスポンスが含まれます。複数ステップの実行では、ハンドオフやモデル、ツール、モデルというサイクルの繰り返しなどにより、複数のレスポンスが生成される場合があります。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.raw_responses"><code>raw_responses</code></a> には、実行中に収集された raw モデルレスポンスが格納されます。複数ステップの実行では、ハンドオフやモデル、ツール、モデルというサイクルの繰り返しなどにより、複数のレスポンスが生成される場合があります。</p>
 <p><a class="autorefs autorefs-internal" title="last_response_id
 
 
   
       property
-  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、<code>raw_responses</code> の最後のエントリの ID にすぎません。</p>
-<p>各 <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> は、その個別のモデル呼び出しに適用される次の 2 つの診断情報も公開します。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.last_response_id"><code>last_response_id</code></a> は、<code>raw_responses</code> の最後のエントリに含まれる ID です。</p>
+<p>各 <a class="autorefs autorefs-internal" title="ModelResponse" href="../../ref/items/#agents.items.ModelResponse"><code>ModelResponse</code></a> は、その個別のモデル呼び出しに適用される 2 つの診断情報も公開します。</p>
 <ul>
 <li><a class="autorefs autorefs-internal" title="request_id
 
@@ -2483,49 +2481,49 @@
   
       class-attribute
       instance-attribute
-  " href="../../ref/items/#agents.items.ModelResponse.request_id"><code>request_id</code></a> は、モデルアダプターとトランスポートがリクエスト ID を伝播する場合のトランスポートリクエスト ID です。組み込みの <code>OpenAIResponsesModel</code> と <code>OpenAIChatCompletionsModel</code> は、HTTP および SSE のトランスポート経路で、利用可能なサーバー生成の <code>x-request-id</code> を伝播します。設定されたエンドポイントが OpenAI API の場合、障害を OpenAIサポートと関連付けられるように、本番環境では <code>None</code> ではない値をログに記録してください。OpenAI互換のプロバイダーまたはプロキシの場合は、代わりにそのサービスのサポート窓口を利用してください。<code>OpenAIResponsesWSModel</code> は現在、<code>request_id</code> を <code>None</code> のままにします。サードパーティーのアダプターでは、リクエスト ID の伝播は保証されません。AnyLLM Chat Completions アダプターと <code>LitellmModel</code> は現在、<code>request_id</code> を <code>None</code> のままにします。Agents SDKの AnyLLM Responses アダプターも、トランスポートリクエスト ID を保持せずにプロバイダーレスポンスを正規化した場合、<code>request_id</code> を <code>None</code> のままにすることがあります。</li>
+  " href="../../ref/items/#agents.items.ModelResponse.request_id"><code>request_id</code></a> は、モデルアダプターとトランスポートがリクエスト ID を伝播する場合のトランスポートリクエスト ID です。組み込みの <code>OpenAIResponsesModel</code> と <code>OpenAIChatCompletionsModel</code> は、HTTP および SSE のトランスポート経路で、利用可能なサーバー生成の <code>x-request-id</code> を伝播します。設定されたエンドポイントが OpenAI API の場合、本番環境では <code>None</code> ではない値をログに記録すると、障害を OpenAI サポートと関連付けることができます。OpenAI 互換のプロバイダーまたはプロキシの場合は、代わりにそのサービスのサポート窓口を使用してください。<code>OpenAIResponsesWSModel</code> では現在、<code>request_id</code> は <code>None</code> のままです。サードパーティ製アダプターでは、リクエスト ID の伝播は保証されません。AnyLLM Chat Completions アダプターと <code>LitellmModel</code> では現在、<code>request_id</code> は <code>None</code> のままです。Agents SDK の AnyLLM Responses アダプターでも、トランスポートリクエスト ID を保持せずにプロバイダーレスポンスを正規化する場合、<code>request_id</code> が <code>None</code> のままになることがあります。</li>
 <li><a class="autorefs autorefs-internal" title="raw_usage
 
 
   
       class-attribute
       instance-attribute
-  " href="../../ref/items/#agents.items.ModelResponse.raw_usage"><code>raw_usage</code></a> は、Agents SDKがペイロードを正規化する前の、プロバイダーの使用量ペイロードに関するオプトインの JSON 互換スナップショットです。<code>ModelSettings(preserve_raw_usage=True)</code> で <code>raw_usage</code> を有効にしてください。<a href="../usage/#preserving-provider-usage-payloads">プロバイダーの使用量ペイロードの保持</a>を参照してください。</li>
+  " href="../../ref/items/#agents.items.ModelResponse.raw_usage"><code>raw_usage</code></a> は、Agents SDK がペイロードを正規化する前のプロバイダーの使用量ペイロードについて、オプトインで取得できる JSON 互換のスナップショットです。<code>ModelSettings(preserve_raw_usage=True)</code> で <code>raw_usage</code> を有効にしてください。<a href="../usage/#preserving-provider-usage-payloads">プロバイダーの使用量ペイロードの保持</a>を参照してください。</li>
 </ul>
-<p><code>ModelResponse.request_id</code> と <code>ModelResponse.raw_usage</code> はそれぞれ <code>None</code> になる可能性があるため、これらの値は会話状態ではなく、オプションの診断情報として扱ってください。</p>
-<h3 id="guardrail-results">ガードレールの実行結果</h3>
+<p><code>ModelResponse.request_id</code> と <code>ModelResponse.raw_usage</code> はそれぞれ <code>None</code> になる可能性があるため、会話状態ではなく、任意の診断情報として扱ってください。</p>
+<h3 id="guardrail-results">ガードレールの結果</h3>
 <p>エージェントレベルのガードレールは、<a class="autorefs autorefs-internal" title="input_guardrail_results
 
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.input_guardrail_results"><code>input_guardrail_results</code></a> および <a class="autorefs autorefs-internal" title="output_guardrail_results
+  " href="../../ref/result/#agents.result.RunResultBase.input_guardrail_results"><code>input_guardrail_results</code></a> と <a class="autorefs autorefs-internal" title="output_guardrail_results
 
 
   
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultBase.output_guardrail_results"><code>output_guardrail_results</code></a> として公開されます。</p>
-<p>ツールのガードレールは、<a class="autorefs autorefs-internal" title="tool_input_guardrail_results
+<p>ツールガードレールは、<a class="autorefs autorefs-internal" title="tool_input_guardrail_results
 
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.tool_input_guardrail_results"><code>tool_input_guardrail_results</code></a> および <a class="autorefs autorefs-internal" title="tool_output_guardrail_results
+  " href="../../ref/result/#agents.result.RunResultBase.tool_input_guardrail_results"><code>tool_input_guardrail_results</code></a> と <a class="autorefs autorefs-internal" title="tool_output_guardrail_results
 
 
   
       instance-attribute
   " href="../../ref/result/#agents.result.RunResultBase.tool_output_guardrail_results"><code>tool_output_guardrail_results</code></a> として個別に公開されます。</p>
-<p>これらの配列は実行全体を通じて蓄積されるため、判断内容のログ記録、追加のガードレールメタデータの保存、実行がブロックされた理由のデバッグに役立ちます。</p>
-<p>エージェントレベルの出力ガードレールが、終端関数ツールによって直接生成された最終出力をブロックする場合は、1 つの編集規則が適用されます。ブロックされた現在のレスポンスでは、<code>output_guardrail_results</code> が拒否されたエージェント出力を置き換え、ペイロードを含む出力メタデータを消去します。また、<code>tool_output_guardrail_results</code> がペイロードを含むツールメタデータを置き換えます。以前に受け入れられた実行結果は変更されません。サニタイズされた出力ガードレールの実行結果は、<a class="autorefs autorefs-internal" title="OutputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.OutputGuardrailTripwireTriggered"><code>OutputGuardrailTripwireTriggered</code></a> 上の <code>guardrail_result</code> として公開されます。サニタイズされた出力ガードレールとツール出力ガードレールの実行結果は、ストリーミングされた実行結果の状態と <code>RunState</code> からも公開されます。<a href="../guardrails/#output-guardrails">出力ガードレール</a>を参照してください。</p>
+<p>これらの配列は実行全体にわたって蓄積されるため、判断のログ記録、追加のガードレールメタデータの保存、実行がブロックされた理由のデバッグに役立ちます。</p>
+<p>エージェントレベルの出力ガードレールが、終了時の関数ツールによって直接生成された最終出力をブロックする場合、1 つの編集ルールが適用されます。ブロックされた現在のレスポンスでは、<code>output_guardrail_results</code> が拒否されたエージェント出力を置き換え、ペイロードを含む出力メタデータを消去します。また、<code>tool_output_guardrail_results</code> がペイロードを含むツールメタデータを置き換えます。以前に受け入れられた実行結果は変更されません。サニタイズ済みの出力ガードレール結果は、<a class="autorefs autorefs-internal" title="OutputGuardrailTripwireTriggered" href="../../ref/exceptions/#agents.exceptions.OutputGuardrailTripwireTriggered"><code>OutputGuardrailTripwireTriggered</code></a> の <code>guardrail_result</code> として公開されます。サニタイズ済みの出力ガードレール結果とツール出力ガードレール結果は、ストリーミングされた実行結果の状態と <code>RunState</code> からも公開されます。<a href="../guardrails/#output-guardrails">出力ガードレール</a>を参照してください。</p>
 <h3 id="context-and-usage">コンテキストと使用量</h3>
 <p><a class="autorefs autorefs-internal" title="context_wrapper
 
 
   
       instance-attribute
-  " href="../../ref/result/#agents.result.RunResultBase.context_wrapper"><code>context_wrapper</code></a> は、アプリのコンテキストに加えて、承認、使用量、ネストされた <code>tool_input</code> など、SDK が管理するランタイムメタデータを公開します。</p>
-<p>使用量は <code>context_wrapper.usage</code> で追跡されます。ストリーミング実行では、ストリームの最後のチャンクが処理されるまで、使用量の合計値が遅れて更新される場合があります。ラッパーの完全な形式と永続化に関する注意事項については、<a href="../context/">コンテキスト管理</a>を参照してください。</p>
+  " href="../../ref/result/#agents.result.RunResultBase.context_wrapper"><code>context_wrapper</code></a> は、アプリケーションのコンテキストに加え、承認、使用量、ネストされた <code>tool_input</code> など、SDK が管理するランタイムメタデータを公開します。</p>
+<p>使用量は <code>context_wrapper.usage</code> で追跡されます。ストリーミング実行では、ストリームの最後のチャンクが処理されるまで、使用量の合計値に遅れが生じる場合があります。ラッパーの完全な構造と永続化に関する注意事項については、<a href="../context/">コンテキスト管理</a>を参照してください。</p>
 
 
 
