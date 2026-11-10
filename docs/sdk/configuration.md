@@ -103,6 +103,16 @@ Complete `codex login` separately before opening an SDK Session. This mode reads
 
 `CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
 
+#### Set up a login on a headless host
+
+1. Ask your ChatGPT workspace admin to enable device-code sign-in in the workspace permissions. For a personal account, enable it in your ChatGPT security settings.
+2. On the headless host, run `codex login --device-auth`. Open the displayed link in a browser on another device and enter the one-time code. Use the ChatGPT account and workspace you want the SDK to use.
+3. Make sure the CLI saved `auth.json` in the directory that `CodexLogin` will read. If your setup uses a credential store, see the [file storage settings](https://learn.chatgpt.com/docs/auth#credential-storage).
+
+If device-code sign-in is unavailable, use a copied login if your workspace permits file storage. Sign in with `codex login` on a machine with a browser and file storage enabled. Then [copy `auth.json` over a secure connection](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache) to the Codex directory on the headless host. Use the default directory or set `CodexLogin(codex_home=...)` to the destination directory. Give the user running the SDK write access to that directory and restrict access to the cache file to that user. Treat the file like a password and keep it out of source control, logs, and shared artifacts.
+
+Sessions in one SDK process can share the same saved login. The SDK coordinates token refresh in that process and writes renewed credentials back to the file. Keep the updated file so the next process can use it after a restart. Use a single process at a time to refresh a saved login, even if copies of the file exist on other hosts.
+
 #### Run a coding turn without an API key
 
 This complete script makes a live model request using the saved login. Run it with an SDK build that includes this experimental API:
