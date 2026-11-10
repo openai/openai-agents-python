@@ -371,6 +371,13 @@ class NativeProvider:
     connections. Other CA, proxy-policy, cookie and login modes retain fresh
     transport construction. Closing the Provider joins native owners before
     releasing its idle clients. Sessions retain fresh auth, settings and history.
+    Eligible explicit API-key WebSocket providers have been sharing default-system
+    TLS configuration, including TLS resumption, across fresh Sessions on Linux
+    under the same direct-route restrictions. Their system-trust snapshot has
+    been following the Provider lifetime; a new Provider has been refreshing it.
+    Every WebSocket connection has been retaining fresh headers, policy permits,
+    sockets and conversation state. WebSocket calls with any CA override have
+    been retaining fresh TLS construction, including per-connection CA reloads.
     Synchronize process-environment changes with SDK calls. Changes between
     calls are supported; client construction does not atomically snapshot the
     ambient environment.

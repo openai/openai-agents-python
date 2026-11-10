@@ -976,3 +976,49 @@ async def test_websocket_malformed_terminal_retires_socket_before_next_request()
             assert len(provider.requests) == 2
             assert provider.connections == 2
             assert not provider.http_requests
+
+
+@pytest.mark.parametrize("ca_variable", ["SSL_CERT_FILE", "CODEX_CA_CERTIFICATE"])
+async def test_shared_websocket_tls_rechecks_custom_ca_before_fresh_connections(
+    ca_variable: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    for variable in ("SSL_CERT_FILE", "SSL_CERT_DIR", "CODEX_CA_CERTIFICATE"):
+        monkeypatch.delenv(variable, raising=False)
+    async with timeout(30), peer() as server:
+        shared = NativeProvider(
+            base_url=server.url,
+            api_key="synthetic-ws-key",
+            supports_websockets=True,
+            request_max_retries=0,
+            stream_max_retries=0,
+        )
+        server.providers.append(shared)
+        agent = Agent(instructions="Keep fresh transport and trust ownership.", provider=shared)
+        server.respond(assistant_output("default trust"))
+        first = await agent.run("default trust input")
+        assert first.final_output == "default trust"
+        connections_before_error = server.connections
+        upgrades_before_error = len(server.upgrades)
+        frames_before_error = len(server.frames)
+        monkeypatch.setenv(ca_variable, str(tmp_path / "missing-custom-ca.pem"))
+        server.respond(assistant_output("HTTP fallback"))
+        fallback = await agent.run("custom trust must not reuse the default snapshot")
+        assert fallback.final_output == "HTTP fallback"
+        assert len(server.requests) == 2
+        assert len(server.http_requests) == 1
+        assert server.connections == connections_before_error
+        assert len(server.upgrades) == upgrades_before_error
+        assert len(server.frames) == frames_before_error
+        monkeypatch.delenv(ca_variable)
+        server.respond(assistant_output("fresh recovery"))
+        recovered = await agent.run("fresh recovery input")
+        assert recovered.final_output == "fresh recovery"
+        assert (
+            len({first.turn.session_id, fallback.turn.session_id, recovered.turn.session_id}) == 3
+        )
+        assert len(server.requests) == 3
+        assert len(server.http_requests) == 1
+        assert server.connections == connections_before_error + 1
+        assert len(server.upgrades) == upgrades_before_error + 1
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
