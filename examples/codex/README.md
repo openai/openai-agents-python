@@ -73,4 +73,23 @@ These programs use the current SDK and model credentials:
 | Use Unix sockets inside an offline job | [offline_unix_sockets.py](offline_unix_sockets.py) | Current SDK, an isolated Linux or macOS executor, gateway credentials, and a local synthetic Responses peer. |
 | Provision an offline Docker job | [offline_docker.py](offline_docker.py) | Docker and a prepared image. This standard-library helper expects the application to supply the gateway and executor configuration. |
 
+### Allow public hosts with exceptions
+
+Use a preview wheel that includes `NetworkPolicy.allow_all()` with this example.
+Pass the policy as `network` when creating an `Environment`. The managed proxy
+allows native commands to reach public hosts and blocks any host that matches
+`denied_domains`.
+
+```python
+from agents import NetworkPolicy
+
+network = NetworkPolicy.allow_all(
+    denied_domains=("uploads.example.org", "**.private.example.org"),
+)
+```
+
+`**.private.example.org` covers the domain itself and its subdomains.
+On Linux, also pass `allow_all_unix_sockets=True` and use an executor private to
+the job. This grants access to every Unix socket the executor can reach.
+
 Use the [SDK guide](../../docs/sdk/index.md) for API behavior and the [tool guide](../../docs/sdk/tools.md) for Python functions and native MCP tools.
