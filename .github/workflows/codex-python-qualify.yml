@@ -51,6 +51,15 @@ jobs:
             echo "Native CI rejects tracked Python bytecode and cache paths." >&2
             exit 1
           fi
+      - name: Check the Linux ARM64 qualification host
+        if: inputs.runner == 'ubuntu-24.04-arm'
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = aarch64
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.39"
+          printf 'Runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          uname -m
+          getconf GNU_LIBC_VERSION
       - name: Configure Linux dependency registries
         if: runner.os == 'Linux'
         run: |
@@ -133,9 +142,15 @@ jobs:
           cp packages/codex/scripts/verify_installed.py "$RUNNER_TEMP/verify_installed.py"
           uv export --frozen --no-default-groups --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$RUNNER_TEMP/sdk-install-constraints.txt"
-          for version in 3.10 3.11 3.12; do
+          versions=(3.10 3.11 3.12)
+          install_options=()
+          if [[ "$RUNNER_ARCH" == ARM64 ]]; then
+            versions+=(3.14)
+            install_options+=(--only-binary=:all:)
+          fi
+          for version in "${versions[@]}"; do
             uv venv --seed --python "$version" "$RUNNER_TEMP/sdk-$version"
-            "$RUNNER_TEMP/sdk-$version/bin/python" -m pip install \
+            "$RUNNER_TEMP/sdk-$version/bin/python" -m pip install "${install_options[@]}" \
               --constraint "$RUNNER_TEMP/sdk-install-constraints.txt" dist/*.whl
             helper="$("$RUNNER_TEMP/sdk-$version/bin/python" -I - <<'PYTHON'
           import os
@@ -198,7 +213,11 @@ jobs:
           fi
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
-          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          install_options=()
+          if [[ "$RUNNER_OS/$RUNNER_ARCH" == Linux/ARM64 ]]; then
+            install_options+=(--only-binary=:all:)
+          fi
+          "$python" -m pip install "${install_options[@]}" --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
           cd "$stage"
           "$python" -I -B - <<'PYTHON'
           import sys
@@ -211,6 +230,34 @@ jobs:
           assert Path(agents._native.__file__).resolve().is_relative_to(prefix)
           print("Installed native revision:", agents._native.CODEX_REVISION)
           PYTHON
+          if [[ "$RUNNER_OS/$RUNNER_ARCH" == Linux/ARM64 ]]; then
+            python314="$RUNNER_TEMP/sdk-3.14/bin/python"
+            "$python314" -m pip install --only-binary=:all: --constraint "$stage/constraints.txt" aiohttp pytest pytest-asyncio
+            wheels=("$GITHUB_WORKSPACE"/dist/openai_agents-*.whl)
+            test "${#wheels[@]}" = 1
+            OPENAI_AGENTS_WHEEL="${wheels[0]}" \
+              "$python314" -I -B -m pytest -q -s -p no:cacheprovider -o "pythonpath=$GITHUB_WORKSPACE/packages/codex" \
+              "$GITHUB_WORKSPACE/packages/codex/tests/test_distribution.py"
+            LC_ALL=C readelf --file-header "$GITHUB_WORKSPACE/dist/exec-server-fixture" | grep -E 'Machine:[[:space:]]+AArch64$'
+            for version in 3.10 3.14; do
+              endpoint="$RUNNER_TEMP/sdk-$version/bin/python"
+              report="$GITHUB_WORKSPACE/dist/local-session-$version.xml"
+              env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+                "$endpoint" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
+                --junitxml="$report" \
+                packages/codex/tests/test_native_executor_local.py::test_local_shell_patch_and_linked_worktree_respect_explicit_roots
+              "$endpoint" -I - "$report" <<'PYTHON'
+          import sys
+          from xml.etree import ElementTree
+
+          cases = ElementTree.parse(sys.argv[1]).findall(".//testcase")
+          assert len(cases) == 1, "expected one installed local Session test"
+          assert not any(child.tag in {"skipped", "failure", "error"} for child in cases[0]), (
+              "the installed local Session test must pass"
+          )
+          PYTHON
+            done
+          fi
           chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
           CODEX_EXEC_SERVER_TEST_BINARY="$GITHUB_WORKSPACE/dist/exec-server-fixture" \
             "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
