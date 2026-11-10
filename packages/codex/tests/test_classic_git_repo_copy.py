@@ -101,6 +101,25 @@ async def test_git_repo_copies_selected_directory(
     assert not session.checkout.exists()
 
 
+async def test_git_repo_uses_system_copy_with_a_limited_path(
+    tmp_path: Path, git_fixture: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool_bin = tmp_path / "tools"
+    tool_bin.mkdir()
+    for utility in ("sh", "git", "rm", "chmod"):
+        executable = shutil.which(utility)
+        assert executable is not None
+        (tool_bin / utility).symlink_to(executable)
+    monkeypatch.setenv("PATH", f"relative-tools{os.pathsep}{tool_bin}")
+
+    session = FixtureGitSession(git_fixture, tmp_path)
+    entry = GitRepo(repo="fixture/repository", ref="main")
+    destination = tmp_path / "output"
+
+    assert await entry.apply(cast(BaseSandboxSession, session), destination, tmp_path) == []
+    assert (destination / "root.txt").read_text() == "root fixture\n"
+
+
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
 async def test_git_repo_reports_unavailable_directory_as_copy_error(
     tmp_path: Path, git_fixture: Path, subpath: str

@@ -793,12 +793,17 @@ class GitRepo(BaseEntry):
 
             # Copy into destination in the container.
             await session.mkdir(dest, parents=True)
-            # Keep the verified physical source as the copy process's working
-            # directory, so cp does not resolve the selected pathname again.
+            # Resolve the system copy utility before changing directories.
+            # Keep the verified physical source as the copy process's working directory.
             copy = await session.exec(
                 "sh",
                 "-c",
                 """set -eu
+copy_program=$(command -p -v cp)
+case "$copy_program" in
+    /*) ;;
+    *) echo 'System copy utility is unavailable' >&2; exit 1 ;;
+esac
 CDPATH=
 cd -P .
 destination=$3
@@ -820,7 +825,7 @@ case "$source_root" in
     "$repo_root"|"$repo_root"/*) ;;
     *) echo 'Git source directory is outside the checkout' >&2; exit 1 ;;
 esac
-exec cp -R -- . "$destination/"
+exec "$copy_program" -R -- . "$destination/"
 """,
                 "sandbox-git-copy",
                 tmp_dir,
