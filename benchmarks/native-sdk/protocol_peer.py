@@ -166,13 +166,13 @@ class Peer:
         }
 
     def response(
-        self, response_id: str, output: list[dict[str, Any]], status: str
+        self, response_id: str, output: list[dict[str, Any]], status: str, model: str
     ) -> dict[str, Any]:
         return {
             "id": response_id,
             "object": "response",
             "created_at": 1,
-            "model": "synthetic-benchmark",
+            "model": model,
             "status": status,
             "error": None,
             "incomplete_details": None,
@@ -421,7 +421,7 @@ class Peer:
                         ],
                     }
                 ]
-            response = self.response(response_id, output, "completed")
+            response = self.response(response_id, output, "completed", body["model"])
             streaming = body.get("stream", False)
             if not isinstance(streaming, bool):
                 raise ValueError("stream must be boolean")

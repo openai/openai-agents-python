@@ -53,6 +53,7 @@ async def validate(check_delay: bool) -> None:
 
             async def post(items, stream=False, expected_status=200):
                 body = {
+                    "model": "benchmark-sse" if stream else "benchmark-json",
                     "input": items,
                     "stream": stream,
                     "tools": [
@@ -88,6 +89,8 @@ async def validate(check_delay: bool) -> None:
                     assert [e["sequence_number"] for e in events] == list(range(len(events)))
                     for event in events:
                         TypeAdapter(ResponseStreamEvent).validate_python(event)
+                        if "response" in event:
+                            assert event["response"]["model"] == body["model"]
                     result = events[-1]["response"]
                     if result["output"][0]["type"] == "message":
                         chunks = [
@@ -98,6 +101,7 @@ async def validate(check_delay: bool) -> None:
                 else:
                     result = json.loads(wire)
                 Response.model_validate(result)
+                assert result["model"] == body["model"]
                 return result
 
             history = []
@@ -206,6 +210,7 @@ async def validate(check_delay: bool) -> None:
                     async with client.post(
                         base + "/responses",
                         json={
+                            "model": "benchmark-delay",
                             "input": "BENCH_RUN=delay",
                             "stream": stream,
                         },
