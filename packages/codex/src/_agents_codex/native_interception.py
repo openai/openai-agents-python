@@ -660,9 +660,12 @@ class _NativeInterception:
             ):
                 return
             assert state.handle is not None
-            if notice is not None and notice.get("realtime_mcp") is True:
+            realtime_notice = (
+                notice if notice is not None and notice.get("realtime_mcp") is True else None
+            )
+            if realtime_notice is not None:
                 enabled = await session._realtime_tool_enabled(
-                    notice,
+                    realtime_notice,
                     session._context,
                     ToolRef(call.name, call.namespace),
                     admitted,
@@ -771,11 +774,23 @@ class _NativeInterception:
                         descriptor.approval, admitted, call_context(), effective
                     )
                 )
-                if admitted():
-                    if isinstance(value, StopTurn):
-                        await session._stop_policy_turn(state, nonce)
-                    elif type(value) is bool and value:
-                        reply = json.dumps(decision, allow_nan=False)
+                if not admitted():
+                    return
+                if isinstance(value, StopTurn):
+                    await session._stop_policy_turn(state, nonce)
+                    return
+                if value is not True:
+                    return
+                if realtime_notice is not None and (
+                    descriptor.before is not None or descriptor.approval is not None
+                ):
+                    # A hook may have waited while the application disabled this tool.
+                    enabled = await session._realtime_tool_enabled(
+                        realtime_notice, session._context, info.tool, admitted
+                    )
+                    if not enabled or not admitted():
+                        return
+                reply = json.dumps(decision, allow_nan=False)
             else:
                 approval = descriptor.approval
                 assert approval is not None

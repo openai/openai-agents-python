@@ -7,7 +7,15 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, HttpMCP, MCPResultContext, NativeProvider, Turn, function_tool
+from agents import (
+    Agent,
+    HttpMCP,
+    MCPResultContext,
+    NativeProvider,
+    ReplaceArguments,
+    Turn,
+    function_tool,
+)
 from agents.realtime import RealtimeAgentConfig, RealtimeConfig
 from tests._asyncio import timeout
 from tests.native_fixtures import function_call, text_response
@@ -78,6 +86,76 @@ async def test_realtime_rechecks_source_predicate_before_native_mcp(
             )
             assert "selected MCP result" in result["item"]["output"]
             assert [call["arguments"]["key"] for call in mcp.calls] == ["allowed"]
+
+
+@pytest.mark.parametrize("phase", ["before", "approval"])
+async def test_realtime_rechecks_mcp_revocation_after_dispatch_hook(
+    realtime_peer: RealtimePeer, phase: str
+) -> None:
+    peer = realtime_peer
+    mcp = Peer(names=("lookup",), label="selected MCP result")
+    application = {"enabled": True}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def before(context, call):
+        if phase == "before":
+            entered.set()
+            await release.wait()
+        return ReplaceArguments({"key": "replacement"})
+
+    async def approval(context, call):
+        entered.set()
+        await release.wait()
+        return True
+
+    async with (
+        timeout(20),
+        mcp.serve() as url,
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(
+            instructions="Read selected records.",
+            tools=[
+                HttpMCP(
+                    name="records",
+                    url=url,
+                    tools=["lookup"],
+                    before=before,
+                    approval=approval if phase == "approval" else None,
+                )
+            ],
+            provider=provider,
+            realtime=RealtimeAgentConfig(
+                tool_enabled=lambda context, tool: context.context["enabled"]
+            ),
+        )
+        async with (
+            agent.session(context=application) as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")),
+        ):
+            configuration = await peer.frame(lambda frame: frame["type"] == "session.update")
+            name = next(
+                tool["name"]
+                for tool in configuration["session"]["tools"]
+                if "lookup" in tool["name"]
+            )
+            await peer.function(name, {"key": "original"}, "revoked")
+            await entered.wait()
+            application["enabled"] = False
+            release.set()
+            await peer.frame(lambda frame: frame.get("item", {}).get("call_id") == "revoked")
+            assert mcp.calls == []
+
+            application["enabled"] = True
+            await peer.function(name, {"key": "original"}, "allowed")
+            result = await peer.frame(
+                lambda frame: frame.get("item", {}).get("call_id") == "allowed"
+            )
+            assert "selected MCP result" in result["item"]["output"]
+            assert [call["arguments"]["key"] for call in mcp.calls] == ["replacement"]
 
 
 @pytest.mark.parametrize("with_graph", [False, True])
