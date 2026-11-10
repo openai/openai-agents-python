@@ -9,11 +9,16 @@ from uuid import UUID
 
 import pytest
 
-from agents.classic.sandbox.entries import Dir, GitRepo
+from agents.classic.run_config import SandboxRunConfig
+from agents.classic.sandbox.entries import BaseEntry, Dir, GitRepo
 from agents.classic.sandbox.manifest import Manifest
+from agents.classic.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
+from agents.classic.sandbox.sandbox_agent import SandboxAgent
 from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+from agents.classic.sandbox.session import manifest_ops
 from agents.classic.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.classic.sandbox.session.manifest_application import ManifestApplier
+from agents.classic.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.classic.sandbox.types import ExecResult, User
 
 
@@ -25,6 +30,23 @@ def recording_session() -> SimpleNamespace:
         mkdir=AsyncMock(),
         _exec_checked_nonzero=AsyncMock(),
     )
+
+
+def assert_git_host_error_is_redacted(error: ValueError) -> None:
+    def contains_configuration(value: object) -> bool:
+        if isinstance(value, (BaseEntry, Manifest, BaseSandboxSession, SandboxSessionState)):
+            return True
+        if isinstance(value, (tuple, list)):
+            return any(contains_configuration(item) for item in value)
+        if isinstance(value, dict):
+            return any(contains_configuration(item) for item in value.values())
+        return False
+
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    for frame, _ in traceback.walk_tb(error.__traceback__):
+        if frame.f_globals["__name__"].startswith("agents.classic."):
+            assert not any(contains_configuration(value) for value in frame.f_locals.values())
 
 
 @pytest.mark.parametrize(
@@ -115,8 +137,7 @@ async def test_invalid_git_host_rejects_before_session_work(host: str) -> None:
         await entry.apply(cast(BaseSandboxSession, session), Path("/dest"), Path("/base"))
 
     assert caught.value.args == ("GitRepo host must be an HTTPS authority without userinfo",)
-    assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None
+    assert_git_host_error_is_redacted(caught.value)
     if host:
         diagnostic = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
         frame_locals = diagnostic.stack[-1].locals
@@ -141,13 +162,14 @@ async def test_create_rejects_invalid_nested_git_host(tmp_path: Path) -> None:
         },
     )
 
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as caught:
         await UnixLocalSandboxClient().create(manifest=manifest)
 
+    assert_git_host_error_is_redacted(caught.value)
     assert not workspace.exists()
 
 
-async def test_start_and_resume_reject_invalid_git_host_before_startup(
+async def test_session_boundaries_reject_invalid_git_host_before_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = UnixLocalSandboxClient()
@@ -161,16 +183,33 @@ async def test_start_and_resume_reject_invalid_git_host_before_startup(
     repo.host = "https://example.test"
     start_backend = AsyncMock()
     rollback = AsyncMock()
+    running = AsyncMock()
     monkeypatch.setattr(session._inner, "_ensure_backend_started", start_backend)
     monkeypatch.setattr(session._inner, "_after_start_failed", rollback)
+    monkeypatch.setattr(session, "running", running)
 
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as start_error:
         await session.start()
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as resume_error:
         await client.resume(session.state)
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as apply_error:
+        await session.apply_manifest()
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as ops_error:
+        await manifest_ops.apply_manifest(session)
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as batch_error:
+        await manifest_ops.apply_entry_batch(session, [(Path("/repo"), repo)], base_dir=Path("/"))
+    agent = SandboxAgent[None](name="example", capabilities=[])
+    manager = SandboxRuntimeSessionManager(
+        starting_agent=agent, sandbox_config=SandboxRunConfig(session=session), run_state=None
+    )
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as live_error:
+        await manager.ensure_session(agent=agent, capabilities=[], is_resumed_state=False)
 
+    for caught in (start_error, resume_error, apply_error, ops_error, batch_error, live_error):
+        assert_git_host_error_is_redacted(caught.value)
     start_backend.assert_not_awaited()
     rollback.assert_not_awaited()
+    running.assert_not_awaited()
 
 
 async def test_manifest_rejects_invalid_nested_git_host_before_materialization() -> None:
@@ -192,13 +231,15 @@ async def test_manifest_rejects_invalid_nested_git_host_before_materialization()
         users=[User(name="example")],
     )
 
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as caught:
         await applier.apply_manifest(manifest)
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    assert_git_host_error_is_redacted(caught.value)
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as batch_error:
         await applier._apply_entry_batch(
             [(Path("/workspace") / name, entry) for name, entry in manifest.entries.items()],
             base_dir=Path("/"),
         )
+    assert_git_host_error_is_redacted(batch_error.value)
 
     mkdir.assert_not_awaited()
     exec_checked.assert_not_awaited()
@@ -211,7 +252,8 @@ async def test_direct_dir_rejects_invalid_git_host_before_materialization() -> N
         children={"repo": GitRepo(host="https://example.test", repo="group/project", ref="stable")}
     )
 
-    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority"):
+    with pytest.raises(ValueError, match="GitRepo host must be an HTTPS authority") as caught:
         await directory.apply(cast(BaseSandboxSession, session), Path("/dest"), Path("/"))
 
+    assert_git_host_error_is_redacted(caught.value)
     session.mkdir.assert_not_awaited()

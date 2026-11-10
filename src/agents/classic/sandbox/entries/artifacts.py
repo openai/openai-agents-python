@@ -22,6 +22,8 @@ from ..errors import (
     LocalChecksumError,
     LocalDirReadError,
     LocalFileReadError,
+    _InvalidGitHostError,
+    _redact_git_host_error_data,
 )
 from ..materialization import MaterializedFile, gather_in_order
 from ..types import ExecResult, User
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
 _COMMIT_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _GIT_AUTHORITY_RE = re.compile(r"(?:([^:\[\]]+)|\[([0-9a-fA-F:.]+)\])(?::([0-9]+))?")
 _GIT_REG_NAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+")
-_GIT_HOST_ERROR = "GitRepo host must be an HTTPS authority without userinfo"
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _HAS_O_DIRECTORY = hasattr(os, "O_DIRECTORY")
 
@@ -58,8 +59,7 @@ def _validate_git_repo_entry_hosts(entries: Iterable[BaseEntry]) -> None:
         if isinstance(entry, Dir):
             _validate_git_repo_entry_hosts(entry.children.values())
         elif isinstance(entry, GitRepo) and entry._validated_host() is None:
-            del entry, entries
-            raise ValueError(_GIT_HOST_ERROR)
+            raise _InvalidGitHostError()
 
 
 class Dir(BaseEntry):
@@ -88,6 +88,7 @@ class Dir(BaseEntry):
         _ = context
         self.permissions.directory = True
 
+    @_redact_git_host_error_data
     async def apply(
         self,
         session: BaseSandboxSession,
@@ -762,6 +763,7 @@ class GitRepo(BaseEntry):
         _ = context
         self.permissions.directory = True
 
+    @_redact_git_host_error_data
     async def apply(
         self,
         session: BaseSandboxSession,
@@ -770,9 +772,7 @@ class GitRepo(BaseEntry):
     ) -> list[MaterializedFile]:
         host = self._validated_host()
         if host is None:
-            # Keep the rejected configuration out of this exception's frame locals.
-            del self
-            raise ValueError(_GIT_HOST_ERROR)
+            raise _InvalidGitHostError()
         git_subpath = self._validate_subpath()
 
         # Ensure git exists in the container.
