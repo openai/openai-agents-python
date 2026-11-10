@@ -1,226 +1,111 @@
-name: Pinned CLI macOS workspace-write control
+name: SDK macOS descendant cleanup control
 
 on:
   push:
     branches: [codex/5688-macos-cli-workspace-control]
+    paths: [.github/workflows/macos-cli-workspace-control.yml]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  compare:
+  owned-descendant:
     if: github.repository == 'openai/openai-agents-python'
     runs-on: macos-15
-    timeout-minutes: 50
+    timeout-minutes: 10
     env:
-      CORE_REVISION: 7c2ce90716335c889a5076ded9a630459f9c9899
-      CORE_TREE: f2b7fab711f712f39d4bfcbee97f57189a876524
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
+      OPENAI_API_KEY: fake-for-tests
+      UV_FROZEN: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.sha }}
+          ref: a7e3bf49778c6b7442e6c1b20b8ced0abc5cd192
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
-          python-version: "3.12"
-      - name: Build the exact stock CLI
+          version: "0.11.14"
+          enable-cache: false
+          python-version: "3.14"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: "13747842037"
+          repository: openai/openai-agents-python
+          run-id: "42779110007"
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/agents-native
+          digest-mismatch: error
+      - name: Bind the prior qualified Mac build and collect both policy variants
         shell: bash
         run: |
           set -euo pipefail
-          test "$(cat packages/codex/CODEX_REVISION)" = "$CORE_REVISION"
-          printf 'SDK diagnostic checkout %s\n' "$(git rev-parse HEAD)"
-          printf 'macOS %s architecture %s UID %s\n' \
-            "$(/usr/bin/sw_vers -productVersion)" "$(/usr/bin/uname -m)" "$(/usr/bin/id -u)"
-          root="$RUNNER_TEMP/pinned-cli"
-          mkdir -p "$root/source"
-          git init --bare "$root/core.git"
-          git --git-dir="$root/core.git" fetch --no-tags --depth=1 https://github.com/openai/codex.git "$CORE_REVISION"
-          test "$(git --git-dir="$root/core.git" rev-parse FETCH_HEAD)" = "$CORE_REVISION"
-          test "$(git --git-dir="$root/core.git" rev-parse 'FETCH_HEAD^{tree}')" = "$CORE_TREE"
-          printf 'Stock Core %s tree %s\n' "$CORE_REVISION" "$CORE_TREE"
-          git --git-dir="$root/core.git" archive FETCH_HEAD | tar -x -C "$root/source"
-          rustup toolchain install 1.95.0 --profile minimal --component rust-src --no-self-update
-          python -I - <<'PYTHON'
+          test "$(git rev-parse HEAD)" = a7e3bf49778c6b7442e6c1b20b8ced0abc5cd192
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          printf 'Baseline SDK %s macOS %s UID %s\n' "$(git rev-parse HEAD)" "$(sw_vers -productVersion)" "$(id -u)"
+          artifacts="$RUNNER_TEMP/agents-native"
+          chmod +x "$artifacts/exec-server-fixture"
+          set -- "$artifacts"/openai_agents-*.whl
+          test "$#" -eq 1
+          test -f "$1.pristine.json"
+          export OPENAI_AGENTS_NATIVE_WHEEL="$1"
+          export CODEX_EXEC_SERVER_TEST_BINARY="$artifacts/exec-server-fixture"
+          make sync
+
+          patch_file="$RUNNER_TEMP/trusted-macos-owned-descendant.patch"
+          cat > "$patch_file" <<'PATCH_EOF'
+          --- a/packages/codex/tests/test_native_executor_local.py
+          +++ b/packages/codex/tests/test_native_executor_local.py
+          @@ -17,7 +17,7 @@
+           from datetime import datetime, timezone
+           from pathlib import Path, PurePosixPath
+           from tempfile import TemporaryDirectory
+          -from typing import Any
+          +from typing import Any, Literal
+           from uuid import uuid4
+           
+           import pytest
+          @@ -1552,8 +1552,11 @@
+           
+           @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
+           @pytest.mark.requires_native_macos_sandbox
+          +@pytest.mark.parametrize("write_policy", ["strict", "trusted_workspace_write"])
+           async def test_macos_session_close_stops_child_after_command_exit(
+          -    responses: ResponsesFixture, tmp_path: Path
+          +    responses: ResponsesFixture,
+          +    tmp_path: Path,
+          +    write_policy: Literal["strict", "trusted_workspace_write"],
+           ) -> None:
+               cwd, extra = tmp_path / "cwd", tmp_path / "extra"
+               cwd.mkdir()
+          @@ -1588,7 +1591,9 @@
+               responses.respond(assistant_output("parent exited"))
+               provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+               agent = Agent(instructions="Use the selected tools.", provider=provider)
+          -    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+          +    environment = Environment.local(
+          +        cwd=cwd, writable_roots=[extra], tools=["exec_command"], write_policy=write_policy
+          +    )
+               # The fixture's 30-second self-exit must never satisfy this test.
+               async with timeout(25), provider:
+                   try:
+          PATCH_EOF
+          printf '%s  %s\n' '57033c9418d1b54a641128624fa8a0a57de625939a287535c798432acaba4f81' "$patch_file" | shasum -a 256 -c
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -rA -vv \
+            --junitxml="$RUNNER_TEMP/macos-owned-descendant.xml" \
+            packages/codex/tests/test_native_executor_local.py::test_macos_session_close_stops_child_after_command_exit
+          python - <<'PYTEST_RESULT'
           import os
-          import subprocess
-          import sys
+          import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          root = Path(os.environ["RUNNER_TEMP"]) / "pinned-cli"
-          source = root / "source"
-          inputs = root / "native-inputs"
-          (inputs / ".upstream").mkdir(parents=True)
-          (inputs / ".upstream" / "codex").symlink_to(source, target_is_directory=True)
-          (inputs / "Cargo.lock").symlink_to(source / "codex-rs" / "Cargo.lock")
-          sys.path.insert(0, str(Path("packages/codex/scripts").resolve()))
-          from native_env import build_environment
-
-          env = build_environment(inputs)
-          env["CARGO_TARGET_DIR"] = str(root / "target")
-          subprocess.run(
-              ["cargo", "build", "--locked", "-p", "codex-cli", "--bin", "codex"],
-              cwd=source / "codex-rs",
-              env=env,
-              check=True,
-          )
-          PYTHON
-      - name: Run the offline workspace-write control
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/pinned-cli"
-          control="$root/macos-cli-workspace-control.py"
-          cat > "$control" <<'CONTROL_PY'
-          """Run the pinned Codex CLI's supported macOS sandbox with synthetic inputs."""
-          
-          import argparse
-          import hashlib
-          import os
-          import signal
-          import socket
-          import subprocess
-          import sys
-          from contextlib import suppress
-          from pathlib import Path
-          from tempfile import TemporaryDirectory
-          
-          CORE_REVISION = "7c2ce90716335c889a5076ded9a630459f9c9899"
-          CORE_TREE = "f2b7fab711f712f39d4bfcbee97f57189a876524"
-          
-          CONTROL = """\
-          import socket
-          import subprocess
-          import sys
-          from pathlib import Path
-          
-          outside, port, network = sys.argv[1:]
-          identity = subprocess.run(
-              ["/usr/bin/id", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-          )
-          ssh = subprocess.run(
-              ["/usr/bin/ssh", "-G", "-T", "-F", "/dev/null", "credential.example.invalid"],
-              capture_output=True, text=True,
-          )
-          ssh_user = any(line.startswith("user ") and line[5:].strip() for line in ssh.stdout.splitlines())
-          print(f"id={identity.returncode} ssh={ssh.returncode} ssh-user={ssh_user}", flush=True)
-          assert Path(outside).read_text() == "untouched"
-          Path("allowed-" + network).write_text("workspace")
-          try:
-              Path(outside).write_text("outside-write")
-          except PermissionError:
-              pass
-          else:
-              raise AssertionError("The sibling write succeeded")
-          
-          try:
-              client = socket.create_connection(("127.0.0.1", int(port)), timeout=2)
-          except PermissionError:
-              assert network == "false"
-          else:
-              with client:
-                  assert network == "true"
-                  client.sendall(b"cli-canary")
-          
-          subprocess.run(["/bin/sh", "-ec", "/bin/sleep 0.01 & wait $!"], check=True)
-          print("in-root-write=allowed sibling-write=denied foreground=joined network=" + network)
-          sys.exit(0 if identity.returncode == ssh.returncode == 0 and ssh_user else 1)
-          """
-          
-          
-          def main():
-              parser = argparse.ArgumentParser(description=__doc__)
-              parser.add_argument("codex", type=Path, help="CLI binary built from the verified pinned tree")
-              args = parser.parse_args()
-              if sys.platform != "darwin":
-                  parser.error("This control requires a native macOS host")
-              codex = args.codex.resolve(strict=True)
-              with codex.open("rb") as binary:
-                  print("CLI sha256=" + hashlib.file_digest(binary, "sha256").hexdigest(), flush=True)
-              print(f"Expected build provenance core={CORE_REVISION} tree={CORE_TREE}", flush=True)
-          
-              with TemporaryDirectory(prefix="codex-workspace-", dir=os.environ.get("RUNNER_TEMP")) as temp:
-                  root = Path(temp).resolve()
-                  workspace, home, scratch, codex_home = [
-                      root / name for name in ("work", "home", "scratch", "codex-home")
-                  ]
-                  for directory in (workspace, home, scratch, codex_home):
-                      directory.mkdir()
-                  outside = root / "sibling"
-                  outside.write_text("untouched")
-                  env = {
-                      "HOME": str(home),
-                      "CODEX_HOME": str(codex_home),
-                      "TMPDIR": str(scratch),
-                      "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                      "SHELL": "/bin/sh",
-                  }
-                  flags = [
-                      "-c",
-                      'sandbox_mode="workspace-write"',
-                      "-c",
-                      "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-                      "-c",
-                      "sandbox_workspace_write.exclude_slash_tmp=true",
-                  ]
-                  failures = []
-                  for network in ("false", "true"):
-                      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-                          listener.bind(("127.0.0.1", 0))
-                          listener.listen(1)
-                          port = str(listener.getsockname()[1])
-                          with subprocess.Popen(
-                              [
-                                  str(codex),
-                                  *flags,
-                                  "-c",
-                                  f"sandbox_workspace_write.network_access={network}",
-                                  "sandbox",
-                                  "--",
-                                  sys.executable,
-                                  "-I",
-                                  "-B",
-                                  "-c",
-                                  CONTROL,
-                                  str(outside),
-                                  port,
-                                  network,
-                              ],
-                              cwd=workspace,
-                              env=env,
-                              start_new_session=True,
-                          ) as child:
-                              try:
-                                  status = child.wait(timeout=30)
-                              except (KeyboardInterrupt, subprocess.TimeoutExpired):
-                                  with suppress(ProcessLookupError):
-                                      os.killpg(child.pid, signal.SIGKILL)
-                                  raise
-                          if status:
-                              failures.append((network, status))
-                              continue
-                          assert (workspace / ("allowed-" + network)).read_text() == "workspace"
-                          assert outside.read_text() == "untouched"
-                          listener.setblocking(False)
-                          if network == "false":
-                              try:
-                                  connection, _ = listener.accept()
-                              except BlockingIOError:
-                                  continue
-                              connection.close()
-                              raise AssertionError("Restricted network reached the listener")
-                          connection, _ = listener.accept()
-                          with connection:
-                              connection.settimeout(2)
-                              with connection.makefile("rb") as stream:
-                                  assert stream.read() == b"cli-canary"
-                  if failures:
-                      raise SystemExit(f"CLI control failed (network, exit status): {failures}")
-          
-          
-          if __name__ == "__main__":
-              main()
-          CONTROL_PY
-          printf '%s  %s\n' 46038f6550280bde0556df56002b9ffc78e38963851c3e7c52e870ac5f5485ce "$control" | shasum -a 256 -c -
-          python -I "$control" "$root/target/debug/codex"
+          report = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "macos-owned-descendant.xml")
+          cases = report.findall(".//testcase")
+          prefix = "test_macos_session_close_stops_child_after_command_exit"
+          expected = {f"{prefix}[strict]", f"{prefix}[trusted_workspace_write]"}
+          assert len(cases) == 2 and {case.attrib["name"] for case in cases} == expected
+          assert all(len(case) == 0 for case in cases), "A required cleanup control did not pass"
+          print("Both strict and trusted managed descendant cleanup controls passed")
+          PYTEST_RESULT
