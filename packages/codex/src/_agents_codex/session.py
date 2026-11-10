@@ -105,7 +105,6 @@ from .agent import (
     OutputT as OutputT,
     SignInWithChatGPT,
     _copy_model_settings as _copy_model_settings,
-    _siwc_binding,
 )
 from .canonical_storage import (
     CustomStorage as CustomStorage,
@@ -2802,6 +2801,7 @@ async def _opening_provider_config(
     opening: _OpeningOwner,
     *,
     captured_api_key: str | None,
+    captured_siwc_provider: str | None,
     saved_plan_provider: str | None,
     standalone_web_search: bool,
 ) -> dict[str, Any]:
@@ -2822,15 +2822,12 @@ async def _opening_provider_config(
         provider_id = "native_agent_codex_login"
         base_url = _CODEX_RESPONSES_BASE_URL
     elif isinstance(auth, SignInWithChatGPT):
-        binding: str | None
         if captured_api_key is None:
-            opening.api_key, binding = await auth._resolve()
+            opening.api_key, provider_id = await auth._resolve()
         else:
-            binding = _siwc_binding(captured_api_key)
-            if binding is None:
-                raise ValueError("Provide a Sign in with ChatGPT access token for Responses")
+            assert captured_siwc_provider is not None
             opening.api_key = captured_api_key
-        provider_id = _SIWC_PROVIDER_PREFIX + binding
+            provider_id = captured_siwc_provider
         if saved_plan_provider is not None and saved_plan_provider != provider_id:
             raise ValueError("Checkpoint requires the original ChatGPT registration")
         base_url = _SIWC_RESPONSES_BASE_URL
@@ -2955,6 +2952,7 @@ class Session(Generic[ContextT, OutputT]):
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         discover_agents_md: bool = False,
         _captured_api_key: str | None = None,
+        _captured_siwc_provider: str | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
@@ -3048,8 +3046,9 @@ class Session(Generic[ContextT, OutputT]):
             # Capture caller-owned data before the first await. The native
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
-            _check_checkpoint(saved, instructions, graph=bool(profiles))
             saved_plan_provider = _checkpoint_plan_provider(saved, auth)
+            if not uses_siwc:
+                _check_checkpoint(saved, instructions, graph=bool(profiles))
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
@@ -3429,10 +3428,13 @@ class Session(Generic[ContextT, OutputT]):
                     provider,
                     opening,
                     captured_api_key=_captured_api_key,
+                    captured_siwc_provider=_captured_siwc_provider,
                     saved_plan_provider=saved_plan_provider,
                     standalone_web_search=web_search is not None
                     and web_search.route == "standalone",
                 )
+                if uses_siwc and state is not None:
+                    _check_checkpoint(saved, instructions, graph=bool(profiles))
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
@@ -9246,10 +9248,15 @@ class Session(Generic[ContextT, OutputT]):
             self._repair_session = None
         if active is not None and not active():
             raise asyncio.CancelledError()
+        captured_siwc_provider = None
+        if self._uses_siwc:
+            assert self._native_options is not None
+            captured_siwc_provider = json.loads(self._native_options)["config"]["model_provider"]
         repair = await Session[ContextT, str]._open(
             declaration,
             context=self._context,
             _captured_api_key=self._model_api_key,
+            _captured_siwc_provider=captured_siwc_provider,
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
         )

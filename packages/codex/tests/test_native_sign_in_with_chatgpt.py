@@ -7,6 +7,8 @@ import base64
 import importlib
 import json
 import os
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,20 +20,26 @@ from agents import (
     CapabilityError,
     ComputerProvider,
     CustomStorage,
+    FunctionTool,
     LocalRecoveryRequired,
     LocalStorage,
     ModelRequest,
     ModelResponse,
     NativeError,
     NativeProvider,
+    PromptedOutput,
     SessionState,
     SignInWithChatGPT,
+    SignInWithChatGPTCredentials,
     SQLiteSessionStore,
     TurnStoppedError,
     computer_tool,
     function_tool,
 )
-from agents.agent import SignInWithChatGPT as AgentSignInWithChatGPT
+from agents.agent import (
+    SignInWithChatGPT as AgentSignInWithChatGPT,
+    SignInWithChatGPTCredentials as AgentSignInWithChatGPTCredentials,
+)
 from agents.realtime import RealtimeConfig, RealtimeSession
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -41,32 +49,50 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.test_native_manual_tools import LookupArgs, next_request
 
 MODEL = "gpt-6.1-sol"
 CLIENT = "oaiapp_synthetic_registration"
-SUBJECT = "synthetic-subject"
+ISSUER = "https://auth.openai.com"
+SUBJECT = "synthetic-verified-account"
 
 
 def access_token(*, signature: str = "synthetic", **overrides: object) -> str:
     claims = {
-        "iss": "https://auth.openai.com",
+        "iss": ISSUER,
         "aud": "https://api.openai.com/v1",
         "client_id": CLIENT,
-        "sub": SUBJECT,
+        "sub": "synthetic-resource-subject",
         "scope": "resource.invoke chatgpt.tokens.use.direct offline_access",
+        "exp": int(time.time()) + 3600,
         **overrides,
     }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
     return f"e30.{payload}.{signature}"
 
 
-def plan_agent(token: str, *, model: str | None = MODEL, **kwargs):
-    async def get_access_token() -> str:
-        return token
+def plan_credentials(
+    token: str, *, client_id: str = CLIENT, subject: str = SUBJECT
+) -> SignInWithChatGPTCredentials:
+    return SignInWithChatGPTCredentials(
+        issuer=ISSUER, client_id=client_id, subject=subject, access_token=token
+    )
+
+
+def plan_agent(
+    token: str,
+    *,
+    model: str | None = MODEL,
+    client_id: str = CLIENT,
+    subject: str = SUBJECT,
+    **kwargs,
+):
+    async def get_credentials() -> SignInWithChatGPTCredentials:
+        return plan_credentials(token, client_id=client_id, subject=subject)
 
     return Agent(
         instructions="Follow the coding request.",
-        provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=get_access_token)),
+        provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials)),
         model=model,
         **kwargs,
     )
@@ -91,6 +117,7 @@ def plan_endpoint(responses, monkeypatch):
 
 def test_public_auth_and_conflicting_provider_options():
     assert SignInWithChatGPT is AgentSignInWithChatGPT
+    assert SignInWithChatGPTCredentials is AgentSignInWithChatGPTCredentials
     auth = plan_agent(access_token()).provider.auth
     for options in (
         {"api_key": "synthetic-key"},
@@ -302,23 +329,32 @@ async def test_tool_calls_require_successful_registered_response(terminal, monke
         access_token(aud="https://api.openai.com"),
         access_token(scope="resource.invoke"),
         access_token(scope="chatgpt.tokens.use.direct"),
+        access_token(exp=1),
+        access_token(client_id="oaiapp_other"),
     ],
-    ids=["api-key", "wrong-audience", "missing-plan-grant", "missing-resource-grant"],
+    ids=[
+        "api-key",
+        "wrong-audience",
+        "missing-plan-grant",
+        "missing-resource-grant",
+        "expired",
+        "different-registration",
+    ],
 )
 async def test_other_credentials_do_not_fall_back(plan_endpoint, token):
-    with pytest.raises(ValueError, match="Provide a Sign in with ChatGPT access token"):
+    with pytest.raises(ValueError, match="Provide verified Sign in with ChatGPT credentials"):
         async with plan_agent(token).session():
             pytest.fail("Opened with an incompatible token")
     assert plan_endpoint.requests == []
 
 
-async def test_token_source_failure_does_not_expose_its_exception(plan_endpoint):
-    async def broken_source() -> str:
+async def test_credential_source_failure_does_not_expose_its_exception(plan_endpoint):
+    async def broken_source() -> SignInWithChatGPTCredentials:
         raise ValueError("synthetic private token source error")
 
     agent = Agent(
         instructions="Follow the coding request.",
-        provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=broken_source)),
+        provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=broken_source)),
     )
     with pytest.raises(RuntimeError, match="Could not obtain") as caught:
         async with agent.session():
@@ -329,19 +365,19 @@ async def test_token_source_failure_does_not_expose_its_exception(plan_endpoint)
     assert plan_endpoint.requests == []
 
 
-async def test_provider_owns_the_session_while_the_token_source_is_pending(plan_endpoint):
+async def test_provider_owns_the_session_while_the_credential_source_is_pending(plan_endpoint):
     started = asyncio.Event()
     release = asyncio.Event()
     calls = 0
 
-    async def get_access_token() -> str:
+    async def get_credentials() -> SignInWithChatGPTCredentials:
         nonlocal calls
         calls += 1
         started.set()
         await release.wait()
-        return access_token()
+        return plan_credentials(access_token())
 
-    provider = NativeProvider(auth=SignInWithChatGPT(get_access_token=get_access_token))
+    provider = NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials))
     agent = Agent(instructions="Follow the coding request.", provider=provider, model=MODEL)
 
     async def open_session() -> None:
@@ -371,7 +407,28 @@ async def test_restore_requires_original_registration_and_accepts_renewal(
     plan_endpoint, tmp_path: Path, local: bool
 ):
     initial = access_token()
-    agent = plan_agent(initial)
+    signed_in = {"id_token": "synthetic-issued-id", "access_token": initial}
+    verifications = 0
+
+    def verify_id_token(token: str) -> tuple[str, str, str]:
+        nonlocal verifications
+        verifications += 1
+        assert token == "synthetic-issued-id"
+        return ISSUER, CLIENT, SUBJECT
+
+    issuer, client_id, subject = verify_id_token(signed_in["id_token"])
+    record = SignInWithChatGPTCredentials(
+        issuer=issuer, client_id=client_id, subject=subject, access_token=signed_in["access_token"]
+    )
+
+    async def get_credentials() -> SignInWithChatGPTCredentials:
+        return record
+
+    agent = Agent(
+        instructions="Follow the coding request.",
+        model=MODEL,
+        provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials)),
+    )
     storage = LocalStorage(tmp_path / "threads") if local else None
     plan_endpoint.respond(assistant_output("Original answer."))
     async with timeout(30), agent.session(storage=storage) as session:
@@ -384,7 +441,22 @@ async def test_restore_requires_original_registration_and_accepts_renewal(
             encoded = (await session.save_state()).to_json()
             for private_value in (initial, CLIENT, SUBJECT):
                 assert private_value not in encoded
-            restore = {"state": SessionState.from_json(encoded)}
+            state = SessionState.from_json(encoded)
+            restore = {"state": state}
+
+    if not local:
+        assert state.root_metadata is not None
+        legacy = state.model_copy(
+            update={
+                "root_metadata": {
+                    **state.root_metadata,
+                    "model_provider": "native_agent_siwc_" + "a" * 64,
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="ChatGPT registration"):
+            async with agent.session(state=legacy):
+                pytest.fail("Restored an unauthenticated preview binding")
 
     api_agent = Agent(
         instructions=agent.instructions,
@@ -393,19 +465,89 @@ async def test_restore_requires_original_registration_and_accepts_renewal(
     with pytest.raises((RuntimeError, ValueError), match="same authentication mode"):
         async with api_agent.session(**restore):
             pytest.fail("Restored plan-backed work with an API key")
-    for changed in (access_token(client_id="oaiapp_other"), access_token(sub="other-user")):
+    for changed in (
+        plan_agent(access_token(client_id="oaiapp_other"), client_id="oaiapp_other"),
+        plan_agent(initial, subject="other-user"),
+    ):
         with pytest.raises((RuntimeError, ValueError), match="ChatGPT registration"):
-            async with plan_agent(changed).session(**restore):
+            async with changed.session(**restore):
                 pytest.fail("Restored with another registration")
     assert len(plan_endpoint.requests) == 1
 
-    renewed = access_token(signature="renewed")
+    renewed = access_token(signature="renewed", sub="renewed-resource-subject")
+    refreshed = {"access_token": renewed, "refresh_token": "synthetic-rotated-refresh"}
+    record = replace(record, access_token=refreshed["access_token"])
     plan_endpoint.respond(assistant_output("Continued answer."))
-    async with timeout(30), plan_agent(renewed).session(**restore) as session:
+    async with timeout(30), agent.session(**restore) as session:
         result = await (await session.submit("Continue.")).get_result()
         assert result.final_output == "Continued answer."
     assert plan_endpoint.request_headers[1]["authorization"] == f"Bearer {renewed}"
     assert "Original answer." in json.dumps(plan_endpoint.requests[1]["input"])
+    assert verifications == 1
+
+
+async def test_prompted_output_repair_keeps_the_opening_credentials(plan_endpoint):
+    token = access_token()
+    calls = 0
+
+    async def get_credentials() -> SignInWithChatGPTCredentials:
+        nonlocal calls
+        calls += 1
+        if calls != 1:
+            pytest.fail("Repair must use the original authenticated record")
+        return plan_credentials(token)
+
+    agent = Agent(
+        instructions="Return a count.",
+        model=MODEL,
+        output_type=PromptedOutput(dict[str, int], max_retries=1),
+        provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials)),
+    )
+    plan_endpoint.respond(assistant_output("invalid JSON"))
+    plan_endpoint.respond(assistant_output('{"count": 2}'))
+    async with timeout(30), agent.session() as session:
+        result = await (await session.submit("Count the matches.")).get_result()
+        assert result.final_output == {"count": 2}
+    assert calls == 1
+    assert [headers["authorization"] for headers in plan_endpoint.request_headers] == [
+        f"Bearer {token}",
+        f"Bearer {token}",
+    ]
+
+
+async def test_manual_checkpoint_admits_the_verified_account_before_pending_calls(plan_endpoint):
+    lookup = FunctionTool(
+        name="lookup", description="Look up a key", input_type=LookupArgs, output_type=str
+    )
+    token = access_token()
+    original = plan_agent(token, tools=[lookup])
+    plan_endpoint.respond(function_call("lookup", {"key": "A"}, "lookup-A"))
+
+    async with timeout(30):
+        async with original.session() as session:
+            turn = await session.submit("Read A.")
+            await next_request(session.interactions(), lookup)
+            state = await session.suspend()
+        assert state is not None
+
+        denied = plan_agent(token, subject="other-user", tools=[lookup])
+        with pytest.raises(ValueError, match="ChatGPT registration"):
+            async with denied.session(state=state):
+                pytest.fail("A different account opened the pending call")
+        assert len(plan_endpoint.requests) == 1
+
+        renewed = access_token(signature="renewed")
+        async with plan_agent(renewed, tools=[lookup]).session(state=state) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            assert (request.call_id, request.turn_id) == ("lookup-A", turn.turn_id)
+            assert len(plan_endpoint.requests) == 1
+            plan_endpoint.respond(assistant_output("Restored."))
+            await request.respond("answer-A")
+            assert restored.restored_turn is not None
+            assert (await restored.restored_turn.get_result()).final_output == "Restored."
+
+    assert tool_output(plan_endpoint.requests[1], "lookup-A") == "answer-A"
+    assert plan_endpoint.request_headers[1]["authorization"] == f"Bearer {renewed}"
 
 
 async def test_plan_limit_is_terminal(plan_endpoint):
@@ -501,17 +643,17 @@ def test_model_backend_cannot_replace_plan_authentication():
         def complete(self, request: ModelRequest) -> ModelResponse:
             pytest.fail("The model callback must not replace plan authentication")
 
-    async def get_access_token() -> str:
+    async def get_credentials() -> SignInWithChatGPTCredentials:
         pytest.fail("Conflicting providers must be rejected before obtaining a token")
 
     with pytest.raises(ValueError, match="without plan authentication"):
         NativeProvider(
-            auth=SignInWithChatGPT(get_access_token=get_access_token), model_backend=Model()
+            auth=SignInWithChatGPT(get_credentials=get_credentials), model_backend=Model()
         )
 
 
 async def test_plan_auth_rejects_computer_tools_before_resolving_credentials():
-    async def get_access_token() -> str:
+    async def get_credentials() -> SignInWithChatGPTCredentials:
         pytest.fail("Computer tools must be rejected before obtaining a token")
 
     def create_computer(_):
@@ -519,7 +661,7 @@ async def test_plan_auth_rejects_computer_tools_before_resolving_credentials():
 
     agent = Agent(
         instructions="Use the computer.",
-        provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=get_access_token)),
+        provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials)),
         tools=[computer_tool(ComputerProvider(create_computer))],
     )
     with pytest.raises(ValueError, match="computer tools"):
@@ -584,6 +726,13 @@ async def test_closed_connection_leaves_retry_timing_to_the_application(monkeypa
 
 @pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX file locking")
 async def test_custom_storage_checks_registration_before_recovery_history(plan_endpoint, tmp_path):
+    class RecordingStore(SQLiteSessionStore):
+        reads = 0
+
+        def read(self, session_id: str, token: str) -> str | None:
+            self.reads += 1
+            return super().read(session_id, token)
+
     started = asyncio.Event()
 
     @function_tool
@@ -594,15 +743,42 @@ async def test_custom_storage_checks_registration_before_recovery_history(plan_e
         return key
 
     plan_endpoint.respond(function_call("record", {"key": "synthetic-private"}, "unfinished-call"))
-    store = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
-    original = plan_agent(access_token(), tools=[record])
+    database = RecordingStore(tmp_path / "canonical.sqlite")
+    store = CustomStorage(database)
+    token = access_token()
+    original = plan_agent(token, tools=[record])
     async with timeout(30):
         async with original.session(storage=store) as session:
             identity = session.id
             await session.submit("Start work.")
             await started.wait()
 
-        denied = plan_agent(access_token(sub="other-user"), tools=[record])
+        reads = database.reads
+        for invalid in (
+            None,
+            replace(plan_credentials(token), issuer="https://example.invalid"),
+            replace(plan_credentials(token), access_token=access_token(exp=1)),
+        ):
+
+            async def get_credentials(
+                snapshot: SignInWithChatGPTCredentials | None = invalid,
+            ) -> SignInWithChatGPTCredentials | None:
+                return snapshot
+
+            unauthenticated = Agent(
+                instructions=original.instructions,
+                model=MODEL,
+                provider=NativeProvider(auth=SignInWithChatGPT(get_credentials=get_credentials)),
+                tools=[record],
+            )
+            with pytest.raises(
+                ValueError, match="Provide verified Sign in with ChatGPT credentials"
+            ):
+                async with unauthenticated.session(storage=store, resume=identity):
+                    pytest.fail("Unauthenticated credentials exposed a saved Session")
+        assert database.reads == reads
+
+        denied = plan_agent(token, subject="other-user", tools=[record])
         with pytest.raises(RuntimeError, match="same authentication mode and ChatGPT registration"):
             async with denied.session(storage=store, resume=identity):
                 pytest.fail("A different user resumed the saved Session")
@@ -639,7 +815,9 @@ async def test_rejected_custom_resume_releases_writer_and_keeps_saved_model(
             )
 
         failed_backend = TransientReleaseStore(database)
-        denied = plan_agent(access_token(client_id="oaiapp_other"), model=None)
+        denied = plan_agent(
+            access_token(client_id="oaiapp_other"), client_id="oaiapp_other", model=None
+        )
         assert denied.provider is not None
         with pytest.raises(RuntimeError, match="same authentication mode and ChatGPT registration"):
             async with denied.session(storage=CustomStorage(failed_backend), resume=identity):

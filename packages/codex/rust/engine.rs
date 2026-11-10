@@ -78,6 +78,7 @@ pub struct EngineState {
 const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
 const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
 pub(crate) const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+const SIWC_VERIFIED_PROVIDER_PREFIX: &str = "native_agent_siwc_verified_";
 
 impl EngineState {
     pub(crate) fn owns_runtime_services(&self) -> bool {
@@ -102,7 +103,7 @@ impl EngineState {
         ensure!(
             (!stored.starts_with(SIWC_PROVIDER_PREFIX)
                 && !current.starts_with(SIWC_PROVIDER_PREFIX))
-                || stored == current,
+                || (current.starts_with(SIWC_VERIFIED_PROVIDER_PREFIX) && stored == current),
             "Saved thread and Session must use the same authentication mode and ChatGPT registration"
         );
         Ok(())

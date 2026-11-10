@@ -25,6 +25,7 @@ from _agents_codex.agent import (
     Sequence as Sequence,
     SessionContextT as SessionContextT,
     SignInWithChatGPT as SignInWithChatGPT,
+    SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     SupportsIndex as SupportsIndex,
     TextAgentT as TextAgentT,
     TracebackType as TracebackType,

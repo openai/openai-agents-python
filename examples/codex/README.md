@@ -28,33 +28,44 @@ This example requires a matching SDK source build. It applies to eligible integr
 that already have a Sign in with ChatGPT registration and the user's consent
 for ChatGPT plan usage. [Registration guide](https://developers.openai.com/siwc/token-sharing-open-source) · [Self-hosted VM setup](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
 
-Pass an async function from your application that returns the OAuth access
-token for the selected user and workspace. Choose a model that the account
-can use and the native SDK recognizes as supporting Responses Lite.
-[Model catalog](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+During sign-in, verify the ID token against OpenAI's issuer keys and the
+issued client ID. Check the token's expiry, nonce, and subject, and check
+the granted scopes. Store the verified identity and credentials from that
+exchange together in a protected record. After authenticating the current
+application user, supply a callback that returns a
+`SignInWithChatGPTCredentials` snapshot from that user's record. Authorize
+access to a saved conversation before supplying its state or resume ID to
+the SDK.
+[Registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
 
 ```python
 from collections.abc import Awaitable, Callable
 
-from agents import Agent, NativeProvider, SignInWithChatGPT
+from agents import Agent, NativeProvider, SignInWithChatGPT, SignInWithChatGPTCredentials
 
 
-def make_agent(get_access_token: Callable[[], Awaitable[str]], model: str) -> Agent:
+def make_agent(
+    get_credentials: Callable[[], Awaitable[SignInWithChatGPTCredentials | None]],
+    model: str,
+) -> Agent:
     return Agent(
         instructions="Help with the team's development work.",
         model=model,
         provider=NativeProvider(
-            auth=SignInWithChatGPT(get_access_token=get_access_token),
+            auth=SignInWithChatGPT(get_credentials=get_credentials),
         ),
     )
 ```
 
-The SDK captures one access token when you open a Session. Your application
-owns renewal of the one-hour access token and protected credential storage.
-After renewal, open a new Session with the same registration and pass the
-saved conversation state or resume the local thread. The SDK reports auth
-or plan usage failures without switching to API-key billing.
-[Token renewal](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions#refreshing-tokens)
+Choose a Responses Lite model available to the selected account. The SDK
+captures one credential snapshot when you open a Session. During refresh,
+keep the verified identity with the protected record and replace its access
+and refresh tokens. The token endpoint can renew credentials without
+returning a new ID token. Open a new Session to use the renewed bearer with
+the same verified identity and restore the saved conversation. The SDK
+reports auth or plan usage failures without switching to API-key billing.
+[Model catalog](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+· [Token renewal](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions#refreshing-tokens)
 
 Pause plan-backed requests when `NativeError.category` is `usage_limit_exceeded`.
 For an HTTP plan limit, the SDK also exposes the service code
@@ -99,13 +110,13 @@ These programs use the current SDK and model credentials:
 | --- | --- | --- |
 | Own native Session storage | [Application-owned storage](canonical_storage/README.md) | A persistent POSIX reference adapter, writer ownership, and verified tool-result recovery. |
 | Store application memory across Sessions | [Packaged memory](packaged_memory.md) | The packaged `SQLiteMemory` store and tools, trusted scope selection, and deletion. Uses scripted responses. |
-| Check and repair a JSON artifact | [Packaged artifact validation](packaged_artifact.md) | The packaged `json_artifact_tool` checks a concrete file candidate, returns an error, and accepts a corrected retry from the same agent. Uses scripted responses. |
+| Check and repair a JSON artifact (development-only) | [Packaged artifact validation](packaged_artifact.md) | Matching source builds have been providing `json_artifact_tool` for validation and correction through scripted responses. |
 | Test application behavior | [Task recipe chooser](../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
 | Read or revise selected text files | [Selected documents](selected_documents.md) | Bounded pages and search, application-selected writable aliases, and serialized revision checks. The application extracts PDF text. |
 | Discover and read selected collection sources | [Selective collection](selective_collection.md) | Application-authorized metadata search and on-demand UTF-8 staging; includes a local 10,000-file fixture and scripted benchmark. |
 | Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires alpha.7 or later. Follow [matching-release setup](../../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../../docs/sdk/configuration.md#edit-the-next-sampling-request). |
 | Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
-| Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
+| Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | Matching source builds have been providing `agents.ui.vercel_stream`; the application has been owning the HTTP response, Session lifetime, and tool-data opt-in. |
 | Render an MCP App and send an action | [MCP App browser](mcp_ui/README.md) | The packaged Vercel stream and MCP App host with a browser, a local MCP peer, and scripted model responses. |
 | Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |
 | Record voice or run a speech pipeline | [Native voice](native_voice.md) | Development-only examples, model credentials, and the `voice` extra where noted. Covers Session-owned Realtime, connection credentials, and custom adapters. |

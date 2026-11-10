@@ -30,6 +30,7 @@ from dataclasses import (
 )
 from pathlib import Path as Path
 from threading import RLock as RLock
+from time import time as _time
 from types import (
     MappingProxyType as MappingProxyType,
     MethodType as MethodType,
@@ -303,74 +304,104 @@ class CodexAccount:
     plan_type: str
 
 
+_SIWC_ISSUER = "https://auth.openai.com"
 _SIWC_RESOURCE = "https://api.openai.com/v1"
 _SIWC_PROVIDER_PREFIX = "native_agent_siwc_"
+_SIWC_VERIFIED_PROVIDER_PREFIX = _SIWC_PROVIDER_PREFIX + "verified_"
 
 
-def _siwc_binding(token: object) -> str | None:
-    """Filter incompatible credentials and identify a registration for restore."""
+def _valid_siwc_bearer(token: str, client_id: str) -> bool:
+    """Check the declared route and lifetime of the record's access token."""
     if not isinstance(token, str) or not re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", token, re.ASCII):
-        return None
+        return False
     payload = token.split(".")[1]
     try:
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except (ValueError, RecursionError):
-        return None
+        return False
     if not isinstance(claims, dict):
-        return None
+        return False
     scope = claims.get("scope")
-    client = claims.get("client_id")
-    subject = claims.get("sub")
-    if (
-        claims.get("iss") != "https://auth.openai.com"
-        or claims.get("aud") != _SIWC_RESOURCE
-        or not isinstance(scope, str)
-        or not {"resource.invoke", "chatgpt.tokens.use.direct"}.issubset(scope.split())
-        or not isinstance(client, str)
-        or not client
-        or not isinstance(subject, str)
-        or not subject
-    ):
-        return None
-    # The service verifies the signature and entitlement. The issued client
-    # stays bound to the user's selected workspace across token renewal.
-    return hashlib.sha256(json.dumps([client, subject]).encode()).hexdigest()
+    expires = claims.get("exp")
+    return (
+        claims.get("iss") == _SIWC_ISSUER
+        and claims.get("aud") == _SIWC_RESOURCE
+        and claims.get("client_id") == client_id
+        and isinstance(scope, str)
+        and {"resource.invoke", "chatgpt.tokens.use.direct"}.issubset(scope.split())
+        and type(expires) is int
+        and expires > _time()
+    )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True, repr=False)
+class SignInWithChatGPTCredentials:
+    """The verified identity and its current bearer from one protected app record.
+
+    Set issuer, client_id, and subject from the application's verified sign-in
+    identity and issued registration. Set access_token from the same credential
+    record. On refresh, preserve the verified identity and replace the bearer
+    with the token issued for that record.
+    """
+
+    issuer: str
+    client_id: str
+    subject: str
+    access_token: str
 
 
 @dataclass(frozen=True, kw_only=True)
 class SignInWithChatGPT:
     """Use a registered integration's ChatGPT plan for native Responses.
 
-    Supply an async callback that reads the access token for the user's selected
-    Sign in with ChatGPT registration. The application owns OAuth, consent,
-    protected credential storage, renewal, and sign-out. The SDK captures one
-    token per Session. Open a new Session with the renewed token and restore
-    the conversation to continue with the same registration.
+    After authenticating the current application user, supply an async callback
+    that returns one snapshot from that user's protected OAuth credential record.
+    At sign-in, the application verifies the ID token and associates its identity
+    with the credentials from the same exchange. Authorize the user's access to
+    a saved conversation before asking the SDK to restore it. Return None when
+    no authenticated credential record is available.
+
+    The SDK binds the Session to the verified identity and captures its bearer
+    for Responses. To use a renewed bearer, open a new Session with the same
+    verified identity and restore the conversation.
 
     See https://developers.openai.com/siwc/token-sharing-open-source for
     eligibility, registration, and supported Responses capabilities.
     """
 
-    get_access_token: _Callable[[], Awaitable[str]] = field(repr=False)
+    get_credentials: _Callable[[], Awaitable[SignInWithChatGPTCredentials | None]] = field(
+        repr=False
+    )
 
     def __post_init__(self) -> None:
-        if not callable(self.get_access_token):
-            raise TypeError("get_access_token must be an async token callback")
+        if not callable(self.get_credentials):
+            raise TypeError("get_credentials must be an async credential callback")
 
     async def _resolve(self) -> tuple[str, str]:
         failure: BaseException
         try:
-            token = await self.get_access_token()
+            credentials = await self.get_credentials()
         except asyncio.CancelledError:
             failure = asyncio.CancelledError()
         except Exception:
-            failure = RuntimeError("Could not obtain a Sign in with ChatGPT access token")
+            failure = RuntimeError("Could not obtain Sign in with ChatGPT credentials")
         else:
-            binding = _siwc_binding(token)
-            if binding is not None:
-                return token, binding
-            del token
-            failure = ValueError("Provide a Sign in with ChatGPT access token for Responses")
+            if (
+                isinstance(credentials, SignInWithChatGPTCredentials)
+                and credentials.issuer == _SIWC_ISSUER
+                and isinstance(credentials.client_id, str)
+                and credentials.client_id.strip()
+                and isinstance(credentials.subject, str)
+                and credentials.subject.strip()
+                and _valid_siwc_bearer(credentials.access_token, credentials.client_id)
+            ):
+                identity = (credentials.issuer, credentials.client_id, credentials.subject)
+                binding = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+                return credentials.access_token, _SIWC_VERIFIED_PROVIDER_PREFIX + binding
+            del credentials
+            failure = ValueError(
+                "Provide verified Sign in with ChatGPT credentials with an active access token"
+            )
         # A credential source can include secrets in its exception or cause.
         raise failure
 
@@ -422,7 +453,7 @@ class NativeProvider:
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
-    Set ``auth=SignInWithChatGPT(get_access_token=...)`` for a registered
+    Set ``auth=SignInWithChatGPT(get_credentials=...)`` for a registered
     integration with ChatGPT plan usage permission. The SDK uses HTTP streaming
     on OpenAI Responses and keeps the Session bound to the registration.
     Omit ``api_key``, ``base_url``, and custom routing. Leave both retry limits
