@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "1529f3589882d8dae85e55d12f6171b7ea3dbdb5",
+  "baseline_commit": "7410b477cdad97ede275171226bd19d2c50c1709",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1848,7 +1848,7 @@
           "RealtimeMatcher = str | RealtimeFrame | Callable[[RealtimeFrame], bool]",
           "RealtimeEmission = Iterable[RealtimeFrame] | Callable[[RealtimeFrame], Iterable[RealtimeFrame]]",
           "@dataclass(frozen=True)\nclass RealtimeStep:\n    expect: RealtimeMatcher\n    emit: RealtimeEmission = ()\n    error: Exception | None = None",
-          "@dataclass(frozen=True)\nclass RealtimeConnectCall:\n    model: str | None\n    headers_provided: bool",
+          "@dataclass(frozen=True)\nclass RealtimeConnectCall:\n    model: str | None\n    headers_provided: bool\n    api_key_provided: bool = False\n    url: str | None = None",
           "class ScriptedRealtimeAdapter:\n\n    def __init__(self, steps: Iterable[RealtimeStep]=(), *, connect_events: Iterable[RealtimeFrame]=(), connect_error: Exception | None=None, close_error: Exception | None=None, strict: bool=True) -> None:\n        pass\n\n    @property\n    def sent_events(self) -> tuple[RealtimeFrame, ...]:\n        pass\n\n    @property\n    def connect_calls(self) -> tuple[RealtimeConnectCall, ...]:\n        pass\n\n    @property\n    def remaining_steps(self) -> int:\n        pass\n\n    async def connect(self, context: RealtimeAdapterContext) -> ScriptedRealtimeAdapter:\n        pass\n\n    @property\n    def incoming(self) -> AsyncIterator[str]:\n        pass\n\n    def emit(self, *frames: RealtimeFrame) -> None:\n        pass\n\n    async def send(self, frame: str) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass\n\n    def assert_complete(self) -> None:\n        pass"
         ],
         "exports": {},

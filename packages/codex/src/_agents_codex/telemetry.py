@@ -677,6 +677,17 @@ class TraceScope:
             native.end_trace_span(self._span_handle, json.dumps(outcome))
         except Exception:
             failed = True
+            # Native payload validation can reject before ending the recording
+            # span. Retained parent contexts still own it after handle release.
+            try:
+                native.end_trace_span(
+                    self._span_handle,
+                    '{"status":"cancelled","category":"trace_end_error","data":{}}'
+                    if status == "cancelled"
+                    else '{"status":"error","category":"trace_end_error","data":{}}',
+                )
+            except Exception:
+                pass
         finally:
             del outcome
             if self._span_handle is not None:
