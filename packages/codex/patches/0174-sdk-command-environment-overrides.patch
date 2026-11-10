@@ -1,0 +1,361 @@
+diff --git a/codex-rs/config/src/shell_environment_policy.rs b/codex-rs/config/src/shell_environment_policy.rs
+index 7e7c056ba6fb54824ef5df5c866ec2e20128df18..b0995af7a455bc9d02c4e21684c093ef1c49c417 100644
+--- a/codex-rs/config/src/shell_environment_policy.rs
++++ b/codex-rs/config/src/shell_environment_policy.rs
+@@ -159,6 +159,7 @@ impl From<ShellEnvironmentPolicyToml> for ShellEnvironmentPolicy {
+                 .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(&pattern))
+                 .collect(),
+             r#set: toml.r#set.unwrap_or_default(),
++            sdk_environment_overrides: Default::default(),
+             include_only: include_only
+                 .into_iter()
+                 .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(&pattern))
+diff --git a/codex-rs/core/src/sandboxing/mod.rs b/codex-rs/core/src/sandboxing/mod.rs
+index 43003e8ad09666b4ebdd3630375b304591c9a64e..c4ea2951a342dea198ab73da01622a12c836ebef 100644
+--- a/codex-rs/core/src/sandboxing/mod.rs
++++ b/codex-rs/core/src/sandboxing/mod.rs
+@@ -44,6 +44,7 @@ pub(crate) struct ExecOptions {
+ pub(crate) struct ExecServerEnvConfig {
+     pub(crate) policy: codex_exec_server::ExecEnvPolicy,
+     pub(crate) local_policy_env: HashMap<String, String>,
++    pub(crate) sdk_env_override_names: std::collections::HashSet<String>,
+ }
+ 
+ #[derive(Debug)]
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index b0fc76fdeb1bf4808c3cb3f897cbe03ad63f998c..ec5a5ab1bb58aa70dfe4e49cf3d68d07929c1be6 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -236,6 +236,49 @@ pub(super) fn exec_env_policy_from_shell_policy(
+     }
+ }
+ 
++fn apply_sdk_environment_overrides(
++    mut inherited: HashMap<String, String>,
++    policy: &ShellEnvironmentPolicy,
++) -> HashMap<String, String> {
++    // Preserve exact names until the selected receiver applies its native identity.
++    inherited.extend(
++        policy
++            .sdk_environment_overrides()
++            .map(|(name, value)| (name.to_owned(), value.to_owned())),
++    );
++    inherited
++}
++
++// This runs only at the direct local spawn boundary: controller and receiver match.
++#[cfg(any(windows, test))]
++fn local_sdk_environment_for_request(request: &ExecRequest) -> HashMap<String, String> {
++    let mut inherited = request.env.clone();
++    let Some(config) = &request.exec_server_env_config else {
++        return inherited;
++    };
++    let overrides = config
++        .sdk_env_override_names
++        .iter()
++        .filter_map(|name| inherited.remove_entry(name))
++        .map(|(name, value)| (name.into(), value.into()))
++        .collect();
++    codex_protocol::shell_environment::merge_env_overrides(
++        inherited
++            .into_iter()
++            .map(|(name, value)| (name.into(), value.into()))
++            .collect(),
++        overrides,
++    )
++    .into_iter()
++    .map(|(name, value)| {
++        (
++            name.into_string().expect("Unicode environment name"),
++            value.into_string().expect("Unicode environment value"),
++        )
++    })
++    .collect()
++}
++
+ fn env_overlay_for_exec_server(
+     request_env: &HashMap<String, String>,
+     local_policy_env: &HashMap<String, String>,
+@@ -264,8 +307,16 @@ fn exec_server_env_for_request(
+     if let Some(exec_server_env_config) = &request.exec_server_env_config {
+         let mut env =
+             env_overlay_for_exec_server(&request.env, &exec_server_env_config.local_policy_env);
++        for name in &exec_server_env_config.sdk_env_override_names {
++            if let Some(value) = request.env.get(name) {
++                env.insert(name.clone(), value.clone());
++            }
++        }
+         if request.exec_server_shell_snapshot.is_some()
+             && !exec_server_env_config.policy.r#set.contains_key("PATH")
++            && !exec_server_env_config
++                .sdk_env_override_names
++                .contains("PATH")
+         {
+             env.remove("PATH");
+         }
+@@ -1718,11 +1769,17 @@ impl UnifiedExecProcessManager {
+         });
+         #[cfg(target_os = "linux")]
+         let command = sandbox_command.as_deref().unwrap_or(command);
++        #[cfg(windows)]
++        let local_env = local_sdk_environment_for_request(request);
++        #[cfg(windows)]
++        let local_env = &local_env;
++        #[cfg(not(windows))]
++        let local_env = &request.env;
+         let spawn_direct = || {
+             codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
+                 command,
+                 cwd: native_cwd.as_path(),
+-                env: &request.env,
++                env: local_env,
+                 arg0: &request.arg0,
+                 sandbox: request.sandbox,
+                 windows_sandbox,
+@@ -1820,7 +1877,10 @@ impl UnifiedExecProcessManager {
+         let turn = &context.step_context.turn;
+         let shell_environment_policy = request.turn_environment.shell_environment_policy();
+         let local_policy_env = create_env(shell_environment_policy, /*thread_id*/ None);
+-        let mut env = local_policy_env.clone();
++        let mut env = apply_sdk_environment_overrides(
++            apply_unified_exec_env(local_policy_env.clone()),
++            shell_environment_policy,
++        );
+         env.insert(
+             CODEX_THREAD_ID_ENV_VAR.to_string(),
+             context.session.thread_id.to_string(),
+@@ -1829,13 +1889,21 @@ impl UnifiedExecProcessManager {
+         inject_apply_patch_env(&mut env, &turn.config.features);
+         let active_permission_profile = request.turn_environment.active_permission_profile();
+         inject_permission_profile_env(&mut env, active_permission_profile.as_ref());
+-        let mut env = apply_unified_exec_env(env);
+         strip_output_env(&mut env);
+         let mut explicit_env_overrides = shell_environment_policy.r#set.clone();
++        explicit_env_overrides.extend(
++            shell_environment_policy
++                .sdk_environment_overrides()
++                .map(|(name, value)| (name.to_owned(), value.to_owned())),
++        );
+         strip_output_env(&mut explicit_env_overrides);
+         let exec_server_env_config = ExecServerEnvConfig {
+             policy: exec_env_policy_from_shell_policy(shell_environment_policy),
+             local_policy_env,
++            sdk_env_override_names: shell_environment_policy
++                .sdk_environment_overrides()
++                .map(|(name, _)| name.to_owned())
++                .collect(),
+         };
+         let shell_snapshot = shell_snapshot_request(request, &cwd, context);
+         let mut orchestrator = ToolOrchestrator::new();
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 14eec7a955ece7e72759d68dc27c4bd1e66a2126..05c71b453a94b05f785986ef241a6327496c1953 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -216,6 +216,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
+             ),
+         ]),
+         exec_server_env_config: Some(ExecServerEnvConfig {
++            sdk_env_override_names: Default::default(),
+             policy: codex_exec_server::ExecEnvPolicy {
+                 inherit: codex_protocol::config_types::ShellEnvironmentPolicyInherit::Core,
+                 ignore_default_excludes: false,
+@@ -912,3 +913,133 @@ async fn shutdown_joins_published_managed_linux_process() {
+         assert_eq!(shutdown.await, confirmed);
+     }
+ }
++
++#[test]
++fn sdk_environment_overrides_preserve_exact_payload_values_after_filtering() {
++    use codex_protocol::config_types::{EnvironmentVariablePattern, ShellEnvironmentPolicyInherit};
++    let mut policy = ShellEnvironmentPolicy {
++        inherit: ShellEnvironmentPolicyInherit::All,
++        include_only: vec![EnvironmentVariablePattern::new_case_insensitive("KEEP")],
++        r#set: HashMap::from([("ORDINARY".to_owned(), "filtered".to_owned())]),
++        ..Default::default()
++    };
++    let inherited = HashMap::from([
++        ("KEEP".to_owned(), "same".to_owned()),
++        ("LITERAL".to_owned(), "excluded".to_owned()),
++        ("LITX".to_owned(), "excluded".to_owned()),
++    ]);
++    let baseline =
++        codex_protocol::shell_environment::create_env_from_vars(inherited, &policy, None);
++    assert_eq!(baseline.get("KEEP"), Some(&"same".to_owned()));
++    let selected = HashMap::from([
++        ("SDK_NORMAL".to_owned(), "private-value".to_owned()),
++        ("LIT*".to_owned(), "star".to_owned()),
++        ("LIT?".to_owned(), "question".to_owned()),
++        ("KEEP".to_owned(), "same".to_owned()),
++        ("TERM".to_owned(), "xterm".to_owned()),
++        ("LANG".to_owned(), "fr_FR".to_owned()),
++        ("PATH".to_owned(), "/upper".to_owned()),
++        ("Path".to_owned(), "/mixed".to_owned()),
++    ]);
++    policy.set_sdk_environment_overrides(selected.clone());
++    let payload =
++        apply_sdk_environment_overrides(apply_unified_exec_env(baseline.clone()), &policy);
++    for (name, value) in &selected {
++        assert_eq!(payload.get(name), Some(value));
++    }
++    assert!(!payload.contains_key("LITERAL"));
++    assert!(!payload.contains_key("LITX"));
++    assert!(!payload.contains_key("ORDINARY"));
++    assert!(!format!("{policy:?}").contains("private-value"));
++    let cwd: codex_utils_absolute_path::AbsolutePathBuf =
++        std::env::current_dir().unwrap().try_into().unwrap();
++    let permission_profile = codex_protocol::models::PermissionProfile::Disabled;
++    let mut request = ExecRequest {
++        command: vec!["bash".to_string(), "-lc".to_string(), "true".to_string()],
++        cwd: cwd.clone().into(),
++        env: HashMap::from([
++            ("HOME".to_string(), "/client-home".to_string()),
++            ("PATH".to_string(), "/sandbox-path".to_string()),
++            ("CODEX_THREAD_ID".to_string(), "thread-1".to_string()),
++            (
++                "HTTP_PROXY".to_string(),
++                "http://127.0.0.1:43123".to_string(),
++            ),
++            ("CODEX_NETWORK_PROXY_ACTIVE".to_string(), "1".to_string()),
++            (
++                "SSL_CERT_FILE".to_string(),
++                "/client/custom-ca.pem".to_string(),
++            ),
++        ]),
++        exec_server_env_config: Some(ExecServerEnvConfig {
++            sdk_env_override_names: Default::default(),
++            policy: codex_exec_server::ExecEnvPolicy {
++                inherit: codex_protocol::config_types::ShellEnvironmentPolicyInherit::Core,
++                ignore_default_excludes: false,
++                exclude: Vec::new(),
++                r#set: HashMap::new(),
++                include_only: Vec::new(),
++            },
++            local_policy_env: HashMap::from([
++                ("HOME".to_string(), "/client-home".to_string()),
++                ("PATH".to_string(), "/client-path".to_string()),
++                (
++                    "HTTP_PROXY".to_string(),
++                    "http://127.0.0.1:43123".to_string(),
++                ),
++                ("CODEX_NETWORK_PROXY_ACTIVE".to_string(), "1".to_string()),
++                (
++                    "SSL_CERT_FILE".to_string(),
++                    "/client/custom-ca.pem".to_string(),
++                ),
++            ]),
++        }),
++        exec_server_shell_snapshot: None,
++        network: None,
++        network_environment_id: None,
++        expiration: crate::exec::ExecExpiration::DefaultTimeout,
++        capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
++        sandbox: codex_sandboxing::SandboxType::None,
++        windows_sandbox_policy_cwd: cwd.clone().into(),
++        windows_sandbox_workspace_roots: vec![cwd],
++        windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
++        permission_profile: permission_profile.clone(),
++        windows_sandbox_filesystem_overrides: None,
++        arg0: None,
++        exec_server_sandbox: None,
++        exec_server_enforce_managed_network: true,
++        exec_server_managed_network: None,
++        exec_server_network_proxy: None,
++    };
++    request.env = payload;
++    let config = request.exec_server_env_config.as_mut().unwrap();
++    config.policy = exec_env_policy_from_shell_policy(&policy);
++    config.local_policy_env = baseline;
++    config.sdk_env_override_names = selected.keys().cloned().collect();
++    let (remote_policy, remote_env) = exec_server_env_for_request(&request);
++    for (name, value) in &selected {
++        assert_eq!(remote_env.get(name), Some(value));
++    }
++    let remote_policy = remote_policy.unwrap();
++    assert_eq!(remote_policy.include_only, vec!["KEEP".to_owned()]);
++    assert_eq!(
++        remote_policy.r#set,
++        HashMap::from([("ORDINARY".to_owned(), "filtered".to_owned())])
++    );
++    assert!(!remote_env.contains_key("LITERAL"));
++    assert!(!remote_env.contains_key("LITX"));
++    request
++        .exec_server_env_config
++        .as_mut()
++        .unwrap()
++        .sdk_env_override_names = std::collections::HashSet::from(["Path".to_owned()]);
++    let local = local_sdk_environment_for_request(&request);
++    assert_eq!(local.get("Path"), Some(&"/mixed".to_owned()));
++    if cfg!(windows) {
++        assert!(!local.contains_key("PATH"));
++    } else {
++        assert_eq!(local.get("PATH"), Some(&"/upper".to_owned()));
++    }
++    policy.set_sdk_environment_overrides(HashMap::new());
++    assert!(policy.sdk_environment_overrides().next().is_none());
++}
+diff --git a/codex-rs/exec-server/src/local_process.rs b/codex-rs/exec-server/src/local_process.rs
+index 257ee47120d0a40312ec39bfa8e07e42cafee789..52acb8c4d83e4f999ae99686b362096a772a427f 100644
+--- a/codex-rs/exec-server/src/local_process.rs
++++ b/codex-rs/exec-server/src/local_process.rs
+@@ -799,6 +799,7 @@ pub(crate) fn shell_environment_policy(env_policy: &ExecEnvPolicy) -> ShellEnvir
+             .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(pattern))
+             .collect(),
+         r#set: env_policy.r#set.clone(),
++        sdk_environment_overrides: Default::default(),
+         include_only: env_policy
+             .include_only
+             .iter()
+diff --git a/codex-rs/protocol/src/config_types.rs b/codex-rs/protocol/src/config_types.rs
+index 6b313ed221a3bcecfdea7737fd2f0c0890e301cd..3ee75c709cf98e99379af5574e81a0693dd22076 100644
+--- a/codex-rs/protocol/src/config_types.rs
++++ b/codex-rs/protocol/src/config_types.rs
+@@ -256,6 +256,29 @@ pub struct ShellEnvironmentPolicy {
+ 
+     /// If true, the shell profile will be used to run the command.
+     pub use_profile: bool,
++
++    /// In-process SDK authority; omitted from config, wire and checkpoint representations.
++    #[doc(hidden)]
++    pub sdk_environment_overrides: std::sync::Arc<HashMap<String, RedactedString>>,
++}
++
++impl ShellEnvironmentPolicy {
++    #[doc(hidden)]
++    pub fn set_sdk_environment_overrides(&mut self, values: HashMap<String, String>) {
++        self.sdk_environment_overrides = std::sync::Arc::new(
++            values
++                .into_iter()
++                .map(|(name, value)| (name, value.into()))
++                .collect(),
++        );
++    }
++
++    #[doc(hidden)]
++    pub fn sdk_environment_overrides(&self) -> impl Iterator<Item = (&str, &str)> {
++        self.sdk_environment_overrides
++            .iter()
++            .map(|(name, value)| (name.as_str(), value.as_str()))
++    }
+ }
+ 
+ impl Default for ShellEnvironmentPolicy {
+@@ -267,6 +290,7 @@ impl Default for ShellEnvironmentPolicy {
+             r#set: HashMap::new(),
+             include_only: Vec::new(),
+             use_profile: false,
++            sdk_environment_overrides: Default::default(),
+         }
+     }
+ }
+diff --git a/codex-rs/rmcp-client/src/stdio_server_launcher.rs b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+index 19a0fd593aabd8f0700009cd09f0f6eceb4dfac5..9b744ec672548ea5764645d3e4284631b66b8f72 100644
+--- a/codex-rs/rmcp-client/src/stdio_server_launcher.rs
++++ b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+@@ -854,6 +854,7 @@ mod tests {
+                 .map(|pattern| EnvironmentVariablePattern::new_case_insensitive(pattern))
+                 .collect(),
+             use_profile: false,
++            sdk_environment_overrides: Default::default(),
+         };
+ 
+         let env = shell_environment::create_env_from_vars(
