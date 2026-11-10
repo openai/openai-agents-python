@@ -310,7 +310,7 @@ async def test_native_managed_availability_rejection_has_no_unfinished_tool_noti
     notices = [
         event
         async for event in reader
-        if isinstance(event, (ToolStarted, ToolFinished)) and event.call_id == "approval-disabled"
+        if isinstance(event, (ToolStarted, ToolFinished)) and event.call_id == request.call_id
     ]
     # Python checks execution availability before publishing ToolStarted.
     assert notices == []
@@ -338,7 +338,7 @@ async def test_native_remembered_rejection_preserves_formatter_omission(
 
     def formatter(error):
         formatted.append(error.call_id)
-        return "Application declined " + error.call_id
+        return "Application declined " + str(len(formatted))
 
     async with (
         timeout(20),
@@ -363,12 +363,16 @@ async def test_native_remembered_rejection_preserves_formatter_omission(
                 lambda frame, call_id=call_id: frame.get("item", {}).get("call_id") == call_id
             )
             assert output["item"]["output"] == (
-                "Application declined " + call_id
+                "Application declined " + str(index + 1)
                 if reason == "implicit"
                 else "Tool execution was rejected"
             )
         await owner.update({"instructions": "Completed remembered calls."})
-        assert formatted == (["remembered-0", "remembered-1"] if reason == "implicit" else [])
+        if reason == "implicit":
+            assert len(formatted) == 2 and len(set(formatted)) == 2
+            assert formatted[0] == request.call_id
+        else:
+            assert formatted == []
         assert effects == []
         assert await session.pending_interactions() == ()
         assert peer.responses.requests == []
