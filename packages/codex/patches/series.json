@@ -493,9 +493,13 @@
       "sha256": "08b93a2908caa91c4e7071347053fa0e5ba22ca85315184e03c5e0d7cf41935c"
     },
     {
-      "path": "sdk-private-macos-deny-paths.patch",
-      "sha256": "327e277742f7d0f984e7c1219b9e4457b0f24c0c72bf29f280485409400ef97d"
+      "path": "0156-sdk-commit-completed-compaction-summary.patch",
+      "sha256": "b97ccbc58e4a1519389fc9634040c60edc30a31d720ea95da58e0456df246a6d"
+    },
+    {
+      "path": "0157-sdk-registered-http-429-diagnostics.patch",
+      "sha256": "a0cb667f8dd1f5358bcee2eeb706592c679c95d8ccc05cfe2e140380e8d4e795"
     }
   ],
-  "result_tree": "14ba6e05d24df6b7349dc1a76d012fbf00a34a80"
+  "result_tree": "154036199220cdeec78e90df83765fbd513310dc"
 }
