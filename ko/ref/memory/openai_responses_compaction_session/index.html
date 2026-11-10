@@ -2502,7 +2502,7 @@ only when that history may be sent.</p>
 </span><span id="__span-0-116"><a id="__codelineno-0-116" name="__codelineno-0-116"></a>        <span class="n">underlying_session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span>
 </span><span id="__span-0-117"><a id="__codelineno-0-117" name="__codelineno-0-117"></a>        <span class="o">*</span><span class="p">,</span>
 </span><span id="__span-0-118"><a id="__codelineno-0-118" name="__codelineno-0-118"></a>        <span class="n">client</span><span class="p">:</span> <span class="n">AsyncOpenAI</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-119"><a id="__codelineno-0-119" name="__codelineno-0-119"></a>        <span class="n">model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-0-119"><a id="__codelineno-0-119" name="__codelineno-0-119"></a>        <span class="n">model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;gpt-6-luna&quot;</span><span class="p">,</span>
 </span><span id="__span-0-120"><a id="__codelineno-0-120" name="__codelineno-0-120"></a>        <span class="n">compaction_mode</span><span class="p">:</span> <span class="n">OpenAIResponsesCompactionMode</span> <span class="o">=</span> <span class="s2">&quot;auto&quot;</span><span class="p">,</span>
 </span><span id="__span-0-121"><a id="__codelineno-0-121" name="__codelineno-0-121"></a>        <span class="n">should_trigger_compaction</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]],</span> <span class="nb">bool</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-122"><a id="__codelineno-0-122" name="__codelineno-0-122"></a>        <span class="n">max_rollback_items</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -2515,7 +2515,7 @@ only when that history may be sent.</p>
 </span><span id="__span-0-129"><a id="__codelineno-0-129" name="__codelineno-0-129"></a><span class="sd">                OpenAIConversationsSession.</span>
 </span><span id="__span-0-130"><a id="__codelineno-0-130" name="__codelineno-0-130"></a><span class="sd">            client: OpenAI client for responses.compact API calls. Defaults to</span>
 </span><span id="__span-0-131"><a id="__codelineno-0-131" name="__codelineno-0-131"></a><span class="sd">                get_default_openai_client() or new AsyncOpenAI().</span>
-</span><span id="__span-0-132"><a id="__codelineno-0-132" name="__codelineno-0-132"></a><span class="sd">            model: Model to use for responses.compact. Defaults to &quot;gpt-4.1&quot;. Must be an</span>
+</span><span id="__span-0-132"><a id="__codelineno-0-132" name="__codelineno-0-132"></a><span class="sd">            model: Model to use for responses.compact. Defaults to &quot;gpt-6-luna&quot;. Must be an</span>
 </span><span id="__span-0-133"><a id="__codelineno-0-133" name="__codelineno-0-133"></a><span class="sd">                OpenAI model name (gpt-*, o*, or ft:gpt-*).</span>
 </span><span id="__span-0-134"><a id="__codelineno-0-134" name="__codelineno-0-134"></a><span class="sd">            compaction_mode: Controls how the compaction request provides conversation</span>
 </span><span id="__span-0-135"><a id="__codelineno-0-135" name="__codelineno-0-135"></a><span class="sd">                history. &quot;auto&quot; (default) uses input when the last response was not</span>
@@ -3266,7 +3266,7 @@ only when that history may be sent.</p>
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">underlying_session</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="Session (agents.memory.session.Session)" href="../../../../ref/memory/session/#agents.memory.session.Session">Session</a></span><span class="p">,</span>
 </span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="o">*</span><span class="p">,</span>
 </span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">client</span><span class="p">:</span> <span class="n"><span title="openai.AsyncOpenAI">AsyncOpenAI</span></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">model</span><span class="p">:</span> <span class="n"><span title="str">str</span></span> <span class="o">=</span> <span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">model</span><span class="p">:</span> <span class="n"><span title="str">str</span></span> <span class="o">=</span> <span class="s2">&quot;gpt-6-luna&quot;</span><span class="p">,</span>
 </span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">compaction_mode</span><span class="p">:</span> <span class="n"><span title="agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionMode">OpenAIResponsesCompactionMode</span></span> <span class="o">=</span> <span class="s2">&quot;auto&quot;</span><span class="p">,</span>
 </span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">should_trigger_compaction</span><span class="p">:</span> <span class="n"><span title="collections.abc.Callable">Callable</span></span><span class="p">[</span>
 </span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="p">[</span><span class="n"><span title="dict">dict</span></span><span class="p">[</span><span class="n"><span title="str">str</span></span><span class="p">,</span> <span class="n"><span title="typing.Any">Any</span></span><span class="p">]],</span> <span class="n"><span title="bool">bool</span></span>
@@ -3351,12 +3351,12 @@ get_default_openai_client() or new AsyncOpenAI().</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Model to use for responses.compact. Defaults to "gpt-4.1". Must be an
+                <p>Model to use for responses.compact. Defaults to "gpt-6-luna". Must be an
 OpenAI model name (gpt-<em>, o</em>, or ft:gpt-*).</p>
               </div>
             </td>
             <td>
-                  <code>&#39;gpt-4.1&#39;</code>
+                  <code>&#39;gpt-6-luna&#39;</code>
             </td>
           </tr>
           <tr class="doc-section-item">
@@ -3502,7 +3502,7 @@ default, independent of this budget.</p>
 </span><span id="__span-0-116"><a id="__codelineno-0-116" name="__codelineno-0-116"></a>    <span class="n">underlying_session</span><span class="p">:</span> <span class="n">Session</span><span class="p">,</span>
 </span><span id="__span-0-117"><a id="__codelineno-0-117" name="__codelineno-0-117"></a>    <span class="o">*</span><span class="p">,</span>
 </span><span id="__span-0-118"><a id="__codelineno-0-118" name="__codelineno-0-118"></a>    <span class="n">client</span><span class="p">:</span> <span class="n">AsyncOpenAI</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-119"><a id="__codelineno-0-119" name="__codelineno-0-119"></a>    <span class="n">model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;gpt-4.1&quot;</span><span class="p">,</span>
+</span><span id="__span-0-119"><a id="__codelineno-0-119" name="__codelineno-0-119"></a>    <span class="n">model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;gpt-6-luna&quot;</span><span class="p">,</span>
 </span><span id="__span-0-120"><a id="__codelineno-0-120" name="__codelineno-0-120"></a>    <span class="n">compaction_mode</span><span class="p">:</span> <span class="n">OpenAIResponsesCompactionMode</span> <span class="o">=</span> <span class="s2">&quot;auto&quot;</span><span class="p">,</span>
 </span><span id="__span-0-121"><a id="__codelineno-0-121" name="__codelineno-0-121"></a>    <span class="n">should_trigger_compaction</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]],</span> <span class="nb">bool</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 </span><span id="__span-0-122"><a id="__codelineno-0-122" name="__codelineno-0-122"></a>    <span class="n">max_rollback_items</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -3515,7 +3515,7 @@ default, independent of this budget.</p>
 </span><span id="__span-0-129"><a id="__codelineno-0-129" name="__codelineno-0-129"></a><span class="sd">            OpenAIConversationsSession.</span>
 </span><span id="__span-0-130"><a id="__codelineno-0-130" name="__codelineno-0-130"></a><span class="sd">        client: OpenAI client for responses.compact API calls. Defaults to</span>
 </span><span id="__span-0-131"><a id="__codelineno-0-131" name="__codelineno-0-131"></a><span class="sd">            get_default_openai_client() or new AsyncOpenAI().</span>
-</span><span id="__span-0-132"><a id="__codelineno-0-132" name="__codelineno-0-132"></a><span class="sd">        model: Model to use for responses.compact. Defaults to &quot;gpt-4.1&quot;. Must be an</span>
+</span><span id="__span-0-132"><a id="__codelineno-0-132" name="__codelineno-0-132"></a><span class="sd">        model: Model to use for responses.compact. Defaults to &quot;gpt-6-luna&quot;. Must be an</span>
 </span><span id="__span-0-133"><a id="__codelineno-0-133" name="__codelineno-0-133"></a><span class="sd">            OpenAI model name (gpt-*, o*, or ft:gpt-*).</span>
 </span><span id="__span-0-134"><a id="__codelineno-0-134" name="__codelineno-0-134"></a><span class="sd">        compaction_mode: Controls how the compaction request provides conversation</span>
 </span><span id="__span-0-135"><a id="__codelineno-0-135" name="__codelineno-0-135"></a><span class="sd">            history. &quot;auto&quot; (default) uses input when the last response was not</span>
