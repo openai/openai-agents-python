@@ -470,6 +470,39 @@ jobs:
       native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
+  produce-linux-arm64:
+    needs: changes
+    if: >-
+      !inputs.native_only && needs.changes.outputs.code == 'true' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'feat/codex-harness') ||
+      (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness'))
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: ubuntu-24.04-arm
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-linux-arm64-pr:
+    needs: [changes, produce-linux-arm64]
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ubuntu-24.04-arm
+      artifact_id: ${{ needs.produce-linux-arm64.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-linux-arm64.outputs.artifact_digest }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-linux-arm64:
+    # Push runs can supply legacy snapshots. Their publication precedes earliest_sdk.
+    needs: [changes, produce-linux-arm64, produce-linux, produce-windows, produce-macos]
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ubuntu-24.04-arm
+      artifact_id: ${{ needs.produce-linux-arm64.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-linux-arm64.outputs.artifact_digest }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
   native-linux:
     needs: [changes, produce-linux, produce-windows, produce-macos]
     if: >-

@@ -74,6 +74,10 @@ def main():
         shutil.copy2(binaries / source, destination / name)
     mode = "develop" if args.develop else "build"
     output = ["--out", str(args.out.resolve())] if args.out is not None else []
+    manylinux = environment.get("OPENAI_AGENTS_NATIVE_MANYLINUX")
+    if mode == "build" and manylinux:
+        # Qualify the same Linux glibc baseline even if Maturin detects an older one.
+        output.extend(["--compatibility", manylinux])
     subprocess.run(
         ["maturin", mode, "--locked", *cargo_options, *flags, *output],
         cwd=project,

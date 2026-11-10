@@ -35,7 +35,7 @@ on:
       runner:
         type: choice
         default: ubuntu-24.04
-        options: [ubuntu-24.04, windows-latest, macos-latest]
+        options: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest, macos-latest]
 
 permissions:
   contents: read
@@ -57,8 +57,8 @@ jobs:
       artifact_digest: ${{ steps.snapshot.outputs.artifact-digest }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
       direct_manual: ${{ steps.producer-identity.outputs.direct_manual }}
-    # Allow cold builds of the bundled Codex runtime on macOS and Windows.
-    timeout-minutes: ${{ (startsWith(inputs.runner, 'windows-') || startsWith(inputs.runner, 'macos-')) && 180 || 100 }}
+    # Allow cold builds of the bundled Codex runtime on the smaller ARM64, macOS and Windows runners.
+    timeout-minutes: ${{ (inputs.runner == 'ubuntu-24.04-arm' || startsWith(inputs.runner, 'windows-') || startsWith(inputs.runner, 'macos-')) && 180 || 100 }}
     defaults:
       run:
         shell: bash
@@ -86,6 +86,19 @@ jobs:
             echo "Native CI rejects tracked Python bytecode and cache paths." >&2
             exit 1
           fi
+      - name: Check the Linux ARM64 build host
+        if: inputs.runner == 'ubuntu-24.04-arm'
+        run: |
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = aarch64
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.39"
+          printf 'Runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          uname -m
+          getconf GNU_LIBC_VERSION
+          df -h "$RUNNER_TEMP"
+          # Leave one CPU and memory headroom on the standard 4-vCPU, 16-GB runner.
+          echo "CARGO_BUILD_JOBS=3" >> "$GITHUB_ENV"
+          echo "OPENAI_AGENTS_NATIVE_MANYLINUX=manylinux_2_39" >> "$GITHUB_ENV"
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -129,6 +142,12 @@ jobs:
       - name: Install native build tools
         if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
+      - name: Report the Linux ARM64 build toolchain
+        if: inputs.runner == 'ubuntu-24.04-arm'
+        run: |
+          rustc -vV
+          rustc -vV | grep -Fx 'host: aarch64-unknown-linux-gnu'
+          clang --version
       - name: Prepare the source distribution
         # Use one stable source path for Cargo, the wheel and the test executor.
         run: |
@@ -326,10 +345,10 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Prepare Rust dependency cache
-        if: github.event_name == 'push' && inputs.native_source_run == ''
+        if: github.event_name == 'push' && inputs.native_source_run == '' && inputs.runner != 'ubuntu-24.04-arm'
         run: python -I -S .github/scripts/native-dependencies.py pack
       - name: Publish Rust dependencies
-        if: github.event_name == 'push' && inputs.native_source_run == ''
+        if: github.event_name == 'push' && inputs.native_source_run == '' && inputs.runner != 'ubuntu-24.04-arm'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-dependencies-${{ runner.os }}-${{ runner.arch }}
@@ -345,6 +364,9 @@ jobs:
         env:
           NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
         run: |
+          if [[ "$RUNNER_OS/$RUNNER_ARCH" == Linux/ARM64 ]]; then
+            df -h "$RUNNER_TEMP"
+          fi
           python -I -S - <<'PYTHON'
           import os
           from pathlib import Path
