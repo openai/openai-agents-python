@@ -1,0 +1,1172 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index d0352c2959b96523541b247fe56f4b8311ceac15..70011ad7f2d06fbe5fea9f77e62d9b0e8ea560a6 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -1073,7 +1073,10 @@ impl CodexThread {
+     }
+ 
+     #[doc(hidden)]
+-    pub async fn sdk_history_snapshot(&self, limit: Option<usize>) -> (String, usize, Vec<String>) {
++    pub async fn sdk_history_snapshot(
++        &self,
++        limit: Option<usize>,
++    ) -> CodexResult<(String, usize, Vec<String>)> {
+         self.session.sdk_history_snapshot(limit).await
+     }
+ 
+@@ -1092,7 +1095,10 @@ impl CodexThread {
+ 
+     /// Read fixed admission eligibility without exposing private projection metadata.
+     #[doc(hidden)]
+-    pub async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
++    pub async fn sdk_history_projection(
++        &self,
++        keep: Option<usize>,
++    ) -> CodexResult<Vec<ResponseItem>> {
+         self.session.sdk_history_projection(keep).await
+     }
+ 
+diff --git a/codex-rs/core/src/session/guardian_checkpoint.rs b/codex-rs/core/src/session/guardian_checkpoint.rs
+index 7e4cd19c696282b05b5eecd31527b2b28bccf0ba..5d5ba4636d4ae653e207a5386ecc38243b88657c 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint.rs
+@@ -12,9 +12,9 @@ impl Session {
+         let state = self.state.lock().await;
+         let history = &state.history;
+         let window_ids = state.auto_compact_window_ids();
+-        // This is a new fork history seed, not a compaction of an existing journal.
++        // Private reviewer forks retain the typed model window, not the public SDK raw catalog.
+         let mut items = vec![RolloutItem::Compacted(CompactedItem {
+-            sdk_originals: Some(state.sdk_originals.clone().into()),
++            sdk_originals: None,
+             message: String::new(),
+             replacement_history: Some(history.annotated_items().to_vec()),
+             guardian_history: history.guardian_history_checkpoint(),
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 50d252c3a9cbda3fb4b44eab2248a17fc3e156f2..276739a21f0f7b249e6468be2fda93fb3beb7e38 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -273,21 +273,102 @@ impl Session {
+     pub(crate) async fn sdk_history_snapshot(
+         &self,
+         limit: Option<usize>,
+-    ) -> (String, usize, Vec<String>) {
+-        self.state.lock().await.sdk_originals.snapshot(limit)
++    ) -> codex_protocol::error::Result<(String, usize, Vec<String>)> {
++        if let Some(snapshot) = self.state.lock().await.sdk_originals.snapshot(limit) {
++            return Ok(snapshot);
++        }
++        Ok(self.sdk_load_original_history().await?.snapshot(limit))
++    }
++
++    /// Explicit history operations borrow a temporary catalog from the existing canonical store.
++    pub(crate) async fn sdk_load_original_history(
++        &self,
++    ) -> codex_protocol::error::Result<codex_history::sdk_originals::SdkOriginalHistory> {
++        use codex_protocol::error::CodexErr;
++        let unavailable =
++            || CodexErr::InvalidRequest("Canonical original history is unavailable".into());
++        let (token, total, fallback_policy) = {
++            let state = self.state.lock().await;
++            (
++                (
++                    state.sdk_originals.revision().map(str::to_owned),
++                    state.sdk_originals.read_token().1,
++                ),
++                state.sdk_originals.len(),
++                state.sdk_originals_replay_policy.unwrap_or(
++                    codex_utils_output_truncation::TruncationPolicy::Bytes(usize::MAX),
++                ),
++            )
++        };
++        if total == Some(0) {
++            return Ok(Default::default());
++        }
++        let live = self.live_thread().ok_or_else(unavailable)?;
++        // Reuse the existing canonical failure flag and durability barrier before trusting storage.
++        live.flush().await.map_err(|_| unavailable())?;
++        let persisted = live.load_history(false).await.map_err(|_| unavailable())?;
++        let originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
++            &persisted.items,
++            |row| {
++                let mut projected = crate::context_manager::ContextManager::new();
++                // Captured per-record limits take precedence over the scalar legacy restore policy.
++                let normalized = if matches!(&row.item, ResponseItem::Message { .. }) {
++                    let mut normalized = row.clone();
++                    if let Some(content) =
++                        codex_context_fragments::to_annotated_content(&mut normalized.item)
++                    {
++                        let _ = codex_context_fragments::set_annotated_content(
++                            &mut normalized.item,
++                            content,
++                        );
++                    }
++                    Some(normalized)
++                } else {
++                    None
++                };
++                projected
++                    .replay_annotated_item(normalized.as_ref().unwrap_or(row), fallback_policy);
++                projected.annotated_items().last().cloned()
++            },
++            |items, turns| {
++                let mut history = crate::context_manager::ContextManager::new();
++                history.replace_annotated(items.to_vec());
++                history.drop_last_n_user_turns(turns);
++                history.annotated_items().to_vec()
++            },
++        );
++        let mut state = self.state.lock().await;
++        let current_token = (
++            state.sdk_originals.revision().map(str::to_owned),
++            state.sdk_originals.read_token().1,
++        );
++        if current_token != token
++            || total.is_some_and(|count| originals.items.len() != count)
++            || token
++                .0
++                .as_ref()
++                .is_some_and(|revision| originals.revision() != revision)
++        {
++            return Err(unavailable());
++        }
++        state.sdk_originals =
++            codex_history::sdk_originals::SdkOriginalHistoryCache::from(&originals);
++        Ok(originals)
+     }
+ 
+     /// Return only previously admitted projections within an original-value prefix.
+-    pub(crate) async fn sdk_history_projection(&self, keep: Option<usize>) -> Vec<ResponseItem> {
+-        let state = self.state.lock().await;
+-        let originals = &state.sdk_originals;
++    pub(crate) async fn sdk_history_projection(
++        &self,
++        keep: Option<usize>,
++    ) -> codex_protocol::error::Result<Vec<ResponseItem>> {
++        let originals = self.sdk_load_original_history().await?;
+         let keep = keep
+             .unwrap_or(originals.items.len())
+             .min(originals.items.len());
+-        originals.items[..keep]
++        Ok(originals.items[..keep]
+             .iter()
+             .filter_map(|item| item.projection.as_ref().map(|row| row.item.clone()))
+-            .collect()
++            .collect())
+     }
+ 
+     /// The SDK owns exclusive native ingress and the mutation permit throughout.
+@@ -305,14 +386,28 @@ impl Session {
+         if active.is_some() {
+             return Err(invalid("history transaction requires an idle thread"));
+         }
++        {
++            let state = self.state.lock().await;
++            if state
++                .sdk_originals
++                .revision()
++                .is_some_and(|revision| revision != expected_revision)
++            {
++                return Err(invalid("canonical history revision conflict"));
++            }
++            if state.sdk_originals.len().is_some_and(|total| keep > total) {
++                return Err(invalid("history keep exceeds snapshot length"));
++            }
++        }
++        let current = self.sdk_load_original_history().await?;
+         let mut state = self.state.lock().await;
+-        if state.sdk_originals.revision() != expected_revision {
++        if state.sdk_originals.revision() != Some(expected_revision) {
+             return Err(invalid("canonical history revision conflict"));
+         }
+-        if keep > state.sdk_originals.items.len() {
++        if keep > current.items.len() {
+             return Err(invalid("history keep exceeds snapshot length"));
+         }
+-        let mut originals = state.sdk_originals.prefix(keep);
++        let mut originals = current.prefix(keep);
+         for original in appended {
+             let projection = input_projection(&original)
+                 .map_err(|_| invalid("Invalid canonical history item"))?
+@@ -325,8 +420,7 @@ impl Session {
+                 projection,
+             });
+         }
+-        let mut envelopes = state
+-            .sdk_originals
++        let mut envelopes = current
+             .retained_projection(state.history.annotated_items(), keep)
+             .map_err(invalid)?;
+         envelopes.extend(
+@@ -378,7 +472,8 @@ impl Session {
+             .await
+             .map_err(|_| CodexErr::Fatal("Canonical history commit outcome is uncertain".into()))?;
+         state.replace_annotated_history(envelopes, None, HistoryReplacement::Reset);
+-        state.sdk_originals = originals;
++        state.sdk_originals =
++            codex_history::sdk_originals::SdkOriginalHistoryCache::from(&originals);
+         Ok(revision)
+     }
+ }
+diff --git a/codex-rs/core/src/session/inject_tests.rs b/codex-rs/core/src/session/inject_tests.rs
+index d83e4311808ccf2f9e92d5395d5477f746b8b580..c9972f726c04ada246c767fc8080dcc53207dec8 100644
+--- a/codex-rs/core/src/session/inject_tests.rs
++++ b/codex-rs/core/src/session/inject_tests.rs
+@@ -65,7 +65,11 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
+ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+     use codex_utils_output_truncation::TruncationPolicy;
+     use serde_json::json;
+-    let (session, _turn, _) = make_session_and_context_with_rx().await;
++    let (mut session, _turn, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
+     let full_output = "original native output ".repeat(2000);
+     let values = vec![
+         json!({"type":"message","id":"user-one","role":"user","content":[{"type":"input_text","text":"first"}]}),
+@@ -81,11 +85,38 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+                 .into()
+         })
+         .collect();
++    for row in &mut rows {
++        // The native admission path prepares positional Message classifications before recording.
++        if let Some(content) = codex_context_fragments::to_annotated_content(&mut row.item) {
++            let _ = codex_context_fragments::set_annotated_content(&mut row.item, content);
++        }
++        if matches!(
++            row.item,
++            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. }
++        ) {
++            row.metadata
++                .get_or_insert_with(Default::default)
++                .history_truncation_token_limit = Some(64);
++        }
++    }
++    let values: Vec<_> = rows
++        .iter()
++        .map(|row| serde_json::to_value(&row.item).unwrap())
++        .collect();
+     {
+         let mut state = session.state.lock().await;
+         state.record_annotated_items(&mut rows, TruncationPolicy::Tokens(64));
+     }
+-    let (revision, total, originals) = session.sdk_history_snapshot(None).await;
++    session
++        .persist_rollout_items(
++            &rows
++                .iter()
++                .cloned()
++                .map(RolloutItem::ResponseItem)
++                .collect::<Vec<_>>(),
++        )
++        .await;
++    let (revision, total, originals) = session.sdk_history_snapshot(None).await.unwrap();
+     assert_eq!(total, 4);
+     assert_eq!(
+         originals
+@@ -109,7 +140,7 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+         session.clone_history().await.into_annotated_items(),
+         before[..3]
+     );
+-    let (_, total, retained) = session.sdk_history_snapshot(None).await;
++    let (_, total, retained) = session.sdk_history_snapshot(None).await.unwrap();
+     assert_eq!(total, 4);
+     assert_eq!(retained[..3], originals[..3]);
+     assert_eq!(
+@@ -121,8 +152,12 @@ async fn sdk_original_prefix_edits_preserve_native_output_truncation() {
+ #[tokio::test]
+ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+     use serde_json::json;
+-    let (session, _turn, _) = make_session_and_context_with_rx().await;
+-    let revision = session.sdk_history_snapshot(None).await.0;
++    let (mut session, _turn, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
++    let revision = session.sdk_history_snapshot(None).await.unwrap().0;
+     session.sdk_replace_history(&revision, 0, vec![
+         json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}).to_string(),
+         json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}).to_string(),
+@@ -134,14 +169,14 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+         .await
+         .history
+         .replace_annotated(vec![summary.into()]);
+-    let before = session.sdk_history_snapshot(None).await;
++    let before = session.sdk_history_snapshot(None).await.unwrap();
+     let model_before = session.clone_history().await.into_annotated_items();
+     let error = session
+         .sdk_replace_history(&before.0, 1, Vec::new())
+         .await
+         .unwrap_err();
+     assert!(error.to_string().contains("compaction"));
+-    assert_eq!(session.sdk_history_snapshot(None).await, before);
++    assert_eq!(session.sdk_history_snapshot(None).await.unwrap(), before);
+     assert_eq!(
+         session.clone_history().await.into_annotated_items(),
+         model_before
+@@ -158,7 +193,7 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+         session.clone_history().await.into_annotated_items(),
+         model_before
+     );
+-    let appended = session.sdk_history_snapshot(None).await;
++    let appended = session.sdk_history_snapshot(None).await.unwrap();
+     session
+         .sdk_replace_history(
+             &appended.0,
+@@ -180,7 +215,11 @@ async fn sdk_partial_compaction_edit_rejects_without_live_change() {
+ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_position() {
+     use codex_protocol::protocol::ThreadRolledBackEvent;
+     use serde_json::json;
+-    let (session, turn, _) = make_session_and_context_with_rx().await;
++    let (mut session, turn, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
+     let originals = vec![
+         json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}],"future":1}),
+         json!({"type":"future","audit":"first"}),
+@@ -189,13 +228,13 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+         json!({"type":"future","audit":"second"}),
+         json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer two"}]}),
+     ].into_iter().map(|value| value.to_string()).collect::<Vec<_>>();
+-    let revision = session.sdk_history_snapshot(None).await.0;
++    let revision = session.sdk_history_snapshot(None).await.unwrap().0;
+     session
+         .sdk_replace_history(&revision, 0, originals.clone())
+         .await
+         .unwrap();
+     let model = session.clone_history().await.into_annotated_items();
+-    let catalog = session.state.lock().await.sdk_originals.clone();
++    let catalog = session.sdk_load_original_history().await.unwrap();
+     let mut checkpoint: codex_history::CompactedItem =
+         serde_json::from_value(json!({"message":""})).unwrap();
+     checkpoint.replacement_history = Some(model.clone());
+@@ -205,12 +244,20 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+     records.push(RolloutItem::Compacted(checkpoint));
+     records = serde_json::from_value(serde_json::to_value(records).unwrap()).unwrap();
+     session.apply_rollout_reconstruction(&turn, &records).await;
+-    assert_eq!(session.sdk_history_snapshot(None).await.2, originals);
+-    records.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+-        ThreadRolledBackEvent { num_turns: 1 },
+-    )));
++    assert_eq!(
++        session.sdk_history_snapshot(None).await.unwrap().2,
++        originals
++    );
++    let rollback = RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
++        num_turns: 1,
++    }));
++    records.push(rollback.clone());
++    session.persist_rollout_items(&[rollback]).await;
+     session.apply_rollout_reconstruction(&turn, &records).await;
+-    assert_eq!(session.sdk_history_snapshot(None).await.2, originals[..3]);
++    assert_eq!(
++        session.sdk_history_snapshot(None).await.unwrap().2,
++        originals[..3]
++    );
+     let retained_model = session.clone_history().await.into_annotated_items();
+     assert_eq!(retained_model.len(), 2);
+     assert_eq!(
+@@ -218,3 +265,182 @@ async fn sdk_original_checkpoint_restore_and_rollback_keep_audit_rows_in_positio
+         "first"
+     );
+ }
++
++#[tokio::test]
++async fn sdk_idle_catalog_is_bounded_with_lossless_cold_reads_and_fork_restore() {
++    use serde_json::json;
++    let (mut session, _, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
++    let full_output = "untruncated original output ".repeat(8192);
++    let mut originals = vec![
++        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"known original"}]}).to_string(),
++        json!({"type":"function_call","name":"lookup","call_id":"stored-output","arguments":"{}"}).to_string(),
++        json!({"type":"function_call_output","call_id":"stored-output","output":full_output}).to_string(),
++    ];
++    originals.extend(
++        (0..2048)
++            .map(|n| json!({"type":"future_audit", "n":n, "payload":"x".repeat(128)}).to_string()),
++    );
++    let revision = session.sdk_history_snapshot(Some(0)).await.unwrap().0;
++    session
++        .sdk_replace_history(&revision, 0, originals.clone())
++        .await
++        .unwrap();
++    assert!(session.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    assert_eq!(
++        session.sdk_history_snapshot(None).await.unwrap().2,
++        originals
++    );
++    assert_eq!(
++        session.sdk_history_snapshot(Some(2)).await.unwrap().2,
++        originals[originals.len() - 2..]
++    );
++    let stored = session
++        .live_thread()
++        .unwrap()
++        .load_history(false)
++        .await
++        .unwrap();
++    let (mut restored, _, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut restored).expect("unique session"),
++    )
++    .await;
++    restored
++        .record_initial_history(codex_history::InitialHistory::Forked(stored.items))
++        .await;
++    assert!(restored.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    assert_eq!(
++        restored.sdk_history_snapshot(None).await.unwrap().2,
++        originals
++    );
++}
++
++#[tokio::test]
++async fn sdk_cold_legacy_projection_reuses_the_captured_restore_policy() {
++    use serde_json::json;
++    let (mut session, _, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
++    let raw = vec![
++        json!({"type":"message","id":"legacy-user","role":"user","content":[{"type":"input_text","text":"first"}]}),
++        json!({"type":"function_call","id":"legacy-call","name":"lookup","call_id":"legacy-output","arguments":"{}"}),
++        json!({"type":"function_call_output","id":"legacy-result","call_id":"legacy-output","output":"legacy untruncated output ".repeat(100_000)}),
++        json!({"type":"message","id":"legacy-next","role":"user","content":[{"type":"input_text","text":"second"}]}),
++    ];
++    let rows = raw
++        .into_iter()
++        .map(|item| {
++            RolloutItem::ResponseItem(ResponseItemEnvelope::new(
++                serde_json::from_value(item).unwrap(),
++            ))
++        })
++        .collect();
++    session
++        .record_initial_history(codex_history::InitialHistory::Forked(rows))
++        .await;
++    let before = session.clone_history().await.into_annotated_items();
++    let projected = session.sdk_history_projection(None).await.unwrap();
++    assert_eq!(
++        serde_json::to_value(&projected[2]).unwrap()["output"],
++        serde_json::to_value(&before[2].item).unwrap()["output"]
++    );
++    let revision = session.sdk_history_snapshot(Some(0)).await.unwrap().0;
++    session
++        .sdk_replace_history(&revision, 3, Vec::new())
++        .await
++        .unwrap();
++    assert_eq!(
++        session.clone_history().await.into_annotated_items(),
++        before[..3]
++    );
++}
++
++#[tokio::test]
++async fn sdk_ordinary_compacted_resume_defers_originals_until_explicit_read() {
++    use codex_rollout::ModelContextScan;
++    use codex_rollout::ModelContextScanProgress;
++    use serde_json::json;
++    let (mut session, turn, _) = make_session_and_context_with_rx().await;
++    crate::session::tests::attach_thread_persistence(
++        std::sync::Arc::get_mut(&mut session).expect("unique session"),
++    )
++    .await;
++    let mut originals =
++        vec![json!({"type":"future_audit","payload":"x".repeat(128 * 1024)}).to_string()];
++    originals.extend(
++        (0..2048).map(|n| json!({"type":"audit","n":n,"payload":"x".repeat(128)}).to_string()),
++    );
++    let revision = session.sdk_history_snapshot(Some(0)).await.unwrap().0;
++    session
++        .sdk_replace_history(&revision, 0, originals.clone())
++        .await
++        .unwrap();
++    let compacted: RolloutItem = serde_json::from_value(json!({"type":"compacted","payload":{
++        "message":"summary", "replacement_history":[], "window_number":1,
++        "sdk_originals":{"preserve":true}
++    }}))
++    .unwrap();
++    session
++        .persist_rollout_items(std::slice::from_ref(&compacted))
++        .await;
++    // The owning scanner returns only the complete model checkpoint, not the raw prefix.
++    let mut scan = ModelContextScan::default();
++    assert_eq!(
++        scan.push(compacted.clone()),
++        ModelContextScanProgress::Complete
++    );
++    let bounded = scan.finish();
++    assert_eq!(bounded.len(), 1);
++    session.apply_rollout_reconstruction(&turn, &bounded).await;
++    {
++        let state = session.state.lock().await;
++        assert_eq!(state.sdk_originals.revision(), None);
++        assert_eq!(state.sdk_originals.len(), None);
++        assert_eq!(state.sdk_originals.retained_bytes(), 0);
++        assert!(state.history.annotated_items().is_empty());
++    }
++    let input: ResponseItem = serde_json::from_value(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"after resume"}]})).unwrap();
++    let admitted = session
++        .record_initial_response_items(&turn, vec![input])
++        .await
++        .unwrap();
++    originals.extend(
++        admitted
++            .iter()
++            .map(|item| serde_json::to_string(item).unwrap()),
++    );
++    assert_eq!(session.state.lock().await.sdk_originals.revision(), None);
++    assert!(session.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    // Another ordinary model checkpoint also remains independent of catalog hydration.
++    session
++        .persist_rollout_items(std::slice::from_ref(&compacted))
++        .await;
++    session.apply_rollout_reconstruction(&turn, &bounded).await;
++    assert_eq!(session.state.lock().await.sdk_originals.revision(), None);
++    let snapshot = session.sdk_history_snapshot(None).await.unwrap();
++    assert_eq!(snapshot.2, originals);
++    assert_eq!(snapshot.1, originals.len());
++    assert_eq!(
++        session.state.lock().await.sdk_originals.revision(),
++        Some(snapshot.0.as_str())
++    );
++    assert!(session.state.lock().await.sdk_originals.retained_bytes() <= 64 * 1024);
++    assert!(
++        session
++            .sdk_replace_history("stale-revision", 0, Vec::new())
++            .await
++            .is_err()
++    );
++    assert_eq!(session.sdk_history_snapshot(None).await.unwrap(), snapshot);
++    session
++        .sdk_replace_history(&snapshot.0, 0, Vec::new())
++        .await
++        .unwrap();
++    assert_eq!(session.sdk_history_snapshot(None).await.unwrap().1, 0);
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index b28bea8546f5374b21314c9bd1dbe22af1c29ecf..68851c0e7bd76675f1c0f27a90ced5819f77fb34 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1861,23 +1861,13 @@ impl Session {
+         let reviewer_compaction_hash = reviewer.comp_hash.clone();
+         {
+             let mut state = self.state.lock().await;
+-            state.sdk_originals = codex_history::sdk_originals::SdkOriginalHistory::replay(
+-                rollout_items,
+-                |row| {
+-                    let mut projected = crate::context_manager::ContextManager::new();
+-                    projected.replay_annotated_item(
+-                        row,
+-                        turn_context.model_info().truncation_policy.into(),
+-                    );
+-                    projected.annotated_items().last().cloned()
+-                },
+-                |items, turns| {
+-                    let mut history = crate::context_manager::ContextManager::new();
+-                    history.replace_annotated(items.to_vec());
+-                    history.drop_last_n_user_turns(turns);
+-                    history.annotated_items().to_vec()
+-                },
+-            );
++            state.sdk_originals_replay_policy =
++                Some(turn_context.model_info().truncation_policy.into());
++            state.sdk_originals =
++                codex_history::sdk_originals::SdkOriginalHistoryCache::replay_metadata(
++                    rollout_items,
++                    |row| crate::context_manager::is_api_message(&row.item, row.metadata.as_ref()),
++                );
+             state.replace_annotated_history(
+                 history,
+                 reference_context_item,
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index 809418f3147ea8b00e48568586bc38ddfbb4f9f2..ea7e6f5a03d1970ac5c77f0b33b377f4be6a355f 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -70,7 +70,8 @@ pub(crate) struct SessionState {
+     /// Persisted origin of the session base instructions, when known.
+     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
+     pub(crate) history: ContextManager,
+-    pub(crate) sdk_originals: codex_history::sdk_originals::SdkOriginalHistory,
++    pub(crate) sdk_originals: codex_history::sdk_originals::SdkOriginalHistoryCache,
++    pub(crate) sdk_originals_replay_policy: Option<codex_utils_output_truncation::TruncationPolicy>,
+     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
+     pub(crate) history_reset: CancellationToken,
+     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+@@ -117,11 +118,10 @@ impl SessionState {
+         auto_compact_window_ids: AutoCompactWindowIds,
+         history: ContextManager,
+     ) -> Self {
+-        let mut sdk_originals = codex_history::sdk_originals::SdkOriginalHistory::default();
++        let mut sdk_originals = codex_history::sdk_originals::SdkOriginalHistoryCache::default();
+         for envelope in history.annotated_items() {
+-            sdk_originals.append(codex_history::sdk_originals::SdkOriginalItem::from_native(
+-                envelope.clone(),
+-            ));
++            sdk_originals
++                .append(serde_json::to_string(&envelope.item).expect("response items serialize"));
+         }
+         Self {
+             active_disabled_plugin_ids: Vec::new(),
+@@ -129,6 +129,7 @@ impl SessionState {
+             base_instructions_provenance: None,
+             history,
+             sdk_originals,
++            sdk_originals_replay_policy: None,
+             history_reset: CancellationToken::new(),
+             latest_rate_limits: None,
+             latest_token_usage_record: None,
+@@ -155,22 +156,14 @@ impl SessionState {
+         items: &mut [ResponseItemEnvelope],
+         policy: codex_utils_output_truncation::TruncationPolicy,
+     ) {
++        self.sdk_originals_replay_policy.get_or_insert(policy);
+         for envelope in items {
+             self.history
+                 .record_annotated_items(std::slice::from_mut(envelope), policy);
+             if crate::context_manager::is_api_message(&envelope.item, envelope.metadata.as_ref()) {
+-                let projection = self
+-                    .history
+-                    .annotated_items()
+-                    .last()
+-                    .expect("accepted history item has a model projection")
+-                    .clone();
+-                self.sdk_originals
+-                    .append(codex_history::sdk_originals::SdkOriginalItem {
+-                        original: serde_json::to_string(&envelope.item)
+-                            .expect("response items serialize"),
+-                        projection: Some(projection),
+-                    });
++                self.sdk_originals.append(
++                    serde_json::to_string(&envelope.item).expect("response items serialize"),
++                );
+             }
+         }
+     }
+diff --git a/codex-rs/history/src/sdk_originals.rs b/codex-rs/history/src/sdk_originals.rs
+index 8ed8e7648a947461f114df1d7fe46e82d8e64bea..b8a07d35ab9840909e08360a33a54123114b6aca 100644
+--- a/codex-rs/history/src/sdk_originals.rs
++++ b/codex-rs/history/src/sdk_originals.rs
+@@ -33,10 +33,6 @@ impl SdkOriginalHistoryCheckpoint {
+     pub fn preserve() -> Self {
+         Self::Preserve { preserve: true }
+     }
+-
+-    pub fn is_preserve(&self) -> bool {
+-        matches!(self, Self::Preserve { preserve: true })
+-    }
+ }
+ 
+ impl From<SdkOriginalHistory> for SdkOriginalHistoryCheckpoint {
+@@ -94,12 +90,187 @@ pub struct SdkOriginalHistory {
+     index: OriginalIndex,
+ }
+ 
++/// Bounded hot originals plus constant-size revision metadata; the journal owns the full catalog.
++#[derive(Clone, Debug)]
++pub struct SdkOriginalHistoryCache {
++    index: Option<OriginalIndex>,
++    total: usize,
++    tail: std::collections::VecDeque<String>,
++    payload_bytes: usize,
++}
++
++impl SdkOriginalHistoryCache {
++    // Cache policy only: older/oversized originals remain in the canonical journal.
++    const MAX_RETAINED_BYTES: usize = 64 * 1024;
++
++    pub fn revision(&self) -> Option<&str> {
++        self.index.as_ref().map(|index| index.revision.as_str())
++    }
++    pub fn len(&self) -> Option<usize> {
++        self.index.as_ref().map(|_| self.total)
++    }
++    pub fn is_empty(&self) -> bool {
++        self.len() == Some(0)
++    }
++    /// Change detection during an explicit cold read, including an unloaded prefix.
++    pub fn read_token(&self) -> (Option<&str>, usize) {
++        (self.revision(), self.total)
++    }
++    pub fn retained_bytes(&self) -> usize {
++        self.payload_bytes + self.tail.capacity() * std::mem::size_of::<String>()
++    }
++
++    pub fn append(&mut self, original: String) {
++        if let Some(index) = &mut self.index {
++            index.append(self.total, &original);
++        }
++        self.total += 1;
++        self.cache(original);
++    }
++
++    fn cache(&mut self, original: String) {
++        self.payload_bytes += original.capacity();
++        self.tail.push_back(original);
++        while self.retained_bytes() > Self::MAX_RETAINED_BYTES {
++            if self.tail.len() == 1 {
++                self.tail.shrink_to_fit();
++                if self.retained_bytes() <= Self::MAX_RETAINED_BYTES {
++                    break;
++                }
++            }
++            let removed = self
++                .tail
++                .pop_front()
++                .expect("over-budget cache has a value");
++            self.payload_bytes -= removed.capacity();
++            if self.tail.is_empty() {
++                self.tail = Default::default();
++            }
++        }
++    }
++
++    pub fn snapshot(&self, limit: Option<usize>) -> Option<(String, usize, Vec<String>)> {
++        let revision = self.revision()?;
++        let count = limit.unwrap_or(self.total).min(self.total);
++        if count > self.tail.len() {
++            return None;
++        }
++        Some((
++            revision.to_owned(),
++            self.total,
++            self.tail
++                .iter()
++                .skip(self.tail.len() - count)
++                .cloned()
++                .collect(),
++        ))
++    }
++}
++
++impl Default for SdkOriginalHistoryCache {
++    fn default() -> Self {
++        Self {
++            index: Some(OriginalIndex::default()),
++            total: 0,
++            tail: Default::default(),
++            payload_bytes: 0,
++        }
++    }
++}
++
++impl SdkOriginalHistoryCache {
++    fn unloaded() -> Self {
++        Self {
++            index: None,
++            ..Default::default()
++        }
++    }
++
++    /// Resume keeps only hot bytes. A preserved prefix is read only on explicit demand.
++    pub fn replay_metadata(
++        records: &[crate::RolloutItem],
++        eligible: impl Fn(&ResponseItemEnvelope) -> bool,
++    ) -> Self {
++        let mut cache = Self::default();
++        for record in records {
++            match record {
++                crate::RolloutItem::ResponseItem(row) if eligible(row) => {
++                    cache.append(
++                        serde_json::to_string(&row.item).expect("response items serialize"),
++                    );
++                }
++                crate::RolloutItem::Compacted(checkpoint) => match &checkpoint.sdk_originals {
++                    Some(SdkOriginalHistoryCheckpoint::Replace(history)) => {
++                        cache = Self::from(history)
++                    }
++                    Some(SdkOriginalHistoryCheckpoint::Preserve { .. }) => cache = Self::unloaded(),
++                    None => {
++                        if let Some(items) = &checkpoint.replacement_history {
++                            cache = Self::default();
++                            for row in items.iter().filter(|row| eligible(row)) {
++                                cache.append(
++                                    serde_json::to_string(&row.item)
++                                        .expect("response items serialize"),
++                                );
++                            }
++                        }
++                    }
++                },
++                crate::RolloutItem::EventMsg(
++                    codex_protocol::protocol::EventMsg::ThreadRolledBack(_),
++                ) => cache = Self::unloaded(),
++                _ => {}
++            }
++        }
++        cache
++    }
++}
++
++impl From<&SdkOriginalHistory> for SdkOriginalHistoryCache {
++    fn from(history: &SdkOriginalHistory) -> Self {
++        let mut cache = Self {
++            index: Some(history.index.clone()),
++            total: history.items.len(),
++            ..Default::default()
++        };
++        // Build only the contiguous suffix that fits; never clone an oversized original.
++        for item in history.items.iter().rev() {
++            let cost = item.original.len() + std::mem::size_of::<String>();
++            if cache.retained_bytes().saturating_add(cost) > Self::MAX_RETAINED_BYTES {
++                break;
++            }
++            let original = item.original.clone();
++            cache.payload_bytes += original.capacity();
++            cache.tail.push_front(original);
++            if cache.retained_bytes() > Self::MAX_RETAINED_BYTES {
++                let removed = cache.tail.pop_front().expect("new cache value");
++                cache.payload_bytes -= removed.capacity();
++                cache.tail.shrink_to_fit();
++                break;
++            }
++        }
++        cache
++    }
++}
++
+ #[derive(Clone, Debug)]
+ struct OriginalIndex {
+     hash: Sha256,
+     revision: String,
+ }
+ 
++impl OriginalIndex {
++    fn append(&mut self, total: usize, original: &str) {
++        if total != 0 {
++            self.hash.update(b",");
++        }
++        self.hash.update(original.as_bytes());
++        let mut completed = self.hash.clone();
++        completed.update(b"]");
++        self.revision = format!("{:x}", completed.finalize());
++    }
++}
++
+ impl Default for OriginalIndex {
+     fn default() -> Self {
+         let mut hash = Sha256::new();
+@@ -159,13 +330,7 @@ impl SdkOriginalHistory {
+     }
+ 
+     pub fn append(&mut self, item: SdkOriginalItem) {
+-        if !self.items.is_empty() {
+-            self.index.hash.update(b",");
+-        }
+-        self.index.hash.update(item.original.as_bytes());
+-        let mut completed = self.index.hash.clone();
+-        completed.update(b"]");
+-        self.index.revision = format!("{:x}", completed.finalize());
++        self.index.append(self.items.len(), &item.original);
+         self.items.push(item);
+     }
+ 
+@@ -216,17 +381,49 @@ impl SdkOriginalHistory {
+         // The current model window is an ordered subsequence of admitted
+         // originals until compaction introduces a summary. Never reconstruct
+         // that summary from originals or retain its deleted content implicitly.
++        // Legacy restore can mint retained-source versions absent from the journal.
++        // Compare persisted content/metadata, then retain the existing live envelope.
++        let matches = |stored: &SdkOriginalItem, current: &ResponseItemEnvelope| {
++            let Some(stored) = &stored.projection else {
++                return false;
++            };
++            if stored.item != current.item {
++                return false;
++            }
++            let mut stored_metadata = stored.metadata.clone().unwrap_or_default();
++            let mut current_metadata = current.metadata.clone().unwrap_or_default();
++            stored_metadata.retained_source = None;
++            current_metadata.retained_source = None;
++            stored_metadata == current_metadata
++        };
++        let unavailable = "cannot shorten original history across model compaction; use keep=0 to replace it explicitly";
++        let mut earliest = Vec::with_capacity(current.len());
+         let mut originals = self.items.iter().enumerate();
+-        let mut retained = Vec::new();
+         for row in current {
+-            let Some((index, _)) =
+-                originals.find(|(_, item)| item.projection.as_ref() == Some(row))
+-            else {
++            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
++                return Err(unavailable);
++            };
++            earliest.push(index);
++        }
++        // The reverse match detects repeated equal items whose position relative to
++        // keep is ambiguous after model truncation. Neither pass reconstructs content.
++        let mut originals = self.items.iter().enumerate().rev();
++        let mut latest = Vec::with_capacity(current.len());
++        for row in current.iter().rev() {
++            let Some((index, _)) = originals.find(|(_, item)| matches(item, row)) else {
++                return Err(unavailable);
++            };
++            latest.push(index);
++        }
++        latest.reverse();
++        let mut retained = Vec::new();
++        for ((row, first), last) in current.iter().zip(earliest).zip(latest) {
++            if first < keep && last >= keep {
+                 return Err(
+-                    "cannot shorten original history across model compaction; use keep=0 to replace it explicitly",
++                    "cannot shorten original history across ambiguous repeated items; use keep=0 to replace it explicitly",
+                 );
+-            };
+-            if index < keep {
++            }
++            if first < keep {
+                 retained.push(row.clone());
+             }
+         }
+@@ -287,6 +484,11 @@ impl SdkOriginalHistory {
+     }
+ 
+     fn after_rollback(&self, retained: Vec<ResponseItemEnvelope>) -> Self {
++        let retained_users: Vec<_> = retained
++            .iter()
++            .filter(|row| matches!(&row.item, ResponseItem::Message { role, .. } if role == "user"))
++            .map(|row| row.item.clone())
++            .collect();
+         let mut by_id: std::collections::HashMap<_, _> = retained
+             .iter()
+             .filter_map(|row| row.item.id().map(|id| (id.to_string(), row.clone())))
+@@ -295,11 +497,19 @@ impl SdkOriginalHistory {
+             .into_iter()
+             .filter(|row| row.item.id().is_none())
+             .collect();
+-        let matched = |row: &ResponseItemEnvelope| {
+-            row.item.id().map_or_else(
+-                || without_id.iter().any(|kept| kept.item == row.item),
+-                |id| by_id.contains_key(id.as_str()),
+-            )
++        let mut retained_users = retained_users.iter();
++        let mut next_user = retained_users.next();
++        let mut matched = |row: &ResponseItemEnvelope| {
++            let found = next_user.is_some_and(|kept| {
++                row.item.id().map_or_else(
++                    || kept == &row.item,
++                    |id| kept.id().is_some_and(|kept_id| kept_id == id),
++                )
++            });
++            if found {
++                next_user = retained_users.next();
++            }
++            found
+         };
+         // Audit-only values belong to the user-turn prefix containing their admitted position.
+         let boundary = self
+@@ -340,6 +550,68 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn idle_catalog_cache_stays_byte_bounded_across_ten_thousand_originals() {
++        let mut cache = SdkOriginalHistoryCache::default();
++        let mut journal = SdkOriginalHistory::default();
++        for n in 0..10_000 {
++            let original = json!({"type":"audit", "n":n, "text":"x".repeat(128)}).to_string();
++            cache.append(original.clone());
++            journal.append(SdkOriginalItem {
++                original,
++                projection: None,
++            });
++            assert!(cache.retained_bytes() <= SdkOriginalHistoryCache::MAX_RETAINED_BYTES);
++        }
++        assert_eq!(cache.snapshot(Some(0)), Some(journal.snapshot(Some(0))));
++        assert_eq!(cache.snapshot(Some(2)), Some(journal.snapshot(Some(2))));
++        assert!(cache.snapshot(None).is_none());
++        let restored = SdkOriginalHistoryCache::from(&journal);
++        assert!(restored.retained_bytes() <= SdkOriginalHistoryCache::MAX_RETAINED_BYTES);
++        assert_eq!(restored.snapshot(Some(2)), Some(journal.snapshot(Some(2))));
++    }
++
++    #[test]
++    fn preserved_model_checkpoint_keeps_metadata_unloaded_and_append_byte_bounded() {
++        let checkpoint: crate::RolloutItem =
++            serde_json::from_value(json!({"type":"compacted","payload":{
++                "message":"summary", "replacement_history":[], "window_number":1,
++                "sdk_originals":{"preserve":true}
++            }}))
++            .unwrap();
++        let mut cache = SdkOriginalHistoryCache::replay_metadata(&[checkpoint], |_| true);
++        assert_eq!(cache.revision(), None);
++        assert_eq!(cache.len(), None);
++        assert_eq!(cache.snapshot(Some(0)), None);
++        let before = cache.read_token().1;
++        for n in 0..10_000 {
++            cache.append(json!({"type":"audit","n":n,"text":"x".repeat(128)}).to_string());
++            assert!(cache.retained_bytes() <= SdkOriginalHistoryCache::MAX_RETAINED_BYTES);
++        }
++        assert!(cache.read_token().1 > before);
++        assert_eq!(cache.snapshot(Some(1)), None);
++    }
++
++    #[test]
++    fn oversized_originals_stay_in_journal_without_a_live_cache_copy() {
++        let original = json!({"type":"future", "payload":"x".repeat(128 * 1024)}).to_string();
++        let mut journal = SdkOriginalHistory::default();
++        journal.append(SdkOriginalItem {
++            original: original.clone(),
++            projection: None,
++        });
++        let mut cache = SdkOriginalHistoryCache::default();
++        cache.append(original);
++        assert_eq!(cache.retained_bytes(), 0);
++        assert!(cache.snapshot(Some(1)).is_none());
++        assert_eq!(cache.snapshot(Some(0)), Some(journal.snapshot(Some(0))));
++        let restored: SdkOriginalHistory =
++            serde_json::from_slice(&serde_json::to_vec(&journal).unwrap()).unwrap();
++        let cache = SdkOriginalHistoryCache::from(&restored);
++        assert_eq!(cache.retained_bytes(), 0);
++        assert_eq!(restored.snapshot(None), journal.snapshot(None));
++    }
++
+     #[test]
+     fn repeated_compaction_references_preserve_originals_without_copying_catalog() {
+         let mut originals = SdkOriginalHistory::default();
+@@ -498,6 +770,30 @@ mod tests {
+         assert!(rolled.items[1].projection.is_none());
+     }
+ 
++    #[test]
++    fn rollback_consumes_identical_idless_users_before_the_audit_boundary() {
++        let user =
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"same"}]})
++                .to_string();
++        let mut history = SdkOriginalHistory::default();
++        for raw in [
++            user.clone(),
++            json!({"type":"audit","turn":1}).to_string(),
++            user,
++            json!({"type":"audit","turn":2}).to_string(),
++        ] {
++            history.append(SdkOriginalItem {
++                projection: input_projection(&raw)
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++                original: raw,
++            });
++        }
++        let retained = history.projection()[..1].to_vec();
++        let rolled = history.after_rollback(retained);
++        assert_eq!(rolled.snapshot(None).2, history.snapshot(None).2[..2]);
++    }
++
+     #[test]
+     fn projection_identifiers_never_rewrite_missing_original_identifiers() {
+         let original = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}],"future":true});
+@@ -519,6 +815,58 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn restored_versions_preserve_live_metadata_and_reject_ambiguous_duplicate_boundaries() {
++        let original = json!({"type":"message","id":"repeated","role":"user","content":[{"type":"input_text","text":"same"}]});
++        let mut history = SdkOriginalHistory::default();
++        for _ in 0..2 {
++            history.append(SdkOriginalItem {
++                original: original.to_string(),
++                projection: input_projection(&original.to_string())
++                    .unwrap()
++                    .map(ResponseItemEnvelope::new),
++            });
++        }
++        let mut current = history.projection();
++        for (index, row) in current.iter_mut().enumerate() {
++            row.metadata
++                .get_or_insert_with(Default::default)
++                .retained_source = Some(
++                serde_json::from_value(json!({
++                    "id":{"message_id":"repeated","turn_id":"legacy","role":"user"},
++                    "revision":format!("live-{index}"), "complete":true,
++                }))
++                .unwrap(),
++            );
++        }
++        // The complete live ordering disambiguates equal-content originals.
++        assert_eq!(
++            history.retained_projection(&current, 1).unwrap(),
++            current[..1]
++        );
++        // A truncated duplicate cannot be guessed onto either side of the cut.
++        assert!(
++            history
++                .retained_projection(&current[1..], 1)
++                .unwrap_err()
++                .contains("ambiguous")
++        );
++        let different = json!({"type":"message","id":"last","role":"user","content":[{"type":"input_text","text":"last"}]});
++        history.append(SdkOriginalItem {
++            original: different.to_string(),
++            projection: input_projection(&different.to_string())
++                .unwrap()
++                .map(ResponseItemEnvelope::new),
++        });
++        // Ambiguity wholly within the retained prefix cannot change which live row survives.
++        assert_eq!(
++            history.retained_projection(&current[1..], 2).unwrap(),
++            current[1..]
++        );
++        current[0].metadata.as_mut().unwrap().compaction_output = true;
++        assert!(history.retained_projection(&current[..1], 1).is_err());
++    }
++
+     #[test]
+     fn prefix_edits_preserve_model_payload_and_reject_ambiguous_summaries() {
+         let mut history = SdkOriginalHistory::default();
+diff --git a/codex-rs/rollout/src/model_context.rs b/codex-rs/rollout/src/model_context.rs
+index 02bc23177ff16cf27327bcfc6dead38ea75ec2f0..892183d2d2366939b3488e53ba85c14cf115757a 100644
+--- a/codex-rs/rollout/src/model_context.rs
++++ b/codex-rs/rollout/src/model_context.rs
+@@ -37,17 +37,7 @@ impl ModelContextScan {
+             ModelContextScanProgress::Continue
+         } else if let RolloutItem::Compacted(compacted) = &item {
+             if compacted.replacement_history.is_some() && compacted.window_number.is_some() {
+-                // A model checkpoint that preserves originals depends on its preceding journal.
+-                // Keep scanning to a complete catalog seed or the legacy migration boundary.
+-                if compacted
+-                    .sdk_originals
+-                    .as_ref()
+-                    .is_some_and(|catalog| catalog.is_preserve())
+-                {
+-                    ModelContextScanProgress::Continue
+-                } else {
+-                    ModelContextScanProgress::Complete
+-                }
++                ModelContextScanProgress::Complete
+             } else {
+                 // This compaction cannot be reconstructed from a bounded suffix. Do not stop at
+                 // an older compaction because this newer one still affects the surviving history.
+@@ -85,21 +75,13 @@ mod sdk_original_tests {
+     }
+ 
+     #[test]
+-    fn original_preservation_requires_the_preceding_journal_or_catalog_seed() {
++    fn original_preservation_does_not_expand_the_bounded_model_scan() {
+         let mut scan = ModelContextScan::default();
+         assert_eq!(
+             scan.push(checkpoint(json!({"preserve":true}))),
+-            ModelContextScanProgress::Continue
+-        );
+-        assert_eq!(
+-            scan.push(checkpoint(json!({"preserve":true}))),
+-            ModelContextScanProgress::Continue
+-        );
+-        assert_eq!(
+-            scan.push(checkpoint(json!({"format_version":1,"items":[]}))),
+             ModelContextScanProgress::Complete
+         );
+-        assert_eq!(scan.finish().len(), 3);
++        assert_eq!(scan.finish().len(), 1);
+         let mut legacy = ModelContextScan::default();
+         assert_eq!(
+             legacy.push(checkpoint(serde_json::Value::Null)),

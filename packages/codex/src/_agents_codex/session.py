@@ -36,7 +36,7 @@ from importlib.resources import files as _package_files
 from os import PathLike as PathLike
 from pathlib import Path as Path
 from tempfile import TemporaryDirectory as TemporaryDirectory
-from types import MappingProxyType as MappingProxyType
+from types import MappingProxyType as MappingProxyType, TracebackType as TracebackType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -1418,10 +1418,24 @@ class _RunHandoff:
 class _OpeningOwner:
     """Join Python publication; exact native slots remain registered by the lease."""
 
-    def __init__(self) -> None:
+    def __init__(self, environment: EnvironmentSource[Any] | None = None) -> None:
         self.lease: Any = None
         self._environment_reservation: Any = None
         self.api_key: str | None = None
+        self.environment = environment
+
+    def __enter__(self) -> _OpeningOwner:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        # Early declaration validation can fail before any resource is acquired.
+        # Keep its traceback from retaining the application's private environment.
+        self.environment = None
 
     async def acquire(self, operation: Any) -> Any:
         pending = asyncio.ensure_future(operation)
@@ -2534,6 +2548,52 @@ def _check_checkpoint(state: SessionState, instructions: str, *, graph: bool = F
         native._check_session_instructions(json.dumps(state.history), instructions)
 
 
+def _prepare_native_checkpoint(
+    saved: SessionState, *, has_output_override: bool
+) -> tuple[str, bool, tuple[ToolRef, ...] | None, tuple[str, ...]]:
+    restored_override = False
+    restored_defaults: tuple[ToolRef, ...] | None = None
+    restored_resource_servers: tuple[str, ...] = ()
+    # The binding still consumes its original idle/manual format.
+    # Validate the SDK envelope before giving Core the native version.
+    payload = json.loads(saved.to_json())
+    if "_sdk_output_override" in saved.agent_options:
+        marker = saved.agent_options["_sdk_output_override"]
+        if type(marker) is not bool or marker is not True:
+            raise ValueError("Invalid saved output override marker")
+        if not has_output_override:
+            raise ValueError("Restore this turn with its restored_output_type override")
+        restored_override = True
+        payload["agent_options"].pop("_sdk_output_override")
+    payload.pop("codex_login_binding", None)
+    payload.pop("executor_read_only", None)
+    if saved.format_version in (4, 5, 6, 7):
+        payload["format_version"] = saved.format_version - 2
+    payload.pop("operation_tools", None)
+    payload.pop("repair_turns", None)
+    payload.pop("repair_items", None)
+    if "_sdk_default_tools" in saved.agent_options:
+        restored_defaults = tuple(
+            ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
+        )
+        payload["agent_options"].pop("_sdk_default_tools")
+    if "_sdk_default_mcp_resources" in saved.agent_options:
+        resource_names = saved.agent_options["_sdk_default_mcp_resources"]
+        if (
+            restored_defaults is None
+            or not isinstance(resource_names, list)
+            or not all(isinstance(name, str) for name in resource_names)
+            or len(set(resource_names)) != len(resource_names)
+        ):
+            raise ValueError("Saved resource servers require distinct names and idle defaults")
+        restored_resource_servers = tuple(resource_names)
+        payload["agent_options"].pop("_sdk_default_mcp_resources")
+    if saved.format_version in (4, 6):
+        # Idle selector names are SDK input, not native grants.
+        payload.pop("step_mcp_tools", None)
+    return json.dumps(payload), restored_override, restored_defaults, restored_resource_servers
+
+
 def _check_restored_output_contract(saved: SessionState, output: _PreparedOutput) -> None:
     """Validate the captured operation decoder before runtime resources open."""
     if saved.native_continuation is not None:
@@ -2647,6 +2707,34 @@ def _validate_storage_opening(
     if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
         raise ValueError("reconciled_calls requires a LocalStorage resume")
     return reconciliation
+
+
+def _validate_custom_storage_capabilities(
+    storage: LocalStorage | CustomStorage | None,
+    *,
+    native_agents: NativeAgents[Any] | None,
+    goals: bool,
+    programmatic_tool_calling: bool,
+    checklist: bool,
+    mcp_tools: Sequence[_MCP[Any]],
+    has_environment: bool,
+    available: Sequence[Tool[Any]],
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+) -> None:
+    if isinstance(storage, CustomStorage) and (
+        native_agents is not None
+        or goals
+        or programmatic_tool_calling
+        or checklist
+        or mcp_tools
+        or has_environment
+        or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
+        or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
+    ):
+        raise ValueError(
+            "CustomStorage preview does not support children, goals, checklist, "
+            "code mode, manual tools, standalone native tools or environments"
+        )
 
 
 def _capture_project_guidance(
@@ -2853,307 +2941,296 @@ class Session(Generic[ContextT, OutputT]):
         _completed_input: str | None = None,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
-        retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
-        if retention_omitted:
-            observation_retention = "bounded"
-        if not isinstance(project_guidance, bool):
-            raise TypeError("project_guidance must be a bool")
-        guidance_config, guidance_options, guidance_tools = _capture_project_guidance(
-            project_guidance
-        )
-        function_concurrency_omitted = max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
-        if function_concurrency_omitted:
-            max_function_concurrency = None
-        if restored_output_type is not None and (
-            state is None or state.native_continuation is None
-        ):
-            raise ValueError("restored_output_type requires a pending restored turn")
-        _validate_function_concurrency(max_function_concurrency)
-        parent_trace = _trace_context(parent_trace)
-        if not isinstance(discover_agents_md, bool):
-            raise TypeError("discover_agents_md must be a bool")
-        reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
-        if state is not None and (model is not None or model_settings is not None):
-            raise ValueError(
-                "Opening model and model_settings overrides cannot be used with state; "
-                "use update(model=...) after the restored Session is idle"
-            )
-        policy_agent = agent
-        selected = _restore_declaration.get()
-        if (
-            selected is not None
-            and selected.owner is not None
-            and selected.owner is asyncio.current_task()
-            and selected.agent is agent
-            and (selected.state is state or selected.state == state)
-        ):
-            agent = selected.declaration
-            if function_concurrency_omitted:
-                max_function_concurrency = selected.max_function_concurrency
+        lease = None
+        pending_environment: _EnvironmentLease | None = None
+        owned_provider = False
+        opening = _OpeningOwner(environment)
+        environment = None
+        runtime: dict[str, Any] = {}
+        native_environment: dict[str, Any] | None = None
+        session = None
+        with opening:
+            retention_omitted = observation_retention is _OBSERVATION_RETENTION_UNSET
             if retention_omitted:
-                observation_retention = selected.observation_retention
-            if tool_selection is not None and not _same_opening_tools(tool_selection, agent.tools):
-                raise ValueError(
-                    "DeferredTools.start restore requires its captured opening tools; "
-                    "omit tools or use prepare and restore explicitly for new bindings"
-                )
-        else:
-            selected = None
-            # Capture the declaration before native opening can suspend. Keep
-            # application hooks and executor policy bound to the original Agent.
-            agent = _capture_opening_agent(
-                agent,
-                provider=provider,
-                model=model,
-                model_settings=model_settings,
-                tool_selection=tool_selection,
+                observation_retention = "bounded"
+            if not isinstance(project_guidance, bool):
+                raise TypeError("project_guidance must be a bool")
+            guidance_config, guidance_options, guidance_tools = _capture_project_guidance(
+                project_guidance
             )
-        if observation_retention not in ("bounded", "all"):
-            raise ValueError('observation_retention must be "bounded" or "all"')
-        profiles = (
-            _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
-        )
-        codex_login = agent.provider.auth if agent.provider is not None else None
-        programmatic_tool_calling = agent.programmatic_tool_calling
-        instructions, instruction_receipts = _load_instruction_files(
-            agent.instructions, instruction_files
-        )
-        if not isinstance(programmatic_tool_calling, bool):
-            raise TypeError("programmatic_tool_calling must be a bool")
-        checkpoint = None
-        manual_restore = False
-        continuation = None
-        operation_slots = None
-        restored_operation_refs = None
-        restored_operation_declarations = None
-        restored_model_settings = None
-        restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
-        restored_resource_servers: tuple[str, ...] = ()
-        restored_override = False
-        if state is not None:
-            if not isinstance(state, SessionState):
-                raise TypeError("state must be a SessionState")
-            # Capture caller-owned data before the first await. The native
-            # importer validates identities, revision, and current tool specs.
-            saved = SessionState.from_json(state.to_json())
-            _check_checkpoint(saved, instructions, graph=bool(profiles))
-            if (saved.codex_login_binding is not None) != (codex_login is not None):
-                raise ValueError("Checkpoint and Session must use the same authentication mode")
-            # The binding still consumes its original idle/manual format.
-            # Validate the SDK envelope before giving Core the native version.
-            payload = json.loads(saved.to_json())
-            if "_sdk_output_override" in saved.agent_options:
-                marker = saved.agent_options["_sdk_output_override"]
-                if type(marker) is not bool or marker is not True:
-                    raise ValueError("Invalid saved output override marker")
-                if restored_output_type is None:
-                    raise ValueError("Restore this turn with its restored_output_type override")
-                restored_override = True
-                payload["agent_options"].pop("_sdk_output_override")
-            payload.pop("codex_login_binding", None)
-            payload.pop("executor_read_only", None)
-            if saved.format_version in (4, 5, 6, 7):
-                payload["format_version"] = saved.format_version - 2
-            payload.pop("operation_tools", None)
-            payload.pop("repair_turns", None)
-            payload.pop("repair_items", None)
-            if "_sdk_default_tools" in saved.agent_options:
-                restored_defaults = tuple(
-                    ToolRef(**item) for item in saved.agent_options["_sdk_default_tools"]
+            function_concurrency_omitted = (
+                max_function_concurrency is _MAX_FUNCTION_CONCURRENCY_UNSET
+            )
+            if function_concurrency_omitted:
+                max_function_concurrency = None
+            if restored_output_type is not None and (
+                state is None or state.native_continuation is None
+            ):
+                raise ValueError("restored_output_type requires a pending restored turn")
+            _validate_function_concurrency(max_function_concurrency)
+            parent_trace = _trace_context(parent_trace)
+            if not isinstance(discover_agents_md, bool):
+                raise TypeError("discover_agents_md must be a bool")
+            reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
+            if state is not None and (model is not None or model_settings is not None):
+                raise ValueError(
+                    "Opening model and model_settings overrides cannot be used with state; "
+                    "use update(model=...) after the restored Session is idle"
                 )
-                payload["agent_options"].pop("_sdk_default_tools")
-            if "_sdk_default_mcp_resources" in saved.agent_options:
-                resource_names = saved.agent_options["_sdk_default_mcp_resources"]
-                if (
-                    restored_defaults is None
-                    or not isinstance(resource_names, list)
-                    or not all(isinstance(name, str) for name in resource_names)
-                    or len(set(resource_names)) != len(resource_names)
+            policy_agent = agent
+            selected = _restore_declaration.get()
+            if (
+                selected is not None
+                and selected.owner is not None
+                and selected.owner is asyncio.current_task()
+                and selected.agent is agent
+                and (selected.state is state or selected.state == state)
+            ):
+                agent = selected.declaration
+                if function_concurrency_omitted:
+                    max_function_concurrency = selected.max_function_concurrency
+                if retention_omitted:
+                    observation_retention = selected.observation_retention
+                if tool_selection is not None and not _same_opening_tools(
+                    tool_selection, agent.tools
                 ):
                     raise ValueError(
-                        "Saved resource servers require distinct names and idle defaults"
+                        "DeferredTools.start restore requires its captured opening tools; "
+                        "omit tools or use prepare and restore explicitly for new bindings"
                     )
-                restored_resource_servers = tuple(resource_names)
-                payload["agent_options"].pop("_sdk_default_mcp_resources")
-            if saved.format_version in (4, 6):
-                # Idle selector names are SDK input, not native grants.
-                payload.pop("step_mcp_tools", None)
-            checkpoint = json.dumps(payload)
-            manual_restore = saved.native_continuation is not None
-            continuation = saved.native_continuation
-            if manual_restore:
-                restored_model_settings = _manual_restore_model_settings(saved)
-        if isinstance(storage, LocalStorage) and programmatic_tool_calling:
-            raise ValueError(
-                "LocalStorage does not support code mode: nested tool identities "
-                "do not yet have durable intent and result receipts"
+            else:
+                selected = None
+                # Capture the declaration before native opening can suspend. Keep
+                # application hooks and executor policy bound to the original Agent.
+                agent = _capture_opening_agent(
+                    agent,
+                    provider=provider,
+                    model=model,
+                    model_settings=model_settings,
+                    tool_selection=tool_selection,
+                )
+            if observation_retention not in ("bounded", "all"):
+                raise ValueError('observation_retention must be "bounded" or "all"')
+            profiles = (
+                _capture_agent_graph(policy_agent, root_declaration=agent) if agent.handoffs else ()
             )
-        tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
-        if restored_resource_servers:
-            assert restored_defaults is not None
-            restored_defaults = (
-                *restored_defaults,
-                *(_MCPResourceRef(name) for name in restored_resource_servers),
+            codex_login = agent.provider.auth if agent.provider is not None else None
+            programmatic_tool_calling = agent.programmatic_tool_calling
+            instructions, instruction_receipts = _load_instruction_files(
+                agent.instructions, instruction_files
             )
-        _check_native_agents_provider(native_agents, agent.provider)
-        available = agent.tools
-        checklist = any(isinstance(tool, Checklist) for tool in available)
-        goals = any(isinstance(tool, NativeGoals) for tool in available)
-        if isinstance(storage, CustomStorage) and (
-            native_agents is not None
-            or goals
-            or programmatic_tool_calling
-            or checklist
-            or mcp_tools
-            or environment is not None
-            or any(isinstance(tool, WebSearch) and tool.route != "hosted" for tool in available)
-            or any(tool._bind is None or tool.needs_approval is not False for tool in tools)
-        ):
-            raise ValueError(
-                "CustomStorage preview does not support children, goals, checklist, "
-                "code mode, manual tools, standalone native tools or environments"
+            if not isinstance(programmatic_tool_calling, bool):
+                raise TypeError("programmatic_tool_calling must be a bool")
+            checkpoint = None
+            manual_restore = False
+            continuation = None
+            operation_slots = None
+            restored_operation_refs = None
+            restored_operation_declarations = None
+            restored_model_settings = None
+            restored_defaults: tuple[ToolRef | _MCPResourceRef, ...] | None = None
+            restored_resource_servers: tuple[str, ...] = ()
+            restored_override = False
+            if state is not None:
+                if not isinstance(state, SessionState):
+                    raise TypeError("state must be a SessionState")
+                # Capture caller-owned data before the first await. The native
+                # importer validates identities, revision, and current tool specs.
+                saved = SessionState.from_json(state.to_json())
+                _check_checkpoint(saved, instructions, graph=bool(profiles))
+                if (saved.codex_login_binding is not None) != (codex_login is not None):
+                    raise ValueError("Checkpoint and Session must use the same authentication mode")
+                (
+                    checkpoint,
+                    restored_override,
+                    restored_defaults,
+                    restored_resource_servers,
+                ) = _prepare_native_checkpoint(
+                    saved, has_output_override=restored_output_type is not None
+                )
+                manual_restore = saved.native_continuation is not None
+                continuation = saved.native_continuation
+                if manual_restore:
+                    restored_model_settings = _manual_restore_model_settings(saved)
+            if isinstance(storage, LocalStorage) and programmatic_tool_calling:
+                raise ValueError(
+                    "LocalStorage does not support code mode: nested tool identities "
+                    "do not yet have durable intent and result receipts"
+                )
+            tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+            if restored_resource_servers:
+                assert restored_defaults is not None
+                restored_defaults = (
+                    *restored_defaults,
+                    *(_MCPResourceRef(name) for name in restored_resource_servers),
+                )
+            _check_native_agents_provider(native_agents, agent.provider)
+            available = agent.tools
+            checklist = any(isinstance(tool, Checklist) for tool in available)
+            goals = any(isinstance(tool, NativeGoals) for tool in available)
+            _validate_custom_storage_capabilities(
+                storage,
+                native_agents=native_agents,
+                goals=goals,
+                programmatic_tool_calling=programmatic_tool_calling,
+                checklist=checklist,
+                mcp_tools=mcp_tools,
+                has_environment=opening.environment is not None,
+                available=available,
+                tools=tools,
             )
-        if goals and storage is None:
-            raise ValueError("NativeGoals requires an explicit LocalStorage profile")
-        hosted_tools = _capture_hosted_tools(available)
-        if hosted_tools and codex_login is not None:
-            raise ValueError("Hosted tools require an API-key Responses provider, not Codex login")
-        web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
-        # Capture the controls before opening can await. Later selections only select the grant.
-        web_search_config = _capture_web_search_config(web_search)
-        allowed_tools, allowed_mcp = tools, mcp_tools
-        deferred_schemas = _has_deferred_tools(available) or any(
-            _has_deferred_tools(profile.declaration.tools) for profile in profiles
-        )
-        if state is not None and state.descendants and native_agents is None:
-            raise ValueError("Restoring child state requires current NativeAgents")
-        if native_agents is not None:
-            if not agent.model:
-                raise ValueError("NativeAgents requires an explicit compatible model")
-            if environment is None or (
-                isinstance(environment, Environment)
-                and not {"exec_command", "write_stdin", "apply_patch"}.issubset(environment.tools)
+            if goals and storage is None:
+                raise ValueError("NativeGoals requires an explicit LocalStorage profile")
+            hosted_tools = _capture_hosted_tools(available)
+            if hosted_tools and codex_login is not None:
+                raise ValueError(
+                    "Hosted tools require an API-key Responses provider, not Codex login"
+                )
+            web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
+            # Capture the controls before opening can await. Later selections only select the grant.
+            web_search_config = _capture_web_search_config(web_search)
+            allowed_tools, allowed_mcp = tools, mcp_tools
+            deferred_schemas = _has_deferred_tools(available) or any(
+                _has_deferred_tools(profile.declaration.tools) for profile in profiles
+            )
+            if state is not None and state.descendants and native_agents is None:
+                raise ValueError("Restoring child state requires current NativeAgents")
+            if native_agents is not None:
+                if not agent.model:
+                    raise ValueError("NativeAgents requires an explicit compatible model")
+                if opening.environment is None or (
+                    isinstance(opening.environment, Environment)
+                    and not {"exec_command", "write_stdin", "apply_patch"}.issubset(
+                        opening.environment.tools
+                    )
+                ):
+                    raise ValueError(
+                        "NativeAgents requires an Environment with all three execution tools"
+                    )
+            output = _prepare_spec(agent.output_type)
+            mcp_names = _tool_names(allowed_mcp)
+            _check_namespaced_tool_collisions(
+                allowed_tools,
+                mcp_names,
+                available,
+                native_agents=native_agents,
+                project_guidance=project_guidance,
+            )
+            model = agent.model
+            catalog = _capture_tools(0, tools, context)
+            bound_tools = catalog.tools
+            native = importlib.import_module("agents._native")
+            native._validate_python_tool_declarations(catalog.native_specs())
+            if (
+                state is not None
+                and saved.managed_tool_specs is not None
+                and not profiles
+                and (native_agents is not None or not manual_restore)
+            ):
+                catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
+            profile_runtimes, profile_roster = _capture_profile_runtimes(
+                profiles, catalog, instructions, context
+            )
+            restored_profile, operation_profile, operation_source = _restore_profile_sources(
+                native,
+                profile_runtimes,
+                profile_roster,
+                saved if state is not None else None,
+                context,
+            )
+            operation_declaration = (
+                operation_profile.profile.declaration if operation_profile is not None else agent
+            )
+            operation_handoffs = (
+                operation_profile.profile.handoffs if operation_profile is not None else None
+            )
+            restored_declaration = (
+                restored_profile.profile.declaration if restored_profile is not None else agent
+            )
+            restored_available = restored_declaration.tools
+            restored_handoffs = (
+                restored_profile.profile.handoffs if restored_profile is not None else None
+            )
+            restored_tools, restored_mcp, _ = _split_tools(
+                restored_available, programmatic_tool_calling
+            )
+            restored_catalog = (
+                _restore_python_catalog(restored_profile.catalog, saved.managed_tool_specs)
+                if restored_profile is not None and saved.managed_tool_specs is not None
+                else catalog
+            )
+            # Carry the owned root's exact contract through this checked restore.
+            # The opening default still applies to the next explicit request.
+            restored_output = (
+                _prepare_spec(restored_output_type)
+                if restored_output_type is not None
+                else selected.output
+                if selected is not None and manual_restore
+                else restored_profile.output
+                if restored_profile is not None
+                else output
+            )
+            settings = _native_model_settings(model, agent.model_settings)
+            if (
+                codex_login is not None
+                and settings.get("request_controls", {}).get("store") is True
+            ):
+                raise ValueError("store=True requires API-key Responses authentication")
+            if restored_model_settings is not None:
+                model, settings = restored_model_settings
+            native_specs = catalog.native_specs()
+            manual_slots = catalog.manual_slots()
+            if state is not None:
+                _check_restored_output_contract(saved, restored_output)
+            if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
+                os.environ.get(name)
+                for name in (
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                )
             ):
                 raise ValueError(
-                    "NativeAgents requires an Environment with all three execution tools"
+                    "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
+                    "Run outside that sandboxed environment or remove unused proxy settings."
                 )
-        output = _prepare_spec(agent.output_type)
-        mcp_names = _tool_names(allowed_mcp)
-        _check_namespaced_tool_collisions(
-            allowed_tools,
-            mcp_names,
-            available,
-            native_agents=native_agents,
-            project_guidance=project_guidance,
-        )
-        model = agent.model
-        catalog = _capture_tools(0, tools, context)
-        bound_tools = catalog.tools
-        native = importlib.import_module("agents._native")
-        native._validate_python_tool_declarations(catalog.native_specs())
-        if (
-            state is not None
-            and saved.managed_tool_specs is not None
-            and not profiles
-            and (native_agents is not None or not manual_restore)
-        ):
-            catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
-        profile_runtimes, profile_roster = _capture_profile_runtimes(
-            profiles, catalog, instructions, context
-        )
-        restored_profile, operation_profile, operation_source = _restore_profile_sources(
-            native, profile_runtimes, profile_roster, saved if state is not None else None, context
-        )
-        operation_declaration = (
-            operation_profile.profile.declaration if operation_profile is not None else agent
-        )
-        operation_handoffs = (
-            operation_profile.profile.handoffs if operation_profile is not None else None
-        )
-        restored_declaration = (
-            restored_profile.profile.declaration if restored_profile is not None else agent
-        )
-        restored_available = restored_declaration.tools
-        restored_handoffs = (
-            restored_profile.profile.handoffs if restored_profile is not None else None
-        )
-        restored_tools, restored_mcp, _ = _split_tools(
-            restored_available, programmatic_tool_calling
-        )
-        restored_catalog = (
-            _restore_python_catalog(restored_profile.catalog, saved.managed_tool_specs)
-            if restored_profile is not None and saved.managed_tool_specs is not None
-            else catalog
-        )
-        # Carry the owned root's exact contract through this checked restore.
-        # The opening default still applies to the next explicit request.
-        restored_output = (
-            _prepare_spec(restored_output_type)
-            if restored_output_type is not None
-            else selected.output
-            if selected is not None and manual_restore
-            else restored_profile.output
-            if restored_profile is not None
-            else output
-        )
-        settings = _native_model_settings(model, agent.model_settings)
-        if codex_login is not None and settings.get("request_controls", {}).get("store") is True:
-            raise ValueError("store=True requires API-key Responses authentication")
-        if restored_model_settings is not None:
-            model, settings = restored_model_settings
-        native_specs = catalog.native_specs()
-        manual_slots = catalog.manual_slots()
-        if state is not None:
-            _check_restored_output_contract(saved, restored_output)
-        if os.environ.get("CODEX_SANDBOX") == "seatbelt" and any(
-            os.environ.get(name)
-            for name in (
-                "HTTP_PROXY",
-                "http_proxy",
-                "HTTPS_PROXY",
-                "https_proxy",
-                "ALL_PROXY",
-                "all_proxy",
+            if manual_restore:
+                _check_restored_tool_context(
+                    restored_tools, restored_mcp, saved.operation_tools, context
+                )
+            # Capture the supported ceiling before acquiring a provider lease.
+            # Excluded openings keep their durable zero-turn publication path.
+            _atomic_first_turn = (
+                _atomic_first_turn
+                and initial_messages_json is None
+                and selected is None
+                and not profiles
+                and state is None
+                and storage is None
+                and resume is None
+                and opening.environment is None
+                and not instruction_files
+                and agent.provider is not None
+                and codex_login is None
+                and _supports_atomic_first_turn(
+                    agent,
+                    output_mode=output.mode,
+                    programmatic_tool_calling=programmatic_tool_calling,
+                    tools=available,
+                )
             )
-        ):
-            raise ValueError(
-                "The pinned Core cannot honor HTTP proxy settings in seatbelt mode. "
-                "Run outside that sandboxed environment or remove unused proxy settings."
-            )
-        if manual_restore:
-            _check_restored_tool_context(
-                restored_tools, restored_mcp, saved.operation_tools, context
-            )
-        # Capture the supported ceiling before acquiring a provider lease.
-        # Excluded openings keep their durable zero-turn publication path.
-        _atomic_first_turn = (
-            _atomic_first_turn
-            and initial_messages_json is None
-            and selected is None
-            and not profiles
-            and state is None
-            and storage is None
-            and resume is None
-            and environment is None
-            and not instruction_files
-            and agent.provider is not None
-            and codex_login is None
-            and _supports_atomic_first_turn(
-                agent,
-                output_mode=output.mode,
-                programmatic_tool_calling=programmatic_tool_calling,
-                tools=available,
-            )
-        )
-        lease = None
-        owned_provider = False
-        opening = _OpeningOwner()
-        if environment is not None and not isinstance(environment, Environment):
-            if not isinstance(environment, AbstractAsyncContextManager):
-                raise TypeError("environment must be an Environment or async context manager")
-            lease = _EnvironmentLease(environment)
-            environment = await lease.acquire()
+            environment = opening.environment
         try:
+            if environment is not None and not isinstance(environment, Environment):
+                if not isinstance(environment, AbstractAsyncContextManager):
+                    raise TypeError("environment must be an Environment or async context manager")
+                pending_environment = _EnvironmentLease(environment)
+                environment = await pending_environment.acquire()
+                lease = pending_environment
+                pending_environment = None
             executor = environment
             if (lease is not None or executor is not None) and not isinstance(
                 executor, Environment
@@ -3245,7 +3322,7 @@ class Session(Generic[ContextT, OutputT]):
             if executor is not None:
                 executor._check_context(context)
             home: TemporaryDirectory[str] | None = None
-            runtime: dict[str, Any] = {
+            runtime = {
                 "strict_config": True,
                 "loader": {"ignore_user_config": True, "ignore_project_config": True},
                 "base_instructions": (
@@ -3255,6 +3332,8 @@ class Session(Generic[ContextT, OutputT]):
             }
             if discover_agents_md:
                 runtime["_sdk_discover_agents_md"] = True
+            if project_guidance:
+                runtime["_sdk_project_guidance_config"] = True
 
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {
@@ -3270,7 +3349,7 @@ class Session(Generic[ContextT, OutputT]):
                 }
             _configure_storage_runtime(runtime, storage, resume, goals)
             if executor is not None:
-                native_environment = executor._to_native()
+                native_environment = cast(dict[str, Any], executor._to_native())
                 native_environment["local_mcp"] = has_host_mcp
                 runtime["environment"] = native_environment
                 runtime["sandbox_mode"] = "read-only"
@@ -3303,7 +3382,6 @@ class Session(Generic[ContextT, OutputT]):
             try:
                 native, transport, provider_lease = provider._acquire_lease()
                 opening.lease = provider_lease
-                session = None
                 engine = None
                 thread = None
                 provider_id = (
@@ -3904,6 +3982,14 @@ class Session(Generic[ContextT, OutputT]):
                 raise
 
         except BaseException as error:
+            # Initialization closures and options share these SDK-owned dictionaries.
+            # Remove secrets in place so every traceback reference loses the payload,
+            # while leaving the application's Environment and exception chain intact.
+            if native_environment is not None:
+                native_environment.clear()
+            runtime.pop("environment", None)
+            environment = executor = None
+            pending_environment = None
             if lease is not None:
                 await _close_after_error(error, lambda: opening.fail_environment(lease))
                 if opening.lease is not None and not lease._retired.done():
@@ -3924,6 +4010,10 @@ class Session(Generic[ContextT, OutputT]):
                         raise
                 raise
             finally:
+                # A retired unpublished Session no longer needs the caller's
+                # Environment. Pending native cleanup must retain its policy owner.
+                if opening.lease is None and session is not None:
+                    session._executor = None
                 # Both the original error and a manager-selected replacement
                 # must retain the same existing owner for unfinished cleanup.
                 if (
@@ -6361,11 +6451,12 @@ class Session(Generic[ContextT, OutputT]):
         return await self._join_mutation(asyncio.create_task(request()), cancellable=True)
 
     async def history_snapshot(self, *, limit: int | None = None) -> CanonicalHistorySnapshot:
-        """Read effective canonical response items from an idle Session.
+        """Original JSON object records from an idle Session.
 
-        ``limit`` returns the latest items; zero returns only revision and count.
-        The revision identifies the entire canonical input, including an omitted
-        prefix. This is distinct from projected ``items()`` and raw audit records.
+        ``limit``: latest original records; zero: revision and total only.
+        Revision and count for all original records, including audit-only records and
+        omitted prefixes. Imported unknown fields and missing IDs unchanged;
+        current model context and projected ``items()`` available separately.
         """
         self._check_callback_operation("read canonical history from its own Session")
         self._check_idle_update()
@@ -6377,7 +6468,9 @@ class Session(Generic[ContextT, OutputT]):
         async def capture() -> CanonicalHistorySnapshot:
             value = json.loads(await self._native._canonical_history(limit))
             return CanonicalHistorySnapshot(
-                value["revision"], value["total"], tuple(value["items"])
+                value["revision"],
+                value["total"],
+                tuple(json.loads(item) for item in value["items"]),
             )
 
         return await self._join_mutation(asyncio.create_task(capture()))
@@ -6389,16 +6482,21 @@ class Session(Generic[ContextT, OutputT]):
         keep: int,
         items: Sequence[Mapping[str, Any]] = (),
     ) -> str:
-        """Atomically retain a prefix and replace its suffix with native items.
+        """Atomic original-prefix retention and suffix replacement with JSON objects.
 
-        Use a current ``history_snapshot().revision``. Core rejects a conflict,
-        invalid item batch or non-idle owner before committing. ``keep=0`` replaces
-        the effective conversation; append with ``keep=snapshot.total``. The
-        acknowledged replacement survives restore through canonical storage.
-        An uncertain persistence outcome retires this Session; close it and
-        restore from storage before continuing. Raw rollout audit records remain.
-        Child graphs, goals and pending work
-        must settle or use their dedicated APIs before editing history.
+        ``expected_revision``: current ``history_snapshot().revision``.
+        ``keep``: original-record count, including audit-only rows.
+        Positive ``keep=snapshot.total``: append with current model context preserved.
+        ``keep=0``: explicit whole-history and model-context replacement, even if empty.
+        Other prefixes: exact retained-original model projections only;
+        ambiguous partial compaction-summary edits rejected before commit.
+
+        Unknown imported record types: audit-only, without model input or work.
+        Known malformed executable records, invalid client tool pairs, stale
+        revisions and non-idle owners: rejection before commit. Acknowledged
+        replacements retained through native restore; raw rollout audit records retained.
+        Uncertain persistence retires this Session; close and restore required.
+        Child graphs, goals and pending work require their dedicated APIs first.
         """
         self._check_callback_operation("edit canonical history from its own Session")
         self._check_idle_update()
@@ -6406,7 +6504,7 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("expected_revision must be nonempty text")
         if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
             raise ValueError("keep must be a nonnegative integer")
-        captured = json.dumps(list(items))
+        captured = json.dumps([json.dumps(item) for item in items])
 
         async def replace() -> str:
             value = json.loads(

@@ -1,0 +1,774 @@
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index 741aa742..09197e3e 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -170,6 +170,21 @@ pub struct LandlockCommand {
+ /// 2. Apply in-process restrictions (no_new_privs + seccomp).
+ /// 3. `execvp` into the final command.
+ pub fn run_main() -> ! {
++    let carrier: std::collections::HashMap<String, String> = std::env::vars_os()
++        .filter_map(|(name, value)| {
++            let name = name.to_str()?;
++            codex_sandboxing::landlock::is_reserved_sandbox_environment_variable(name).then(|| {
++                (
++                    name.to_owned(),
++                    value
++                        .into_string()
++                        .unwrap_or_else(|_| panic!("invalid sandbox command environment")),
++                )
++            })
++        })
++        .collect();
++    let mut command_env = codex_sandboxing::landlock::decode_sandbox_command_environment(&carrier)
++        .unwrap_or_else(|_| panic!("invalid sandbox command environment"));
+     let LandlockCommand {
+         sandbox_policy_cwd,
+         command_cwd,
+@@ -247,7 +262,7 @@ pub fn run_main() -> ! {
+             let spec = proxy_route_spec
+                 .as_deref()
+                 .unwrap_or_else(|| panic!("managed proxy mode requires --proxy-route-spec"));
+-            if let Err(err) = activate_proxy_routes_in_netns(spec) {
++            if let Err(err) = activate_proxy_routes_in_netns(spec, command_env.as_mut()) {
+                 panic!("error activating Linux proxy routing bridge: {err}");
+             }
+         }
+@@ -285,7 +300,7 @@ pub fn run_main() -> ! {
+             drop(cancel);
+             reset_forwarded_signal_handlers_to_default();
+             signal_mask.restore();
+-            exec_or_panic(command);
++            exec_or_panic(command, command_env.as_ref());
+         }
+ 
+         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
+@@ -328,7 +343,7 @@ pub fn run_main() -> ! {
+         ) {
+             panic!("error applying Linux sandbox restrictions: {e:?}");
+         }
+-        exec_or_panic(command);
++        exec_or_panic(command, command_env.as_ref());
+     }
+ 
+     if !use_legacy_landlock {
+@@ -336,12 +351,26 @@ pub fn run_main() -> ! {
+         // sandboxed environment to apply seccomp. This path never falls back
+         // to legacy Landlock on failure.
+         let (proxy_route_spec, proxy_controls) = if allow_network_for_proxy {
+-            let (proxy_route_spec, controls) = prepare_host_proxy_route_spec()
++            let (proxy_route_spec, controls) = prepare_host_proxy_route_spec(command_env.as_mut())
+                 .unwrap_or_else(|err| panic!("failed to prepare host proxy routing bridge: {err}"));
+             (Some(proxy_route_spec), controls)
+         } else {
+             (None, Vec::new())
+         };
++        if let Some(env) = command_env.as_ref() {
++            let encoded = codex_sandboxing::landlock::encode_sandbox_command_environment(env)
++                .unwrap_or_else(|_| panic!("invalid sandbox command environment"));
++            // SAFETY: startup is single-threaded. Only opaque carrier entries
++            // change; payload variables never become bootstrap variables.
++            unsafe {
++                for name in carrier.keys() {
++                    std::env::remove_var(name);
++                }
++                for (name, value) in encoded {
++                    std::env::set_var(name, value);
++                }
++            }
++        }
+         let options = BwrapOptions {
+             mount_proc: !no_proc && !inherit_pid_namespace,
+             inherit_pid_namespace,
+@@ -380,10 +409,8 @@ pub fn run_main() -> ! {
+         // expose only that file so bubblewrap can re-enter it to apply seccomp.
+         let helper = AbsolutePathBuf::from_absolute_path(Path::new(&inner[0]))
+             .unwrap_or_else(|err| panic!("invalid sandbox helper path: {err}"));
+-        let file_system_sandbox_policy = file_system_sandbox_policy.with_additional_readable_roots(
+-            &sandbox_policy_cwd,
+-            &[helper],
+-        );
++        let file_system_sandbox_policy = file_system_sandbox_policy
++            .with_additional_readable_roots(&sandbox_policy_cwd, &[helper]);
+         run_bwrap_with_proc_fallback(
+             &sandbox_policy_cwd,
+             command_cwd.as_deref(),
+@@ -405,7 +432,7 @@ pub fn run_main() -> ! {
+     ) {
+         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+     }
+-    exec_or_panic(command);
++    exec_or_panic(command, command_env.as_ref());
+ }
+ 
+ #[derive(Debug, Clone)]
+@@ -1641,7 +1668,19 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
+ }
+ 
+ /// Exec the provided argv, panicking with context if it fails.
+-fn exec_or_panic(command: Vec<String>) -> ! {
++fn exec_or_panic(
++    command: Vec<String>,
++    env: Option<&std::collections::HashMap<String, String>>,
++) -> ! {
++    if let Some(env) = env {
++        use std::os::unix::process::CommandExt;
++        let error = std::process::Command::new(&command[0])
++            .args(&command[1..])
++            .env_clear()
++            .envs(env)
++            .exec();
++        panic!("Failed to exec sandboxed command: {error}");
++    }
+     #[expect(clippy::expect_used)]
+     let c_command =
+         CString::new(command[0].as_str()).expect("Failed to convert command to CString");
+diff --git a/codex-rs/linux-sandbox/src/proxy_routing.rs b/codex-rs/linux-sandbox/src/proxy_routing.rs
+index a008299d..a356893a 100644
+--- a/codex-rs/linux-sandbox/src/proxy_routing.rs
++++ b/codex-rs/linux-sandbox/src/proxy_routing.rs
+@@ -72,8 +72,15 @@ struct ProxyRoutePlan {
+     has_proxy_config: bool,
+ }
+ 
+-pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, Vec<File>)> {
+-    let (attribution_token, plan) = extract_attribution_token_and_plan(std::env::vars().collect());
++pub(crate) fn prepare_host_proxy_route_spec(
++    env: Option<&mut HashMap<String, String>>,
++) -> io::Result<(String, Vec<File>)> {
++    let (attribution_token, plan) = if let Some(env) = env {
++        let attribution_token = env.remove(PROXY_ATTRIBUTION_TOKEN_ENV_KEY);
++        (attribution_token, plan_proxy_routes(env))
++    } else {
++        extract_attribution_token_and_plan(std::env::vars().collect())
++    };
+     // SAFETY: the sandbox helper is single-threaded here, before it forks bridge workers or
+     // executes the user command.
+     unsafe {
+@@ -128,7 +135,10 @@ fn extract_attribution_token_and_plan(
+     (attribution_token, plan)
+ }
+ 
+-pub(crate) fn activate_proxy_routes_in_netns(serialized_spec: &str) -> io::Result<()> {
++pub(crate) fn activate_proxy_routes_in_netns(
++    serialized_spec: &str,
++    mut env: Option<&mut HashMap<String, String>>,
++) -> io::Result<()> {
+     let spec: ProxyRouteSpec = serde_json::from_str(serialized_spec).map_err(io::Error::other)?;
+ 
+     if spec.routes.is_empty() {
+@@ -183,12 +193,20 @@ pub(crate) fn activate_proxy_routes_in_netns(serialized_spec: &str) -> io::Resul
+         let Some(local_port) = local_port_by_control.get(&route.control_fd) else {
+             return Err(io::Error::other("missing proxy listener port"));
+         };
+-        let original_value = std::env::var(&route.env_key).map_err(|_| {
+-            io::Error::new(
+-                io::ErrorKind::NotFound,
+-                format!("missing proxy env key {}", route.env_key),
+-            )
+-        })?;
++        let original_value = env
++            .as_ref()
++            .and_then(|env| env.get(&route.env_key).cloned())
++            .or_else(|| {
++                env.is_none()
++                    .then(|| std::env::var(&route.env_key).ok())
++                    .flatten()
++            })
++            .ok_or_else(|| {
++                io::Error::new(
++                    io::ErrorKind::NotFound,
++                    format!("missing proxy env key {}", route.env_key),
++                )
++            })?;
+         let Some(rewritten) = rewrite_proxy_env_value(&original_value, *local_port) else {
+             return Err(io::Error::new(
+                 io::ErrorKind::InvalidInput,
+@@ -197,8 +215,12 @@ pub(crate) fn activate_proxy_routes_in_netns(serialized_spec: &str) -> io::Resul
+         };
+         // SAFETY: this helper process is single-threaded at this point, and
+         // env mutation happens before execing the user command.
+-        unsafe {
+-            std::env::set_var(route.env_key, rewritten);
++        if let Some(env) = env.as_mut() {
++            env.insert(route.env_key, rewritten);
++        } else {
++            unsafe {
++                std::env::set_var(route.env_key, rewritten);
++            }
+         }
+     }
+ 
+diff --git a/codex-rs/linux-sandbox/tests/suite/environment_tests.rs b/codex-rs/linux-sandbox/tests/suite/environment_tests.rs
+new file mode 100644
+index 00000000..795c7844
+--- /dev/null
++++ b/codex-rs/linux-sandbox/tests/suite/environment_tests.rs
+@@ -0,0 +1,142 @@
++use super::*;
++use codex_sandboxing::SandboxCommand;
++use codex_sandboxing::SandboxManager;
++use codex_sandboxing::SandboxTransformRequest;
++use codex_sandboxing::SandboxType;
++use std::os::unix::process::CommandExt;
++use std::path::Path;
++use std::process::Command;
++
++fn run_payload_environment(
++    workspace: &Path,
++    env: HashMap<String, String>,
++    argv: &[&str],
++) -> Output {
++    let workspace = AbsolutePathBuf::try_from(workspace).unwrap();
++    let command = SandboxCommand {
++        program: argv[0].into(),
++        args: argv[1..].iter().map(|arg| (*arg).to_owned()).collect(),
++        cwd: url::Url::from_directory_path(workspace.as_path())
++            .unwrap()
++            .as_str()
++            .parse()
++            .unwrap(),
++        env,
++        managed_network: None,
++        additional_permissions: None,
++    };
++    let cwd = command.cwd.clone();
++    let permissions = PermissionProfile::workspace_write_with(
++        std::slice::from_ref(&workspace),
++        NetworkSandboxPolicy::Restricted,
++        /*exclude_tmpdir_env_var*/ true,
++        /*exclude_slash_tmp*/ true,
++    );
++    let helper = codex_linux_sandbox_exe();
++    let request = SandboxManager::new()
++        .transform(SandboxTransformRequest {
++            command,
++            permissions: &permissions,
++            sandbox: SandboxType::LinuxSeccomp,
++            enforce_managed_network: false,
++            environment_id: None,
++            network: None,
++            sandbox_policy_cwd: &cwd,
++            sandbox_exe: Some(&helper),
++            use_legacy_landlock: false,
++            windows_sandbox_level: WindowsSandboxLevel::Disabled,
++        })
++        .unwrap();
++    let mut command = Command::new(&request.command[0]);
++    command
++        .args(&request.command[1..])
++        .current_dir(workspace.as_path())
++        .env_clear()
++        .envs(request.env);
++    if let Some(arg0) = request.arg0 {
++        command.arg0(arg0);
++    }
++    command.output().unwrap()
++}
++
++#[test_case::test_case("LD_PRELOAD"; "preload")]
++#[test_case::test_case("LD_AUDIT"; "audit")]
++#[tokio::test]
++async fn loader_constructor_only_runs_with_payload_permissions(variable: &str) {
++    if should_skip_bwrap_tests().await {
++        return;
++    }
++    let root = tempfile::TempDir::new().unwrap();
++    let workspace = root.path().join("workspace");
++    std::fs::create_dir(&workspace).unwrap();
++    let source = workspace.join("loader.c");
++    let library = workspace.join("loader.so");
++    std::fs::write(&source, include_str!("fixtures/environment_loader.c")).unwrap();
++    assert!(
++        Command::new("cc")
++            .args(["-shared", "-fPIC"])
++            .arg(&source)
++            .arg("-o")
++            .arg(&library)
++            .status()
++            .unwrap()
++            .success()
++    );
++    // Neither /tmp nor TMPDIR is writable in this profile. Only workspace is.
++    let outside = root.path().join("outside-marker");
++    let inside = workspace.join("inside-marker");
++    let env = HashMap::from([
++        (variable.to_owned(), library.to_string_lossy().into_owned()),
++        (
++            "CODEX_TEST_OUTSIDE_MARKER".to_owned(),
++            outside.to_string_lossy().into_owned(),
++        ),
++        (
++            "CODEX_TEST_INSIDE_MARKER".to_owned(),
++            inside.to_string_lossy().into_owned(),
++        ),
++    ]);
++    let output = run_payload_environment(&workspace, env, &["/bin/true"]);
++    assert!(output.status.success(), "{output:?}");
++    assert!(
++        !outside.exists(),
++        "loader ran before filesystem confinement"
++    );
++    assert!(inside.is_file(), "payload loader constructor did not run");
++    assert!(String::from_utf8_lossy(&output.stdout).contains("payload-constructor"));
++}
++
++#[tokio::test]
++async fn chunked_environment_preserves_two_individually_valid_large_values() {
++    if should_skip_bwrap_tests().await {
++        return;
++    }
++    let workspace = tempfile::TempDir::new().unwrap();
++    let env = HashMap::from([
++        ("FIRST".to_owned(), "a".repeat(80 * 1024)),
++        ("SECOND".to_owned(), "b".repeat(80 * 1024)),
++    ]);
++    let output = run_payload_environment(
++        workspace.path(),
++        env,
++        &[
++            "/bin/sh",
++            "-c",
++            "test ${#FIRST} -eq 81920 && test ${#SECOND} -eq 81920",
++        ],
++    );
++    assert!(output.status.success(), "{output:?}");
++}
++
++#[tokio::test]
++async fn chunked_environment_preserves_existing_large_control_character_values() {
++    if should_skip_bwrap_tests().await {
++        return;
++    }
++    let workspace = tempfile::TempDir::new().unwrap();
++    let env: HashMap<String, String> = (0..32)
++        .map(|index| (format!("VALUE_{index}"), "\n".repeat(40960)))
++        .collect();
++    let output = run_payload_environment(workspace.path(), env, &["/bin/true"]);
++    assert!(output.status.success(), "{output:?}");
++}
+diff --git a/codex-rs/linux-sandbox/tests/suite/fixtures/environment_loader.c b/codex-rs/linux-sandbox/tests/suite/fixtures/environment_loader.c
+new file mode 100644
+index 00000000..03919dc3
+--- /dev/null
++++ b/codex-rs/linux-sandbox/tests/suite/fixtures/environment_loader.c
+@@ -0,0 +1,19 @@
++#include <fcntl.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++unsigned int la_version(unsigned int version) { return version; }
++
++__attribute__((constructor)) static void loaded(void) {
++    const char *names[] = {"CODEX_TEST_OUTSIDE_MARKER", "CODEX_TEST_INSIDE_MARKER"};
++    for (unsigned int i = 0; i < 2; ++i) {
++        const char *path = getenv(names[i]);
++        if (path == NULL) continue;
++        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
++        if (fd >= 0) {
++            write(fd, "loaded\n", 7);
++            close(fd);
++        }
++    }
++    write(STDOUT_FILENO, "payload-constructor\n", 20);
++}
+diff --git a/codex-rs/linux-sandbox/tests/suite/landlock.rs b/codex-rs/linux-sandbox/tests/suite/landlock.rs
+index fa22e7a1..7a98db8d 100644
+--- a/codex-rs/linux-sandbox/tests/suite/landlock.rs
++++ b/codex-rs/linux-sandbox/tests/suite/landlock.rs
+@@ -37,6 +37,9 @@ mod root_metadata_tests;
+ #[path = "denied_files_tests.rs"]
+ mod denied_files_tests;
+ 
++#[path = "environment_tests.rs"]
++mod environment_tests;
++
+ // At least on GitHub CI, the arm64 tests appear to need longer timeouts.
+ 
+ #[cfg(not(target_arch = "aarch64"))]
+diff --git a/codex-rs/sandboxing/src/landlock.rs b/codex-rs/sandboxing/src/landlock.rs
+index dad16e23..ece326a1 100644
+--- a/codex-rs/sandboxing/src/landlock.rs
++++ b/codex-rs/sandboxing/src/landlock.rs
+@@ -6,6 +6,181 @@ use std::path::Path;
+ /// helper.
+ pub const CODEX_LINUX_SANDBOX_ARG0: &str = "codex-linux-sandbox";
+ 
++/// Payload environment transported as data until the sandbox's final exec boundary.
++pub const CODEX_SANDBOX_COMMAND_ENV_JSON: &str = "CODEX_SANDBOX_COMMAND_ENV_JSON";
++
++const COMMAND_ENV_CHUNK_BYTES: usize = 64 * 1024;
++const MAX_COMMAND_ENV_CHUNKS: usize = 1024;
++const COMMAND_ENV_PREFIX: &str = "CODEX_SANDBOX_COMMAND_ENV_JSON_";
++
++pub fn is_reserved_sandbox_environment_variable(name: &str) -> bool {
++    name.eq_ignore_ascii_case(CODEX_SANDBOX_COMMAND_ENV_JSON)
++        || name
++            .get(..COMMAND_ENV_PREFIX.len())
++            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(COMMAND_ENV_PREFIX))
++}
++
++fn invalid_command_env() -> std::io::Error {
++    std::io::Error::new(
++        std::io::ErrorKind::InvalidInput,
++        "invalid sandbox command environment",
++    )
++}
++
++pub fn encode_sandbox_command_environment(
++    payload: &std::collections::HashMap<String, String>,
++) -> std::io::Result<std::collections::HashMap<String, String>> {
++    if payload
++        .keys()
++        .any(|name| is_reserved_sandbox_environment_variable(name))
++    {
++        return Err(invalid_command_env());
++    }
++    let mut encoded = format!("{}:", payload.len());
++    for (name, value) in payload {
++        if name.contains('\0') || value.contains('\0') {
++            return Err(invalid_command_env());
++        }
++        encoded.push_str(&format!("{}:", name.len()));
++        encoded.push_str(name);
++        encoded.push_str(&format!("{}:", value.len()));
++        encoded.push_str(value);
++    }
++    let mut carrier = std::collections::HashMap::new();
++    let mut offset = 0;
++    let mut count = 0;
++    while offset < encoded.len() {
++        let mut end = (offset + COMMAND_ENV_CHUNK_BYTES).min(encoded.len());
++        while !encoded.is_char_boundary(end) {
++            end -= 1;
++        }
++        carrier.insert(
++            format!("{COMMAND_ENV_PREFIX}{count}"),
++            encoded[offset..end].to_owned(),
++        );
++        offset = end;
++        count += 1;
++        if count > MAX_COMMAND_ENV_CHUNKS {
++            return Err(invalid_command_env());
++        }
++    }
++    carrier.insert(
++        CODEX_SANDBOX_COMMAND_ENV_JSON.to_owned(),
++        format!("1:{count}"),
++    );
++    Ok(carrier)
++}
++
++pub fn decode_sandbox_command_environment(
++    carrier: &std::collections::HashMap<String, String>,
++) -> std::io::Result<Option<std::collections::HashMap<String, String>>> {
++    let chunks = carrier
++        .keys()
++        .filter(|name| name.starts_with(COMMAND_ENV_PREFIX))
++        .count();
++    let reserved = carrier
++        .keys()
++        .filter(|name| is_reserved_sandbox_environment_variable(name))
++        .count();
++    let Some(header) = carrier.get(CODEX_SANDBOX_COMMAND_ENV_JSON) else {
++        return if reserved == 0 {
++            Ok(None)
++        } else {
++            Err(invalid_command_env())
++        };
++    };
++    let count: usize = header
++        .strip_prefix("1:")
++        .ok_or_else(invalid_command_env)?
++        .parse()
++        .map_err(|_| invalid_command_env())?;
++    if count == 0
++        || count > MAX_COMMAND_ENV_CHUNKS
++        || count != chunks
++        || reserved != count + 1
++        || header != &format!("1:{count}")
++    {
++        return Err(invalid_command_env());
++    }
++    let mut encoded = String::new();
++    for index in 0..count {
++        let chunk = carrier
++            .get(&format!("{COMMAND_ENV_PREFIX}{index}"))
++            .ok_or_else(invalid_command_env)?;
++        if chunk.is_empty() || chunk.len() > COMMAND_ENV_CHUNK_BYTES {
++            return Err(invalid_command_env());
++        }
++        encoded.push_str(chunk);
++    }
++    let mut remaining = encoded.as_str();
++    let count = read_command_env_length(&mut remaining)?;
++    if count > remaining.len() / 4 {
++        return Err(invalid_command_env());
++    }
++    let mut payload = std::collections::HashMap::new();
++    for _ in 0..count {
++        let name = read_command_env_string(&mut remaining)?.to_owned();
++        let value = read_command_env_string(&mut remaining)?.to_owned();
++        if name.contains('\0') || value.contains('\0') || payload.insert(name, value).is_some() {
++            return Err(invalid_command_env());
++        }
++    }
++    if !remaining.is_empty() {
++        return Err(invalid_command_env());
++    }
++    if payload
++        .keys()
++        .any(|name| is_reserved_sandbox_environment_variable(name))
++    {
++        return Err(invalid_command_env());
++    }
++    Ok(Some(payload))
++}
++
++fn read_command_env_length(remaining: &mut &str) -> std::io::Result<usize> {
++    let (length, rest) = remaining.split_once(':').ok_or_else(invalid_command_env)?;
++    let parsed: usize = length.parse().map_err(|_| invalid_command_env())?;
++    if length != parsed.to_string() {
++        return Err(invalid_command_env());
++    }
++    *remaining = rest;
++    Ok(parsed)
++}
++
++fn read_command_env_string<'a>(remaining: &mut &'a str) -> std::io::Result<&'a str> {
++    let length = read_command_env_length(remaining)?;
++    let value = remaining.get(..length).ok_or_else(invalid_command_env)?;
++    *remaining = remaining.get(length..).ok_or_else(invalid_command_env)?;
++    Ok(value)
++}
++
++pub fn prepare_linux_sandbox_environment(
++    payload: &std::collections::HashMap<String, String>,
++) -> std::io::Result<std::collections::HashMap<String, String>> {
++    // Bootstrap lookups use the trusted executor environment, never payload PATH
++    // or loader variables. Retain only inputs needed by helper startup/discovery.
++    let mut bootstrap = std::collections::HashMap::new();
++    for name in [
++        "PATH",
++        "TMPDIR",
++        "CARGO_BIN_EXE_bwrap",
++        "CODEX_SDK_BWRAP_SEARCH_PATH",
++        "RUNFILES_DIR",
++        "TEST_SRCDIR",
++        "RUNFILES_MANIFEST_FILE",
++        "TEST_WORKSPACE",
++    ] {
++        if let Ok(value) = std::env::var(name) {
++            bootstrap.insert(name.to_owned(), value);
++        }
++    }
++    if let Some(path) = bootstrap.get("CODEX_SDK_BWRAP_SEARCH_PATH").cloned() {
++        bootstrap.insert("PATH".to_owned(), path);
++    }
++    bootstrap.extend(encode_sandbox_command_environment(payload)?);
++    Ok(bootstrap)
++}
++
+ pub fn allow_network_for_proxy(enforce_managed_network: bool) -> bool {
+     // When managed network requirements are active, request proxy-only
+     // networking from the Linux sandbox helper. Without managed requirements,
+diff --git a/codex-rs/sandboxing/src/landlock_tests.rs b/codex-rs/sandboxing/src/landlock_tests.rs
+index b3a57c3e..a8f36144 100644
+--- a/codex-rs/sandboxing/src/landlock_tests.rs
++++ b/codex-rs/sandboxing/src/landlock_tests.rs
+@@ -1,6 +1,103 @@
+ use super::*;
+ use pretty_assertions::assert_eq;
+ 
++#[test]
++fn payload_environment_is_data_until_the_sandbox_exec_boundary() {
++    let payload = std::collections::HashMap::from([
++        ("PATH".to_owned(), "/model-writable/bin".to_owned()),
++        (
++            "LD_PRELOAD".to_owned(),
++            "/model-writable/loader.so".to_owned(),
++        ),
++        ("LD_AUDIT".to_owned(), "/model-writable/audit.so".to_owned()),
++        ("BASH_ENV".to_owned(), "/model-writable/startup".to_owned()),
++        ("APP_MODE".to_owned(), "payload".to_owned()),
++    ]);
++    let bootstrap = prepare_linux_sandbox_environment(&payload).expect("bootstrap environment");
++    for name in ["LD_PRELOAD", "LD_AUDIT", "BASH_ENV", "APP_MODE"] {
++        assert!(!bootstrap.contains_key(name));
++    }
++    let expected_path = std::env::var("CODEX_SDK_BWRAP_SEARCH_PATH")
++        .or_else(|_| std::env::var("PATH"))
++        .ok();
++    assert_eq!(bootstrap.get("PATH"), expected_path.as_ref());
++    assert_eq!(
++        decode_sandbox_command_environment(&bootstrap).unwrap(),
++        Some(payload)
++    );
++}
++
++#[test]
++fn command_environment_preserves_large_values_and_utf8_chunk_boundaries() {
++    let payload = std::collections::HashMap::from([
++        ("FIRST".to_owned(), "a".repeat(80 * 1024)),
++        ("SECOND".to_owned(), "b".repeat(80 * 1024)),
++        ("UNICODE".to_owned(), "é".repeat(40 * 1024)),
++        (
++            "$serde_json::private::Number".to_owned(),
++            "7301592846".to_owned(),
++        ),
++        (
++            "$serde_json::private::RawValue".to_owned(),
++            "{\"unchanged\":true}".to_owned(),
++        ),
++    ]);
++    let encoded = encode_sandbox_command_environment(&payload).unwrap();
++    assert!(encoded.len() > 3);
++    assert!(
++        encoded
++            .values()
++            .all(|chunk| chunk.len() <= COMMAND_ENV_CHUNK_BYTES)
++    );
++    assert_eq!(
++        decode_sandbox_command_environment(&encoded).unwrap(),
++        Some(payload)
++    );
++}
++
++#[test]
++fn command_environment_rejects_incomplete_or_ambiguous_framing() {
++    let encoded = encode_sandbox_command_environment(&std::collections::HashMap::new()).unwrap();
++    for (key, value) in [
++        (CODEX_SANDBOX_COMMAND_ENV_JSON, "0"),
++        (CODEX_SANDBOX_COMMAND_ENV_JSON, "01"),
++        (CODEX_SANDBOX_COMMAND_ENV_JSON, "1025"),
++        ("CODEX_SANDBOX_COMMAND_ENV_JSON_1", "{}"),
++        ("codex_sandbox_command_env_json_0", "{}"),
++        ("CODEX_SANDBOX_COMMAND_ENV_JSON_é", "{}"),
++        ("CODEX_SANDBOX_COMMAND_ENV_JSON_0", "[]"),
++    ] {
++        let mut invalid = encoded.clone();
++        invalid.insert(key.to_owned(), value.to_owned());
++        assert!(decode_sandbox_command_environment(&invalid).is_err());
++    }
++    for missing in encoded.keys() {
++        let mut invalid = encoded.clone();
++        invalid.remove(missing);
++        assert!(decode_sandbox_command_environment(&invalid).is_err());
++    }
++    assert_eq!(
++        decode_sandbox_command_environment(&std::collections::HashMap::new()).unwrap(),
++        None
++    );
++}
++
++#[test]
++fn payload_cannot_supply_carrier_control_names() {
++    for name in [
++        CODEX_SANDBOX_COMMAND_ENV_JSON,
++        "codex_sandbox_command_env_json_0",
++        "CODEX_SANDBOX_COMMAND_ENV_JSON_é",
++    ] {
++        let payload = std::collections::HashMap::from([(
++            name.to_owned(),
++            "private-payload-value".to_owned(),
++        )]);
++        let error = encode_sandbox_command_environment(&payload).unwrap_err();
++        assert!(!error.to_string().contains("private-payload-value"));
++    }
++}
++
+ #[test]
+ fn legacy_landlock_flag_is_included_when_requested() {
+     let command = vec!["/bin/true".to_string()];
+@@ -90,3 +187,39 @@ fn proxy_network_requires_managed_requirements() {
+         true
+     );
+ }
++
++#[test]
++fn command_environment_does_not_expand_control_character_values() {
++    let payload: std::collections::HashMap<String, String> = (0..32)
++        .map(|index| (format!("VALUE_{index}"), "\n".repeat(40960)))
++        .collect();
++    let encoded = encode_sandbox_command_environment(&payload).unwrap();
++    let bytes: usize = encoded.values().map(String::len).sum();
++    assert!(bytes < 1_312_000);
++    assert_eq!(
++        decode_sandbox_command_environment(&encoded).unwrap(),
++        Some(payload)
++    );
++}
++
++#[test]
++fn command_environment_rejects_noncanonical_or_truncated_lengths() {
++    for body in [
++        "01:",
++        "1:1:é0:",
++        "1:2:a",
++        "1:1:a00:",
++        "1:1:a0:extra",
++        "2:1:a0:1:a0:",
++        "1:1:a18446744073709551615:x",
++    ] {
++        let carrier = std::collections::HashMap::from([
++            (CODEX_SANDBOX_COMMAND_ENV_JSON.to_owned(), "1:1".to_owned()),
++            (
++                "CODEX_SANDBOX_COMMAND_ENV_JSON_0".to_owned(),
++                body.to_owned(),
++            ),
++        ]);
++        assert!(decode_sandbox_command_environment(&carrier).is_err());
++    }
++}
+diff --git a/codex-rs/sandboxing/src/lib.rs b/codex-rs/sandboxing/src/lib.rs
+index 248f79cf..57ffe4e8 100644
+--- a/codex-rs/sandboxing/src/lib.rs
++++ b/codex-rs/sandboxing/src/lib.rs
+@@ -71,7 +71,8 @@ impl From<SandboxTransformError> for CodexErr {
+     fn from(err: SandboxTransformError) -> Self {
+         match err {
+             error @ SandboxTransformError::InvalidCommandCwd { .. }
+-            | error @ SandboxTransformError::InvalidSandboxPolicyCwd { .. } => {
++            | error @ SandboxTransformError::InvalidSandboxPolicyCwd { .. }
++            | error @ SandboxTransformError::LinuxSandboxEnvironment(_) => {
+                 CodexErr::InvalidRequest(error.to_string())
+             }
+             SandboxTransformError::MissingLinuxSandboxExecutable => {
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index 5449a7cc..8b8d287a 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -195,6 +195,7 @@ pub enum SandboxTransformError {
+         source: io::Error,
+     },
+     MissingLinuxSandboxExecutable,
++    LinuxSandboxEnvironment(io::Error),
+     WindowsMxcPreparation(String),
+     EnvironmentNetworkProxy(String),
+     #[cfg(target_os = "macos")]
+@@ -229,6 +230,9 @@ impl std::fmt::Display for SandboxTransformError {
+             Self::EnvironmentNetworkProxy(err) => {
+                 write!(f, "failed to prepare environment network proxy: {err}")
+             }
++            Self::LinuxSandboxEnvironment(err) => {
++                write!(f, "failed to prepare Linux sandbox environment: {err}")
++            }
+             #[cfg(target_os = "macos")]
+             Self::SeatbeltPreparation(err) => {
+                 write!(f, "failed to prepare Seatbelt sandbox: {err}")
+@@ -251,6 +255,7 @@ impl std::error::Error for SandboxTransformError {
+             Self::InvalidCommandCwd { source, .. }
+             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
+             Self::MissingLinuxSandboxExecutable => None,
++            Self::LinuxSandboxEnvironment(source) => Some(source),
+             Self::WindowsMxcPreparation(_) => None,
+             Self::EnvironmentNetworkProxy(_) => None,
+             #[cfg(target_os = "macos")]
+@@ -526,6 +531,8 @@ impl SandboxManager {
+                 let mut full_command = Vec::with_capacity(1 + args.len());
+                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
+                 full_command.append(&mut args);
++                command.env = crate::landlock::prepare_linux_sandbox_environment(&command.env)
++                    .map_err(SandboxTransformError::LinuxSandboxEnvironment)?;
+                 (
+                     full_command,
+                     Some(linux_sandbox_arg0_override(exe)),

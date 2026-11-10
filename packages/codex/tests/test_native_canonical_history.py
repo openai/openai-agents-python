@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore
-from tests.native_fixtures import assistant_output, responses as responses
+from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, function_tool
+from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
 async def test_committed_history_flush_failure_retires_live_session(responses, tmp_path):
@@ -108,9 +108,11 @@ async def test_atomic_canonical_history_replacement_and_restore(responses):
         with pytest.raises(RuntimeError, match="revision conflict"):
             await session.transact_history(expected_revision=before.revision, keep=0)
         assert (await session.history_snapshot()).revision == revision
-        with pytest.raises(RuntimeError, match="unsupported canonical"):
+        with pytest.raises(RuntimeError, match="Invalid canonical history item"):
             await session.transact_history(
-                expected_revision=revision, keep=0, items=[{"type": "unsupported-item"}]
+                expected_revision=revision,
+                keep=0,
+                items=[{"type": "function_call", "arguments": 17}],
             )
         assert (await session.history_snapshot()).revision == revision
         state = await session.save_state()
@@ -213,3 +215,271 @@ async def test_history_transactions_preserve_self_contained_provider_hosted_reco
         item.get("type") == "tool_search_output" and item.get("execution") == "server"
         for item in wire
     )
+
+
+async def test_original_values_survive_restore_without_becoming_model_work(responses):
+    responses.respond(assistant_output("originals preserved"))
+    originals = [
+        {
+            "type": "future_tool_call",
+            "name": "do_not_run",
+            "call_id": "audit-call",
+            "payload": {"large": 10**80, "nested": [None, True, {"extra": "retained"}]},
+        },
+        {"type": 17, "untyped": "audit-only"},
+        {"type": "future", "nested": {"$serde_json::private::Number": "7"}},
+        {"type": "future", "nested": {"$serde_json::private::RawValue": '{"converted":true}'}},
+        {"$serde_json::private::Number": "7"},
+        {
+            "$serde_json::private::RawValue": json.dumps(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "must remain audit only"}],
+                }
+            )
+        },
+        {"type": {"$serde_json::private::RawValue": '"message"'}},
+        {"__proto__": {"unchanged": True}},
+        {"type": "configuration_update", "opaque": "audit-only"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "known message"}],
+            "unknown_field": "original-only",
+        },
+    ]
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-original-values"
+    ) as provider:
+        agent = Agent(instructions="Answer briefly.", provider=provider)
+        async with agent.session() as session:
+            before = await session.history_snapshot()
+            revision = await session.transact_history(
+                expected_revision=before.revision, keep=0, items=originals
+            )
+            current = await session.history_snapshot()
+            assert current.items == tuple(originals)
+            assert current.total == len(originals) and current.revision == revision
+            assert "id" not in current.items[-1]
+            tail = await session.history_snapshot(limit=1)
+            assert tail.items == (originals[-1],) and tail.total == len(originals)
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            assert await restored.history_snapshot() == current
+            result = await (await restored.submit("continue")).get_result()
+            assert result.final_output == "originals preserved"
+    wire = json.dumps(responses.requests[-1]["input"])
+    assert "known message" in wire
+    assert "audit-call" not in wire and "audit-only" not in wire
+    assert "original-only" not in wire and "do_not_run" not in wire
+    assert "must remain audit only" not in wire and "converted" not in wire
+
+
+async def test_audit_rows_count_in_keep_but_cannot_complete_an_executable_pair(responses):
+    call = {
+        "type": "function_call",
+        "call_id": "original-pair",
+        "name": "lookup",
+        "arguments": "{}",
+    }
+    output = {"type": "function_call_output", "call_id": "original-pair", "output": "retained"}
+    audit = {
+        "type": "future_output",
+        "id": "audit-data",
+        "call_id": "original-pair",
+        "output": "never executable",
+    }
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-original-pairs"
+    ) as provider:
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            initial = await session.history_snapshot()
+            with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
+                await session.transact_history(
+                    expected_revision=initial.revision, keep=0, items=[call, audit]
+                )
+            assert await session.history_snapshot() == initial
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=[audit, call, output, audit]
+            )
+            complete = await session.history_snapshot()
+            assert complete.total == 4
+            with pytest.raises(RuntimeError, match="complete tool call/result pairs"):
+                await session.transact_history(expected_revision=complete.revision, keep=2)
+            assert await session.history_snapshot() == complete
+            await session.transact_history(expected_revision=complete.revision, keep=1)
+            assert (await session.history_snapshot()).items == (audit,)
+            assert responses.requests == []
+
+
+async def test_original_catalog_survives_supplied_compaction_and_rejects_ambiguous_edits(responses):
+    responses.respond(assistant_output("summary continued"))
+    responses.respond(assistant_output("replacement continued"))
+    originals = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old original first"}],
+            "extra": 17,
+        },
+        {"type": "application_note", "value": "audit between messages"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old original second"}],
+        },
+    ]
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-original-compaction"
+    ) as provider:
+        agent = Agent(instructions="Answer briefly.", provider=provider)
+        async with agent.session() as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=originals
+            )
+            before = await session.history_snapshot()
+            await session.compact(summary="application summary only")
+            assert await session.history_snapshot() == before
+            model = await session.model_context()
+            assert "application summary only" in json.dumps(model.items)
+            assert "old original" not in json.dumps(model.items)
+            with pytest.raises(
+                RuntimeError, match="cannot shorten original history across model compaction"
+            ):
+                await session.transact_history(expected_revision=before.revision, keep=1)
+            assert await session.history_snapshot() == before
+            assert (await session.model_context()).items == model.items
+            assert responses.requests == []
+            audit = {"type": "application_note", "value": "after compaction"}
+            await session.transact_history(
+                expected_revision=before.revision, keep=before.total, items=[audit]
+            )
+            appended = await session.history_snapshot()
+            assert appended.items == (*before.items, audit)
+            assert (await session.model_context()).items == model.items
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            assert await restored.history_snapshot() == appended
+            assert (
+                await (await restored.submit("after append")).get_result()
+            ).final_output == "summary continued"
+            wire = json.dumps(responses.requests[-1]["input"])
+            assert "application summary only" in wire and "old original" not in wire
+            assert "audit between messages" not in wire and "after compaction" not in wire
+            current = await restored.history_snapshot()
+            replacement = {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "explicit replacement"}],
+            }
+            await restored.transact_history(
+                expected_revision=current.revision, keep=0, items=[replacement]
+            )
+            assert (await restored.history_snapshot()).items == (replacement,)
+            assert (
+                await (await restored.submit("after replacement")).get_result()
+            ).final_output == "replacement continued"
+            wire = json.dumps(responses.requests[-1]["input"])
+            assert "explicit replacement" in wire and "application summary only" not in wire
+            assert "old original" not in wire
+
+
+async def test_native_original_tool_result_survives_prefix_edit_without_untruncating_model(
+    responses,
+):
+    full = "original native tool output " * 10_000
+
+    @function_tool
+    def lookup() -> str:
+        return full
+
+    responses.respond(function_call("lookup", {}, "large-original-output"))
+    responses.respond(assistant_output("large result settled"))
+    responses.respond(assistant_output("truncated continuation"))
+    async with NativeProvider(
+        base_url=responses.url, api_key="synthetic-original-truncation"
+    ) as provider:
+        agent = Agent(instructions="Use lookup.", provider=provider, tools=[lookup])
+        async with agent.session() as session:
+            await (await session.submit("read the large result")).get_result()
+            before = await session.history_snapshot()
+            index = next(
+                index
+                for index, item in enumerate(before.items)
+                if item.get("type") == "function_call_output"
+                and item.get("call_id") == "large-original-output"
+            )
+            assert full in json.dumps(before.items[index])
+            model = await session.model_context()
+            projected = next(
+                item
+                for item in model.items
+                if item.get("type") == "function_call_output"
+                and item.get("call_id") == "large-original-output"
+            )
+            assert len(json.dumps(projected)) < len(full)
+            audit = {"type": "application_note", "value": "retained prefix"}
+            await session.transact_history(
+                expected_revision=before.revision, keep=index + 1, items=[audit]
+            )
+            retained = await session.history_snapshot()
+            assert retained.items == (*before.items[: index + 1], audit)
+            assert projected in (await session.model_context()).items
+            state = await session.save_state()
+        async with agent.session(state=state) as restored:
+            assert await restored.history_snapshot() == retained
+            assert projected in (await restored.model_context()).items
+            assert (
+                await (await restored.submit("continue")).get_result()
+            ).final_output == "truncated continuation"
+            wire_output = next(
+                item
+                for item in responses.requests[-1]["input"]
+                if item.get("type") == "function_call_output"
+                and item.get("call_id") == "large-original-output"
+            )
+            assert wire_output["output"] == projected["output"]
+            assert full not in json.dumps(responses.requests[-1]["input"])
+
+
+async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp_path):
+    originals = [
+        {"$serde_json::private::RawValue": '{"type":"function_call","name":"never"}'},
+        {"type": "future", "nested": {"$serde_json::private::Number": "7"}, "large": 10**80},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "stored known input"}],
+            "missing_id": True,
+        },
+    ]
+    storage = CustomStorage(SQLiteSessionStore(tmp_path / "raw-originals.sqlite"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-raw-storage") as provider:
+        agent = Agent(instructions="Answer.", provider=provider)
+        async with agent.session(storage=storage) as session:
+            initial = await session.history_snapshot()
+            await session.transact_history(
+                expected_revision=initial.revision, keep=0, items=originals
+            )
+            retained = await session.history_snapshot()
+            assert retained.items == tuple(originals)
+            identity = session.id
+        async with agent.session(storage=storage, resume=identity) as restored:
+            current = await restored.history_snapshot()
+            assert current.items[: retained.total] == retained.items
+            assert current.total == len(current.items)
+            for item in current.items[retained.total :]:
+                assert item["type"] == "message"
+                assert item["role"] == "developer"
+                kinds = item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                assert kinds
+                assert set(kinds) <= {
+                    "collaboration_mode.instructions",
+                    "sdk_application.accepted",
+                }
+            assert await restored.history_snapshot(limit=1) == type(current)(
+                current.revision, current.total, current.items[-1:]
+            )
+            assert responses.requests == []
