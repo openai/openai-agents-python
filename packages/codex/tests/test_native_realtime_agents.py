@@ -245,6 +245,64 @@ async def test_replaced_voice_agent_preserves_backend_settings_updates(realtime_
                 assert request["model"] == "gpt-5.5"
 
 
+async def test_backend_sync_joins_before_concurrent_voice_agent_update(realtime_peer):
+    peer = realtime_peer
+    syncing = asyncio.Event()
+    release_sync = asyncio.Event()
+    order = []
+    block_sync = False
+
+    async def first_instructions(_context):
+        if block_sync:
+            syncing.set()
+            await release_sync.wait()
+            order.append("first synchronized")
+        return "First voice instructions"
+
+    def next_instructions(_context):
+        order.append("next configured")
+        return "Next voice instructions"
+
+    peer.responses.respond(*text_response("backend-updated", "Updated backend"))
+    async with (
+        timeout(15),
+        NativeProvider(
+            base_url=peer.responses.url, api_key="test-key", supports_websockets=False
+        ) as provider,
+    ):
+        source = Agent(instructions="Opening backend instructions", provider=provider)
+        first = Agent(
+            instructions="First",
+            realtime=RealtimeAgentConfig(instructions=first_instructions),
+        )
+        next_agent = Agent(
+            instructions="Next",
+            realtime=RealtimeAgentConfig(instructions=next_instructions),
+        )
+        async with (
+            source.session() as session,
+            session.realtime(config=RealtimeConfig(model="fixture-realtime")) as voice,
+        ):
+            await voice.update_agent(first)
+            block_sync = True
+            backend_update = asyncio.create_task(
+                session.update(instructions="Updated backend instructions")
+            )
+            await syncing.wait()
+            replacement = asyncio.create_task(voice.update_agent(next_agent))
+            try:
+                await asyncio.wait((replacement,), timeout=1)
+            finally:
+                release_sync.set()
+            await asyncio.gather(backend_update, replacement)
+
+            assert order == ["first synchronized", "next configured"]
+            assert await voice.get_active_agent() is next_agent
+            turn = await session.submit("Use the updated backend settings")
+            assert (await turn.get_result()).final_output == "Updated backend"
+            assert "Updated backend instructions" in json.dumps(peer.responses.requests[-1])
+
+
 @pytest.mark.parametrize("close_voice", [False, True])
 async def test_replaced_voice_agent_preserves_backend_tool_replacement(realtime_peer, close_voice):
     peer = realtime_peer

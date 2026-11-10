@@ -4298,16 +4298,19 @@ class Session(Generic[ContextT, OutputT]):
         if _start_readers:
             self._start_readers()
 
-    def _start_readers(self) -> None:
-        self._start_interception()
+    def _start_readers(self, pending: Sequence[Agent[Any, Any]] = ()) -> None:
+        self._start_interception(pending)
+        if self._mcp_reader is not None:
+            return
+        configured = tuple(profile.profile.declaration for profile in self._profiles.values())
         if any(
             server.transform_result is not None or server.request_metadata is not None
             for server in self._mcp_tools
         ) or any(
             isinstance(tool, _MCP)
             and (tool.transform_result is not None or tool.request_metadata is not None)
-            for profile in self._profiles.values()
-            for tool in profile.profile.declaration.tools
+            for agent in (*configured, *pending)
+            for tool in agent.tools
         ):
             self._mcp_reader = _create_task(self._read_mcp_results())
 
@@ -7878,11 +7881,7 @@ class Session(Generic[ContextT, OutputT]):
                 *(binding for binding in self._bindings if isinstance(binding, _MCP)),
             )
             self._mcp_tools = mcp_tools
-            self._start_interception()
-            if self._mcp_reader is None and any(
-                s.transform_result is not None or s.request_metadata is not None for s in mcp_tools
-            ):
-                self._mcp_reader = _create_task(self._read_mcp_results())
+            self._start_readers()
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
         """Find only the active native owner or admission reserved by this Turn."""

@@ -1448,7 +1448,7 @@ class RealtimeSession:
 
                 async def admit() -> None:
                     async with self._session._catalog_publication_lock:
-                        self._session._start_interception(
+                        self._session._start_readers(
                             tuple(runtime.profile.declaration for runtime in runtimes.values())
                         )
                         self._voice_registry_used = True
@@ -2591,11 +2591,14 @@ class RealtimeSession:
     async def _sync_active_profile(
         self, *, include_mono: bool = False, delegation_id: str | None = None
     ) -> None:
-        target = self._voice_target or json.loads(
-            await self._session._native._active_agent_profile()
-        )
-        if target is not None or include_mono or delegation_id is not None:
-            await self._apply_profile(None, target, delegation_id=delegation_id)
+        async with self._agent_update_lock:
+            if not self._live:
+                return
+            target = self._voice_target or json.loads(
+                await self._session._native._active_agent_profile()
+            )
+            if target is not None or include_mono or delegation_id is not None:
+                await self._apply_profile(None, target, delegation_id=delegation_id)
 
     async def _apply_profile(
         self,
