@@ -163,23 +163,39 @@ async def test_native_voice_rechecks_source_predicate_after_dispatch_hook(realti
             assert effects == ["handoff" if handoff else "function"]
 
 
-async def test_native_voice_rechecks_handoff_grant_after_awaited_source_policy(realtime_peer):
+@pytest.mark.parametrize(
+    ("revoked_grant", "denial_reason"),
+    [("handoff", "This handoff is disabled."), ("source", "Tool disabled by its source Agent")],
+)
+async def test_native_voice_rechecks_handoff_grants_after_awaited_policy(
+    realtime_peer, revoked_grant, denial_reason
+):
     peer = realtime_peer
-    handoff_checked, source_waiting, release = (asyncio.Event() for _ in range(3))
-    application = {"handoff_enabled": True}
+    policy_waiting, release = asyncio.Event(), asyncio.Event()
+    application = {"handoff": True, "source": True}
     effects = []
     armed = False
+    handoff_checks = 0
 
     def handoff_enabled(context):
+        nonlocal handoff_checks
         if armed:
-            handoff_checked.set()
-        return context.context["handoff_enabled"]
+            handoff_checks += 1
+        if revoked_grant == "source" and handoff_checks == 2:
 
-    async def source_enabled(_context, _tool):
-        if handoff_checked.is_set():
-            source_waiting.set()
+            async def check_after_release():
+                policy_waiting.set()
+                await release.wait()
+                return context.context["handoff"]
+
+            return check_after_release()
+        return context.context["handoff"]
+
+    async def source_enabled(context, _tool):
+        if revoked_grant == "handoff" and handoff_checks:
+            policy_waiting.set()
             await release.wait()
-        return True
+        return context.context["source"]
 
     def on_handoff(_):
         effects.append("handoff")
@@ -215,17 +231,17 @@ async def test_native_voice_rechecks_handoff_grant_after_awaited_source_policy(r
             assert "transfer" in {tool["name"] for tool in initial["session"]["tools"]}
             armed = True
             await peer.function("transfer", {}, "revoked-handoff")
-            await source_waiting.wait()
-            application["handoff_enabled"] = False
+            await policy_waiting.wait()
+            application[revoked_grant] = False
             release.set()
             denied = await peer.frame(
                 lambda frame: frame.get("item", {}).get("call_id") == "revoked-handoff"
             )
             assert effects == []
-            assert "This handoff is disabled." in denied["item"]["output"]
+            assert denial_reason in denied["item"]["output"]
             assert await session.get_active_agent() is source
 
-            application["handoff_enabled"] = True
+            application[revoked_grant] = True
             await peer.function("transfer", {}, "allowed-handoff")
             await peer.frame(
                 lambda frame: frame.get("item", {}).get("call_id") == "allowed-handoff"

@@ -129,6 +129,10 @@ class _CapturedHandoff(_CapturedFunction):
         }
 
 
+class _HandoffAllowedAfterAwait(Allow):
+    """A handoff grant returned after awaiting application policy."""
+
+
 def _handoff_tool(
     handoff: RealtimeHandoff, source: Agent[Any, Any], name: str
 ) -> FunctionTool[Any, Any, Any]:
@@ -174,10 +178,15 @@ def _handoff_tool(
         async def before(_: ToolContext[Any]) -> Allow | Deny:
             enabled = handoff.is_enabled
             value = enabled(application) if callable(enabled) else enabled
-            result = await value if inspect.isawaitable(value) else value
+            if inspect.isawaitable(value):
+                result = await value
+                allowed: Allow = _HandoffAllowedAfterAwait()
+            else:
+                result = value
+                allowed = Allow()
             if type(result) is not bool:
                 raise TypeError("Realtime handoff is_enabled must return a bool")
-            return Allow() if result else Deny("This handoff is disabled.")
+            return allowed if result else Deny("This handoff is disabled.")
 
         return _CapturedHandoff(
             name=name,

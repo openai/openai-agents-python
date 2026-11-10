@@ -12099,7 +12099,7 @@ class Session(Generic[ContextT, OutputT]):
             if realtime_tool and entry.before is not None:
                 if not await admit_source_tool():
                     return
-                from .realtime_agents import _CapturedHandoff
+                from .realtime_agents import _CapturedHandoff, _HandoffAllowedAfterAwait
 
                 if isinstance(entry, _CapturedHandoff):
                     source = self._agent_for_message(message).realtime
@@ -12116,6 +12116,11 @@ class Session(Generic[ContextT, OutputT]):
                         if isinstance(handoff_decision, Deny):
                             await respond_tool_denial(handoff_decision.reason)
                             return
+                        # An awaited handoff decision applies to this attempt.
+                        # Refresh the source grant after that application wait.
+                        if isinstance(handoff_decision, _HandoffAllowedAfterAwait):
+                            if not await admit_source_tool():
+                                return
             if not self._admit_tool(state, request):
                 return
             timeout_output: ToolOutput | None = None
