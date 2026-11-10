@@ -12667,24 +12667,32 @@ class Session(Generic[ContextT, OutputT]):
                             if engine_closed:
                                 if self._realtime is not None:
                                     await self._realtime._native_shutdown()
+
+                                async def finish_retirement() -> None:
+                                    if self._home is not None:
+                                        await _finish_native_home_cleanup(self._home.cleanup)
+                                    self._resources_retired = (
+                                        self._reader.done()
+                                        and (self._mcp_reader is None or self._mcp_reader.done())
+                                        and (
+                                            self._interception is None
+                                            or self._interception.reader is None
+                                            or self._interception.reader.done()
+                                        )
+                                    )
+
                                 computer_scope = _Invocation(self)
                                 computer_token = _invocation.set(computer_scope)
                                 try:
-                                    await self._computer_resources.close()
-                                finally:
-                                    computer_scope.active = False
-                                    _invocation.reset(computer_token)
-                                if self._home is not None:
-                                    await _finish_native_home_cleanup(self._home.cleanup)
-                                self._resources_retired = (
-                                    self._reader.done()
-                                    and (self._mcp_reader is None or self._mcp_reader.done())
-                                    and (
-                                        self._interception is None
-                                        or self._interception.reader is None
-                                        or self._interception.reader.done()
-                                    )
-                                )
+                                    try:
+                                        await self._computer_resources.close()
+                                    finally:
+                                        computer_scope.active = False
+                                        _invocation.reset(computer_token)
+                                except BaseException as error:
+                                    await _close_after_error(error, finish_retirement)
+                                    raise
+                                await finish_retirement()
 
         except BaseException as error:
             # Keep the original close failure primary, then its stop-owner errors.
