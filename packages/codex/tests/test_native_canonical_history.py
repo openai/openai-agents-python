@@ -7,13 +7,11 @@ import pytest
 
 from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, function_tool
 from tests.native_fixtures import assistant_output, function_call, responses as responses
+from tests.native_storage_fixtures import MemorySessionStore
 
 
-@pytest.mark.skipif(
-    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
-)
-async def test_committed_history_flush_failure_retires_live_session(responses, tmp_path):
-    class FailCheckpointFlush(SQLiteSessionStore):
+async def test_committed_history_flush_failure_retires_live_session(responses):
+    class FailCheckpointFlush(MemorySessionStore):
         armed = False
         accepted_checkpoint = False
 
@@ -32,7 +30,7 @@ async def test_committed_history_flush_failure_retires_live_session(responses, t
             return super().flush(session_id, token)
 
     responses.respond(assistant_output("restored replacement"))
-    backend = FailCheckpointFlush(tmp_path / "uncertain.sqlite")
+    backend = FailCheckpointFlush()
     storage = CustomStorage(backend)
     async with NativeProvider(base_url=responses.url, api_key="synthetic-uncertain") as provider:
         agent = Agent(instructions="Answer.", provider=provider)
@@ -448,9 +446,6 @@ async def test_native_original_tool_result_survives_prefix_edit_without_untrunca
             assert full not in json.dumps(responses.requests[-1]["input"])
 
 
-@pytest.mark.skipif(
-    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
-)
 async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp_path):
     originals = [
         {"$serde_json::private::RawValue": '{"type":"function_call","name":"never"}'},
@@ -462,7 +457,12 @@ async def test_raw_original_objects_survive_custom_storage_reopen(responses, tmp
             "missing_id": True,
         },
     ]
-    storage = CustomStorage(SQLiteSessionStore(tmp_path / "raw-originals.sqlite"))
+    backend = (
+        SQLiteSessionStore(tmp_path / "raw-originals.sqlite")
+        if os.name == "posix"
+        else MemorySessionStore()
+    )
+    storage = CustomStorage(backend)
     async with NativeProvider(base_url=responses.url, api_key="synthetic-raw-storage") as provider:
         agent = Agent(instructions="Answer.", provider=provider)
         async with agent.session(storage=storage) as session:

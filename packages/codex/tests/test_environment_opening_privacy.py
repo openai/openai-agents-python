@@ -6,11 +6,11 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
-from agents import Agent, CustomStorage, Environment, NativeProvider, SessionStore
+from agents import Agent, CustomStorage, Environment, NativeProvider
+from tests.native_storage_fixtures import MemorySessionStore
 
 
 def assert_private_opening(error: BaseException, environment: Environment, marker: str) -> None:
@@ -49,7 +49,6 @@ async def test_failed_environment_opening_releases_secrets(
     provider = NativeProvider(api_key="synthetic-model-key")
     if closed_provider:
         await provider.aclose()
-    if closed_provider:
         expected = "NativeProvider is closed"
     elif sys.platform == "win32":
         expected = "the local executor requires Linux or macOS"
@@ -113,7 +112,7 @@ async def test_early_opening_releases_environment(tmp_path: Path, failure: str) 
         options["instruction_files"] = [tmp_path / "missing.md"]
         expected = FileNotFoundError
     elif failure == "storage":
-        options["storage"] = CustomStorage(Mock(spec=SessionStore))
+        options["storage"] = CustomStorage(MemorySessionStore())
         match = "CustomStorage preview does not support"
     elif failure == "retention":
         options["observation_retention"] = "invalid"
