@@ -4,16 +4,20 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
-use codex_history::RolloutItem;
+use codex_history::{ResponseItemEnvelope, RolloutItem};
+use codex_protocol::ThreadId;
 use codex_protocol::models::{
     ContentItemKind, FunctionCallOutputBody, FunctionCallOutputPayload,
     InternalChatMessageMetadataPassthrough, PermissionProfile, ResponseItem,
 };
 use codex_protocol::permissions::{FileSystemAccessMode, FileSystemPath};
-use codex_protocol::protocol::{EventMsg, sdk_executor_policy_receipt};
+use codex_protocol::protocol::{
+    EventMsg, TurnAbortReason, TurnAbortedEvent, sdk_executor_policy_receipt,
+};
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::engine::ThreadState;
 
@@ -39,11 +43,34 @@ impl Outcome {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconciledCall {
-    thread_id: String,
+    thread_id: ThreadId,
     turn_id: String,
     call_id: String,
     outcome: Outcome,
     result: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryRequest {
+    receipts: Vec<ReconciledCall>,
+    histories: HashMap<ThreadId, DescendantHistory>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DescendantHistory {
+    digest: String,
+    parent: ThreadId,
+    status: String,
+    interrupted: Vec<String>,
+}
+
+pub(crate) fn encode_history(history: &[RolloutItem]) -> serde_json::Result<String> {
+    // Some rollout payloads use hash maps. Compare canonical JSON across reads.
+    let mut value = serde_json::to_value(history)?;
+    value.sort_all_objects();
+    serde_json::to_string(&value)
 }
 
 fn output(item: &ResponseItem) -> Option<(&str, &FunctionCallOutputPayload)> {
@@ -340,7 +367,7 @@ async fn validate_recorded_executor_policy(
 }
 
 pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> {
-    let receipts: Vec<ReconciledCall> = serde_json::from_str(encoded)
+    let request: RecoveryRequest = serde_json::from_str(encoded)
         .map_err(|_| anyhow::anyhow!("Invalid local reconciliation receipt"))?;
     let tools = state
         .thread
@@ -363,11 +390,133 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         .get::<crate::recovery_guard::Guard>()
         .context("Reconciliation requires the SDK replay guard")?;
 
+    let has_receipts = !request.receipts.is_empty();
+    let mut receipts_by_thread = HashMap::<_, Vec<_>>::new();
+    for receipt in &request.receipts {
+        ensure!(
+            receipt.thread_id == state.id || request.histories.contains_key(&receipt.thread_id),
+            "Reconciliation receipt belongs to a different thread"
+        );
+        receipts_by_thread
+            .entry(receipt.thread_id)
+            .or_default()
+            .push(receipt);
+    }
+    let root_receipts = receipts_by_thread.remove(&state.id).unwrap_or_default();
+    let (root_append, protected) = plan(&history, &root_receipts)?;
+
+    // The root writer fences the original owner. Also reserve each child writer
+    // so an independently reopened child cannot race recovery or change topology.
+    verify_descendants(state, &request.histories).await?;
+    let _child_writers = store.reserve_reconciliation_writers(request.histories.keys().copied())?;
+    if !_child_writers.is_empty() {
+        verify_descendants(state, &request.histories).await?;
+    }
+    let mut child_appends = Vec::new();
+    let mut protected_children = HashMap::new();
+    for (&id, expected) in &request.histories {
+        let (path, history) = store.reconciliation_history(id).await?;
+        ensure!(
+            format!("{:x}", Sha256::digest(encode_history(&history)?)) == expected.digest,
+            "Native descendant history changed during local recovery"
+        );
+        let receipts = receipts_by_thread.remove(&id).unwrap_or_default();
+        let (outputs, protected) = plan(&history, &receipts)?;
+        if !protected.is_empty() {
+            protected_children.insert(id.to_string(), protected);
+        }
+        let writes_receipts = !outputs.is_empty();
+        if writes_receipts || !expected.interrupted.is_empty() {
+            ensure!(
+                has_receipts,
+                "An interrupted descendant turn requires a confirmed call"
+            );
+            let mut items = Vec::new();
+            for turn in &expected.interrupted {
+                items.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
+                    TurnAbortedEvent {
+                        turn_id: Some(turn.clone()),
+                        reason: TurnAbortReason::Interrupted,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                )));
+            }
+            items.extend(
+                outputs
+                    .into_iter()
+                    .map(|item| RolloutItem::ResponseItem(ResponseItemEnvelope::new(item))),
+            );
+            child_appends.push((writes_receipts, id, path, items, receipts));
+        }
+    }
+    // Validate every supplied result before recording any part of the batch.
+    // Publish interrupted ancestors before receipts that could clear the last
+    // unresolved call and allow the next open without confirmations.
+    child_appends.sort_by_key(|(writes_receipts, ..)| *writes_receipts);
+    for (_, id, path, items, receipts) in child_appends {
+        confirm_durable(
+            &store.append_reconciliation(id, &path, items).await?,
+            &receipts,
+        )?;
+    }
+    if !root_append.is_empty() {
+        state.thread.inject_response_items(root_append).await?;
+        state.thread.flush_rollout().await?;
+        confirm_durable(&store.load_owned_history(state.id).await?, &root_receipts)?;
+    }
+    guard.set_reconciled(protected);
+    state
+        .engine
+        .recovery
+        .set_reconciled_descendants(protected_children);
+    Ok(())
+}
+
+async fn verify_descendants(
+    state: &ThreadState,
+    expected: &HashMap<ThreadId, DescendantHistory>,
+) -> Result<()> {
+    state.engine.agent_graph.hydrate(state.id).await?;
+    let current = crate::subagents::list(state).await?;
+    ensure!(
+        current.len() == expected.len()
+            && current.iter().all(|child| {
+                expected.get(&child.id).is_some_and(|snapshot| {
+                    !child.runtime_loaded
+                        && child.parent_agent_id == snapshot.parent
+                        && child.status == snapshot.status
+                })
+            }),
+        "Native descendant ownership changed during local recovery"
+    );
+    Ok(())
+}
+
+fn confirm_durable(history: &[RolloutItem], receipts: &[&ReconciledCall]) -> Result<()> {
+    for receipt in receipts {
+        ensure!(
+            history.iter().any(|record| matches!(
+                record,
+                RolloutItem::ResponseItem(envelope) if matches_receipt(&envelope.item, receipt)
+            )),
+            "Reconciliation result was not confirmed in native storage"
+        );
+    }
+    Ok(())
+}
+
+fn plan(
+    history: &[RolloutItem],
+    receipts: &[&ReconciledCall],
+) -> Result<(Vec<ResponseItem>, HashSet<String>)> {
     let mut seen = HashMap::new();
     let mut outputs = HashMap::new();
     let mut protected = HashSet::new();
     let mut context_turn = None;
-    for record in &history {
+    for record in history {
         match record {
             RolloutItem::TurnContext(context) => {
                 context_turn = context.turn_id.as_deref().or(context_turn);
@@ -403,12 +552,9 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     }
     let mut requested = HashSet::new();
     let mut append = Vec::new();
-    for receipt in &receipts {
+    for receipt in receipts {
         let key = (receipt.turn_id.as_str(), receipt.call_id.as_str());
-        ensure!(
-            receipt.thread_id == thread_id && requested.insert(key),
-            "Reconciliation receipt is duplicate or belongs to a different thread"
-        );
+        ensure!(requested.insert(key), "Reconciliation receipt is duplicate");
         let call = seen
             .get(&key)
             .copied()
@@ -452,22 +598,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         });
         protected.insert(receipt.call_id.clone());
     }
-    if !append.is_empty() {
-        state.thread.inject_response_items(append).await?;
-        state.thread.flush_rollout().await?;
-        let durable = store.load_owned_history(state.id).await?;
-        for receipt in &receipts {
-            ensure!(
-                durable.iter().any(|record| matches!(
-                    record,
-                    RolloutItem::ResponseItem(envelope) if matches_receipt(&envelope.item, receipt)
-                )),
-                "Reconciliation result was not confirmed in native storage"
-            );
-        }
-    }
-    guard.set_reconciled(protected);
-    Ok(())
+    Ok((append, protected))
 }
 
 #[cfg(test)]

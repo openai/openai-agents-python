@@ -7,7 +7,7 @@ import base64
 import json
 import os
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +113,9 @@ class ExecutorPeer:
     start_reply_dropped: asyncio.Event = field(default_factory=asyncio.Event)
     synthetic_process_output: str | None = field(default=None, repr=False)
     synthetic_sandbox_denied: bool = False
+    before_synthetic_process_reply: Callable[[str], Awaitable[None]] | None = field(
+        default=None, repr=False
+    )
     # Override advertised admission metadata, not real executor enforcement.
     advertised_platform: str | None = None
     synthetic_process_starts: list[str] = field(default_factory=list)
@@ -222,6 +225,13 @@ class ExecutorPeer:
                                                     assert process_id not in synthetic_processes
                                                     synthetic_processes.add(process_id)
                                                     self.synthetic_process_starts.append(process_id)
+                                                    if (
+                                                        self.before_synthetic_process_reply
+                                                        is not None
+                                                    ):
+                                                        await self.before_synthetic_process_reply(
+                                                            process_id
+                                                        )
                                                     start_reply = {
                                                         "id": value["id"],
                                                         "result": {

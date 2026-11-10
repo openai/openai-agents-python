@@ -84,6 +84,18 @@ def test_allow_all_preserves_wildcard_wire_and_checkpoint_identity() -> None:
         )
 
 
+def test_bare_wildcard_rejected_at_declaration() -> None:
+    with pytest.raises(ValueError, match=r"Use NetworkPolicy\.allow_all\(\)"):
+        Environment(
+            url="wss://executor.invalid",
+            cwd="/job",
+            tools=["exec_command"],
+            network={"allowed_domains": ["*"]},
+        )
+    with pytest.raises(ValueError, match="Use an exact host or a scoped wildcard"):
+        NetworkPolicy.allow_all(denied_domains=["*"])
+
+
 @pytest.mark.parametrize("typed", [True, False], ids=["policy", "dictionary"])
 def test_environment_captures_network_policy(typed: bool) -> None:
     allowed = ["api.example.invalid", "BLOCKED.example.invalid."]
@@ -1103,30 +1115,35 @@ from contextlib import closing
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-allowed, overlap, unlisted = sys.argv[1:]
+allowed, overlap, unlisted, mode = sys.argv[1:]
+allow_all = mode == "allow-all"
 proxy = urlsplit(os.environ["HTTP_PROXY"])
-for url, expected in [(allowed, 200), (overlap, 403), (unlisted, 403)]:
+for url, expected in [(allowed, 200), (overlap, 403), (unlisted, 200 if allow_all else 403)]:
     with closing(HTTPConnection(proxy.hostname, proxy.port, timeout=3)) as connection:
         connection.request("GET", url)
         response = connection.getresponse()
         assert response.status == expected, (url, response.status)
         if expected == 200:
-            assert response.read() == b"127.0.0.1"
+            assert response.read().decode() == urlsplit(url).hostname
+        if url == overlap:
+            assert response.getheader("x-proxy-error") == "blocked-by-denylist"
 
-target = urlsplit(allowed)
-try:
-    with socket.create_connection((target.hostname, target.port), timeout=3):
-        raise AssertionError("Direct connection to the allowed destination succeeded")
-except OSError as error:
-    assert error.errno in (
-        errno.EPERM, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH
-    ), error
+if not allow_all:
+    target = urlsplit(allowed)
+    try:
+        with socket.create_connection((target.hostname, target.port), timeout=3):
+            raise AssertionError("Direct connection to the allowed destination succeeded")
+    except OSError as error:
+        assert error.errno in (
+            errno.EPERM, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH
+        ), error
 """
 
 
 @pytest.mark.requires_native_linux_sandbox
-async def test_linux_network_policy_enforces_proxy_and_blocks_direct_access(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ["allowlist", "allow-all"])
+async def test_linux_network_policy_enforces_proxy_rules(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     allowed, overlap, unlisted = "127.0.0.1", "127.0.0.2", "127.0.0.3"
     received: list[str] = []
@@ -1151,18 +1168,28 @@ async def test_linux_network_policy_enforces_proxy_and_blocks_direct_access(
 
         monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        if mode == "allow-all":
+            policy = NetworkPolicy.allow_all(
+                denied_domains=[overlap],
+                allow_all_unix_sockets=True,
+                allow_local_binding=True,
+            )
+            expected_requests = [allowed, unlisted]
+        else:
+            policy = NetworkPolicy(
+                allowed_domains=[allowed, overlap],
+                denied_domains=[overlap],
+                allow_all_unix_sockets=True,
+            )
+            expected_requests = [allowed]
         environment = Environment(
             url=executor.url,
             cwd=str(executor.root),
             headers={"Authorization": "Bearer " + executor.token},
             tools=["exec_command"],
-            network=NetworkPolicy(
-                allowed_domains=[allowed, overlap],
-                denied_domains=[overlap],
-                allow_all_unix_sockets=True,
-            ),
+            network=policy,
         )
-        command = shlex.join(["python3", "-I", "-c", _LINUX_NETWORK_PROBE, *urls])
+        command = shlex.join(["python3", "-I", "-c", _LINUX_NETWORK_PROBE, *urls, mode])
         responses.respond(
             function_call("exec_command", {"cmd": command, "yield_time_ms": 20_000}, "probe")
         )
@@ -1170,7 +1197,7 @@ async def test_linux_network_policy_enforces_proxy_and_blocks_direct_access(
         agent = Agent(instructions="Probe the network policy.", provider=provider(responses))
         await agent.run("Run the probe.", environment=environment)
         assert "Process exited with code 0" in tool_output(responses.requests[-1], "probe")
-        assert received == [allowed]
+        assert received == expected_requests
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
