@@ -18,6 +18,16 @@ on:
   workflow_dispatch:
   # Use GitHub's Re-run failed jobs action to retry this run.
 
+concurrency:
+  # Keep explicit retries and trusted native producers out of the PR cancellation group.
+  group: >-
+    ${{ github.event_name == 'pull_request' && github.run_attempt == '1' &&
+    github.event.pull_request.number &&
+    (github.event.pull_request.stack.base.ref || github.base_ref) == 'feat/codex-harness' &&
+    format('agents-python-tests-harness-pr-{0}', github.event.pull_request.number) ||
+    format('agents-python-tests-run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   actions: read
