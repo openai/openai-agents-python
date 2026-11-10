@@ -2963,7 +2963,6 @@ class Session(Generic[ContextT, OutputT]):
             and not instruction_files
             and agent.provider is not None
             and codex_login is None
-            and not agent.provider._websockets_enabled
             and output.mode == "plain"
             and not programmatic_tool_calling
             and agent.transform_context is None

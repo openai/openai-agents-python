@@ -175,8 +175,8 @@ class WebSocketPeer(ResponsesFixture):
                         if may_disconnect:
                             return False
                         raise
-                    # Permit a peer close only after this test's exact invalid
-                    # frame was sent. Other transport and hook errors still fail.
+                    # The chosen frame has been marking the earliest permitted peer close.
+                    # Other transport and hook errors have been remaining failures.
                     if event is self.expected_disconnect_event:
                         may_disconnect = True
                     return True
@@ -266,6 +266,8 @@ async def test_provider_never_shares_generated_session_history() -> None:
             server.respond(assistant_output(f"answer-{index}"))
             result = await agent.run(f"prompt-{index}")
             assert result.final_output == f"answer-{index}"
+            await server.disconnected.wait()
+            assert not server.sockets and server.handlers == 0
             sessions.add(result.turn.session_id)
             assert message_text(server.requests[-1]["input"], "user") == [f"prompt-{index}"]
             assert message_text(server.requests[-1]["input"], "assistant") == []
@@ -281,6 +283,163 @@ async def test_provider_never_shares_generated_session_history() -> None:
             assert result.thread_usage.total_token_usage.total_tokens == 14
         assert len(sessions) == 3
         assert not server.http_requests
+
+
+async def test_concurrent_plain_runs_retire_sockets_before_provider_close() -> None:
+    async with timeout(20), peer() as server:
+        agent = Agent(instructions="Answer.", provider=server.provider())
+        server.respond(assistant_output("answer-0"))
+        server.respond(assistant_output("answer-1"))
+        runs = [asyncio.create_task(agent.run(f"prompt-{index}")) for index in range(2)]
+        try:
+            results = await asyncio.gather(*runs)
+        finally:
+            for run in runs:
+                if not run.done():
+                    run.cancel()
+            await asyncio.gather(*runs, return_exceptions=True)
+        assert {result.final_output for result in results} == {"answer-0", "answer-1"}
+        assert len({result.turn.session_id for result in results}) == 2
+        assert {tuple(message_text(request["input"], "user")) for request in server.requests} == {
+            ("prompt-0",),
+            ("prompt-1",),
+        }
+        assert all(not message_text(request["input"], "assistant") for request in server.requests)
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        assert server.connections == 2 and not server.http_requests
+
+
+async def test_cancelled_plain_run_retires_socket_before_provider_close() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events = text_response("held-id", "cancelled-answer")
+
+    async def hold(event: dict[str, Any]) -> None:
+        if event is events[1]:
+            entered.set()
+            await release.wait()
+
+    async with timeout(20), peer() as server:
+        server.before_event = hold
+        server.expected_disconnect_event = events[0]
+        server.respond(*events)
+        agent = Agent(instructions="Answer.", provider=server.provider())
+        running = asyncio.create_task(agent.run("cancelled-prompt"))
+        try:
+            await entered.wait()
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        finally:
+            release.set()
+            if not running.done():
+                running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        server.before_event = None
+        server.expected_disconnect_event = None
+        server.respond(assistant_output("fresh-answer"))
+        assert (await agent.run("fresh-prompt")).final_output == "fresh-answer"
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        assert message_text(server.requests[-1]["input"], "user") == ["fresh-prompt"]
+        assert not message_text(server.requests[-1]["input"], "assistant")
+        assert server.connections == 2 and not server.http_requests
+
+
+async def test_failed_plain_run_retires_socket_before_provider_close() -> None:
+    added, delta, _ = text_response("first-id", "unaccepted-answer")
+    malformed = {
+        "type": "response.output_item.added",
+        "item": {"type": "message", "id": "broken", "role": "assistant"},
+    }
+    async with timeout(20), peer() as server:
+        server.expected_disconnect_event = malformed
+        server.respond(added, delta, malformed)
+        agent = Agent(instructions="Answer.", provider=server.provider())
+        with pytest.raises(
+            NativeError, match="^Native model response ended without complete supported output$"
+        ):
+            await agent.run("failed-prompt")
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        server.expected_disconnect_event = None
+        server.respond(assistant_output("fresh-answer"))
+        assert (await agent.run("fresh-prompt")).final_output == "fresh-answer"
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        assert message_text(server.requests[-1]["input"], "user") == ["fresh-prompt"]
+        assert not message_text(server.requests[-1]["input"], "assistant")
+        assert server.connections == 2 and not server.http_requests
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["success", "cancel"])
+async def test_plain_run_tool_callback_joins_cleanup_before_provider_close(cancel: bool) -> None:
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleaned = asyncio.Event()
+    effects = []
+
+    @function_tool
+    async def held() -> str:
+        """Return one application value after the caller releases it."""
+        effects.append("accepted-effect")
+        entered.set()
+        try:
+            await finish.wait()
+            return "tool-value"
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleaned.set()
+
+    async with timeout(20), peer() as server:
+        server.respond(function_call("held", {}, "call_held_ws"))
+        if not cancel:
+            server.respond(assistant_output("tool-finished"))
+        agent = Agent(instructions="Use held when asked.", tools=[held], provider=server.provider())
+        running = asyncio.create_task(agent.run("use held"))
+        try:
+            await entered.wait()
+            if cancel:
+                running.cancel()
+            else:
+                finish.set()
+            await cleanup_started.wait()
+            assert not running.done() and not cleaned.is_set()
+            assert effects == ["accepted-effect"]
+            release_cleanup.set()
+            if cancel:
+                with pytest.raises(asyncio.CancelledError):
+                    await running
+                assert len(server.requests) == 1
+            else:
+                result = await running
+                assert result.final_output == "tool-finished"
+                assert tool_output(server.requests[-1], "call_held_ws") == "tool-value"
+                assert len(server.requests) == 2
+        finally:
+            finish.set()
+            release_cleanup.set()
+            if not running.done():
+                running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        assert cleaned.is_set() and effects == ["accepted-effect"]
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        server.respond(assistant_output("fresh-answer"))
+        assert (await agent.run("fresh-prompt")).final_output == "fresh-answer"
+        await server.disconnected.wait()
+        assert not server.sockets and server.handlers == 0
+        assert message_text(server.requests[-1]["input"], "user") == ["fresh-prompt"]
+        assert not message_text(server.requests[-1]["input"], "assistant")
+        assert "call_held_ws" not in json.dumps(server.requests[-1]["input"])
+        assert effects == ["accepted-effect"]
+        assert server.connections == 2 and not server.http_requests
 
 
 async def test_concurrent_sessions_retire_sockets_without_sharing_history() -> None:
@@ -328,10 +487,11 @@ async def test_fresh_authenticated_socket_keeps_tools_and_history_session_owned(
         assert result.final_output == "previous-session-only-answer"
         await server.disconnected.wait()
         assert not server.sockets
+        warmups_before_current = server.warmups
         async with agent.session() as current:
             # Change generating metadata after Core's own warmup. Otherwise a
             # bad warmup ID would test the synthetic fixture before any call.
-            while server.warmups < 2:
+            while server.warmups <= warmups_before_current:
                 await asyncio.sleep(0)
             if malformed == "created":
                 server.creation_override = {}
