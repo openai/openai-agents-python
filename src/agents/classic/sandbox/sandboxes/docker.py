@@ -1615,6 +1615,22 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         self._removal_service = removal_service
 
     @redact_mount_error_data
+    async def assert_borrowed_session_authority(
+        self, session: SandboxSession, options: DockerSandboxClientOptions
+    ) -> None:
+        inner = session._inner
+        if not isinstance(inner, DockerSandboxSession):
+            raise TypeError("DockerSandboxClient requires a Docker sandbox session")
+        network_mode = options.network_mode or inner.state.network_mode
+        if network_mode is None:
+            return
+        await run_blocking_workspace_io(
+            lambda: _assert_existing_container_network_configuration_matches(
+                inner._container, network_mode
+            )
+        )
+
+    @redact_mount_error_data
     async def create(
         self,
         *,

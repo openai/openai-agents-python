@@ -219,6 +219,7 @@ def sandbox_environment(
             else:
                 _assert_current_mount_authority(selected.state, captured_manifest)
                 await selected._validate_manifest_application(manifest=captured_manifest)
+                await client.assert_borrowed_session_authority(selected, captured_options)
             yield await owners.enter_async_context(connect(selected))
 
     return source()
