@@ -239,6 +239,13 @@ async def test_trusted_macos_keeps_saved_login_private_during_rotation(
     home.mkdir()
     alias = home / "auth.json"
     alias.symlink_to(cache)
+    mcp_fallback = home / ".credentials.json"
+    mcp_target = home / "synthetic-mcp-store"
+    mcp_target.write_text("{}", encoding="utf-8")
+    mcp_target.chmod(0o600)
+    source_mcp_target = home / "synthetic-source-mcp-store"
+    source_mcp_target.write_text("{}", encoding="utf-8")
+    mcp_fallback.symlink_to(source_mcp_target)
     note = home / "ordinary"
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -246,15 +253,17 @@ async def test_trusted_macos_keeps_saved_login_private_during_rotation(
     staging.mkdir()
     marker = staging / "inert"
 
+    private_paths = shlex.join(map(str, (alias, cache, marker, mcp_fallback, mcp_target)))
     command = (
         "set -eu; for phase in before during after; do "
         'until [ -f "$phase.go" ]; do /bin/sleep 0.05; done; '
         f'test "$(/bin/cat {shlex.quote(str(note))})" = "$phase"; '
-        f"for path in {shlex.join([str(alias), str(cache), str(marker)])}; do "
+        f"for path in {private_paths}; do "
         'if ( : < "$path" ) 2>/dev/null; then exit 17; fi; '
         'done; : > "$phase.ok"; done'
     )
     peer = ResponsesFixture()
+    peer.respond(assistant_output("Ready to restore."))
     peer.respond(
         function_call(
             "exec_command", {"cmd": command, "login": False, "yield_time_ms": 1000}, "probe"
@@ -318,7 +327,47 @@ async def test_trusted_macos_keeps_saved_login_private_during_rotation(
         environment = Environment.local(
             cwd=workspace, tools=["exec_command"], write_policy="trusted_workspace_write"
         )
+        hard_link = home / "synthetic-mcp-hard-link"
+        hard_link.hardlink_to(source_mcp_target)
+        with pytest.raises(RuntimeError, match="MCP OAuth fallback file without hard links") as exc:
+            async with agent.session(environment=environment):
+                pytest.fail("Trusted execution opened a hard-linked MCP OAuth fallback")
+        assert str(mcp_fallback) not in str(exc.value)
+        assert str(source_mcp_target) not in str(exc.value)
+        assert peer.requests == []
+        hard_link.unlink()
+
         async with agent.session(environment=environment) as session:
+            assert (await submit(session, "Settle the initial turn.")).final_output == (
+                "Ready to restore."
+            )
+            history_json = await session._native.read_thread_history(None)
+            raw_receipts = [
+                executor
+                for record in json.loads(history_json)
+                if record["type"] == "turn_context"
+                for executor in (
+                    (record["payload"].get("sdk_receipt") or {}).get("executors") or []
+                )
+            ]
+            policies_json = await session._native._executor_policies()
+            assert raw_receipts and json.loads(policies_json)
+            assert all("permission_profile" in receipt for receipt in raw_receipts)
+
+            state = await session.save_state()
+            assert any(
+                record["type"] == "turn_context" and record["payload"].get("permission_profile")
+                for record in state.history
+            )
+            # Capture before the model names private paths in its test command.
+            for encoded in (history_json, policies_json, state.to_json()):
+                for private in (directory, mcp_fallback, source_mcp_target):
+                    assert str(private) not in encoded
+
+        # A new executor binds the current fallback without changing portable identity.
+        mcp_fallback.unlink()
+        mcp_fallback.symlink_to(mcp_target)
+        async with agent.session(environment=environment, state=state) as session:
             assert (await submit(session, "Start the isolation probe.")).final_output == (
                 "Probe running."
             )
@@ -337,6 +386,17 @@ async def test_trusted_macos_keeps_saved_login_private_during_rotation(
             )
             assert alias.is_symlink() and alias.resolve() == cache
             await probe("after")
+
+            receipts = [
+                executor
+                async for turn in session.turns()
+                if "receipt" in turn
+                for executor in turn["receipt"]["executors"] or []
+            ]
+            assert receipts
+            assert all("permission_profile" not in receipt for receipt in receipts)
+            encoded = json.dumps(receipts)
+            assert mcp_fallback.name not in encoded and mcp_target.name not in encoded
 
 
 @pytest.mark.serial

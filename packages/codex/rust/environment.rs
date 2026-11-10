@@ -72,7 +72,6 @@ pub(crate) struct LocalPrivatePaths<'a> {
 
 pub async fn for_unattached_threads(
     config: &Config,
-    sdk_local: bool,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -86,14 +85,6 @@ pub async fn for_unattached_threads(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
-    let paths = if sdk_local {
-        let paths = paths.with_join_unreturned_local_exec_on_interrupt();
-        #[cfg(target_os = "macos")]
-        let paths = paths.with_restricted_macos_process_sandbox();
-        paths
-    } else {
-        paths
-    };
     // The SDK owns its explicit execution selection. Reserve host MCP capacity
     // without reading ambient Noise or user environment configuration.
     Ok((
@@ -503,7 +494,28 @@ impl EnvironmentOptions {
                 "a local executor does not accept connection settings"
             );
             check_local_helpers(config)?;
-            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ true).await?;
+            let paths = ExecServerRuntimeOptions::from_optional_paths(
+                config.codex_self_exe.clone(),
+                config.codex_linux_sandbox_exe.clone(),
+            )?
+            .with_join_unreturned_local_exec_on_interrupt();
+            #[cfg(target_os = "macos")]
+            let paths = {
+                let mut paths = paths.with_restricted_macos_process_sandbox();
+                if self.trusted_workspace_write {
+                    paths.local_macos_deny_paths =
+                        macos_saved_login_deny_paths(private_paths, |fallback| {
+                            fallback
+                                .canonicalize()
+                                .context("could not resolve the MCP OAuth fallback")
+                        })?;
+                }
+                paths
+            };
+            let manager = EnvironmentManager::with_unselected_local_environment(
+                paths,
+                config.http_client_factory(),
+            )?;
             let environment = manager
                 .try_local_environment()
                 .context("local executor requires the native process helper")?;
@@ -533,7 +545,7 @@ impl EnvironmentOptions {
         // SDK selections may publish a host MCP roster after this manager is built.
         // Reserve its lazy local launcher without selecting a host workspace:
         // for_unattached_threads has no default; selection below remains remote.
-        let (manager, _) = for_unattached_threads(config, /*sdk_local*/ false).await?;
+        let (manager, _) = for_unattached_threads(config).await?;
         if needs_local_mcp {
             ensure!(
                 manager.try_local_environment().is_some(),
@@ -1070,6 +1082,8 @@ async fn strict_write_profile(
         {
             use std::os::unix::fs::MetadataExt;
 
+            #[cfg(target_os = "macos")]
+            let _ = file;
             let metadata = std::fs::symlink_metadata(&target)
                 .context("could not verify the trusted executor's saved Codex login file")?;
             ensure!(
@@ -1083,15 +1097,29 @@ async fn strict_write_profile(
                      CodexLogin.credential_directory or strict write policy"
                 );
             }
+            #[cfg(target_os = "macos")]
+            {
+                let protected = macos_saved_login_deny_paths(private_paths, |fallback| {
+                    check_local_write_root_overlap(
+                        fallback,
+                        &roots,
+                        "local executor writable roots must stay outside the MCP OAuth fallback",
+                    )
+                })?;
+                ensure!(
+                    environment
+                        .local_runtime_paths()
+                        .is_some_and(|paths| paths.local_macos_deny_paths == protected),
+                    "private saved-login paths changed since executor startup"
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
             let denied = match private_paths.credential_directory {
                 Some(directory) => vec![directory],
-                None if cfg!(target_os = "macos") => anyhow::bail!(
-                    "trusted local execution with a saved Codex login on macOS requires \
-                     CodexLogin.credential_directory or strict write policy"
-                ),
                 None if file != target => vec![file, target.as_path()],
                 None => vec![file],
             };
+            #[cfg(not(target_os = "macos"))]
             for path in denied {
                 filesystem_policy.entries.push(FileSystemSandboxEntry::new(
                     FileSystemPath::Path {
@@ -1141,6 +1169,44 @@ async fn strict_write_profile(
     };
     // The first resolved root is always the implicit working directory grant.
     Ok((profile, roots[0].clone(), writes))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_saved_login_deny_paths(
+    private_paths: LocalPrivatePaths<'_>,
+    resolve_fallback: impl FnOnce(&Path) -> Result<PathBuf>,
+) -> Result<Vec<AbsolutePathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(file) = private_paths.saved_login_file else {
+        return Ok(Vec::new());
+    };
+    let directory = private_paths.credential_directory.context(
+        "trusted local execution with a saved Codex login on macOS requires \
+         CodexLogin.credential_directory or strict write policy",
+    )?;
+    let mut paths = vec![AbsolutePathBuf::from_absolute_path(directory)?];
+    // An existing MCP OAuth fallback may remain in the declared login home.
+    let fallback = file.with_file_name(".credentials.json");
+    match fallback.symlink_metadata() {
+        Ok(_) => {
+            let target = resolve_fallback(&fallback)?;
+            let metadata = target
+                .symlink_metadata()
+                .context("could not verify the MCP OAuth fallback")?;
+            ensure!(
+                metadata.is_file() && metadata.nlink() == 1,
+                "trusted local executor requires a regular MCP OAuth fallback file without hard links"
+            );
+            paths.push(AbsolutePathBuf::from_absolute_path(&fallback)?);
+            if target != fallback {
+                paths.push(AbsolutePathBuf::from_absolute_path(&target)?);
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("could not verify the MCP OAuth fallback"),
+    }
+    Ok(paths)
 }
 
 fn check_local_private_write_roots(

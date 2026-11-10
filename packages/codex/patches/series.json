@@ -463,7 +463,11 @@
     {
       "path": "sdk-bwrap-read-only-auth-alias.patch",
       "sha256": "4ecee9ea7a5f1f5378068e7c8a25b6c062e5be2e29349cdbbf689549c172d02d"
+    },
+    {
+      "path": "sdk-private-macos-deny-paths.patch",
+      "sha256": "bae91585b5f333d736c4ccd38702f6671a09711515df1a4e7bfb13b8dea01082"
     }
   ],
-  "result_tree": "8c27c24cef6864937889eb9edba6711aba47238a"
+  "result_tree": "6806dc8a91381685f6cf19ddf2a11f36f6520587"
 }
