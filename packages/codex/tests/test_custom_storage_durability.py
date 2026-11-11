@@ -19,12 +19,18 @@ from agents import (
     Agent,
     CustomStorage,
     Environment,
+    HostedShell,
     LocalRecoveryRequired,
     LocalStorage,
     NativeAgents,
+    NativeError,
     NativeGoals,
     NativeProvider,
     SessionStoreCleanup,
+    ShellCall,
+    ShellCommandOutput,
+    ShellExit,
+    ShellOutput,
     SQLiteSessionStore,
     ToolContext,
     ToolOutput,
@@ -32,6 +38,7 @@ from agents import (
     ToolOutputText,
     function_tool,
     get_cleanup,
+    shell_tool,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
@@ -60,8 +67,10 @@ class FaultStore(SQLiteSessionStore):
 
     def commit(self, thread_id, token, expected_revision, write_id, payload):
         items = _responses(json.loads(payload))
-        has_call = any(item.get("type") == "function_call" for item in items)
-        has_result = any(item.get("type") == "function_call_output" for item in items)
+        has_call = any(item.get("type") in {"function_call", "shell_call"} for item in items)
+        has_result = any(
+            item.get("type") in {"function_call_output", "shell_call_output"} for item in items
+        )
         boundary = "result-fail" if has_result else "intent-fail" if has_call else ""
         self.fail(boundary)
         if self.mode == "stale" and has_call and not self.fired:
@@ -374,6 +383,304 @@ async def test_lost_result_ack_is_reconciled_without_duplicate_effects(responses
     saved = _snapshot(tmp_path, _row(rows, "opened"))
     assert sum(item.get("type") == "function_call" for item in _responses(saved)) == 1
     assert sum(item.get("type") == "function_call_output" for item in _responses(saved)) == 1
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_application_shell_commits_one_typed_receipt_to_custom_storage(
+    responses, tmp_path, interrupted
+):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    calls: list[str] = []
+    output = ShellOutput(
+        output=[
+            ShellCommandOutput(
+                stdout="ready and more", stderr="details", outcome=ShellExit(exit_code=0)
+            )
+        ]
+    )
+
+    class ShellStore(FaultStore):
+        pending_shell_calls: list[list[str]]
+
+        def commit(self, thread_id, token, expected_revision, write_id, payload):
+            super().commit(thread_id, token, expected_revision, write_id, payload)
+            self.pending_shell_calls = json.loads(payload).get("pending_shell_calls", [])
+
+    def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        ((_, saved_call),) = store.pending_shell_calls
+        assert saved_call == call.call_id
+        calls.append(call.call_id)
+        return output
+
+    responses.respond(shell_call())
+    if not interrupted:
+        responses.respond(assistant_output("done"))
+    path = tmp_path / "canonical.sqlite"
+    store = ShellStore(path, "result-fail" if interrupted else "normal")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the configured Shell tool.",
+            model="gpt-5",
+            provider=native_provider,
+            tools=[shell_tool(execute)],
+        )
+        async with agent.session(storage=CustomStorage(store)) as session:
+            identity = session.id
+            turn = await session.submit("Run the test command.")
+            if interrupted:
+                with pytest.raises(RuntimeError):
+                    await turn.get_result()
+            else:
+                assert (await turn.get_result()).final_output == "done"
+                (history_receipt,) = [
+                    item async for item in session.items() if item["type"] == "shell_call_output"
+                ]
+                assert history_receipt["id"] == "shell-local:output"
+                assert history_receipt["call_id"] == "shell-local"
+
+        if interrupted:
+            assert len(responses.requests) == 1
+            saved = _snapshot(tmp_path, identity)
+            assert not any(item["type"] == "shell_call_output" for item in _responses(saved))
+            (original,) = [item for item in _responses(saved) if item["type"] == "shell_call"]
+            turn_id = original["internal_chat_message_metadata_passthrough"]["turn_id"]
+            recovery = CustomStorage(SQLiteSessionStore(path))
+            with pytest.raises(LocalRecoveryRequired) as blocked:
+                async with agent.session(storage=recovery, resume=identity):
+                    pytest.fail("The unresolved application Shell call allowed reopening")
+            (uncertain,) = blocked.value.calls
+            assert (uncertain.thread_id, uncertain.turn_id, uncertain.call_id, uncertain.name) == (
+                identity,
+                turn_id,
+                "shell-local",
+                "shell",
+            )
+            assert len(responses.requests) == 1
+            with pytest.raises(
+                RuntimeError, match="Shell reconciliation requires a valid ShellOutput"
+            ):
+                await recovery.reconcile(
+                    identity, turn_id=turn_id, call_id="shell-local", output="ready"
+                )
+            await recovery.reconcile(
+                identity, turn_id=turn_id, call_id="shell-local", output=output
+            )
+            with pytest.raises(
+                RuntimeError, match="requires an unresolved original turn/call identity"
+            ):
+                await recovery.reconcile(
+                    identity, turn_id=turn_id, call_id="shell-local", output=output
+                )
+
+            responses.respond(assistant_output("done"))
+            async with agent.session(storage=recovery, resume=identity) as resumed:
+                assert (
+                    await (await resumed.submit("Continue.")).get_result()
+                ).final_output == "done"
+
+    assert calls == ["shell-local"]
+    saved = _snapshot(tmp_path, identity)
+    assert saved is not None
+    assert "pending_shell_calls" not in saved
+    items = _responses(saved)
+    calls_saved = [item for item in items if item["type"] == "shell_call"]
+    assert [item["call_id"] for item in calls_saved] == calls
+    (receipt,) = [item for item in items if item["type"] == "shell_call_output"]
+    assert receipt["call_id"] == "shell-local"
+    assert receipt["max_output_length"] == 5
+    assert receipt["output"] == [
+        {"stdout": "ready", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+    ]
+    (sent,) = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert sent["call_id"] == receipt["call_id"] and sent["output"] == receipt["output"]
+
+
+async def test_local_storage_reconciles_interrupted_application_shell(responses, tmp_path):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    entered = asyncio.Event()
+    calls: list[str] = []
+    result = ShellOutput(
+        output=[
+            ShellCommandOutput(
+                stdout="ready and more", stderr="details", outcome=ShellExit(exit_code=0)
+            )
+        ]
+    )
+
+    async def execute(_context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        calls.append(call.call_id)
+        if entered.is_set():
+            return result
+        entered.set()
+        await asyncio.Future()
+        raise AssertionError("The interrupted executor must not return")
+
+    responses.respond(shell_call())
+    storage = LocalStorage(tmp_path / "local")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the application Shell tool.",
+            model="gpt-5",
+            provider=native_provider,
+            tools=[shell_tool(execute)],
+        )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            turn = await session.submit("Run the test command.")
+            await entered.wait()
+            await turn.cancel()
+
+        with pytest.raises(LocalRecoveryRequired) as blocked:
+            async with agent.session(storage=storage, resume=identity):
+                pytest.fail("The unresolved application Shell call allowed reopening")
+        (uncertain,) = blocked.value.calls
+        assert (uncertain.thread_id, uncertain.call_id, uncertain.name) == (
+            identity,
+            "shell-local",
+            "shell",
+        )
+        assert len(responses.requests) == 1
+
+        untyped = uncertain.reconcile(outcome="applied", result="verified")
+        with pytest.raises(RuntimeError, match="requires a verified ShellOutput"):
+            async with agent.session(storage=storage, resume=identity, reconciled_calls=[untyped]):
+                pytest.fail("A text result settled the application Shell call")
+        verified = uncertain.reconcile(outcome="applied", result=result)
+        async with agent.session(
+            storage=storage, resume=identity, reconciled_calls=[verified]
+        ) as confirmed:
+            (confirmed_receipt,) = [
+                item async for item in confirmed.items() if item["type"] == "shell_call_output"
+            ]
+            assert confirmed_receipt["id"]
+        conflicting = uncertain.reconcile(
+            outcome="applied",
+            result=ShellOutput(
+                output=[
+                    ShellCommandOutput(stdout="wrong", stderr="", outcome=ShellExit(exit_code=0))
+                ]
+            ),
+        )
+        with pytest.raises(RuntimeError, match="Reconciliation conflicts with a retained result"):
+            async with agent.session(
+                storage=storage, resume=identity, reconciled_calls=[conflicting]
+            ):
+                pytest.fail("A second result replaced the confirmed application Shell receipt")
+        responses.respond(assistant_output("done"))
+        async with agent.session(
+            storage=storage, resume=identity, reconciled_calls=[verified]
+        ) as resumed:
+            (history_receipt,) = [
+                item async for item in resumed.items() if item["type"] == "shell_call_output"
+            ]
+            assert history_receipt["id"] == confirmed_receipt["id"]
+            assert history_receipt["turn_id"] == uncertain.turn_id
+            assert (await (await resumed.submit("Continue.")).get_result()).final_output == "done"
+
+            responses.respond(shell_call())
+            responses.respond(assistant_output("Replayed the command."))
+            with pytest.raises(
+                NativeError, match="Cannot reuse an original call identity during recovery"
+            ):
+                await (await resumed.submit("Repeat the original call identity.")).get_result()
+
+    assert calls == ["shell-local"]
+    assert len(responses.requests) == 3
+    (receipt,) = [
+        item for item in responses.requests[1]["input"] if item["type"] == "shell_call_output"
+    ]
+    assert receipt["call_id"] == "shell-local" and receipt["max_output_length"] == 5
+    assert receipt["output"] == [
+        {"stdout": "ready", "stderr": "", "outcome": {"type": "exit", "exit_code": 0}}
+    ]
+
+
+async def test_local_storage_reopens_after_markerless_hosted_shell(responses, tmp_path):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    responses.respond(shell_call(), assistant_output("Provider finished."))
+    storage = LocalStorage(tmp_path / "local")
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the provider's Shell tool.",
+            model="gpt-5.5",
+            provider=native_provider,
+            tools=[HostedShell(environment={"type": "container_auto"})],
+        )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            assert (await (await session.submit("Answer.")).get_result()).final_output == (
+                "Provider finished."
+            )
+        async with agent.session(storage=storage, resume=identity):
+            pass
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        None,
+        {"type": "container_auto"},
+        {"type": "container_reference", "container_id": "cntr-shell"},
+    ],
+)
+async def test_canonical_reconciliation_rejects_provider_shell_calls(
+    responses, tmp_path, environment
+):
+    from tests.test_native_application_shell import shell_call
+    from tests.test_native_manual_tools import provider
+
+    def execute(_context: ToolContext[None], _call: ShellCall) -> ShellOutput:
+        pytest.fail("A provider Shell call reached the application executor")
+
+    call = shell_call() if environment is None else shell_call(environment=environment)
+    responses.respond(call, assistant_output("Provider finished."))
+    storage = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+    async with timeout(30), provider(responses) as native_provider:
+        agent = Agent(
+            instructions="Use the configured Shell tool.",
+            model="gpt-5.5" if environment is None else "gpt-5",
+            provider=native_provider,
+            tools=(
+                [HostedShell(environment={"type": "container_auto"})]
+                if environment is None
+                else [shell_tool(execute)]
+            ),
+        )
+        async with agent.session(storage=storage) as session:
+            identity = session.id
+            assert (await (await session.submit("Answer.")).get_result()).final_output == (
+                "Provider finished."
+            )
+
+    before = _snapshot(tmp_path, identity)
+    assert "pending_shell_calls" not in before
+    (original,) = [item for item in _responses(before) if item["type"] == "shell_call"]
+    if environment is None:
+        assert "container_id" not in original and "environment" not in original
+    with pytest.raises(
+        RuntimeError, match="requires an unresolved original application Shell call"
+    ):
+        await storage.reconcile(
+            identity,
+            turn_id=original["internal_chat_message_metadata_passthrough"]["turn_id"],
+            call_id="shell-local",
+            output=ShellOutput(
+                output=[
+                    ShellCommandOutput(stdout="verified", stderr="", outcome=ShellExit(exit_code=0))
+                ]
+            ),
+        )
+    assert _snapshot(tmp_path, identity) == before
+    assert len(responses.requests) == 1
 
 
 async def test_readable_lost_ack_without_confirmation_keeps_session_failed(responses, tmp_path):
