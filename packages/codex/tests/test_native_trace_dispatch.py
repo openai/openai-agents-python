@@ -77,8 +77,18 @@ async def dispatch_case(mode):
         assert (await telemetry.force_flush()).status == "success"
     finally:
         await telemetry.shutdown()
-    with pytest.raises(Exception, match="shutting down"):
-        await telemetry.dispatch_trace_event(original[0])
+    rejected = {**original[0], "attributes": {"private": "DISPATCH_PRIVATE_SENTINEL"}}
+    with pytest.raises(Exception, match="shutting down") as caught:
+        await telemetry.dispatch_trace_event(rejected)
+    frame = caught.value.__traceback__
+    inspected = 0
+    while frame is not None:
+        if frame.tb_frame.f_code.co_name == "dispatch_trace_event":
+            inspected += 1
+            assert not {"event", "encoded", "current"}.intersection(frame.tb_frame.f_locals)
+            assert "DISPATCH_PRIVATE_SENTINEL" not in repr(frame.tb_frame.f_locals)
+        frame = frame.tb_next
+    assert inspected == 1
 
 
 @pytest.mark.parametrize("mode", ["lifecycle", "credentials", "reentrant"])

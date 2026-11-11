@@ -1464,16 +1464,20 @@ async def dispatch_trace_event(event: TraceLifecycleEvent) -> None:
     sequence and routes; it never activates a span or recovers credentials.
     Calls from a trace processor are rejected before queue admission.
     """
-    if _in_processor.get():
-        raise RuntimeError("Trace event dispatch cannot run inside a trace processor callback")
-    current = _current.get()
-    if _tracing_disabled or (current is not None and current.disabled):
-        return
-    encoded = json.dumps(
-        event, default=dict, allow_nan=False, ensure_ascii=False, separators=(",", ":")
-    )
-    _ensure_processor_pump()
-    await _native_tracing().dispatch_trace_event(encoded)
+    current = encoded = None
+    try:
+        if _in_processor.get():
+            raise RuntimeError("Trace event dispatch cannot run inside a trace processor callback")
+        current = _current.get()
+        if _tracing_disabled or (current is not None and current.disabled):
+            return
+        encoded = json.dumps(
+            event, default=dict, allow_nan=False, ensure_ascii=False, separators=(",", ":")
+        )
+        _ensure_processor_pump()
+        await _native_tracing().dispatch_trace_event(encoded)
+    finally:
+        del event, encoded, current
 
 
 async def force_flush(*, timeout_ms: int = 10_000) -> FlushResult:
