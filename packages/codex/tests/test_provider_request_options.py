@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 
+import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -150,11 +151,13 @@ async def test_borrowed_retry_override_keeps_original_client_open_and_counts_att
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_borrowed_per_attempt_timeout_uses_real_client_without_retries(adapter):
-    calls = 0
+    attempts = 0
+
+    async def record_attempt(req):
+        nonlocal attempts
+        attempts += 1
 
     async def handle(req):
-        nonlocal calls
-        calls += 1
         await asyncio.sleep(0.1)
         return web.json_response(response(adapter))
 
@@ -162,13 +165,16 @@ async def test_borrowed_per_attempt_timeout_uses_real_client_without_retries(ada
     app.router.add_post("/{tail:.*}", handle)
     async with TestServer(app) as server:
         async with AsyncOpenAI(
-            api_key="fixture", base_url=str(server.make_url("/v1/")), max_retries=0
+            api_key="fixture",
+            base_url=str(server.make_url("/v1/")),
+            max_retries=0,
+            http_client=httpx.AsyncClient(event_hooks={"request": [record_attempt]}),
         ) as client:
             with pytest.raises(APITimeoutError):
                 await adapter(
                     client, request_options={"timeout_ms": 10, "max_retries": 0}
                 ).complete(request())
-            assert calls == 1
+            assert attempts == 1
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
