@@ -3228,6 +3228,30 @@ def _supports_atomic_first_turn(
     )
 
 
+def _normalize_opening_error(error: BaseException, api_key: str | None) -> None:
+    if isinstance(error, UnicodeEncodeError) and error.object is api_key:
+        # Keep only the character or range shown by the native conversion error.
+        error.object = (
+            "*" * error.start + error.object[error.start]
+            if error.end == error.start + 1
+            else "*" * error.end
+        )
+        error.args = (
+            error.encoding,
+            error.object,
+            error.start,
+            error.end,
+            error.reason,
+        )
+    # Keep native validation order and the missing-environment diagnostic.
+    if (
+        api_key is None
+        and isinstance(error, RuntimeError)
+        and error.args == ("api_key must not be empty",)
+    ):
+        error.args = ("Provide api_key or set OPENAI_API_KEY",)
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -4374,27 +4398,7 @@ class Session(Generic[ContextT, OutputT]):
                 session._environment_lease = lease
                 return session
             except BaseException as error:
-                if isinstance(error, UnicodeEncodeError) and error.object is opening.api_key:
-                    # Keep only the character or range shown by the native conversion error.
-                    error.object = (
-                        "*" * error.start + error.object[error.start]
-                        if error.end == error.start + 1
-                        else "*" * error.end
-                    )
-                    error.args = (
-                        error.encoding,
-                        error.object,
-                        error.start,
-                        error.end,
-                        error.reason,
-                    )
-                # Keep native validation order and the missing-environment diagnostic.
-                if (
-                    opening.api_key is None
-                    and isinstance(error, RuntimeError)
-                    and error.args == ("api_key must not be empty",)
-                ):
-                    error.args = ("Provide api_key or set OPENAI_API_KEY",)
+                _normalize_opening_error(error, opening.api_key)
                 opening.api_key = None
                 if opening.lease is not None:
                     await _close_after_error(error, lambda: opening.fail(session, transport, lease))
