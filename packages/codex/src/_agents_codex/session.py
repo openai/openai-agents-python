@@ -67,6 +67,8 @@ from ._events import (
     MessageItem,
     ReasoningItem,
     SessionItem as SessionItem,
+    ShellCallItem,
+    ShellCallOutputItem,
     WebSearchCallItem,
 )
 from ._function_tools import (
@@ -1373,6 +1375,8 @@ def _project_progress(
                     "web_search_call",
                     "file_search_call",
                     "code_interpreter_call",
+                    "shell_call",
+                    "shell_call_output",
                     "image_generation_call",
                 }
                 or (
@@ -1391,6 +1395,8 @@ def _project_progress(
                             | WebSearchCallItem
                             | FileSearchCallItem
                             | CodeInterpreterCallItem
+                            | ShellCallItem
+                            | ShellCallOutputItem
                             | ImageGenerationCallItem,
                             item,
                         ),
@@ -2220,7 +2226,7 @@ def _split_tools(
         else:
             raise TypeError(
                 "tools must use FunctionTool, function_tool, StdioMCP, HttpMCP, "
-                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, "
+                "Checklist, NativeGoals, WebSearch, FileSearch, CodeInterpreter, HostedShell, "
                 "ImageGeneration, ToolSearch or NativeAgents"
             )
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents

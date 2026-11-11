@@ -35,6 +35,8 @@ from ._events import (
     ImageGenerationCallItem,
     MessageItem,
     ReasoningItem,
+    ShellCallItem,
+    ShellCallOutputItem,
     WebSearchCallItem,
 )
 from ._mcp_errors import _protect_mcp_methods
@@ -158,7 +160,13 @@ class RawProviderEvent(_SubmissionEvent):
 class HostedToolCallSummary:
     """Identity and status of a hosted call, without provider payloads."""
 
-    type: Literal["file_search_call", "code_interpreter_call", "image_generation_call"]
+    type: Literal[
+        "file_search_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "shell_call",
+        "shell_call_output",
+    ]
     id: str
     turn_id: str
     status: str
@@ -184,6 +192,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         | WebSearchCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
+        | ShellCallItem
+        | ShellCallOutputItem
         | ImageGenerationCallItem
         | HostedToolCallSummary
     )
@@ -647,6 +657,8 @@ class EventStream(AsyncIterator[Observation]):
                                 and (
                                     model_item["type"] == "file_search_call"
                                     or model_item["type"] == "code_interpreter_call"
+                                    or model_item["type"] == "shell_call"
+                                    or model_item["type"] == "shell_call_output"
                                     or model_item["type"] == "image_generation_call"
                                 )
                             ):
