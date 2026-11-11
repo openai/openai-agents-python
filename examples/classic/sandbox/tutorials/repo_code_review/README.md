@@ -19,14 +19,7 @@ uv run python examples/classic/sandbox/tutorials/repo_code_review/evals.py
 
 This demo exits after the scripted review so the generated artifacts and eval contract stay deterministic.
 
-To run the same review in Docker, build the shared tutorial image once and pass
-`--docker`:
-
-```bash
-docker build -t sandbox-tutorials:latest -f examples/classic/sandbox/tutorials/Dockerfile .
-uv run python examples/classic/sandbox/tutorials/repo_code_review/main.py --docker
-uv run python examples/classic/sandbox/tutorials/repo_code_review/evals.py
-```
+This tutorial has been using Unix-local because Docker sandboxes have been rejecting `GitRepo` entries.
 
 ## Expected artifacts
 

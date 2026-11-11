@@ -219,7 +219,7 @@ class ModelResponse:
     usage: dict[str, int] | None = None
     response_id: str = field(default_factory=lambda: "resp_" + uuid4().hex)
 
-    def _capture(self) -> str:
+    def _capture(self, *, capture_raw_usage: bool = False) -> str:
         usage: Any = None
         rendered: str | None = None
         try:
@@ -229,7 +229,16 @@ class ModelResponse:
             usage = _capture_model_usage(self.usage)
             try:
                 rendered = json.dumps(
-                    {"response_id": self.response_id, "output": self.output, "usage": usage},
+                    {
+                        "response_id": self.response_id,
+                        "output": self.output,
+                        "usage": usage,
+                        **(
+                            {"original_usage": _capture_responses_usage(self)}
+                            if capture_raw_usage
+                            else {}
+                        ),
+                    },
                     allow_nan=False,
                 )
             except (TypeError, ValueError, OverflowError, RecursionError):
@@ -241,6 +250,33 @@ class ModelResponse:
         finally:
             # Invalid provider counters must not retain output through this frame.
             del self, usage, rendered
+
+
+def _capture_responses_usage(response: ModelResponse) -> dict[str, Any] | None:
+    original: Any = None
+    usage: Any = None
+    request_id: Any = None
+    response_id: Any = None
+    try:
+        original = getattr(response, "_responses_usage", None)
+        if original is None:
+            return None
+        usage, request_id, response_id = original
+        if (
+            not isinstance(response_id, str)
+            or not response_id.strip()
+            or response_id != response.response_id
+        ):
+            raise ValueError("Original Responses usage requires its unchanged provider response ID")
+        if hasattr(usage, "model_dump"):
+            usage = usage.model_dump(mode="json", exclude_unset=True)
+        return {
+            "response_id": response_id,
+            "upstream_request_id": request_id if isinstance(request_id, str) else None,
+            "usage": usage,
+        }
+    finally:
+        del response, original, usage, request_id, response_id
 
 
 class NativeModel(Protocol):
@@ -857,6 +893,7 @@ class ResponsesModel:
         usage: dict[str, int] | None = None
         item: Any = None
         part: Any = None
+        returned: ModelResponse | None = None
         try:
             selected = await _request_options_for(self._request_options_source, request)
             client = self.client
@@ -923,7 +960,23 @@ class ResponsesModel:
                     break
             if value.get("status") != "completed" and not refusal:
                 raise ValueError("ResponsesModel requires a completed response")
-            return ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            returned = ModelResponse(output, usage, value.get("id") or "resp_" + uuid4().hex)
+            if (
+                value.get("status") == "completed"
+                and isinstance(value.get("id"), str)
+                and value["id"].strip()
+                and raw_usage is not None
+            ):
+                object.__setattr__(
+                    returned,
+                    "_responses_usage",
+                    (
+                        getattr(response, "usage", raw_usage),
+                        getattr(response, "_request_id", None),
+                        value.get("id"),
+                    ),
+                )
+            return returned
 
         finally:
             # Traceback-local logging must not retain SDK-owned request/response payloads.
@@ -937,6 +990,7 @@ class ResponsesModel:
                 output,
                 raw_usage,
                 usage,
+                returned,
                 item,
                 part,
             )

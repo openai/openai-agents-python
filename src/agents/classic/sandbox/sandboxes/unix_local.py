@@ -28,7 +28,7 @@ from collections import deque
 from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import partial
+from functools import cache, partial
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
@@ -73,7 +73,7 @@ from ..util.tar_utils import (
     should_skip_tar_member,
     validate_tarfile,
 )
-from ..workspace_paths import _raise_if_filesystem_root
+from ..workspace_paths import _git_copy_tool_path, _raise_if_filesystem_root
 from . import _unix_local_file_ops
 from ._unix_local_files import _UnixLocalFiles
 
@@ -310,7 +310,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             resolved_manifest,
             provider_backend_id="unix_local",
         )
-        resolved_manifest._validate_git_repo_hosts()
+        resolved_manifest._validate_git_repo_entries(supports_git_repo=self._supports_git_repo)
 
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
@@ -385,6 +385,48 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
         env, cwd = await self._resolved_exec_context()
+        return await self._exec_in_context(*command, env=env, cwd=cwd, timeout=timeout)
+
+    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
+        cwd = await self._exec_workspace()
+        path = await run_blocking_workspace_io(lambda: self._git_copy_path(cwd))
+        shell = shutil.which("sh", path=path) if path else None
+        if shell is None:
+            return ExecResult(
+                stdout=b"", stderr=b"Unable to locate the provider's sh", exit_code=127
+            )
+        return await self._exec_in_context(
+            shell, "-c", script, "sandbox-git-copy", *arguments, env={"PATH": path}, cwd=cwd
+        )
+
+    def _git_copy_path(self, cwd: str) -> str:
+        configured_path = os.defpath
+        if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
+            configured_path = f"{os.environ.get('PATH', os.defpath)}{os.pathsep}{os.defpath}"
+
+        @cache
+        def read_link(path: PurePosixPath) -> str | None:
+            try:
+                return os.readlink(path)
+            except OSError as error:
+                if error.errno == errno.EINVAL:
+                    return ""
+                return None
+
+        workspace = PurePosixPath(os.path.realpath(cwd))
+        root = PurePosixPath(os.getcwd())
+        directories = (root / (entry or ".") for entry in configured_path.split(os.pathsep))
+        # Procfs aliases such as /proc/self/cwd change meaning in the copy child.
+        # Exclude them in directory and executable links before the cwd transition.
+        return _git_copy_tool_path(directories, (workspace, PurePosixPath("/proc")), read_link)
+
+    async def _exec_in_context(
+        self,
+        *command: str | Path,
+        env: dict[str, str],
+        cwd: str,
+        timeout: float | None = None,
+    ) -> ExecResult:
         workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -597,12 +639,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             }
         env.update(await self.state.manifest.environment.resolve())
 
+        cwd = await self._exec_workspace()
+        env["HOME"] = cwd
+        return env, cwd
+
+    async def _exec_workspace(self) -> str:
         workspace = Path(self.state.manifest.root)
         if not await asyncio.to_thread(workspace.exists):
             raise WorkspaceRootNotFoundError(path=workspace)
-
-        env["HOME"] = str(workspace)
-        return env, str(workspace)
+        return str(workspace)
 
     async def _pump_process_stream(
         self,

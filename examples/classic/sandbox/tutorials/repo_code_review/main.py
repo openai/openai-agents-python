@@ -22,7 +22,6 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
 from examples.classic.sandbox.tutorials.misc import (
-    DEFAULT_SANDBOX_IMAGE,
     console,
     create_sandbox_client_and_session,
     load_env_defaults,
@@ -98,7 +97,7 @@ def write_review_artifacts(output_dir: Path, review: RepoReviewResult) -> None:
         (output_dir / "fix.patch").write_text(review.fix_patch.strip() + "\n", encoding="utf-8")
 
 
-async def main(model: str, question: str, use_docker: bool, image: str) -> None:
+async def main(model: str, question: str) -> None:
     manifest = Manifest(
         entries={
             "AGENTS.md": File(content=AGENTS_MD.encode("utf-8")),
@@ -116,8 +115,7 @@ async def main(model: str, question: str, use_docker: bool, image: str) -> None:
 
     client, sandbox = await create_sandbox_client_and_session(
         manifest=manifest,
-        use_docker=use_docker,
-        image=image,
+        use_docker=False,
     )
     try:
         async with sandbox:
@@ -158,16 +156,6 @@ if __name__ == "__main__":
         default=DEFAULT_QUESTION,
         help="Prompt to send to the agent.",
     )
-    parser.add_argument(
-        "--docker",
-        action="store_true",
-        help="Run this example in Docker instead of Unix-local.",
-    )
-    parser.add_argument(
-        "--image",
-        default=DEFAULT_SANDBOX_IMAGE,
-        help="Docker image to use when --docker is set.",
-    )
     args = parser.parse_args()
 
-    asyncio.run(main(args.model, args.question, args.docker, args.image))
+    asyncio.run(main(args.model, args.question))

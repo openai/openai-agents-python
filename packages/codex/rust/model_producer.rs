@@ -43,6 +43,16 @@ pub(super) struct ModelReply {
     output: Vec<Value>,
     #[serde(default)]
     usage: Option<codex_protocol::protocol::TokenUsage>,
+    #[serde(default)]
+    original_usage: Option<OriginalResponsesUsage>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalResponsesUsage {
+    response_id: String,
+    #[serde(default)]
+    upstream_request_id: Option<String>,
+    usage: serde_json::Map<String, Value>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -438,6 +448,13 @@ impl ModelResponseInterceptor for Producer {
                 event["msg"]["profile_id"] = json!(profile.profile_id);
                 event["msg"]["profile_epoch"] = json!(profile.epoch);
             }
+            event["msg"]["capture_raw_usage"] = json!(
+                tools
+                    .interception
+                    .get()
+                    .and_then(|control| control.upgrade())
+                    .is_some_and(|control| control.raw_usage_active())
+            );
             event["msg"]["root_turn_id"] = json!(admission.root_turn_id());
             if let Some(attempt) = &attempt {
                 event["msg"]["attempt_id"] = json!(attempt.id());
@@ -512,11 +529,54 @@ impl ModelResponseInterceptor for Producer {
                     if !ticket.admits() || callback.cleanup_failed.load(Ordering::Acquire) {
                         return Err(FAILURE.into());
                     }
-                    let events = codex_extension_api::completed_model_response(
+                    let mut events = codex_extension_api::completed_model_response(
                         reply.response_id,
                         reply.output,
                         reply.usage,
                     );
+                    if let Some(original) = reply.original_usage {
+                        if let Some(Ok(codex_extension_api::ResponseEvent::Completed {
+                            response_id,
+                            usage_metadata,
+                            ..
+                        })) = events.last_mut()
+                        {
+                            if original.response_id != *response_id {
+                                return Err(FAILURE.into());
+                            }
+                            let raw_usage = Value::Object(original.usage);
+                            let count = |value: &Value| value.as_i64().filter(|count| *count >= 0);
+                            let received_usage = codex_protocol::protocol::ReceivedResponseUsage {
+                                input_tokens: raw_usage.get("input_tokens").and_then(count),
+                                cached_input_tokens: raw_usage
+                                    .pointer("/input_tokens_details/cached_tokens")
+                                    .and_then(count),
+                                cache_write_input_tokens: raw_usage
+                                    .pointer("/input_tokens_details/cache_write_tokens")
+                                    .and_then(count),
+                                output_tokens: raw_usage.get("output_tokens").and_then(count),
+                                reasoning_output_tokens: raw_usage
+                                    .pointer("/output_tokens_details/reasoning_tokens")
+                                    .and_then(count),
+                                total_tokens: raw_usage.get("total_tokens").and_then(count),
+                            };
+                            let observation = codex_protocol::protocol::ResponseObservation {
+                                response_id: Some(original.response_id),
+                                upstream_request_id: original.upstream_request_id,
+                                status:
+                                    codex_protocol::protocol::ResponseObservationStatus::Completed,
+                                incomplete_reason: None,
+                                usage: Some(received_usage),
+                            };
+                            usage_metadata.get_or_insert_default().metadata = Some(raw_usage);
+                            events.insert(
+                                events.len() - 1,
+                                Ok(codex_extension_api::ResponseEvent::ResponseObserved(
+                                    observation,
+                                )),
+                            );
+                        }
+                    }
                     Ok(futures_util::stream::iter(events).boxed())
                 }
                 Response::Stream { events, finish } => {
