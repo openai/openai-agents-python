@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import FrozenInstanceError
 from typing import Any
 
@@ -16,9 +17,11 @@ from agents import (
     ActionReply,
     Agent,
     Completed,
+    ContinueTurn,
     FunctionTool,
     Interaction,
     InteractionRequired,
+    PromptedOutput,
     RawProviderUsage,
     Session,
     SessionState,
@@ -106,13 +109,29 @@ async def test_native_original_provider_usage_stays_out_of_history_and_checkpoin
         assert result.raw_usage is None
 
 
+@pytest.mark.parametrize("delegated", [False, True])
 async def test_native_original_provider_usage_on_manual_restore(
     responses: ResponsesFixture,
+    delegated: bool,
 ) -> None:
     lookup = FunctionTool(
         name="lookup", description="Read a record.", input_type=LookupArgs, output_type=str
     )
-    agent = Agent(instructions="Use lookup once.", tools=[lookup], provider=provider(responses))
+
+    class DelegatingAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **options: Any):
+            async with super().session(**options) as session:
+                if options.get("state") is not None:
+                    restored = session.restored_turn
+                    assert restored is not None
+                    await restored.get_result()
+                yield session
+
+    agent_type = DelegatingAgent if delegated else Agent
+    agent = agent_type(
+        instructions="Use lookup once.", tools=[lookup], provider=provider(responses)
+    )
     responses.before_event = _report_usage
     responses.respond(function_call("lookup", {"key": "A"}, "raw-usage-manual"))
 
@@ -135,6 +154,41 @@ async def test_native_original_provider_usage_on_manual_restore(
     assert result.raw_usage is not None
     assert [record.response_id for record in result.raw_usage] == ["resp_2"]
     assert result.raw_usage[0].usage["fixture_secret"] == "not-for-usage-readers"
+
+
+@pytest.mark.parametrize("resample", [False, True])
+async def test_native_original_provider_usage_includes_prompted_output_repair(
+    responses: ResponsesFixture,
+    resample: bool,
+) -> None:
+    def complete(request):
+        if resample and request.text == '{"count": 7}':
+            return ContinueTurn("Count once more.")
+        return None
+
+    responses.before_event = _report_usage
+    responses.respond(assistant_output("invalid JSON"))
+    responses.respond(assistant_output('{"count": 7}'))
+    if resample:
+        responses.respond(assistant_output('{"count": 8}'))
+    agent = Agent(
+        instructions="Return the count.",
+        provider=provider(responses),
+        output_type=PromptedOutput(dict[str, int], max_retries=1),
+        before_complete=complete if resample else None,
+    )
+    async with timeout(30):
+        result = await agent.run("count", return_raw_usage=True, return_state=True)
+
+    assert result.final_output == {"count": 8 if resample else 7}
+    expected_responses = ["resp_1", "resp_2", "resp_3"] if resample else ["resp_1", "resp_2"]
+    assert result.run_usage.requests == len(expected_responses)
+    assert result.raw_usage is not None
+    assert [record.response_id for record in result.raw_usage] == expected_responses
+    assert all(
+        record.usage["fixture_secret"] == "not-for-usage-readers" for record in result.raw_usage
+    )
+    assert result.state is not None and "not-for-usage-readers" not in result.state.to_json()
 
 
 async def check_usage_types(session: Session[object, str], handle: Turn[str]) -> None:

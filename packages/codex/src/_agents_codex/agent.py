@@ -1554,7 +1554,6 @@ class Agent(Generic[ContextT, OutputT]):
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
         _atomic_first_turn: bool = False,
-        _capture_raw_usage: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
         project_guidance: bool = False,
@@ -1595,7 +1594,6 @@ class Agent(Generic[ContextT, OutputT]):
                 discover_agents_md=discover_agents_md,
                 parent_trace=parent_trace,
                 _atomic_first_turn=_atomic_first_turn,
-                _capture_raw_usage=_capture_raw_usage,
                 _completed_input=_completed_input,
                 _private_text_run=_private_text_run,
                 **cast(
@@ -1817,6 +1815,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
+        raw_usage_token = None
         try:
             from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
@@ -1827,6 +1826,7 @@ class Agent(Generic[ContextT, OutputT]):
                 InteractionRequired,
                 NativeError,
                 _handoff_default_names,
+                _raw_usage_restore,
                 _split_tools,
             )
             from .state import SessionState
@@ -1954,13 +1954,10 @@ class Agent(Generic[ContextT, OutputT]):
                 options["max_function_concurrency"] = max_function_concurrency
             if environment is not None:
                 options["environment"] = environment
-            builtin_session_factory = (
+            if (
                 isinstance(session_factory, MethodType)
                 and session_factory.__self__ is self
                 and session_factory.__func__ is _BUILTIN_SESSION_FACTORY
-            )
-            if (
-                builtin_session_factory
                 and state is None
                 and initial_messages is None
                 and input is not None
@@ -1985,17 +1982,18 @@ class Agent(Generic[ContextT, OutputT]):
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
-            capture_before_restore = return_raw_usage and resume_manual and builtin_session_factory
-            if capture_before_restore:
-                session_factory = self._session_context
-                options["_capture_raw_usage"] = True
-                options.setdefault("max_function_concurrency", _MAX_FUNCTION_CONCURRENCY_UNSET)
+            if return_raw_usage and resume_manual:
+                assert state is not None
+                raw_usage_token = _raw_usage_restore.set((self, state, asyncio.current_task()))
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
             ) as session:
                 from .session import Completed
 
+                if raw_usage_token is not None:
+                    _raw_usage_restore.reset(raw_usage_token)
+                    raw_usage_token = None
                 if isinstance(session, Completed):
                     return session
                 if (
@@ -2120,8 +2118,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
-                if return_raw_usage and not capture_before_restore:
-                    session._native._start_raw_usage()
+                if return_raw_usage:
+                    session._start_raw_usage()
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -2158,6 +2156,8 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, raw_usage=session._take_raw_usage(result.turn))
                 return result
         finally:
+            if raw_usage_token is not None:
+                _raw_usage_restore.reset(raw_usage_token)
             options.pop("trace_options", None)
             del trace_options
 

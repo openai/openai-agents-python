@@ -1201,6 +1201,17 @@ _restore_declaration: ContextVar[_RestoreDeclaration | None] = ContextVar(
     "native_restore_declaration", default=None
 )
 
+_raw_usage_restore: ContextVar[
+    tuple[Agent[Any, Any], SessionState, asyncio.Task[Any] | None] | None
+] = ContextVar("native_raw_usage_restore", default=None)
+
+
+@dataclass(repr=False)
+class _RawUsageCapture:
+    records: list[RawProviderUsage] = field(default_factory=list)
+    payload_bytes: int = 2
+    error: str | None = None
+
 
 @contextmanager
 def _private_task(
@@ -3295,7 +3306,6 @@ class Session(Generic[ContextT, OutputT]):
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
         _atomic_first_turn: bool = False,
-        _capture_raw_usage: bool = False,
         _completed_input: str | None = None,
         _private_text_run: bool = False,
         project_guidance: bool = False,
@@ -4305,10 +4315,16 @@ class Session(Generic[ContextT, OutputT]):
                 if owned_provider:
                     session._owned_provider = provider
                 session._websockets_enabled = websockets_enabled
-                if _capture_raw_usage:
-                    thread._start_raw_usage()
                 if manual_restore:
                     assert continuation is not None and checkpoint is not None
+                    capture = _raw_usage_restore.get()
+                    if (
+                        capture is not None
+                        and capture[0] is policy_agent
+                        and (capture[1] is state or capture[1] == state)
+                        and capture[2] is asyncio.current_task()
+                    ):
+                        session._start_raw_usage()
                     session._manual_source_digest = hashlib.sha256(
                         saved.to_json().encode()
                     ).hexdigest()
@@ -4586,6 +4602,7 @@ class Session(Generic[ContextT, OutputT]):
         self._managed_workspace: _ManagedWorkspaceSource | None = None
         self._owned_provider: NativeProvider | None = None
         self._repair_session: Session[ContextT, str] | None = None
+        self._raw_usage_capture: _RawUsageCapture | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._profiles: dict[str, _ProfileRuntime] = {}
@@ -7216,15 +7233,46 @@ class Session(Generic[ContextT, OutputT]):
 
         return await self._join_mutation(asyncio.create_task(capture()))
 
-    def _take_raw_usage(self, turn: Turn[Any]) -> tuple[RawProviderUsage, ...]:
+    def _start_raw_usage(self) -> None:
+        if self._raw_usage_capture is None:
+            self._native._start_raw_usage()
+            self._raw_usage_capture = _RawUsageCapture()
+
+    def _collect_raw_usage(self, turn: Turn[Any], capture: _RawUsageCapture) -> None:
+        if capture.error is not None:
+            return
         turn_id = turn.turn_id
         if turn_id is None:
-            raise NativeError("Completed native turn has no provider usage identity")
+            capture.error = "Completed native turn has no provider usage identity"
+            capture.records.clear()
+            return
         try:
-            records = json.loads(self._native._take_raw_usage(turn_id))
+            encoded = self._native._take_raw_usage(turn_id)
         except RuntimeError as error:
-            raise NativeError(str(error)) from error
-        return tuple(RawProviderUsage(**record) for record in records)
+            capture.error = str(error)
+            capture.records.clear()
+            return
+        records = json.loads(encoded)
+        if not records:
+            return
+        separator_bytes = 1 if capture.records else 0
+        payload_bytes = capture.payload_bytes + len(encoded.encode()) - 2 + separator_bytes
+        if payload_bytes > 8 * 1024 * 1024 or len(capture.records) + len(records) > 4096:
+            capture.error = "Provider usage exceeds the SDK capture limit"
+            capture.records.clear()
+            return
+        capture.payload_bytes = payload_bytes
+        capture.records.extend(RawProviderUsage(**record) for record in records)
+
+    def _take_raw_usage(self, turn: Turn[Any]) -> tuple[RawProviderUsage, ...]:
+        capture = self._raw_usage_capture
+        if capture is None:
+            raise NativeError("Provider usage capture was not started")
+        self._collect_raw_usage(turn, capture)
+        self._raw_usage_capture = None
+        if capture.error is not None:
+            raise NativeError(capture.error)
+        return tuple(capture.records)
 
     async def _run_history(self) -> tuple[dict[str, Any], ...]:
         try:
@@ -10101,6 +10149,14 @@ class Session(Generic[ContextT, OutputT]):
             # No repair work can have started before this local check.
             # _start reaches its identical check without yielding.
             repair._check_open()
+            capture = self._raw_usage_capture
+            if capture is not None:
+                # A completion decision can resume sampling on the original turn.
+                # Keep its preceding responses ahead of this correction.
+                self._collect_raw_usage(handle, capture)
+                if capture.error is None:
+                    self._native._start_raw_usage()
+                    repair._native._start_raw_usage()
             rejected = False
             try:
                 try:
@@ -10123,6 +10179,8 @@ class Session(Generic[ContextT, OutputT]):
                     if state.failure.done():
                         raise state.failure.result()
                     result = repair_result.result()
+                    if capture is not None:
+                        repair._collect_raw_usage(attempt, capture)
                 except BaseException as error:
                     # Waiting is passive. This producer, not the waiter,
                     # owns cancellation and joins only its exact attempt.
