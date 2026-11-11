@@ -827,6 +827,14 @@ impl ThreadStore for MemoryThreadStore {
         })
     }
 
+    fn read_original_history(
+        &self,
+        params: LoadThreadHistoryParams,
+        reader: Box<dyn codex_thread_store::OriginalHistoryReader>,
+    ) -> ThreadStoreFuture<'_, codex_thread_store::OriginalHistorySnapshot> {
+        self.inner.read_original_history(params, reader)
+    }
+
     fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,
@@ -2683,6 +2691,39 @@ impl ThreadStore for LocalChecklistStore {
                 revision: None,
                 items,
             })
+        })
+    }
+
+    fn load_original_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
+        Box::pin(async move {
+            let writers = self.writers.lock().await;
+            if let Some(writer) = writers.get(&params.thread_id) {
+                writer.check()?;
+                if writer.loss.is_some() {
+                    return Err(checklist_error("local writer is suspending its lost owner"));
+                }
+            }
+            ThreadStore::load_original_history(&self.inner, params).await
+        })
+    }
+
+    fn read_original_history(
+        &self,
+        params: LoadThreadHistoryParams,
+        reader: Box<dyn codex_thread_store::OriginalHistoryReader>,
+    ) -> ThreadStoreFuture<'_, codex_thread_store::OriginalHistorySnapshot> {
+        Box::pin(async move {
+            let writers = self.writers.lock().await;
+            if let Some(writer) = writers.get(&params.thread_id) {
+                writer.check()?;
+                if writer.loss.is_some() {
+                    return Err(checklist_error("local writer is suspending its lost owner"));
+                }
+            }
+            ThreadStore::read_original_history(&self.inner, params, reader).await
         })
     }
 

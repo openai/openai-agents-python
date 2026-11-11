@@ -1,0 +1,33 @@
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -626,22 +626,24 @@
+         {
+             Some(parent.session.inherited_instructions().await)
+         } else {
+-            // The registered logical root supplies only current resource context.
+-            // Preserve the existing private/shared thread-provider policy separately.
+-            let user_appendix = if let Some(root_id) =
++            // The registered root has been supplying its applied user base and current
++            // resource appendix. Thread providers have been retaining their sharing policy.
++            let (user, user_appendix) = if let Some(root_id) =
+                 self.runtime.registry.agent_id_for_path(&AgentPath::root())
+                 && let Ok(root) = state.get_thread(root_id).await
+             {
+-                root.session.inherited_instructions().await.user_appendix
++                let instructions = root.session.inherited_instructions().await;
++                (instructions.user, instructions.user_appendix)
+             } else {
+-                None
++                (None, None)
+             };
+             let thread_provider = self
+                 .runtime
+                 .shared_thread_instructions_provider
+                 .get()
+                 .cloned();
+-            (user_appendix.is_some() || thread_provider.is_some()).then_some(SessionInstructions {
++            (user.is_some() || user_appendix.is_some() || thread_provider.is_some()).then_some(SessionInstructions {
++                user,
+                 user_appendix,
+                 thread_provider,
+                 ..Default::default()

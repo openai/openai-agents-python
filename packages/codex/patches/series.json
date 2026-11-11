@@ -527,7 +527,71 @@
     {
       "path": "0158-sdk-private-disposable-run.patch",
       "sha256": "7798a788f8c67eca899ec42f5d72bc8432a9817ed1a3549a468a29fd075311bc"
+    },
+    {
+      "path": "sdk-realtime-voice-policies.patch",
+      "sha256": "9b738c67f5ec9766e66393703518d40a82f20fef0226fbc0bacfaf30825b8453"
+    },
+    {
+      "path": "sdk-agent-profile-observations.patch",
+      "sha256": "6e7ccb5f3b38d26fa69dbfc33338d829011692ab29a544baa074fb71bbcea607"
+    },
+    {
+      "path": "sdk-realtime-filter-forwarded-batches.patch",
+      "sha256": "fcc45c2e79c74aedb6c621f422b298f58a3b1c759ed691378b5f7fb893bc9838"
+    },
+    {
+      "path": "native-model-input-modalities.patch",
+      "sha256": "5bece16f3599d550006f178f1e903f6b9bfaab18395daad81235ea0fd5587946"
+    },
+    {
+      "path": "native-box-model-deadline-futures.patch",
+      "sha256": "68f27e496efe84385243d8067e9b45aae4948222d810af32cb2399716f15a717"
+    },
+    {
+      "path": "0212-native-mcp-routing.patch",
+      "sha256": "832935a9e112b8fc1a4e4768e97b0011254709219c6dfa5264a277adef4ed547"
+    },
+    {
+      "path": "sdk-bounded-original-history-reads.patch",
+      "sha256": "9c2091df8d9532c8d9f201172cee0440cdde554e811b0f2c15525128e92dabbb"
+    },
+    {
+      "path": "sdk-terminal-candidate-admission.patch",
+      "sha256": "c8eb0fc9c4fb238e493d52bc39b79cf29071e7e4ad391583ebeab7e1daf0c1db"
+    },
+    {
+      "path": "sdk-realtime-captured-tool-policy.patch",
+      "sha256": "7049918cd439db51f58be02adb304a54c6b313160b9be163a31c8778799f7c06"
+    },
+    {
+      "path": "sdk-suspended-terminal-guard-only.patch",
+      "sha256": "7ab156a284a8f1bde203cd46fbe2e63f2ffc73bb78ee655278d98bd6c7dc6073"
+    },
+    {
+      "path": "sdk-host-trace-credentials.patch",
+      "sha256": "88a7876ebaee3fd063e0edfa5ae0997e6c36dae38b7df6b8ff4eb2c0128c88e7"
+    },
+    {
+      "path": "sdk-user-instructions-appendix.patch",
+      "sha256": "a3ea35cfd3f2eaeed66dc6ad6b06e7f651a7126ebfc66032636dc5bfe9ae31d9"
+    },
+    {
+      "path": "sdk-fork-originals-lineage.patch",
+      "sha256": "3f315e7d82ebdc5e30cb9d336282876d05a410458dce6bdf7a6d5576fcf65411"
+    },
+    {
+      "path": "sdk-cold-child-workspace-user-instructions.patch",
+      "sha256": "cd6a420cdec6aa3b3663aef30f9d7aec10ee58a34eea46b1bc47045279b2dd64"
+    },
+    {
+      "path": "sdk-realtime-captured-mcp-policy.patch",
+      "sha256": "6483f796a3a9329ebde3348ee431b60f4e09278fcfcd79bace8a6ab5627f8a2b"
+    },
+    {
+      "path": "sdk-mcp-forced-choice-captured-binding.patch",
+      "sha256": "4bd3b5089c6843c58c3c8af71f50e488142a1a26ce29d6d5dcc4041cf7ff1985"
     }
   ],
-  "result_tree": "11f8f5830af2b1278ea9f85193e99ae9f1a38313"
+  "result_tree": "117c8a6363c61081270c91b326336bab0152c74e"
 }

@@ -12,6 +12,7 @@ mod canonical_rules;
 mod canonical_storage;
 mod checkpoint;
 mod config;
+mod console_diagnostics;
 mod context;
 mod decisions;
 mod engine;
@@ -38,6 +39,7 @@ mod realtime_adapter;
 mod recovery_guard;
 mod response_integrity;
 mod storage;
+mod stored_history;
 mod subagents;
 mod telemetry;
 mod turn_settlement;
@@ -950,6 +952,110 @@ impl NativeThread {
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _stored_history<'py>(
+        &self,
+        py: Python<'py>,
+        query_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        let query = serde_json::from_str(query_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let value = stored_history::read(&inner, query)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&value).map_err(py_error)
+        })
+    }
+
+    fn _fork_stored<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let source = self.current()?;
+        let boundary = stored_history::fork_boundary(request_json).map_err(py_error)?;
+        async_bridge::future_into_py(py, async move {
+            let _operation = source.engine.operation(false).map_err(py_error)?;
+            source
+                .engine
+                .fork_stored(&source, boundary)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _discard_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let Some(inner) = self.live()? else {
+            return async_bridge::future_into_py(py, async { Ok(()) });
+        };
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            let _lifecycle = inner.engine.lifecycle.lock().await;
+            inner
+                .engine
+                .discard_stored_forks(Some(inner.id))
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _retire_stored_fork<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        if inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error("This thread is not an owned stored fork"));
+        }
+        async_bridge::future_into_py(py, async move {
+            let _operation = inner.engine.operation(true).map_err(py_error)?;
+            // Preserve the imported-ID/live-slot cleanup receipt until the
+            // outer public waiter chooses publication or joined rollback.
+            inner.close().await.map_err(py_error)
+        })
+    }
+
+    fn _publish_stored_fork(&self) -> PyResult<String> {
+        let mut owner = self.inner.lock().map_err(py_error)?;
+        let inner = owner
+            .live
+            .as_ref()
+            .ok_or_else(|| py_error("No unpublished stored fork"))?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        if !inner.is_closed()
+            || inner.engine.local_checklist_store.is_none()
+            || !self
+                .checkpoint_import
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == inner.id)
+        {
+            return Err(py_error(
+                "Stored fork publication requires its joined native writer",
+            ));
+        }
+        if let Some(store) = &inner.engine.local_checklist_store {
+            store.check_durability().map_err(py_error)?;
+        }
+        // No await after this handoff. Later discard cannot delete publication.
+        if !inner.engine.finish_stored_fork(inner.id) {
+            return Err(py_error("Unpublished stored fork receipt expired"));
+        }
+        owner.release();
+        Ok(self.id.clone())
+    }
+
+    fn _stored_history_close_action(&self, action_json: &str) -> PyResult<StoredHistoryClose> {
+        let inner = self.current()?;
+        Ok(StoredHistoryClose {
+            inner: Arc::new(
+                stored_history::CloseAction::capture(&inner, action_json).map_err(py_error)?,
+            ),
+            owner: Arc::downgrade(&self.inner),
         })
     }
 
@@ -2732,11 +2838,13 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (grant, response_json, start_response = true))]
     fn _respond_manual_tool<'py>(
         &self,
         py: Python<'py>,
         grant: &python_tools::ManualToolGrant,
         response_json: &str,
+        start_response: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let grant = grant.clone();
@@ -2795,11 +2903,16 @@ impl NativeThread {
                         .commit_sdk_receipt(id, &grant.key, item, reentry)
                         .await
                         .map_err(py_error)?;
-                    Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+                    Ok(tools.respond_manual(
+                        &grant.key.reply.thread,
+                        &grant,
+                        response,
+                        start_response,
+                    ))
                 })
                 .await;
             }
-            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response, start_response))
         })
     }
 
@@ -3590,6 +3703,31 @@ impl NativeThread {
     }
 }
 
+#[pyclass(frozen, name = "_StoredHistoryClose", module = "agents._native")]
+struct StoredHistoryClose {
+    inner: Arc<stored_history::CloseAction>,
+    owner: std::sync::Weak<std::sync::Mutex<NativeThreadOwner>>,
+}
+
+#[pymethods]
+impl StoredHistoryClose {
+    fn apply<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        {
+            let owner = self
+                .owner
+                .upgrade()
+                .ok_or_else(|| py_error("Native thread shutdown cannot be verified"))?;
+            if owner.lock().map_err(py_error)?.live.is_some() {
+                return Err(py_error(
+                    "Stored history mutation requires confirmed native thread shutdown",
+                ));
+            }
+        }
+        let inner = Arc::clone(&self.inner);
+        async_bridge::future_into_py(py, async move { inner.apply().await.map_err(py_error) })
+    }
+}
+
 // Deliberately private: Session owns the transaction and its durable decision.
 #[pyclass(module = "agents._native")]
 struct ContextChange {
@@ -4272,6 +4410,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;
+    module.add_class::<StoredHistoryClose>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapter>()?;
     module.add_class::<realtime_adapter::NativeRealtimeAdapterRequest>()?;
     module.add_class::<live::NativeLiveSession>()?;

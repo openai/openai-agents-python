@@ -32,7 +32,11 @@ from typing import (
     TypeVar as TypeVar,
 )
 
-from typing_extensions import ReadOnly as ReadOnly, TypedDict as TypedDict
+from typing_extensions import (
+    NotRequired as NotRequired,
+    ReadOnly as ReadOnly,
+    TypedDict as TypedDict,
+)
 
 from ._lifecycle import (
     _close_after_error as _close_after_error,
@@ -42,6 +46,7 @@ from ._lifecycle import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext
+from ._trace_delivery import _trace_delivery_context, _TraceDeliveryOwner
 from ._trace_export import (
     ConsoleTraceProcessor as ConsoleTraceProcessor,
     OpenAITraceExporter as OpenAITraceExporter,
@@ -77,6 +82,22 @@ class OtlpHttp:
 
 
 Exporter: TypeAlias = OtlpGrpc | OtlpHttp
+
+
+@dataclass(frozen=True, kw_only=True)
+class ConsoleDiagnostics:
+    """Local native diagnostic events as JSON lines on process stdout.
+
+    The default records contain only static source metadata. include_fields
+    adds messages and arbitrary fields, which may contain sensitive data.
+    This option is independent of trace and OTLP capture controls.
+    """
+
+    level: Literal["error", "warn", "info", "debug", "trace"] = "warn"
+    targets: tuple[str, ...] = ()
+    """Exact targets or ::-delimited prefixes; an empty tuple selects all."""
+    include_fields: bool = False
+
 
 # Immutable options from the one successful configure. Native still owns
 # engine admission, subscriber conflicts and terminal failure/shutdown.
@@ -155,6 +176,7 @@ async def configure(
     log_agent_responses: bool = False,
     tool_result_max_bytes: int = 0,
     processors: Sequence[TraceProcessor] = (),
+    diagnostics: ConsoleDiagnostics | None = None,
 ) -> None:
     """Configure once, before opening the first Session.
 
@@ -196,6 +218,12 @@ async def configure(
                 "otel.span_attributes": _string_map(span_attributes, "span_attributes"),
             }
         )
+        if diagnostics is not None:
+            options["sdk.console_diagnostics"] = {
+                "level": diagnostics.level,
+                "targets": diagnostics.targets,
+                "include_fields": diagnostics.include_fields,
+            }
         if processors:
             options["otel.trace_processors"] = True
         options.update({key: item for key, item in emission.items() if key != "otel.exporter"})
@@ -234,6 +262,7 @@ async def configure(
             except RuntimeError as error:
                 # Only fixed native diagnostics may leave this credential boundary.
                 if str(error) in (
+                    "Invalid console diagnostic options",
                     "Codex telemetry can only be configured once per process",
                     "Configure telemetry before creating any Codex clients",
                     "A Rust tracing subscriber is already installed; "
@@ -574,6 +603,10 @@ class TraceScope:
         self.__exit__(None, None, None)
 
     def __enter__(self) -> TraceScope:
+        return self._start_recording(activate=True)
+
+    def _start_recording(self, *, activate: bool = False) -> TraceScope:
+        """Own a recording independently of ambient stack order for item streams."""
         if self._context is not None or self._ended:
             raise RuntimeError("A trace scope can only be entered once")
         value = self._options
@@ -615,7 +648,8 @@ class TraceScope:
             self._context = SpanContext(_handle=handle, **data)
             self._span_handle = handle
             admitted = True
-            self._token = _current.set(self._context)
+            if activate:
+                self._token = _current.set(self._context)
             try:
                 _ensure_processor_pump()
             except BaseException as error:
@@ -841,6 +875,8 @@ class TraceLifecycleEvent(TypedDict):
     Nanosecond timestamps use decimal strings to preserve their exact values.
     """
 
+    # Nonsecret provenance; only the original active snapshot carries auth authority.
+    credential_required: NotRequired[ReadOnly[bool]]
     sequence: ReadOnly[int]
     processor_ids: ReadOnly[Sequence[str]]
     lifecycle: ReadOnly[Literal["start", "end"]]
@@ -1074,6 +1110,7 @@ class _ProcessorBatch:
     admitted_at: float = field(default_factory=monotonic)
     stopped: Event = field(default_factory=Event)
     completion: Future[None] | None = None
+    credential_delivery: _TraceDeliveryOwner | None = None
 
     def done(self) -> bool:
         # The worker completes records in order, including fenced records.
@@ -1099,6 +1136,8 @@ class _ProcessorBatch:
             # A late callback may finish, but cannot begin subsequent records
             # after the host times out, is cancelled, or retires this batch.
             self.stopped.set()
+            if self.credential_delivery is not None:
+                self.credential_delivery.retire()
 
 
 class _ProcessorRoute:
@@ -1110,15 +1149,22 @@ class _ProcessorRoute:
         self.pending: _ProcessorBatch | None = None
         self.loss_epoch = 0
 
-    async def _invoke(self, callback: _Callable[..., Any], *args: Any) -> None:
+    async def _invoke(
+        self,
+        callback: _Callable[..., Any],
+        *args: Any,
+        delivery: _TraceDeliveryOwner | None = None,
+        events: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
         import inspect
 
         failed = False
         token = _in_processor.set(True)
         try:
-            result = callback(*args)
-            if inspect.isawaitable(result):
-                await result
+            with _trace_delivery_context(delivery, events):
+                result = callback(*args)
+                if inspect.isawaitable(result):
+                    await result
         except BaseException:
             # Contain even callback cancellation and BaseException subclasses.
             # Raise outside the handler so raw callback errors are not chained.
@@ -1143,7 +1189,12 @@ class _ProcessorRoute:
             if not batch.stopped.is_set() and monotonic() < previous_finished + 1.0:
                 try:
                     await self._recover_loss(batch.loss_epoch)
-                    await self._invoke(callback, tuple(item.event for item in batch.deliveries))
+                    await self._invoke(
+                        callback,
+                        tuple(item.event for item in batch.deliveries),
+                        delivery=batch.credential_delivery,
+                        events=tuple(item.event for item in batch.deliveries),
+                    )
                     success = monotonic() < previous_finished + 1.0 and not batch.stopped.is_set()
                 except Exception:
                     pass
@@ -1163,7 +1214,12 @@ class _ProcessorRoute:
             success = True
             try:
                 await self._recover_loss(batch.loss_epoch)
-                await self._invoke(self.processor.on_trace_event, delivery.event)
+                await self._invoke(
+                    self.processor.on_trace_event,
+                    delivery.event,
+                    delivery=batch.credential_delivery,
+                    events=(delivery.event,),
+                )
             except Exception:
                 success = False
             finished = monotonic()
@@ -1175,7 +1231,12 @@ class _ProcessorRoute:
             delivery.result.set_result((success, finished))
             previous_finished = finished
 
-    def submit(self, events: Sequence[TraceLifecycleEvent], loss_epoch: int = 0) -> _ProcessorBatch:
+    def submit(
+        self,
+        events: Sequence[TraceLifecycleEvent],
+        loss_epoch: int = 0,
+        credential_routes: Mapping[str, Any] | None = None,
+    ) -> _ProcessorBatch:
         from threading import Thread
 
         global _worker_count
@@ -1213,6 +1274,9 @@ class _ProcessorRoute:
         batch = _ProcessorBatch(
             tuple(_ProcessorDelivery(event) for event in events), loss_epoch=loss_epoch
         )
+        batch.credential_delivery = _TraceDeliveryOwner(
+            events, credential_routes or {}, batch.stopped
+        )
         work = self._invoke_batch(batch)
         try:
             batch.completion = asyncio.run_coroutine_threadsafe(work, self.loop)
@@ -1233,6 +1297,8 @@ class _ProcessorRoute:
 
         if self.pending is not None:
             self.pending.stopped.set()
+            if self.pending.credential_delivery is not None:
+                self.pending.credential_delivery.retire()
             completion = self.pending.completion
             if completion is not None and not completion.done():
                 # A blocked callback retains only its bounded batch and worker.
@@ -1283,6 +1349,7 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
         drain = _ProcessorDrain(native.drain_trace_events(64))
         deliveries: list[_ProcessorBatch] = []
         batch: Any = None
+        empty = True
         try:
             await asyncio.shield(drain)
             batch = json.loads(drain.outcome.result())
@@ -1332,7 +1399,9 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                         ):
                             continue
                         try:
-                            delivery = processor.submit(events, epoch)
+                            delivery = processor.submit(
+                                events, epoch, batch.get("credential_routes")
+                            )
                         except Exception:
                             continue
                     deliveries.append(delivery)
@@ -1348,20 +1417,27 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                 batch = json.loads(drain.outcome.result())
             for delivery in deliveries:
                 delivery.stopped.set()
+                if delivery.credential_delivery is not None:
+                    delivery.credential_delivery.retire()
             selected = sum(len(event.get("processor_ids", [])) for event in batch["events"])
             completed = sum(
                 record.result.done() and record.result.result()[0]
                 for delivery in deliveries
                 for record in delivery.deliveries
             )
-            with _processor_lock:
-                if batch["through_sequence"]:
-                    native.ack_trace_events(batch["through_sequence"], selected - completed)
-                    _processor_acknowledged = max(
-                        _processor_acknowledged, batch["through_sequence"]
-                    )
-                    _retire_routes(_processor_acknowledged)
-        if not batch["events"]:
+            empty = not batch["events"]
+            try:
+                with _processor_lock:
+                    if batch["through_sequence"]:
+                        native.ack_trace_events(batch["through_sequence"], selected - completed)
+                        _processor_acknowledged = max(
+                            _processor_acknowledged, batch["through_sequence"]
+                        )
+                        _retire_routes(_processor_acknowledged)
+            finally:
+                # No credential-bearing native JSON survives pump cancellation/ACK failure.
+                del batch, drain
+        if empty:
             await asyncio.sleep(0.01)
 
 

@@ -183,6 +183,7 @@ def test_runtime_dependencies_do_not_use_public_facades() -> None:
                     "agents.classic.sandbox.entries",
                     "agents.classic.sandbox.entries.mounts",
                     "agents.classic.sandbox.manifest",
+                    "agents.classic.sandbox.remote_mount_policy",
                     "agents.classic.sandbox.session.sandbox_client",
                     "agents.classic.sandbox.session.sandbox_session",
                 }:

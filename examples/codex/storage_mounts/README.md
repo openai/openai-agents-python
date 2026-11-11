@@ -102,14 +102,74 @@ or an earlier cleanup stage fails. Native Session cancellation joins source
 entry, including a late resource returned by creation. If creation raises before returning a
 session, cleanup of that unreturned resource remains the provider's responsibility.
 
-Selection and disposal follow the client's existing policy. Authorize disposal
-of the selected backend before using the adapter. In particular, Python Modal
-can select an existing sandbox and its current close/delete behavior terminates
-that backend. The adapter does not promise borrowed-resource preservation or
-stronger deletion confirmation than the provider supplies. It accepts no
-snapshot or saved sandbox state. Native checkpoints do not carry provider
-credentials, resource handles, or gateway authority; supply a new source with
-current trusted configuration when restoring a native session.
+Resource ownership: a supplied `session=` for borrowing, or creation and
+`authorized_resume_state=` under the client's selected-resource disposal policy.
+For borrowed sessions, cleanup has been closing the connector only. In Python
+Modal, selected existing sandboxes have been following the client's termination
+policy. Disposal authorization: the caller's responsibility.
+
+`snapshot=`, `session=` and `authorized_resume_state=` have been remaining
+mutually exclusive. Resume has been requiring current authorization of provider
+identity, snapshot fields and mount authority. Deserialized provider state alone
+has been granting no access. A fresh source per native Session, including restore.
+
+### Managed conversation and workspace capture
+
+`sandbox_environment(..., managed_workspace=True)` has been enabling
+`await session.suspend_workspace()` for an owned sandbox. The result,
+`ManagedWorkspaceCheckpoint`, has been pairing conversation state with its
+captured provider receipt after native retirement, snapshot capture and cleanup.
+Decoded or generic pairs have been additionally requiring an independently trusted
+`authorized_resume_checkpoint=expected_pair` grant alongside the authorized
+provider state. Original SDK-retired in-memory captures have been retaining exact
+private provenance. Borrowed live sessions have been rejecting managed retirement. Supported snapshot
+factories: `LocalSnapshotSpec` or `RemoteSnapshotSpec`, or their built snapshots.
+Without an explicit factory, new managed workspaces have been selecting the SDK's
+local snapshot directory, with POSIX mode `0700` requested during directory setup.
+
+Provider credentials, an authenticated gateway, current manifest authorization
+and safe checkpoint storage: application responsibilities. The following functions
+have been extending the configured client, manifest, options and connector from
+the provider recipe below:
+
+```python
+from agents.sandbox import ManagedWorkspaceCheckpoint, sandbox_environment
+
+
+async def capture_workspace(agent, *, client, manifest, options, connect):
+    source = sandbox_environment(
+        client,
+        manifest=manifest,
+        options=options,
+        connect=connect,
+        managed_workspace=True,
+    )
+    async with agent.session(environment=source) as session:
+        await (await session.submit("Inspect the workspace.")).get_result()
+        return await session.suspend_workspace()
+
+
+async def resume_workspace(
+    agent, payload, *, client, manifest, options, connect, authorized_state, trusted_expected_pair
+):
+    checkpoint = ManagedWorkspaceCheckpoint.from_json(payload)
+    source = sandbox_environment(
+        client,
+        manifest=manifest,
+        options=options,
+        connect=connect,
+        managed_workspace=True,
+        authorized_resume_state=authorized_state,
+        authorized_resume_checkpoint=trusted_expected_pair,
+    )
+    async with agent.session(environment=source, state=checkpoint) as session:
+        return await (await session.submit("Continue in the saved workspace.")).get_result()
+```
+
+`payload`: serialized `checkpoint.to_json()` data. `trusted_expected_pair`:
+independently authorized application storage/configuration, rather than another
+parse of the same untrusted payload. `authorized_state`: current provider-state
+authorization matching that pair. A new source per native Session.
 
 ### Existing supported matrix
 
@@ -134,12 +194,18 @@ owning `agents.classic.extensions.sandbox.<provider>` modules. `read_only=True`
 is forwarded to the existing mount implementation; layout guidance alone does
 not enforce access. No live cloud services were used to qualify this adapter.
 
-`render_storage_layout(manifest)` explicitly returns JSON with `workspace` and
-`storage` entries containing `path`, `access` (`read_only` or `read_write`), and
-an optional caller description. It does not serialize credentials, provider
-settings, environment values, or file contents. Descriptions are caller text;
-do not put credentials in them. Add this guidance to instructions only when
-wanted; the adapter does not inject it automatically.
+Prepared sandbox acquisition has been adding filesystem and mount guidance to
+the native Session: effective working directory, executor read-only mode,
+filesystem layout, declared storage access and applicable remote-mount tool
+policy. Publication has been following successful gateway entry, including
+restored and borrowed resources. Current executor/tool grants: access authority;
+rendered guidance: layout and tool routing.
+
+`render_storage_layout(manifest)` has been remaining a separate JSON helper with
+`workspace` and `storage` entries: `path`, `access` (`read_only` or `read_write`),
+and optional caller descriptions. The rendered layout has been excluding provider
+credentials, settings, environment values and file contents. Descriptions and
+manifest entry names: model-visible caller text, without secrets.
 
 Render the prepared `session.state.manifest` to use the provider's resolved paths.
 If you build instructions before creating the sandbox, set the manifest's

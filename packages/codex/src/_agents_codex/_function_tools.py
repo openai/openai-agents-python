@@ -49,7 +49,11 @@ from .manual import (
     _CapturedManual as _CapturedManual,
 )
 from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP
-from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents
+from .native_agents import (
+    ChildInvocation as ChildInvocation,
+    ChildStepContext as ChildStepContext,
+    NativeAgents as NativeAgents,
+)
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .realtime_result import BackgroundResult as BackgroundResult
 from .realtime_usage import RealtimeUsage as RealtimeUsage
@@ -66,10 +70,11 @@ from .tools import (
     _CapturedFunction as _CapturedFunction,
     _function_parameters as _function_parameters,
 )
+from .turn import Turn as Turn
 
 if TYPE_CHECKING:
     from .decisions import DecisionInput, DecisionProvider
-    from .turn import Turn
+    from .usage import TokenUsage
 
 ToolContextT = TypeVar("ToolContextT")
 _DecisionT = TypeVar("_DecisionT")
@@ -127,6 +132,21 @@ class ToolContext(Generic[ContextT_co]):
     trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
     # Detached speech usage at callback creation; application context stays caller-owned.
     realtime_usage: RealtimeUsage | None = field(default=None, kw_only=True)
+
+    _usage_reporter: Callable[[TokenUsage | None, int], None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def report_usage(self, usage: TokenUsage | None, *, requests: int = 1) -> None:
+        """Report trusted measured external usage while this invocation is admitted.
+
+        This does not change native context-window estimates or RunBudget. Tool
+        result JSON never reports usage implicitly. Retained contexts lose this
+        capability when the owning callback retires or is cancelled.
+        """
+        if self._usage_reporter is None:
+            raise RuntimeError("Usage reporting requires an admitted native ToolContext")
+        self._usage_reporter(usage, requests)
 
     @overload
     async def decide(
@@ -239,8 +259,13 @@ class FunctionTool(Generic[InputT, ResultT, BinderT_co]):
     finish_turn: bool = False
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False
     run_before_approval: bool = False
+    is_enabled: (
+        bool | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]]
+    ) = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.is_enabled, bool) and not callable(self.is_enabled):
+            raise TypeError("FunctionTool is_enabled must be a bool or callable")
         if self.namespace is not None and (
             not isinstance(self.namespace, str) or not self.namespace.strip()
         ):
@@ -470,6 +495,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[ToolContextT, ToolContextT]: ...
 
 
@@ -483,6 +510,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[object, object]: ...
 
 
@@ -502,6 +531,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -521,6 +552,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -540,6 +573,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -559,6 +594,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -578,6 +615,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[object]: ...
 
 
@@ -599,6 +638,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _ToolDecorator[PolicyContextT]: ...
 
 
@@ -630,6 +671,8 @@ def function_tool(
     finish_turn: bool = False,
     needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
     run_before_approval: bool = False,
+    is_enabled: bool
+    | Callable[[Any, Turn[Any] | ChildStepContext[Any]], bool | Awaitable[bool]] = True,
 ) -> _PythonTool[Any, Any] | _ToolDecorator[Any]:
     """Declare a Python tool without starting a connection or runtime.
 
@@ -665,6 +708,11 @@ def function_tool(
     namespace_description describes that native namespace. Equal short names
     in different namespaces remain distinct. Manual functions do not support
     namespaces. A Session captures this identity before native opening.
+
+    is_enabled filters schema advertisement before each model step within the
+    current opening and operation grants. A predicate receives the application
+    context and existing Turn or ChildStepContext, before any tool call exists.
+    Returning False omits this tool; it never adds another declaration.
 
     Observe tool starts and results through Session.events().
 
@@ -751,6 +799,7 @@ def function_tool(
             finish_turn=finish_turn,
             needs_approval=needs_approval,
             run_before_approval=run_before_approval,
+            is_enabled=is_enabled,
             timeout_behavior=timeout_behavior,
             timeout_error_function=timeout_error_function,
             namespace=namespace,

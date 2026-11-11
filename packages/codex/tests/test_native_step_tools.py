@@ -1160,3 +1160,139 @@ async def test_legacy_missing_operation_subset_keeps_native_defaults(
             assert {("functions", "lookup"), ("functions", "update_plan")} <= set(
                 declarations(responses.requests[-1])
             )
+
+
+async def test_function_enablement_rechecks_each_advertisement(responses):
+    application = {"enabled": False}
+    seen = []
+
+    async def enabled(context, step):
+        seen.append((context, step))
+        await asyncio.sleep(0)
+        return context["enabled"]
+
+    @function_tool
+    def activate() -> str:
+        application["enabled"] = True
+        return "enabled"
+
+    @function_tool(is_enabled=enabled)
+    def gated() -> str:
+        return "gated"
+
+    responses.respond(function_call("activate", {}, "activate"))
+    responses.respond(assistant_output("done"))
+    async with Agent(
+        instructions="Select tools.", provider=provider(responses), tools=[activate, gated]
+    ).session(context=application) as session:
+        turn = await session.submit("Run")
+        assert (await turn.get_result()).final_output == "done"
+    assert all(context is application and step is turn for context, step in seen)
+    assert len(seen) == 2
+    assert [set(declarations(r)) for r in responses.requests] == [
+        {("functions", "activate")},
+        {("functions", "activate"), ("functions", "gated")},
+    ]
+
+
+async def test_function_enablement_intersects_explicit_step_selection(responses):
+    @function_tool(is_enabled=False)
+    def disabled() -> str:
+        pytest.fail("Disabled function must not execute")
+
+    @function_tool
+    def omitted() -> str:
+        pytest.fail("Omitted function must not execute")
+
+    responses.respond(assistant_output("done"))
+    async with Agent(
+        instructions="Select tools.", provider=provider(responses), tools=[disabled, omitted]
+    ).session() as session:
+        turn = await session.submit("Run", before_step=lambda turn, step_index: [disabled.ref])
+        assert (await turn.get_result()).final_output == "done"
+    assert set(declarations(responses.requests[0])) == set()
+
+
+async def test_function_enablement_failure_precedes_model_effects(responses):
+    async def enabled(context, step):
+        await asyncio.sleep(0)
+        raise ValueError("Enablement rejected")
+
+    @function_tool(is_enabled=enabled)
+    def gated() -> str:
+        pytest.fail("Failed predicate must not execute")
+
+    async with Agent(
+        instructions="Select tools.", provider=provider(responses), tools=[gated]
+    ).session() as session:
+        turn = await session.submit("Run")
+        with pytest.raises(ValueError, match="Enablement rejected"):
+            await turn.get_result()
+    assert responses.requests == []
+
+
+async def test_cancelled_function_enablement_cannot_publish_schema(responses):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def enabled(context, step):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+        return True
+
+    @function_tool(is_enabled=enabled)
+    def gated() -> str:
+        pytest.fail("Cancelled predicate must not enable execution")
+
+    async with Agent(
+        instructions="Select tools.", provider=provider(responses), tools=[gated]
+    ).session() as session:
+        turn = await session.submit("Run")
+        await asyncio.wait_for(entered.wait(), 5)
+        stopping = asyncio.create_task(turn.cancel())
+        try:
+            await asyncio.wait_for(cancelled.wait(), 5)
+            assert not stopping.done()
+            assert responses.requests == []
+        finally:
+            release.set()
+        await asyncio.wait_for(stopping, 5)
+    assert responses.requests == []
+
+
+async def test_function_enablement_restored_manual_advertisement(responses):
+    from tests.test_native_agent import function_declarations
+    from tests.test_native_manual_tools import LookupArgs, next_request
+
+    enabled = True
+    effects = []
+    lookup = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+
+    @function_tool(is_enabled=lambda context, step: enabled)
+    def metered() -> str:
+        effects.append("called")
+        return "done"
+
+    agent = Agent(instructions="Read both.", tools=[lookup, metered], provider=provider(responses))
+    responses.respond(
+        function_call("lookup", {"key": "A"}, "manual"), function_call("metered", {}, "meter")
+    )
+    async with agent.session() as source:
+        await source.submit("Read")
+        await next_request(source.interactions(), lookup)
+        saved = await source.suspend()
+    enabled = False
+    responses.respond(assistant_output("continued"))
+    async with agent.session(state=saved) as restored:
+        request = await next_request(restored.interactions(), lookup)
+        await request.respond("known")
+        assert (await restored.restored_turn.get_result()).final_output == "continued"
+        assert effects == ["called"]
+        assert "metered" not in {
+            tool["name"] for tool in function_declarations(responses.requests[-1])
+        }

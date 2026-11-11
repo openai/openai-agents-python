@@ -5,6 +5,7 @@ from _agents_codex.input import (
     AssistantMessage as AssistantMessage,
     ImageDetail as ImageDetail,
     InitialMessage as InitialMessage,
+    InputAudio as InputAudio,
     InputFile as InputFile,
     InputImage as InputImage,
     InputImageFile as InputImageFile,

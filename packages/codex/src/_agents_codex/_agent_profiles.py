@@ -77,6 +77,8 @@ def _capture_agent_graph(
             transform_context=source.transform_context,
             before_compact=source.before_compact,
             before_complete=source.before_complete,
+            input_guardrails=source.input_guardrails,
+            output_guardrails=source.output_guardrails,
         )
         if declaration.provider is not None and declaration.provider is not opening.provider:
             raise ValueError("Handoff profiles must share the Session provider")

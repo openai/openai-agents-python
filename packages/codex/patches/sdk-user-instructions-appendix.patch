@@ -1,0 +1,344 @@
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -626,13 +626,26 @@
+         {
+             Some(parent.session.inherited_instructions().await)
+         } else {
+-            self.runtime
++            // The registered logical root supplies only current resource context.
++            // Preserve the existing private/shared thread-provider policy separately.
++            let user_appendix = if let Some(root_id) =
++                self.runtime.registry.agent_id_for_path(&AgentPath::root())
++                && let Ok(root) = state.get_thread(root_id).await
++            {
++                root.session.inherited_instructions().await.user_appendix
++            } else {
++                None
++            };
++            let thread_provider = self
++                .runtime
+                 .shared_thread_instructions_provider
+                 .get()
+-                .map(|provider| SessionInstructions {
+-                    thread_provider: Some(Arc::clone(provider)),
+-                    ..Default::default()
+-                })
++                .cloned();
++            (user_appendix.is_some() || thread_provider.is_some()).then_some(SessionInstructions {
++                user_appendix,
++                thread_provider,
++                ..Default::default()
++            })
+         };
+         // Reserving a slot can evict an idle nested parent. Capture its instructions
+         // alongside its authority so the child does not depend on a later live lookup.
+--- a/codex-rs/core/src/agents_md.rs
++++ b/codex-rs/core/src/agents_md.rs
+@@ -315,6 +315,9 @@
+     /// Account- or home-scoped instructions supplied by the host.
+     user_instructions: Option<Instructions>,
+ 
++    /// Current source-less per-opening appendix; never part of the captured user base.
++    user_instructions_appendix: Option<String>,
++
+     /// Thread-scoped instructions supplied by the host.
+     thread_instructions: Option<Instructions>,
+ 
+@@ -333,6 +336,7 @@
+                 text: contents,
+                 source: Some(path),
+             }),
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: Vec::new(),
+         }
+@@ -342,6 +346,7 @@
+         Self {
+             user_instructions: user_instructions
+                 .filter(|instructions| !instructions.text.trim().is_empty()),
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: Vec::new(),
+         }
+@@ -351,9 +356,12 @@
+         mut self,
+         user_instructions: Option<Instructions>,
+         thread_instructions: Option<Instructions>,
++        user_instructions_appendix: Option<String>,
+     ) -> Option<Self> {
+         self.user_instructions =
+             user_instructions.filter(|instructions| !instructions.text.trim().is_empty());
++        self.user_instructions_appendix =
++            user_instructions_appendix.filter(|text| !text.trim().is_empty());
+         self.thread_instructions =
+             thread_instructions.filter(|instructions| !instructions.text.trim().is_empty());
+         (!self.is_empty()).then_some(self)
+@@ -370,6 +378,7 @@
+         }
+         Self {
+             user_instructions: None,
++            user_instructions_appendix: None,
+             thread_instructions: None,
+             entries: vec![InstructionEntry {
+                 contents,
+@@ -380,6 +389,7 @@
+ 
+     fn is_empty(&self) -> bool {
+         self.user_instructions.is_none()
++            && self.user_instructions_appendix.is_none()
+             && self.thread_instructions.is_none()
+             && self
+                 .entries
+@@ -400,15 +410,21 @@
+         let mut output = String::new();
+         let mut has_previous = false;
+         let mut previous_was_project = false;
+-        for instructions in self
++        for text in self
+             .user_instructions
+             .iter()
+-            .chain(self.thread_instructions.iter())
++            .map(|instructions| instructions.text.as_str())
++            .chain(self.user_instructions_appendix.as_deref())
++            .chain(
++                self.thread_instructions
++                    .iter()
++                    .map(|instructions| instructions.text.as_str()),
++            )
+         {
+             if has_previous {
+                 output.push_str("\n\n");
+             }
+-            output.push_str(&instructions.text);
++            output.push_str(text);
+             has_previous = true;
+         }
+         for entry in &self.entries {
+@@ -435,15 +451,21 @@
+         let mut output = String::new();
+         let mut has_previous = false;
+         let mut previous_environment: Option<(&str, &PathUri)> = None;
+-        for instructions in self
++        for text in self
+             .user_instructions
+             .iter()
+-            .chain(self.thread_instructions.iter())
++            .map(|instructions| instructions.text.as_str())
++            .chain(self.user_instructions_appendix.as_deref())
++            .chain(
++                self.thread_instructions
++                    .iter()
++                    .map(|instructions| instructions.text.as_str()),
++            )
+         {
+             if has_previous {
+                 output.push_str("\n\n");
+             }
+-            output.push_str(&instructions.text);
++            output.push_str(text);
+             has_previous = true;
+         }
+         for entry in &self.entries {
+--- a/codex-rs/core/src/agents_md_manager.rs
++++ b/codex-rs/core/src/agents_md_manager.rs
+@@ -28,6 +28,7 @@
+ #[derive(Clone, Default)]
+ pub(crate) struct SessionInstructions {
+     pub(crate) user: Option<Instructions>,
++    pub(crate) user_appendix: Option<String>,
+     pub(crate) thread: Option<Instructions>,
+     pub(crate) user_provider: Option<Arc<dyn UserInstructionsProvider>>,
+     pub(crate) thread_provider: Option<Arc<dyn ThreadInstructionsProvider>>,
+@@ -48,6 +49,9 @@
+ impl AgentsMdManager {
+     pub(crate) fn new(mut instructions: SessionInstructions) -> Self {
+         instructions.user = normalize_instructions(instructions.user);
++        instructions.user_appendix = instructions
++            .user_appendix
++            .filter(|text| !text.trim().is_empty());
+         instructions.thread = normalize_instructions(instructions.thread);
+         Self {
+             refresh_lock: Semaphore::new(/*permits*/ 1),
+@@ -109,12 +113,16 @@
+         }
+ 
+         let result = async {
++            if let Some(input) = &instructions.user_appendix {
++                validate_thread_instruction_size(input.len())?;
++            }
+             if let Some(input) = &instructions.thread {
+                 validate_thread_instruction_size(input.text.len())?;
+             }
+             if !refresh_repository {
+                 let state = self.state.lock().await;
+                 if state.instructions.user == instructions.user
++                    && state.instructions.user_appendix == instructions.user_appendix
+                     && state.instructions.thread == instructions.thread
+                 {
+                     return Ok(cached);
+@@ -128,7 +136,11 @@
+             } else {
+                 cached.as_deref().cloned().unwrap_or_default()
+             }
+-            .with_instructions(instructions.user.clone(), instructions.thread.clone())
++            .with_instructions(
++                instructions.user.clone(),
++                instructions.thread.clone(),
++                instructions.user_appendix.clone(),
++            )
+             .map(Arc::new);
+             let mut state = self.state.lock().await;
+             state.instructions = instructions;
+@@ -151,6 +163,7 @@
+         let state = self.state.lock().await;
+         SessionInstructions {
+             user: state.instructions.user.clone(),
++            user_appendix: state.instructions.user_appendix.clone(),
+             thread: state.instructions.thread.clone(),
+             thread_provider: state
+                 .instructions
+--- a/codex-rs/core/src/agents_md_tests.rs
++++ b/codex-rs/core/src/agents_md_tests.rs
+@@ -422,6 +422,7 @@
+     };
+     let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
+     let loaded = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -456,6 +457,7 @@
+         .join("AGENTS.md")
+         .expect("Windows AGENTS.md URI");
+     let loaded = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -614,6 +616,7 @@
+ #[test]
+ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
+     let empty = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -622,6 +625,7 @@
+         }],
+     };
+     let whitespace = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![InstructionEntry {
+@@ -694,6 +698,7 @@
+ 
+     let loaded = load_agents_md(&config).await.expect("project instructions");
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -1387,6 +1392,7 @@
+     let root_agents = repo.path().join("AGENTS.md").abs();
+     let crate_agents = cfg.cwd.join("AGENTS.md");
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: None,
+         thread_instructions: None,
+         entries: vec![
+@@ -1524,6 +1530,7 @@
+     let project_agents = cfg.cwd.join("AGENTS.md");
+ 
+     let expected = LoadedAgentsMd {
++        user_instructions_appendix: None,
+         user_instructions: Some(Instructions {
+             text: "global doc".to_string(),
+             source: Some(global_agents.clone()),
+@@ -1797,3 +1804,46 @@
+     let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+ }
++
++#[test]
++fn user_appendix_replaces_only_its_current_snapshot() {
++    let directory = tempfile::tempdir().expect("instruction source directory");
++    let source = AbsolutePathBuf::try_from(directory.path().join("AGENTS.md"))
++        .expect("absolute instruction source");
++    let user = Instructions {
++        text: "original user".to_owned(),
++        source: Some(source),
++    };
++    let thread = Instructions {
++        text: "original thread".to_owned(),
++        source: None,
++    };
++    let first = LoadedAgentsMd::default()
++        .with_instructions(
++            Some(user.clone()),
++            Some(thread.clone()),
++            Some("guide A".to_owned()),
++        )
++        .expect("first instruction snapshot");
++    let sources = first.sources().collect::<Vec<_>>();
++    let receipts = first.sdk_file_receipts(|text| text.to_owned());
++    let second = first
++        .with_instructions(
++            Some(user.clone()),
++            Some(thread.clone()),
++            Some("guide B".to_owned()),
++        )
++        .expect("replacement instruction snapshot");
++    assert_eq!(second.text(), "original user\n\nguide B\n\noriginal thread");
++    assert_eq!(second.sources().collect::<Vec<_>>(), sources);
++    assert_eq!(second.sdk_file_receipts(|text| text.to_owned()), receipts);
++    let cleared = second
++        .with_instructions(Some(user), Some(thread), None)
++        .expect("original sources remain");
++    assert_eq!(cleared.text(), "original user\n\noriginal thread");
++    assert!(
++        LoadedAgentsMd::default()
++            .with_instructions(None, None, Some(" \t".to_owned()))
++            .is_none()
++    );
++}
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -287,6 +287,9 @@
+     pub inherited_environments: Option<TurnEnvironmentSnapshot>,
+     /// Explicit global instructions carried by an internal caller instead of loading them again.
+     pub user_instructions: Option<LoadedUserInstructions>,
++    /// Current source-less root context, separate from global/provider instruction text.
++    /// New roots replace or clear this appendix; ordinary children inherit the applied snapshot.
++    pub user_instructions_appendix: Option<String>,
+     pub thread_extension_init: ExtensionDataInit,
+     /// Host-supplied data captured by each new turn. This is not persisted.
+     pub turn_extension_init: ExtensionDataInit,
+@@ -314,6 +317,7 @@
+             environments: None,
+             inherited_environments: None,
+             user_instructions: None,
++            user_instructions_appendix: None,
+             thread_extension_init: ExtensionDataInit::default(),
+             turn_extension_init: ExtensionDataInit::default(),
+             client_mcp_extensions: ClientMcpExtensions::default(),
+@@ -2114,6 +2118,7 @@
+             environments,
+             inherited_environments: captured_environments,
+             user_instructions: supplied_user_instructions,
++            user_instructions_appendix,
+             mut thread_extension_init,
+             turn_extension_init,
+             client_mcp_extensions,
+@@ -2308,6 +2313,11 @@
+                 )
+             };
+         let mut instructions = instructions;
++        // Root openings use only their current capture, including omission/clear.
++        // An inherited appendix is never folded into the original user base.
++        if !session_source.is_non_root_agent() || user_instructions_appendix.is_some() {
++            instructions.user_appendix = user_instructions_appendix;
++        }
+         if let Some(supplied) = supplied_user_instructions {
+             instructions.user = supplied.instructions;
+             instructions.user_provider = None;

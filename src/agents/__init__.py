@@ -55,10 +55,18 @@ if TYPE_CHECKING:
         LocalStorageMount as LocalStorageMount,
         NetworkPolicy as NetworkPolicy,
     )
+    from .guardrails import (
+        GuardrailRecord as GuardrailRecord,
+        GuardrailResult as GuardrailResult,
+        GuardrailTripwire as GuardrailTripwire,
+        InputGuardrail as InputGuardrail,
+        OutputGuardrail as OutputGuardrail,
+    )
     from .input import (
         AssistantMessage as AssistantMessage,
         ImageDetail as ImageDetail,
         InitialMessage as InitialMessage,
+        InputAudio as InputAudio,
         InputFile as InputFile,
         InputImage as InputImage,
         InputImageFile as InputImageFile,
@@ -115,6 +123,8 @@ if TYPE_CHECKING:
         LitellmModel as LitellmModel,
         ModelProvider as ModelProvider,
         ModelRequest as ModelRequest,
+        ModelRequestOptions as ModelRequestOptions,
+        ModelRequestOptionsFactory as ModelRequestOptionsFactory,
         ModelResponse as ModelResponse,
         NativeModel as NativeModel,
         ResponsesModel as ResponsesModel,
@@ -150,6 +160,7 @@ if TYPE_CHECKING:
         ReconciledCall as ReconciledCall,
         UncertainCall as UncertainCall,
     )
+    from .repl import run_demo_loop as run_demo_loop
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -209,15 +220,18 @@ if TYPE_CHECKING:
         InstructionFileReceipt as InstructionFileReceipt,
         TurnReceipt as TurnReceipt,
     )
-    from .usage import RunBudget as RunBudget
+    from .usage import RunBudget as RunBudget, RunUsage as RunUsage
 
 _MODULES = {
+    "run_demo_loop": ".repl",
     "ChatCompletionsModel": ".models",
     "ResponsesModel": ".models",
     "LitellmModel": ".models",
     "AnyLLMModel": ".models",
     "ModelProvider": ".models",
     "ModelRequest": ".models",
+    "ModelRequestOptions": ".models",
+    "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
     "NativeModel": ".models",
     "DecisionError": ".decisions",
@@ -227,11 +241,17 @@ _MODULES = {
     "DecisionResponse": ".decisions",
     "OpenAIDecisions": ".decisions",
     "CompactionContext": ".compaction",
+    "GuardrailRecord": ".guardrails",
+    "GuardrailResult": ".guardrails",
+    "GuardrailTripwire": ".guardrails",
+    "InputGuardrail": ".guardrails",
+    "OutputGuardrail": ".guardrails",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "RunBudget": ".usage",
+    "RunUsage": ".usage",
     "PreparedRequest": ".prepared_request",
     "PreparedToolPresentation": ".prepared_request",
     "TraceContext": "._trace_context",
@@ -306,6 +326,7 @@ _MODULES = {
     "InitialMessage": ".input",
     "InputImage": ".input",
     "InputImageFile": ".input",
+    "InputAudio": ".input",
     "InputFile": ".input",
     "ImageDetail": ".input",
     "InputText": ".input",

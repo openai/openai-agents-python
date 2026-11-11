@@ -30,6 +30,7 @@ from agents import (
     Environment,
     EnvironmentSource,
     ExecutorContext,
+    InputGuardrail,
     InputImage,
     InputText,
     LocalStorage,
@@ -43,6 +44,7 @@ from agents import (
     NativeProvider,
     NativeRole,
     OpenAIDecisions,
+    OutputGuardrail,
     PromptedOutput,
     ReplaceArguments,
     ResponseIntegrityReason,
@@ -1110,4 +1112,22 @@ async def typed_scalar_decision_schemas(
     assert_type(child_probability, float)
     assert_type(
         await child.decide("Assess", input="Evidence", output_type=Literal["yes", "no"]), Any
+    )
+
+
+def guardrail_constructor_inference(
+    input_guardrail: "InputGuardrail[dict[str, int]]",
+    output_guardrail: "OutputGuardrail[dict[str, int]]",
+) -> None:
+    assert_type(
+        Agent(instructions="Guarded input", input_guardrails=(input_guardrail,)),
+        Agent[dict[str, int], str],
+    )
+    assert_type(
+        Agent(
+            instructions="Guarded output",
+            output_type=int,
+            output_guardrails=(output_guardrail,),
+        ),
+        Agent[dict[str, int], int],
     )
