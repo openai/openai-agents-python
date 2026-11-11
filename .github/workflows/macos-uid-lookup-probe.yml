@@ -127,7 +127,7 @@ jobs:
               printf("{\"command\":\"%s\",\"message_id\":%d,\"size\":%u,\"complex\":%s,\"descriptors\":%u,\"recognized_service\":\"%s\"}\n",command,message.h.msgh_id,message.h.msgh_size,(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX)?"true":"false",count,service);
               if(message.h.msgh_id==0x40000324) printf("{\"command\":\"%s\",\"lookup_header_remote_type\":%u,\"voucher_present\":%s,\"expected_size\":%zu}\n",command,MACH_MSGH_BITS_REMOTE(message.h.msgh_bits),message.h.msgh_voucher_port?"true":"false",sizeof(struct identity_lookup));
               /* Forward only the exact existing read-only libinfo service lookup. */
-              if (message.h.msgh_id==0x40000324 && message.h.msgh_size==sizeof(struct identity_lookup) && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && message.h.msgh_voucher_port==MACH_PORT_NULL && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+              if (message.h.msgh_id==0x40000324 && message.h.msgh_size==sizeof(struct identity_lookup) && !(message.h.msgh_bits&MACH_MSGH_BITS_COMPLEX) && MACH_MSGH_BITS_REMOTE(message.h.msgh_bits)==MACH_MSG_TYPE_MOVE_SEND_ONCE) {
                 struct identity_lookup *lookup=(void*)&message;
                 size_t offset=(message.h.msgh_size+3u)&~3u;
                 mach_msg_audit_trailer_t *audit=(void*)(message.bytes+offset);
@@ -135,6 +135,12 @@ jobs:
                 bool name=strnlen(lookup->name,sizeof(lookup->name))==strlen("com.apple.system.opendirectoryd.libinfo") && !strcmp(lookup->name,"com.apple.system.opendirectoryd.libinfo");
                 printf("{\"command\":\"%s\",\"lookup_flags\":%llu,\"lookup_target\":%d,\"owner_matches\":%s}\n",command,(unsigned long long)lookup->flags,lookup->target,owner?"true":"false");
                 if (owner && name && !memcmp(&lookup->ndr,&NDR_record,sizeof(NDR_record)) && lookup->target==0 && lookup->flags==8) {
+                  mach_port_t voucher=message.h.msgh_voucher_port;
+                  message.h.msgh_voucher_port=MACH_PORT_NULL;
+                  message.h.msgh_bits &= ~MACH_MSGH_BITS_VOUCHER_MASK;
+                  kern_return_t disposed=voucher==MACH_PORT_NULL?KERN_SUCCESS:mach_port_deallocate(task,voucher);
+                  printf("{\"command\":\"%s\",\"voucher_disposal_result\":%d}\n",command,disposed);
+                  if(disposed!=KERN_SUCCESS) { mach_msg_destroy(&message.h); continue; }
                   mach_port_t reply=message.h.msgh_remote_port;
                   memset(lookup->instance,0,sizeof(lookup->instance));
                   message.h.msgh_remote_port=bootstrap_port; message.h.msgh_local_port=reply;
@@ -155,6 +161,11 @@ jobs:
                 message.h.msgh_remote_port=MACH_PORT_NULL;
                 kr=mach_msg(&reply.Head,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(reply),0,MACH_PORT_NULL,100,MACH_PORT_NULL);
                 if (kr!=KERN_SUCCESS) mach_msg_destroy(&reply.Head);
+              }
+              if(message.h.msgh_voucher_port!=MACH_PORT_NULL) {
+                mach_port_deallocate(task,message.h.msgh_voucher_port);
+                message.h.msgh_voucher_port=MACH_PORT_NULL;
+                message.h.msgh_bits &= ~MACH_MSGH_BITS_VOUCHER_MASK;
               }
               mach_msg_destroy(&message.h);
             }
