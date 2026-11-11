@@ -827,17 +827,20 @@ async def test_cold_child_snapshot_cannot_answer_reloaded_manual_grant(tmp_path,
             with pytest.raises(ValueError, match="not a live native incarnation"):
                 await stale.start(raw)
             assert validated == []
+            value = Answer(value="reloaded")
+            validated.clear()
+            # The reply waits for the child Turn to be observed.
+            await request.respond(value)
             current = next(
                 child
                 for child in [item async for item in restored.subagents()]
                 if child.id == alpha_id
             )
             assert current._instance_id is not None
-            value = Answer(value="reloaded")
-            validated.clear()
-            await request.respond(value)
-            assert current.turn is not None
-            assert (await current.turn.get_result()).final_output == "alpha complete"
+            turn = current.turn
+            assert turn is not None
+            assert (turn.submission_id, turn.turn_id) == (request.submission_id, request.turn_id)
+            assert (await turn.get_result()).final_output == "alpha complete"
             assert validated == ["reloaded"]
 
 
