@@ -51,12 +51,15 @@ impl ModelResponseInterceptor for Interceptor {
         if !self.registered_plan {
             return self.intercept(stream);
         }
-        let stop = admission.and_then(|admission| admission.turn_store().get::<TurnSamplingStop>());
+        let stop = admission
+            .as_ref()
+            .and_then(|admission| admission.turn_store().get::<TurnSamplingStop>());
         let deadline = stop.as_ref().and_then(|stop| stop.capture_model_deadline());
         let gate = PlanStream {
             upstream: Some(self.intercept(stream)),
             pending: VecDeque::new(),
             completed_response: None,
+            admission,
             stop,
             deadline,
         };
@@ -83,6 +86,7 @@ struct PlanStream {
     upstream: Option<ModelResponseStream>,
     pending: VecDeque<Result<ResponseEvent, ModelResponseError>>,
     completed_response: Option<String>,
+    admission: Option<Arc<dyn ModelToolAdmission>>,
     stop: Option<Arc<TurnSamplingStop>>,
     deadline: Option<Arc<ModelInvocationDeadlineState>>,
 }
@@ -129,7 +133,9 @@ impl PlanStream {
                         }
                         _ => {}
                     }
-                    if self.pending.is_empty() && !starts_tool_call(&event) {
+                    if self.pending.is_empty()
+                        && !starts_tool_call(&event, self.admission.as_deref())
+                    {
                         return Some(Ok(event));
                     }
                     if self.pending.len() == MAX_PENDING_PLAN_EVENTS {
@@ -159,7 +165,7 @@ impl PlanStream {
     }
 }
 
-fn starts_tool_call(event: &ResponseEvent) -> bool {
+fn starts_tool_call(event: &ResponseEvent, admission: Option<&dyn ModelToolAdmission>) -> bool {
     let item = match event {
         ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => item,
         _ => return false,
@@ -173,7 +179,8 @@ fn starts_tool_call(event: &ResponseEvent) -> bool {
     ) || matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(_), execution, .. } if execution == "client"
-    )
+    ) || (matches!(item, ResponseItem::ShellCall { .. })
+        && admission.is_some_and(|admission| admission.admits(item)))
 }
 
 struct Generation {

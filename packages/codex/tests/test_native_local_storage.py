@@ -350,9 +350,9 @@ async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(
             assert not effects.exists()
         assert len(responses.requests) == 1
 
-        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+        with pytest.raises(ValueError, match="Reconciliation requires a confirmed outcome"):
             call.reconcile(outcome="unknown", result="Outcome is still unknown")
-        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+        with pytest.raises(ValueError, match="a text or ShellOutput result"):
             call.reconcile(outcome="applied", result={"confirmed": True})
         confirmed = call.reconcile(outcome=outcome, result="Confirmed application record")
         from_journal = ReconciledCall(

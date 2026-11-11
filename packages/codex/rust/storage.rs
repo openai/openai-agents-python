@@ -30,11 +30,51 @@ use crate::manual_checkpoint::UnsupportedManualState;
 /// The engine and its extensions own this tracker for one Session lifetime;
 /// entries grow with that Session's canonical calls and drop with the engine.
 #[derive(Default)]
-pub(crate) struct ManagedCalls(std::sync::Mutex<HashSet<(String, String, String)>>);
+pub(crate) struct ManagedCalls {
+    calls: std::sync::Mutex<HashSet<(String, String, String)>>,
+    canonical_writer: std::sync::Weak<crate::canonical_storage::CanonicalStore>,
+}
 
 impl ManagedCalls {
+    pub(crate) fn with_canonical_writer(
+        canonical_writer: std::sync::Weak<crate::canonical_storage::CanonicalStore>,
+    ) -> Self {
+        Self {
+            canonical_writer,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) async fn record_shell_call(
+        &self,
+        thread: &str,
+        turn: &str,
+        call: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(writer) = self.canonical_writer.upgrade() {
+            writer
+                .record_shell_call(ThreadId::from_string(thread)?, turn, call)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn discard_shell_call(
+        &self,
+        thread: &str,
+        turn: &str,
+        call: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(writer) = self.canonical_writer.upgrade() {
+            writer
+                .discard_shell_call(ThreadId::from_string(thread)?, turn, call)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn register(&self, thread: &str, turn: &str, call: &str) {
-        self.0.lock().expect("managed calls poisoned").insert((
+        self.calls.lock().expect("managed calls poisoned").insert((
             thread.into(),
             turn.into(),
             call.into(),
@@ -46,11 +86,11 @@ impl ManagedCalls {
             && let Some((call, Some(turn))) =
                 crate::local_reconciliation::output_identity(&envelope.item)
         {
-            return self.0.lock().expect("managed calls poisoned").contains(&(
-                thread.to_string(),
-                turn.to_owned(),
-                call.to_owned(),
-            ));
+            return self
+                .calls
+                .lock()
+                .expect("managed calls poisoned")
+                .contains(&(thread.to_string(), turn.to_owned(), call.to_owned()));
         }
         false
     }

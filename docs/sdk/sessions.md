@@ -28,7 +28,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run `.venv/bin/python conversation.py` on Linux/macOS or `.\.venv\Scripts\python.exe conversation.py` on Windows. The script prints an answer recalling `atlas`; the model chooses the wording.
+In your activated SDK environment, run `python conversation.py` from the directory where you saved the script. The answer should recall `atlas`. The model chooses the wording.
 
 Later examples with `await` or `async with` are fragments for an async function unless marked as complete scripts. Use the same installed SDK and credentials, and follow the version notices when opening other pages.
 

@@ -11,7 +11,7 @@ Install the [SDK preview wheel](../../../docs/sdk/installation.md), activate you
 First run the scripted cases without credentials. The runner writes results to the path passed as `--output`; choose a path you can write:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.evaluation.run --mode scripted --repeats 2 --output harness.json
+python -m examples.codex.evaluation.run --mode scripted --repeats 2 --output harness.json
 ```
 
 A successful scripted run creates `harness.json` and reports `evidence` set to `harness_only`, four trials, and four passes.
@@ -27,7 +27,7 @@ Live mode sends synthetic prompts and catalog values to the provider and can inc
 Supply your key through your usual secret mechanism, then record a baseline:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.evaluation.run --mode live --config examples/codex/evaluation/config.json --repeats 3 --output baseline.json
+python -m examples.codex.evaluation.run --mode live --config examples/codex/evaluation/config.json --repeats 3 --output baseline.json
 ```
 
 ### Run a candidate
@@ -35,7 +35,7 @@ PYTHONPATH=. python -m examples.codex.evaluation.run --mode live --config exampl
 Copy `examples/codex/evaluation/config.json` to `candidate.json` and change only the instructions or model setting you want to compare. Keep the cases and repeats fixed:
 
 ```sh
-PYTHONPATH=. python -m examples.codex.evaluation.run --mode live --config candidate.json --repeats 3 --baseline baseline.json --output candidate-results.json
+python -m examples.codex.evaluation.run --mode live --config candidate.json --repeats 3 --baseline baseline.json --output candidate-results.json
 ```
 
 Each live command records six trials. Inspect the output file even if the command exits with a failure.

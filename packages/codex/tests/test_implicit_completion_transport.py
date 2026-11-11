@@ -14,10 +14,13 @@ from agents import (
     Agent,
     Allow,
     NativeProvider,
+    ShellCall,
+    ShellOutput,
     SignInWithChatGPT,
     SignInWithChatGPTCredentials,
     ToolContext,
     function_tool,
+    shell_tool,
 )
 
 
@@ -520,6 +523,8 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
         "proxy",
         "raw_usage",
         "raw_usage_tool",
+        "application-shell",
+        "mixed-application-shell",
     ],
 )
 async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
@@ -559,6 +564,9 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         """Return synthetic output."""
         return "unused"
 
+    def execute_shell(context: ToolContext[None], call: ShellCall) -> ShellOutput:
+        raise AssertionError("Shell execution must not precede native startup")
+
     monkeypatch.setattr(module, "NativeProvider", OwnedProvider)
     monkeypatch.setattr(native, "create_engine", create_engine)
     agent_options: dict[str, Any] = {}
@@ -577,6 +585,13 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
         run_options["context"] = object()
     elif profile == "events":
         run_options["observation_retention"] = "all"
+    elif profile in ("application-shell", "mixed-application-shell"):
+        application_shell = shell_tool(execute_shell)
+        agent_options["tools"] = (
+            [optional_tool, application_shell]
+            if profile == "mixed-application-shell"
+            else [application_shell]
+        )
     if profile in ("raw_usage", "raw_usage_tool"):
         run_options["return_raw_usage"] = True
     agent = Agent(instructions="Answer briefly.", **agent_options)

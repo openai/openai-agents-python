@@ -406,15 +406,15 @@ impl Engine {
         async_bridge::future_factory_into_py(py, move || async move {
             let _operation = inner.operation(false).map_err(py_error)?;
             let _lifecycle = inner.lifecycle.lock().await;
-            if !inner
+            let Some(store) = inner
                 .store
                 .as_any()
-                .is::<canonical_storage::CanonicalStore>()
-            {
+                .downcast_ref::<canonical_storage::CanonicalStore>()
+            else {
                 return Err(PyRuntimeError::new_err(
                     "Recovery inspection requires custom canonical storage",
                 ));
-            }
+            };
             // CanonicalStore loads under its exclusive writer. Keep that lease
             // through startup or failed-opening cleanup; never start Core here.
             let stored = inner.read_stored_thread(id).await.map_err(py_error)?;
@@ -431,7 +431,8 @@ impl Engine {
                 })
                 .await
                 .map_err(py_error)?;
-            serde_json::to_string(&history.items).map_err(py_error)
+            let pending_shell_calls = store.pending_shell_calls(id).await.map_err(py_error)?;
+            serde_json::to_string(&(history.items, pending_shell_calls)).map_err(py_error)
         })
     }
 
@@ -4476,7 +4477,7 @@ fn reconcile_canonical_store(
 ) -> PyResult<CanonicalReconciliation> {
     let id = codex_protocol::ThreadId::from_string(&thread_id).map_err(py_error)?;
     Ok(CanonicalReconciliation {
-        store: Arc::new(canonical_storage::CanonicalStore::new(backend)),
+        store: canonical_storage::CanonicalStore::new(backend),
         thread_id: id,
         input: std::sync::Mutex::new(Some((turn_id, call_id, output))),
     })
