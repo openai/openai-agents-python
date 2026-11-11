@@ -1,5 +1,5 @@
 {
-  "name": "Locate the exact stopped code approval phase",
+  "name": "Locate stopped approval under original full-suite order",
   "on": {
     "push": {
       "branches": [
@@ -14,7 +14,7 @@
   "jobs": {
     "full-suite": {
       "runs-on": "macos-15",
-      "timeout-minutes": 10,
+      "timeout-minutes": 40,
       "env": {
         "OPENAI_API_KEY": "fake-for-tests",
         "UV_FROZEN": "1",
@@ -60,9 +60,17 @@
           "run": "# The managed shell clears its bootstrap port before running commands.\n# Give libc's local lookup the existing runner account.\nrecord=\"$(python3 - <<'PY'\nimport os\nimport pwd\nfrom pathlib import Path\n\naccount = pwd.getpwuid(os.getuid())\nif account.pw_uid == 0:\n    raise SystemExit(\"Expected a non-root runner account\")\nuid, gid = str(account.pw_uid), str(account.pw_gid)\nidentity = (account.pw_name, uid, gid, account.pw_dir, account.pw_shell)\nfields = (account.pw_name, \"*\", uid, gid, account.pw_gecos, account.pw_dir, account.pw_shell)\nif any(\":\" in value or \"\\r\" in value or \"\\n\" in value for value in fields):\n    raise SystemExit(\"Invalid runner account field in passwd record\")\nfor row in Path(\"/etc/passwd\").read_text().splitlines():\n    columns = row.split(\":\")\n    if len(columns) != 7:\n        continue\n    name, _, local_uid, local_gid, _, home, shell = columns\n    if name != account.pw_name and local_uid != uid:\n        continue\n    if (name, local_uid, local_gid, home, shell) != identity:\n        raise SystemExit(\"Runner account conflicts with an existing passwd record\")\n    raise SystemExit(0)\nprint(\":\".join(fields))\nPY\n)\"\nif [[ -n \"$record\" ]]; then\n  printf '\\n%s\\n' \"$record\" | sudo -n /usr/bin/tee -a /etc/passwd >/dev/null\nfi\n"
         },
         {
-          "name": "Check the neighboring approval cases in their serial order",
-          "timeout-minutes": 4,
-          "run": "uv run --no-sync python - <<'PYTHON'\nimport os,signal,subprocess,sys\nfrom pathlib import Path\np=Path(os.environ['RUNNER_TEMP'])/'approval_phase_probe.py'\np.write_text(\"import sys\\nimport pytest\\ndef phase(frame, event, argument):\\n    selected=frame.f_code.co_filename.endswith('/test_native_negative_approval.py') and frame.f_code.co_name in {'test_native_code_approval_rejection_retires_before_following_effect','approval'}\\n    if selected and event=='line':\\n        print('PHASE '+frame.f_code.co_name+':'+str(frame.f_lineno),flush=True)\\n    return phase if selected else None\\nsys.settrace(phase)\\nraise SystemExit(pytest.main(['packages/codex/tests/test_native_negative_approval.py','-q','-s','--tb=short']))\\n\",encoding='utf-8')\nprocess=subprocess.Popen([sys.executable,'packages/codex/scripts/test_native.py','--sdk',str(p)],start_new_session=True)\ntry:\n    result=process.wait(timeout=90)\nexcept subprocess.TimeoutExpired:\n    os.killpg(process.pid,signal.SIGTERM)\n    try:\n        process.wait(timeout=10)\n    except subprocess.TimeoutExpired:\n        os.killpg(process.pid,signal.SIGKILL)\n        process.wait(timeout=10)\n    raise RuntimeError('owned approval phase probe exceeded90seconds') from None\nraise SystemExit(result)\nPYTHON\n"
+          "name": "Enable phase-only output for the single stopped approval case",
+          "run": "python - <<'PYTHON'\nimport os\nfrom pathlib import Path\np=Path(os.environ['RUNNER_TEMP'])/'stopped_approval_phase.py'\np.write_text(\"import sys\\nnames={'test_native_code_approval_rejection_retires_before_following_effect','approval','_stop_policy_turn','stop_owner','_invoke_executor_policy_body','_join','get_result','aclose','_aclose','_close','_close_session'}\\ndef phase(frame,event,argument):\\n    path=frame.f_code.co_filename\\n    selected=(path.endswith('/test_native_negative_approval.py') or '/_agents_codex/' in path) and (frame.f_code.co_name in names or frame.f_code.co_name.startswith('_retire'))\\n    if selected and event=='line':\\n        print('PHASE '+path.rsplit('/',1)[-1]+':'+frame.f_code.co_name+':'+str(frame.f_lineno),flush=True)\\n    return phase if selected else None\\ndef pytest_runtest_setup(item):\\n    if item.nodeid.endswith('test_native_code_approval_rejection_retires_before_following_effect[stop-exec_command]'):\\n        print('PHASE stopped-approval-control:active',flush=True)\\n        sys.settrace(phase)\\ndef pytest_runtest_teardown(item):\\n    sys.settrace(None)\\n\",encoding='utf-8')\nwith open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as out:\n    out.write('PYTHONPATH='+os.pathsep.join(filter(None,(str(p.parent),os.environ.get('PYTHONPATH'))))+'\\n')\nPYTHON\n"
+        },
+        {
+          "name": "Run native SDK tests on macOS",
+          "timeout-minutes": 30,
+          "env": {
+            "PYTEST_ADDOPTS": "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0 -p stopped_approval_phase",
+            "PYTHONUNBUFFERED": "1"
+          },
+          "run": "make tests"
         }
       ]
     }
