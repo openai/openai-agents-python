@@ -3554,7 +3554,7 @@ class Session(Generic[ContextT, OutputT]):
                 if uses_siwc and state is not None:
                     _check_checkpoint(saved, instructions, graph=bool(profiles))
 
-                def private_run_policy() -> tuple[bool, bool, bool]:
+                def private_run_policy(provider: NativeProvider) -> tuple[bool, bool, bool]:
                     private_text = (
                         _atomic_first_turn
                         and observation_retention == "bounded"
@@ -3603,7 +3603,7 @@ class Session(Generic[ContextT, OutputT]):
                         websockets_enabled = False
                     return use_completed_owner, websockets_enabled, private_http
 
-                use_completed_owner, websockets_enabled, private_http = private_run_policy()
+                use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
