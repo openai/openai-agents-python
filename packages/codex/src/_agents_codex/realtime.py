@@ -7,6 +7,7 @@ import base64
 import hashlib
 import inspect
 import json
+import re
 from collections import deque
 from collections.abc import (
     AsyncIterator,
@@ -960,24 +961,36 @@ class RealtimeSession:
                 raise TypeError("url must be a WebSocket URL string")
             try:
                 parsed_url = urlsplit(config.url)
+                port = parsed_url.port
                 valid_url = (
                     parsed_url.scheme in {"ws", "wss"}
                     and parsed_url.hostname is not None
                     and parsed_url.username is None
                     and parsed_url.password is None
-                    and not parsed_url.fragment
+                    and "#" not in config.url
+                    and (port is None or 0 <= port <= 65535)
                 )
             except ValueError:
                 valid_url = False
             if not valid_url:
-                raise ValueError("url requires ws or wss without credentials or fragments")
+                raise ValueError(
+                    "url requires ws or wss, a valid port, and no credentials or fragments"
+                )
         if config.headers is not None:
-            if not isinstance(config.headers, Mapping) or any(
+            if not isinstance(config.headers, Mapping):
+                raise TypeError("headers must map strings to strings")
+            headers = dict(config.headers)
+            if any(
                 not isinstance(name, str) or not isinstance(value, str)
-                for name, value in config.headers.items()
+                for name, value in headers.items()
             ):
                 raise TypeError("headers must map strings to strings")
-            config = replace(config, headers=dict(config.headers))
+            for name, value in headers.items():
+                if not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+                    raise ValueError("Invalid Realtime header name")
+                if any(char != "\t" and not 0x20 <= ord(char) <= 0x7E for char in value):
+                    raise ValueError("Invalid Realtime header value")
+            config = replace(config, headers=headers)
             self._config = config
         self._input_lock = asyncio.Lock()
         self._input_count = 0

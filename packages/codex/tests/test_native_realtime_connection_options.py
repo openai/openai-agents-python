@@ -45,6 +45,7 @@ async def connection_endpoint(
         (None, None, None),
         (None, "explicit-voice-key", "Bearer explicit-voice-key"),
         ({}, "discarded-voice-key", None),
+        ({"X-Voice": "valid\tvalue"}, None, None),
         (
             {"Authorization": "Bearer custom-header-key", "X-Voice": "custom"},
             None,
@@ -143,6 +144,9 @@ async def test_existing_call_accepts_exact_url_and_replacement_headers(call_peer
         "https://example.test/voice",
         "ws://user:password@example.test/voice",
         "ws://example.test/#secret",
+        "ws://example.test/voice#",
+        "ws://example.test:invalid/voice",
+        "ws://example.test:65536/voice",
     ],
 )
 async def test_invalid_url_rejects_before_resolving_credentials(
@@ -156,23 +160,40 @@ async def test_invalid_url_rejects_before_resolving_credentials(
         Agent(instructions="Listen.", provider=provider).session() as session,
     ):
         with pytest.raises(ValueError, match="ws or wss"):
-            session.realtime(config=RealtimeConfig(url=url, api_key=credential))
+            async with session.realtime(config=RealtimeConfig(url=url, api_key=credential)):
+                pytest.fail("Invalid URL must reject before transport I/O")
         assert not realtime_peer.upgrades
 
 
-@pytest.mark.parametrize("headers", [{"invalid name": "value"}, {"X-Voice": "private\nvalue"}])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"invalid name": "value"},
+        {"X-Voice": "private\nvalue"},
+        {"X-Voice": "private\x7fvalue"},
+        {"X-Voice": "private-café-value"},
+    ],
+)
 async def test_invalid_headers_reject_without_sending_or_exposing_values(
     realtime_peer: RealtimePeer, headers: dict[str, str]
 ) -> None:
+    calls = 0
+
+    def credential() -> str:
+        nonlocal calls
+        calls += 1
+        return "private-callback-key"
+
     async with (
         timeout(30),
         NativeProvider(base_url=realtime_peer.responses.url, api_key="session-key") as provider,
         Agent(instructions="Listen.", provider=provider).session() as session,
     ):
-        with pytest.raises(RuntimeError, match="Invalid Realtime header") as error:
-            async with session.realtime(config=RealtimeConfig(headers=headers)):
+        with pytest.raises(ValueError, match="Invalid Realtime header") as error:
+            async with session.realtime(config=RealtimeConfig(headers=headers, api_key=credential)):
                 pytest.fail("Invalid headers must reject before transport I/O")
         assert "private" not in str(error.value)
+        assert calls == 0
         assert not realtime_peer.upgrades
 
 
