@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -16,8 +17,10 @@ from agents import (
     RetryAdvice,
     RetryBackoffSettings,
     RetryDecision,
+    retry_policies,
 )
 from tests._asyncio import timeout
+from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 
 def response(text: str, tokens: int = 5) -> ModelResponse:
@@ -79,6 +82,70 @@ async def test_policy_retry_preserves_exact_error_and_counts_each_attempt_once()
     assert result.run_usage.input_tokens == 10
     assert result.run_usage.missing_usage_requests == 0
     assert requests[0].report_usage({"input_tokens": 99}) is False
+
+
+async def test_composed_retry_policy_dispatches_each_predicate_in_its_executor():
+    loop_thread = threading.get_ident()
+    predicate_threads = []
+    attempts = 0
+
+    class Model:
+        def complete(self, _request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("retry this attempt")
+            return response("recovered")
+
+    def sync_policy(_context):
+        predicate_threads.append(("sync", threading.get_ident()))
+        return True
+
+    async def async_policy(_context):
+        predicate_threads.append(("async", threading.get_ident()))
+        return True
+
+    policy = retry_policies.any(retry_policies.all(sync_policy, async_policy))
+    async with timeout(15), NativeProvider(model_backend=Model()) as provider:
+        result = await Agent(
+            model="custom-model",
+            instructions="Answer.",
+            provider=provider,
+            model_settings=settings(policy),
+        ).run("go")
+    assert result.final_output == "recovered"
+    assert [kind for kind, _ in predicate_threads] == ["sync", "async"]
+    assert predicate_threads[0][1] != loop_thread
+    assert predicate_threads[1][1] == loop_thread
+
+
+async def test_retry_update_uses_the_active_handoff_agent(responses):
+    def source_policy(_context):
+        return False
+
+    def target_policy(_context):
+        return False
+
+    target = Agent(name="target", instructions="Target.", model_settings=settings(target_policy))
+    provider = NativeProvider(
+        base_url=responses.url, api_key="synthetic-retry-handoff-key", supports_websockets=False
+    )
+    source = Agent(
+        instructions="Source.",
+        handoffs=[target],
+        provider=provider,
+        model_settings=settings(source_policy),
+    )
+    responses.respond(function_call("transfer_to_target", {}, "handoff-target"))
+    responses.respond(assistant_output("target active"))
+    async with timeout(20), source.session() as session:
+        assert (await (await session.submit("Switch to target")).get_result()).final_output == (
+            "target active"
+        )
+        assert await session.get_active_agent() is target
+        await session.update(model_settings=settings(target_policy, retries=2))
+        with pytest.raises(ValueError, match="different retry policy callable"):
+            await session.update(model_settings=settings(source_policy))
 
 
 @pytest.mark.parametrize("retry", [False, True], ids=["declined", "exhausted"])

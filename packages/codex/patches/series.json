@@ -658,7 +658,11 @@
     },
     {
       "path": "sdk-model-cohort-core-test-fixtures.patch",
-      "sha256": "7cbb510d137129da06bddbbd0e15fd0a93f137039ca8ccf1f16f8add3c253007"
+      "sha256": "30c218b88cfd15417c664024c6a2039e18c6d4ab8cd65bd9cd8440de9d38b4c5"
+    },
+    {
+      "path": "sdk-model-deadline-admission-compile.patch",
+      "sha256": "4a2fcdee2635a88dcfb17c3d060ccee894a5a2adae5f12bc6cccdf82401e5c8c"
     },
     {
       "path": "sdk-stored-owner-retirement.patch",
@@ -677,5 +681,5 @@
       "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
     }
   ],
-  "result_tree": "5d022eaa2cff4dc3b23ebad93aa80ff60e3d02b0"
+  "result_tree": "2a2518cbe703eca57016c2c5fa1dbe8231108aed"
 }

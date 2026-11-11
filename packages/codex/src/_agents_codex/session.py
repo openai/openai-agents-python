@@ -243,6 +243,7 @@ from .recovery import (
     UncertainCall as UncertainCall,
 )
 from .response_facts import _response_fact_record
+from .retry import _CombinedRetryPolicy
 from .schema import (
     OutputSpec as OutputSpec,
     OutputValidationError as OutputValidationError,
@@ -8324,18 +8325,9 @@ class Session(Generic[ContextT, OutputT]):
         """
         self._check_idle_update()
         captured_update_settings = _copy_model_settings(model_settings)
-        if captured_update_settings:
-            requested_retry = captured_update_settings.get("retry")
-            if requested_retry is not None and requested_retry.policy is not None:
-                captured_retry = (
-                    self._opening_agent.model_settings.get("retry")
-                    if self._opening_agent is not None
-                    else None
-                )
-                if captured_retry is None or requested_retry.policy is not captured_retry.policy:
-                    raise ValueError(
-                        "Session.update cannot install a different retry policy callable"
-                    )
+        requested_retry = (
+            captured_update_settings.get("retry") if captured_update_settings else None
+        )
         settings = _native_model_settings(model, captured_update_settings)
         captured_tools = tuple(tools) if tools is not None else None
         target = None
@@ -8354,6 +8346,12 @@ class Session(Generic[ContextT, OutputT]):
 
         async def publish_update() -> None:
             await self._refresh_profile_bindings()
+            if requested_retry is not None and requested_retry.policy is not None:
+                captured_retry = self._effective_agent().model_settings.get("retry")
+                if captured_retry is None or requested_retry.policy is not captured_retry.policy:
+                    raise ValueError(
+                        "Session.update cannot install a different retry policy callable"
+                    )
             if target is not None:
                 expected = json.loads(await self._native._active_agent_profile())
                 self._agent_for_profile(expected)
@@ -10944,6 +10942,8 @@ class Session(Generic[ContextT, OutputT]):
             async def invoke(callback: Callable[..., Any], argument: Any) -> Any:
                 if not active():
                     raise asyncio.CancelledError
+                if isinstance(callback, _CombinedRetryPolicy):
+                    return await _call_callback(callback.evaluate, active, argument, invoke)
                 return await _call_callback(callback, active, argument)
 
             result = await _resolve_retry(message["data"], state.model_failure, policy, invoke)

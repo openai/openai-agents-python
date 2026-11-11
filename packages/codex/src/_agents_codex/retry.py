@@ -122,6 +122,7 @@ class RetryPolicyContext:
 
 
 RetryPolicy = Callable[[RetryPolicyContext], bool | RetryDecision | Awaitable[bool | RetryDecision]]
+_RetryPolicyInvoker = Callable[[RetryPolicy, RetryPolicyContext], Awaitable[bool | RetryDecision]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,8 +159,10 @@ class ModelRetrySettings:
         return result
 
 
-async def _evaluate(policy: RetryPolicy, context: RetryPolicyContext) -> RetryDecision:
-    result = policy(context)
+async def _evaluate(
+    policy: RetryPolicy, context: RetryPolicyContext, invoke: _RetryPolicyInvoker | None
+) -> RetryDecision:
+    result = policy(context) if invoke is None else await invoke(policy, context)
     if inspect.isawaitable(result):
         result = await result
     if type(result) is bool:
@@ -167,6 +170,14 @@ async def _evaluate(policy: RetryPolicy, context: RetryPolicyContext) -> RetryDe
     if not isinstance(result, RetryDecision):
         raise TypeError("Retry policy must return a bool or RetryDecision")
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _CombinedRetryPolicy:
+    evaluate: Callable[[RetryPolicyContext, _RetryPolicyInvoker | None], Awaitable[RetryDecision]]
+
+    async def __call__(self, context: RetryPolicyContext) -> RetryDecision:
+        return await self.evaluate(context, None)
 
 
 class _RetryPolicies:
@@ -207,12 +218,14 @@ class _RetryPolicies:
         return lambda context: context.normalized.status_code in allowed
 
     def _combine(self, policies: tuple[RetryPolicy, ...], require_all: bool) -> RetryPolicy:
-        async def policy(context: RetryPolicyContext) -> RetryDecision:
+        async def policy(
+            context: RetryPolicyContext, invoke: _RetryPolicyInvoker | None
+        ) -> RetryDecision:
             positive: RetryDecision | None = None
             negative = RetryDecision(False)
             veto: RetryDecision | None = None
             for predicate in policies:
-                decision = await _evaluate(predicate, context)
+                decision = await _evaluate(predicate, context, invoke)
                 if decision._veto == "hard":
                     return decision
                 if decision._veto == "provider_unsafe":
@@ -244,7 +257,7 @@ class _RetryPolicies:
                 return replace(positive, reason=positive.reason or veto.reason)
             return negative if positive is None else positive
 
-        return policy
+        return _CombinedRetryPolicy(policy)
 
     def all(self, *policies: RetryPolicy) -> RetryPolicy:
         return self._combine(policies, require_all=True)

@@ -1128,6 +1128,7 @@ mod steering_capture_tests {
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
+                model_attempt: None,
             }),
         }
     }
@@ -1428,6 +1429,7 @@ mod steering_capture_tests {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    model_attempt: None,
                 }),
             };
             row.observe(&state, child_id, &event);

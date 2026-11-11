@@ -187,7 +187,17 @@ async def test_different_update_policy_rejects_before_any_native_publication():
     agent = Agent(
         instructions="fixture", model_settings={"retry": ModelRetrySettings(policy=original)}
     )
-    owner = SimpleNamespace(_check_idle_update=lambda: None, _opening_agent=agent)
+
+    async def refresh_profile():
+        return None
+
+    owner = SimpleNamespace(
+        _check_idle_update=lambda: None,
+        _opening_agent=agent,
+        _refresh_profile_bindings=refresh_profile,
+        _effective_agent=lambda: agent,
+        _join_mutation=lambda pending: pending,
+    )
     with pytest.raises(ValueError, match="different retry policy callable"):
         await Session.update(
             owner, model_settings={"retry": ModelRetrySettings(policy=lambda _context: True)}

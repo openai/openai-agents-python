@@ -3504,6 +3504,7 @@ mod managed_receipt_tests {
                         response_id: "sampled".into(),
                         token_usage: None,
                         usage_metadata: None,
+                        model_attempt_id: None,
                     },
                 ))],
             })
@@ -3638,6 +3639,7 @@ mod managed_receipt_tests {
                 response_id: "first".into(),
                 token_usage: None,
                 usage_metadata: None,
+                model_attempt_id: None,
             },
         )));
         // The manual call belongs to a later, still-unsampled response. The

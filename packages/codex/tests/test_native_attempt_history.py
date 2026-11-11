@@ -1,6 +1,9 @@
 """Recorded native usage replaces cumulative snapshots once per physical owner."""
 
+import asyncio
 import json
+
+import pytest
 
 from _agents_codex._history import project_history
 
@@ -92,3 +95,51 @@ def test_rollback_removes_old_owner_and_legacy_contributions_before_same_id_reco
     assert len(turns) == 1
     assert turns[0]["run_usage"]["requests"] == 1
     assert turns[0]["run_usage"]["input_tokens"] == 3
+
+
+@pytest.mark.parametrize("terminal", ["task_complete", "turn_complete", "turn_aborted"])
+def test_terminal_snapshots_replace_the_matching_owner_without_double_counting(terminal):
+    snapshot = fact("owner-A", 1, 7)["payload"]["data"]
+    records = [
+        event("turn_started"),
+        fact("restored-owner", 1, 3),
+        fact("owner-A", 1, 0, 1),
+        raw(7, attempt="attempt"),
+        event(terminal, model_attempt=snapshot),
+    ]
+    turns, _ = project_history(records, "session")
+    assert turns[0]["run_usage"]["input_tokens"] == 10
+    assert turns[0]["run_usage"]["requests"] == 2
+    assert turns[0]["run_usage"]["missing_usage_requests"] == 0
+
+
+async def test_force_cancel_retains_reported_model_usage_in_recorded_turns():
+    from agents import Agent, ModelRequest, NativeProvider, TurnStoppedError
+    from tests._asyncio import timeout
+
+    reported, released = asyncio.Event(), asyncio.Event()
+    reports = []
+
+    class Model:
+        async def complete(self, request: ModelRequest):
+            reports.append(request.report_usage({"input_tokens": 7, "total_tokens": 7}))
+            reported.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                released.set()
+
+    async with timeout(15), NativeProvider(model_backend=Model()) as provider:
+        agent = Agent(model="custom-model", instructions="Answer.", provider=provider)
+        async with agent.session() as session:
+            turn = await session.submit("go")
+            await reported.wait()
+            await turn.cancel(mode="force")
+            with pytest.raises(TurnStoppedError):
+                await turn.get_result()
+            assert released.is_set() and reports == [True]
+            recorded = [item async for item in session.turns()]
+            assert len(recorded) == 1 and recorded[0]["id"] == turn.turn_id
+            usage = recorded[0]["run_usage"]
+            assert usage["input_tokens"] == usage["total_tokens"] == 7
+            assert usage["requests"] == 1 and usage["missing_usage_requests"] == 0
