@@ -30,6 +30,7 @@ from _agents_codex.agent import (
     SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     SupportsIndex as SupportsIndex,
     TextAgentT as TextAgentT,
+    ToolErrorFormatter as ToolErrorFormatter,
     TracebackType as TracebackType,
     TraceContext as TraceContext,
     TypedAgentT as TypedAgentT,
