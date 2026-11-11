@@ -265,6 +265,21 @@ async def worker() -> None:
                 return
             result = await (await session.submit("Run requested work.")).get_result()
             root_items = [item async for item in session.items()]
+            if request["mode"] == "cold-active" and request["depth"] == 2:
+                (spawn,) = [item for item in root_items if item["type"] == "create_subagent_call"]
+                assert spawn["status"] == "completed"
+                children = await handles(session, 2)
+                (parent,) = [child for child in children if child.child_id == spawn["subagent_id"]]
+                (leaf,) = [child for child in children if child.child_id != parent.child_id]
+                assert (await parent.get_result()).final_output == "/root/alpha finished"
+                # Reading the live parent's history flushes its rollout. Match
+                # its own turn, excluding inherited fork-all spawn records.
+                (spawn,) = [
+                    item
+                    async for item in session.items(subagent_id=parent.child_id)
+                    if item["type"] == "create_subagent_call" and item["turn_id"] == parent.turn_id
+                ]
+                assert (spawn["status"], spawn["subagent_id"]) == ("completed", leaf.child_id)
             print(json.dumps({"output": result.final_output, "root_items": root_items}), flush=True)
             finished_root.set()
             if request["mode"] == "followup":
@@ -789,7 +804,7 @@ async def test_local_reopen_refuses_cold_active_child_without_tool_receipt(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         peer.url = str(server.make_url("/v1"))
-        source = await start(peer, executor, tmp_path, "known", depth)
+        source = await start(peer, executor, tmp_path, "cold-active", depth)
         try:
             assert source.stdout is not None
             opened = json.loads(await source.stdout.readline())

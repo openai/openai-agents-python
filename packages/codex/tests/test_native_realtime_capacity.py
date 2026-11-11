@@ -3,7 +3,7 @@
 from contextlib import aclosing
 
 from agents import Agent, NativeProvider, function_tool
-from agents.realtime import RealtimeConfig, RealtimeToolCall
+from agents.realtime import RealtimeConfig, RealtimeResponse, RealtimeToolCall
 from tests._asyncio import timeout
 from tests.native_fixtures import text_response
 from tests.test_native_realtime import RealtimePeer, realtime_peer as realtime_peer
@@ -38,9 +38,12 @@ async def test_sequential_native_realtime_functions_exceed_native_retention_capa
             ) as owner,
             aclosing(owner.events()) as events,
         ):
+            assert peer.response_count == 0
             for index in range(call_count):
                 call_id = f"capacity-call-{index}"
+                start = len(peer.frames)
                 await peer.function("echo", {"index": index}, call_id)
+                tool_done = response_done = False
                 async for event in events:
                     if (
                         isinstance(event, RealtimeToolCall)
@@ -48,18 +51,34 @@ async def test_sequential_native_realtime_functions_exceed_native_retention_capa
                         and event.status in ("completed", "failed")
                     ):
                         assert event.status == "completed"
+                        output = await peer.frame(
+                            lambda frame, call_id=call_id: (
+                                frame.get("item", {}).get("type") == "function_call_output"
+                                and frame["item"].get("call_id") == call_id
+                            ),
+                            after=start,
+                        )
+                        assert output["item"]["output"] == f"accepted-{index}"
+                        item = dict(output["item"])
+                        item.setdefault("id", f"capacity-output-{index}")
+                        assert peer.socket is not None
+                        for kind in ("conversation.item.added", "conversation.item.done"):
+                            await peer.socket.send_json({"type": kind, "item": item})
+                        tool_done = True
+                    elif (
+                        isinstance(event, RealtimeResponse)
+                        and event.response_id == f"voice-response-{index + 1}"
+                        and event.status in ("done", "cancelled")
+                    ):
+                        assert event.status == "done"
+                        response_done = True
+                    if tool_done and response_done:
                         break
                 else:
                     raise AssertionError(
                         f"Voice ended after {len(accepted)} accepted function calls"
                     )
-                output = await peer.frame(
-                    lambda frame, call_id=call_id: (
-                        frame.get("item", {}).get("type") == "function_call_output"
-                        and frame["item"].get("call_id") == call_id
-                    )
-                )
-                assert output["item"]["output"] == f"accepted-{index}"
+                assert peer.response_count == index + 1
                 accepted.append(call_id)
             assert executed == list(range(call_count))
             assert len(accepted) == call_count
