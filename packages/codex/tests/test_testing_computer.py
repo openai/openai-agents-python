@@ -16,6 +16,15 @@ async def test_scripted_computer_actions_screenshot_and_native_history_replay():
     actions[0]["x"] = 99
     checks[0]["message"] = "later mutation"
     driver, disposed = Driver(), []
+    application_data = {"private_note": "synthetic-private-computer-tag"}
+
+    def extract(_, output):
+        assert output["type"] == "computer_call_output"
+        assert output["call_id"] == "computer-1"
+        assert output["output"]["image_url"] == "data:image/png;base64,aA=="
+        output["output"]["image_url"] = "data:image/png;base64,detached"
+        return application_data
+
     async with ScriptedResponses([item], [text("clicked")], [text("remembered")]) as peer:
         agent = Agent(
             instructions="Use the computer.",
@@ -25,11 +34,17 @@ async def test_scripted_computer_actions_screenshot_and_native_history_replay():
                 computer_tool(
                     ComputerProvider(lambda _: driver, disposed.append),
                     on_safety_check=lambda *_: True,
+                    extract_application_data=extract,
                 )
             ],
         )
         async with agent.session() as session:
-            assert (await (await session.submit("Click.")).get_result()).final_output == "clicked"
+            completed = await (await session.submit("Click.")).get_result()
+            assert completed.final_output == "clicked"
+            (record,) = completed.application_tool_outputs
+            assert record.call_id == "computer-1" and record.name == "computer"
+            assert record.application_data == application_data
+            assert (await session.save_state()).application_tool_outputs == [record]
             history = [item async for item in session.items()]
             normalized = next(item for item in history if item.get("type") == "function_call")
             assert normalized["name"] == "computer"
@@ -40,6 +55,7 @@ async def test_scripted_computer_actions_screenshot_and_native_history_replay():
                 await (await session.submit("Remember.")).get_result()
             ).final_output == "remembered"
         for request in peer.requests[1:]:
+            assert "synthetic-private-computer-tag" not in repr(request)
             output = next(
                 item for item in request["input"] if item.get("type") == "computer_call_output"
             )
