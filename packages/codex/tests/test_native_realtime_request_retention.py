@@ -11,7 +11,7 @@ from agents import Session
 
 
 def owner() -> RealtimeSession:
-    session = SimpleNamespace(_check_callback_operation=lambda _: None)
+    session = SimpleNamespace(_agent=None, _check_callback_operation=lambda _: None)
     realtime = RealtimeSession(cast(Session[Any, Any], session), config=RealtimeConfig())
     realtime._live = True
     realtime._ready.set_result(None)
@@ -22,9 +22,21 @@ def owner() -> RealtimeSession:
 
 def request(realtime: RealtimeSession, call_id: str) -> None:
     realtime._payload(
-        {"FunctionCallRequested": {"call_id": call_id, "name": "echo", "response_id": call_id}},
+        {
+            "FunctionCallRequested": {
+                "call_id": call_id,
+                "item_id": f"item-{call_id}",
+                "name": "echo",
+                "arguments": "{}",
+                "response_id": call_id,
+            },
+        },
         None,
     )
+
+
+def reserved_function_bytes(call_id: str) -> int:
+    return 4 * (3 * len(call_id) + len(f"item-{call_id}") + len("echo") + len("{}"))
 
 
 def drain(realtime: RealtimeSession) -> None:
@@ -66,8 +78,8 @@ async def test_completed_function_rollover_preserves_active_requests(monkeypatch
         assert "active" in realtime._seen
         assert len(realtime._seen) <= 4
         if index == 11:
-            assert realtime._identity_bytes == 4 * sum(
-                3 * len(key) + len("echo") for key in realtime._seen
+            assert realtime._identity_bytes == sum(
+                reserved_function_bytes(key) for key in realtime._seen
             )
         drain(realtime)
     assert "call-0" not in realtime._function_names
@@ -155,7 +167,7 @@ async def test_retirement_rollover_preserves_running_guardrail():
 
 async def test_terminal_request_byte_pressure_releases_only_terminal_reservations(monkeypatch):
     realtime = owner()
-    monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 400)
+    monkeypatch.setattr(realtime, "_BUFFER_BYTES_LIMIT", 600)
     request(realtime, "active")
     for index in range(12):
         call_id = f"terminal-{index}" + "x" * 12
@@ -163,7 +175,7 @@ async def test_terminal_request_byte_pressure_releases_only_terminal_reservation
         realtime._retire_pending_functions(call_id)
         assert "active" in realtime._pending_functions
         assert "active" in realtime._seen
-        assert realtime._identity_bytes == 4 * sum(
-            3 * len(key) + len("echo") for key in realtime._seen
+        assert realtime._identity_bytes == sum(
+            reserved_function_bytes(key) for key in realtime._seen
         )
-        assert realtime._identity_bytes <= 400
+        assert realtime._identity_bytes <= 600
