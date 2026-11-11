@@ -1,18 +1,18 @@
-name: Stock XPC observation
+name: Stock XPC observation after fork
 
 on:
   push:
     branches:
-      - diagnostics/nov9-stock-xpc-observe-a12
+      - diag/python-stock-postfork-registered-ports-alpha10
     paths:
       - .github/workflows/stock-xpc-observe.yml
-      - .github/diagnostics/stock-xpc-observe.c
 
 permissions:
   contents: read
 
 jobs:
   observe:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
     runs-on: macos-15
     timeout-minutes: 4
     steps:
@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Observe stock XPC lookup selection
+      - name: Observe stock XPC lookup after the child clears registered ports
         shell: bash
         run: |
           set -euo pipefail
@@ -33,7 +33,7 @@ jobs:
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/bin/id -u)" -ne 0
           source=.github/diagnostics/stock-xpc-observe.c
-          /usr/bin/shasum -a 256 "$source"
+          printf '%s  %s\n' 66f0f5aeb718826be7bde54e1df3d652e5850e04f648580d78f272e07dded6ae "$source" | /usr/bin/shasum -a 256 -c -
           temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc.XXXXXXXX")"
           trap '/bin/rm -rf -- "$temp_dir"' EXIT
           /usr/bin/xcrun --sdk macosx clang -std=c11 -D_DARWIN_C_SOURCE -fblocks \
