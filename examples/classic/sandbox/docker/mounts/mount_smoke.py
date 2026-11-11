@@ -156,5 +156,14 @@ async def run_mount_smoke_test(
             raise
         for mount_case in mount_cases:
             await _check_case(sandbox, agent, provider, mount_case)
-    finally:
+    except BaseException:
+        try:
+            await client.delete(sandbox)
+        except Exception as exc:
+            print(
+                f"Docker mount sandbox cleanup also failed ({type(exc).__name__}).",
+                file=sys.stderr,
+            )
+        raise
+    else:
         await client.delete(sandbox)

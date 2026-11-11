@@ -73,7 +73,10 @@ async def test_docker_mount_example_reports_missing_driver(monkeypatch, capsys, 
 
 
 @pytest.mark.asyncio
-async def test_docker_mount_example_deletes_sandbox_when_start_fails(monkeypatch, capsys):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_docker_mount_example_deletes_sandbox_when_start_fails(
+    monkeypatch, capsys, cleanup_fails
+):
     pytest.importorskip("docker")
     from agents.classic.sandbox.errors import MountCommandError
     from examples.classic.sandbox.docker.mounts import mount_smoke as example
@@ -91,6 +94,8 @@ async def test_docker_mount_example_deletes_sandbox_when_start_fails(monkeypatch
 
     async def delete(session):
         live_sessions.remove(session)
+        if cleanup_fails:
+            raise RuntimeError("protected cleanup details")
 
     client = SimpleNamespace(create=create, delete=delete)
     monkeypatch.setattr(example, "ensure_mount_image", lambda: None)
@@ -102,7 +107,11 @@ async def test_docker_mount_example_deletes_sandbox_when_start_fails(monkeypatch
 
     assert caught.value is error
     assert not live_sessions
-    assert "mount stderr: mount failed" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "mount stderr: mount failed" in captured.out
+    if cleanup_fails:
+        assert "Docker mount sandbox cleanup also failed" in captured.err
+        assert "protected cleanup details" not in captured.err
 
 
 @pytest.mark.asyncio
