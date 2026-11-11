@@ -33,7 +33,7 @@ jobs:
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/bin/id -u)" -ne 0
           source=.github/diagnostics/stock-xpc-observe.c
-          printf '%s  %s\n' 25c4d0d2f011d77aac4b94ca73ed95eb05763d6cf1dd0a10c3bf71bd521ef693 "$source" | /usr/bin/shasum -a 256 -c -
+          printf '%s  %s\n' c0870815e27a837a0a73c436f618e0465f111bb84f9ce501e59ff180fbcfe60a "$source" | /usr/bin/shasum -a 256 -c -
           temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc.XXXXXXXX")"
           trap '/bin/rm -rf -- "$temp_dir"' EXIT
           /usr/bin/xcrun --sdk macosx clang -std=c11 -D_DARWIN_C_SOURCE -fblocks \

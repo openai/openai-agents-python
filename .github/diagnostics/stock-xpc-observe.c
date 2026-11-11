@@ -195,7 +195,12 @@ static mach_msg_return_t send_port(mach_port_t destination, mach_msg_id_t id,
         .body = {.msgh_descriptor_count = 1},
         .port = {.name = right, .disposition = disposition, .type = MACH_MSG_PORT_DESCRIPTOR},
     };
-    return send_message(&message.header);
+    mach_msg_return_t status = send_message(&message.header);
+    if (status != MACH_MSG_SUCCESS && disposition == MACH_MSG_TYPE_MOVE_SEND_ONCE) {
+        // A failed send can return the right under a new name in this buffer.
+        mach_msg_destroy(&message.header);
+    }
+    return status;
 }
 
 static mach_msg_return_t receive_message(union received_message *message, mach_port_t port,
@@ -507,20 +512,22 @@ static int observe_request(const char *binary, const char *role, bool stock, mac
             startup.canary, startup.matched, lookup.matched, lookup.canary, lookup.first_size,
             lookup.first_complex, lookup.disposition, startup.invalid || lookup.invalid);
     int outcome = 1;
-    if (progress.ready && progress.entered && progress.resumed && !startup.invalid &&
+    if (progress.ready && progress.entered && (stock || progress.resumed) && !startup.invalid &&
         !lookup.invalid && lookup.matched == 1 && lookup.canary == 0 && MACH_PORT_VALID(lookup.reply) &&
         live_right("observer", lookup.reply, MACH_PORT_TYPE_SEND_ONCE)) {
         fprintf(stderr, "%s transfer_attempt=1\n", role);
         mach_msg_return_t status = send_port(destination, transfer_id, lookup.reply,
                                              MACH_MSG_TYPE_MOVE_SEND_ONCE);
+        lookup.reply = MACH_PORT_NULL;
         fprintf(stderr, "%s transfer_status=%#x\n", role, (unsigned)status);
-        // Task exit cleans up any residual name after a failed send.
         if (status == MACH_MSG_SUCCESS) {
             char ack;
             bool dropped = read_within(sink.report, &ack, 1, 1500) && ack == 'D';
             receive_for(port, source, stock, false, &progress, &settlement, 200, false);
-            fprintf(stderr, "%s sink_drop_ack=%d settlement_extra=%u invalid=%d\n",
-                    role, dropped, settlement.canary + settlement.matched, settlement.invalid);
+            fprintf(stderr, "%s sink_drop_ack=%d settlement_resumed=%d settlement_unavailable=%d "
+                            "settlement_extra=%u invalid=%d\n",
+                    role, dropped, progress.resumed, progress.unavailable,
+                    settlement.canary + settlement.matched, settlement.invalid);
             outcome = dropped && !settlement.invalid &&
                       settlement.canary == 0 && settlement.matched == 0 ? 0 : 1;
         } else if (status == MACH_SEND_INVALID_RIGHT) {
@@ -530,8 +537,12 @@ static int observe_request(const char *binary, const char *role, bool stock, mac
             fprintf(stderr, "%s result=send_timeout\n", role);
         }
     }
+    if (MACH_PORT_VALID(lookup.reply)) {
+        kern_return_t released = mach_port_deallocate(mach_task_self(), lookup.reply);
+        fprintf(stderr, "%s retained_reply_release_status=%d\n", role, released);
+    }
     bool source_exited = finish_fixture(source, role);
-    return !source_exited ? 1 : outcome;
+    return outcome == 0 && !source_exited ? 1 : outcome;
 }
 
 static int run_arm(const char *binary, const char *role, bool stock) {
