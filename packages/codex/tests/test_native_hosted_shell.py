@@ -45,6 +45,7 @@ async def test_native_hosted_shell_returns_produced_call_and_output(
         frames.append(assistant_output("provider complete"))
     responses.respond(*frames)
     agent = Agent(
+        instructions="Use the hosted shell.",
         model="gpt-5.5",
         tools=[HostedShell(environment={"type": "container_auto"})],
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-produced-shell"),
@@ -52,16 +53,17 @@ async def test_native_hosted_shell_returns_produced_call_and_output(
     async with timeout(30):
         completed = await agent.run("run in the provider container", return_items=True)
     assert completed.items is not None
-    assert [entry.item["type"] for entry in completed.items] == [
-        "shell_call",
-        "shell_call_output",
-        *(["message"] if include_text else []),
-    ]
+    assert len(completed.items) == 2 + int(include_text)
     assert all(entry.agent is agent for entry in completed.items)
-    assert completed.items[0].item["call_id"] == "shell-produced"
-    assert completed.items[0].item["action"] == call["action"]
-    assert completed.items[1].item["call_id"] == "shell-produced"
-    assert completed.items[1].item["output"] == output["output"]
+    call_item, output_item = completed.items[0].item, completed.items[1].item
+    assert call_item["type"] == "shell_call"
+    assert output_item["type"] == "shell_call_output"
+    assert call_item["call_id"] == "shell-produced"
+    assert call_item["action"] == call["action"]
+    assert output_item["call_id"] == "shell-produced"
+    assert output_item["output"] == output["output"]
+    if include_text:
+        assert completed.items[2].item["type"] == "message"
     assert len(responses.requests) == 1
 
 
