@@ -4584,7 +4584,7 @@ class Session(Generic[ContextT, OutputT]):
                 await session._publish_opening_configuration(
                     settings=settings,
                     fresh=checkpoint is None and not _atomic_first_turn,
-                    restored=checkpoint is not None,
+                    restored=checkpoint is not None or resume is not None,
                     validate_provider_model=(
                         uses_siwc or (web_search is not None and web_search.route == "hosted")
                     ),

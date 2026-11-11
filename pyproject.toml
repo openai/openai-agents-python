@@ -236,6 +236,7 @@ path = "packages/codex/scripts/hatch_build.py"
 [tool.maturin]
 manifest-path = "packages/codex/Cargo.toml"
 python-source = "src"
+python-packages = ["agents", "_agents_shared"]
 module-name = "agents._native"
 pgo-command = "python packages/codex/scripts/pgo_train.py"
 pgo-dependency-group = "pgo"

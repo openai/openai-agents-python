@@ -4928,6 +4928,10 @@ impl TurnLifecycleContributor for PythonContributor {
                     owner.clone(),
                     input
                         .step_store
+                        .get::<codex_extension_api::CapturedModelAttempt>()
+                        .map(|captured| captured.0.clone()),
+                    input
+                        .step_store
                         .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
                         .map(|scope| scope.0.clone()),
                     [

@@ -343,6 +343,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
     session._repair_turns = []
     session._repair_items = []
     session._repair_receipts_incomplete = False
+    session._include_raw_provider_events = True
     session._observations = _ObservationBuffer("session", include_model_output_items=True)
     state = _Submission(_prepare_spec(root.output_type))
     state.handle = SimpleNamespace(turn_id="original-turn", submission_id="submission")
@@ -425,6 +426,7 @@ async def test_real_repair_keeps_original_epoch_settings_hooks_and_output_contra
 
     async def open_repair(cls, declaration, **kwargs):
         assert kwargs["include_model_output_items"] is True
+        assert kwargs["include_raw_provider_events"] is True
         opened.append(declaration)
         return Repair()
 
