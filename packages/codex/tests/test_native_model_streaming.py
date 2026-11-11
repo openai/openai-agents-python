@@ -240,9 +240,10 @@ async def test_model_stream_delivers_text_before_completion() -> None:
             assert (await turn.get_result()).final_output == "incremental"
 
 
-@pytest.mark.parametrize("terminal", ["complete", "missing", "duplicate"])
+@pytest.mark.parametrize("terminal", ["complete", "many-deltas", "missing", "duplicate"])
 async def test_model_stream_admits_tools_after_one_terminal(terminal: str) -> None:
     effects: list[str] = []
+    valid_terminal = terminal in {"complete", "many-deltas"}
 
     @function_tool
     def record(value: str) -> str:
@@ -264,6 +265,9 @@ async def test_model_stream_admits_tools_after_one_terminal(terminal: str) -> No
                 return
 
             yield function_call("record", {"value": "once"}, "one-call")
+            if terminal == "many-deltas":
+                for frame in text_response("deferred-text", *("x" * 5000)):
+                    yield frame
             if terminal != "missing":
                 yield completed("before-tool")
             if terminal == "duplicate":
@@ -276,12 +280,12 @@ async def test_model_stream_admits_tools_after_one_terminal(terminal: str) -> No
             tools=[record],
             provider=provider,
         )
-        if terminal == "complete":
+        if valid_terminal:
             assert (await agent.run("Record once.")).final_output == "recorded"
         else:
             with pytest.raises(RuntimeError):
                 await agent.run("Record once.")
-    assert effects == (["once"] if terminal == "complete" else [])
+    assert effects == (["once"] if valid_terminal else [])
 
 
 async def test_model_stream_cancellation_joins_iterator_before_reusing_session() -> None:
