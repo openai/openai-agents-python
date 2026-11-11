@@ -679,7 +679,11 @@
     {
       "path": "sdk-nested-tool-output-acceptance.patch",
       "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
+    },
+    {
+      "path": "sdk-provider-tool-search.patch",
+      "sha256": "8d99209333aab7c8dd48fa39d1f2e9cb3d33282ea640b5eabb6e318fced58f0e"
     }
   ],
-  "result_tree": "448f31f467afe839006a6aa46b557c7c1c4e4dbc"
+  "result_tree": "52ed03837ce2e6774ea3a7e3be127361aa2c4d68"
 }
