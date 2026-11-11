@@ -37,7 +37,11 @@ async def test_default_choice_keeps_forcing_after_accepted_tool_use(responses, s
     responses.respond(assistant_output("done"))
     async with timeout(15), provider(responses) as native:
         result = await Agent(
-            instructions="Use echo.", provider=native, tools=[echo], model_settings=settings
+            model="gpt-5.5",
+            instructions="Use echo.",
+            provider=native,
+            tools=[echo],
+            model_settings=settings,
         ).run("go")
     assert result.final_output == "done"
     assert effects == ["accepted"]
@@ -60,6 +64,7 @@ async def test_opt_in_releases_forcing_and_new_runs_start_with_declared_choice(r
         responses.respond(assistant_output("done"))
     async with timeout(15), provider(responses) as native:
         agent = Agent(
+            model="gpt-5.5",
             instructions="Use echo.",
             provider=native,
             tools=[echo],
@@ -71,7 +76,8 @@ async def test_opt_in_releases_forcing_and_new_runs_start_with_declared_choice(r
     assert effects == ["0", "1"]
     for request in responses.requests[::2]:
         if named:
-            assert request["tool_choice"]["name"] == "echo"
+            assert request["tool_choice"] == "required"
+            assert request["tools"][0]["name"] == "echo"
         else:
             assert request["tool_choice"] == "required"
     assert all(request.get("tool_choice", "auto") == "auto" for request in responses.requests[1::2])
@@ -87,6 +93,7 @@ async def test_incoming_handoff_profile_keeps_its_first_named_choice(responses):
         return value
 
     target = Agent(
+        model="gpt-5.5",
         name="B",
         instructions="Use echo.",
         tools=[echo],
@@ -97,6 +104,7 @@ async def test_incoming_handoff_profile_keeps_its_first_named_choice(responses):
     responses.respond(assistant_output("done"))
     async with timeout(15), provider(responses) as native:
         source = Agent(
+            model="gpt-5.5",
             name="A",
             instructions="Transfer to B.",
             provider=native,
@@ -106,7 +114,7 @@ async def test_incoming_handoff_profile_keeps_its_first_named_choice(responses):
         assert (await source.run("go")).final_output == "done"
     assert effects == ["B"]
     assert responses.requests[0]["tool_choice"] == "required"
-    assert responses.requests[1]["tool_choice"]["name"] == "echo"
+    assert responses.requests[1]["tool_choice"] == "required"
     assert responses.requests[2].get("tool_choice", "auto") == "auto"
     assert_local_control(responses.requests)
 
@@ -129,6 +137,7 @@ async def test_manual_restore_releases_choice_without_reexecuting_accepted_sibli
     responses.respond(assistant_output("done"))
     async with timeout(20), provider(responses) as native:
         agent = Agent(
+            model="gpt-5.5",
             instructions="Use both tools.",
             provider=native,
             tools=[echo, lookup],
@@ -145,7 +154,7 @@ async def test_manual_restore_releases_choice_without_reexecuting_accepted_sibli
             current = await next_request(restored.interactions(), lookup)
             assert current.call_id == request.call_id
             await current.respond("accepted")
-            assert (await restored.wait()).final_output == "done"
+            assert (await restored.restored_turn.get_result()).final_output == "done"
     assert effects == ["once"]
     assert len(responses.requests) == 2
     assert responses.requests[0]["tool_choice"] == "required"
@@ -158,10 +167,53 @@ async def test_none_remains_disabled_when_reset_is_enabled(responses):
     async with timeout(15), provider(responses) as native:
         assert (
             await Agent(
+                model="gpt-5.5",
                 instructions="Answer.",
                 provider=native,
                 model_settings={"tool_choice": "none", "reset_tool_choice": True},
             ).run("go")
         ).final_output == "done"
     assert responses.requests[0]["tool_choice"] == "none"
+    assert_local_control(responses.requests)
+
+
+async def test_named_manual_restore_keeps_the_original_eligible_catalog_after_release(responses):
+    from tests.test_native_agent import function_declarations
+
+    effects = []
+
+    @function_tool
+    def echo(value: str) -> str:
+        effects.append(value)
+        return value
+
+    lookup = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+    responses.respond(function_call("lookup", {"key": "pending"}, "forced-manual"))
+    responses.respond(function_call("echo", {"value": "after-reset"}, "eligible-other"))
+    responses.respond(assistant_output("done"))
+    async with timeout(20), provider(responses) as native:
+        agent = Agent(
+            model="gpt-5.5",
+            instructions="Read, then echo.",
+            provider=native,
+            tools=[lookup, echo],
+            model_settings={"tool_choice": ToolRef("lookup"), "reset_tool_choice": True},
+        )
+        async with agent.session() as original:
+            await original.submit("go")
+            await next_request(original.interactions(), lookup)
+            saved = SessionState.from_json((await original.suspend()).to_json())
+        assert len(responses.requests) == 1
+        assert responses.requests[0]["tool_choice"] == "required"
+        async with agent.session(state=saved) as restored:
+            current = await next_request(restored.interactions(), lookup)
+            await current.respond("accepted")
+            assert (await restored.restored_turn.get_result()).final_output == "done"
+    assert effects == ["after-reset"]
+    assert len(responses.requests) == 3
+    assert responses.requests[1].get("tool_choice", "auto") == "auto"
+    assert {tool["name"] for tool in function_declarations(responses.requests[1])} == {
+        "lookup",
+        "echo",
+    }
     assert_local_control(responses.requests)
