@@ -957,11 +957,11 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
-    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     decisions: DecisionProvider | None
     realtime: RealtimeAgentConfig | None
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
+    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -990,9 +990,9 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
-            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -1009,9 +1009,9 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
-            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             **kwargs: Any,
         ) -> TypedAgentT: ...
 
@@ -1044,10 +1044,10 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
     ) -> None: ...
 
     @overload
@@ -1070,10 +1070,10 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -1095,10 +1095,10 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
-        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")

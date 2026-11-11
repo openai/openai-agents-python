@@ -36,7 +36,13 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "before_complete",
         "decisions",
     )
-    expected_fields = (*original_fields, "realtime", "input_guardrails", "output_guardrails")
+    expected_fields = (
+        *original_fields,
+        "realtime",
+        "input_guardrails",
+        "output_guardrails",
+        "tool_batch_completion",
+    )
     assert tuple(field.name for field in fields(Agent)) == expected_fields
     assert Agent.__match_args__ == expected_fields
     agent = Agent(instructions="Answer.", name="Voice")
@@ -67,6 +73,7 @@ def test_realtime_preserves_existing_agent_field_and_parameter_order():
         "realtime",
         "input_guardrails",
         "output_guardrails",
+        "tool_batch_completion",
     )
     assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters)
 

@@ -137,6 +137,7 @@ def test_package_root_has_one_public_surface():
         "history",
         "items",
         "run_usage",
+        "tool_batch_call_ids",
     ]
 
 

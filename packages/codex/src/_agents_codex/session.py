@@ -944,11 +944,11 @@ class Completed(Generic[OutputT, TurnT]):
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
-    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
     items: tuple[ProducedItem, ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
+    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_usage", cast("Turn[Any] | ChildTurn", self.turn).run_usage)
