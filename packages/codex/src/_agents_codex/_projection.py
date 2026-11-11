@@ -213,20 +213,25 @@ def project_hosted_response_item(raw: dict[str, Any], turn_id: str | None) -> di
         for key, value in raw.items()
         if key != "internal_chat_message_metadata_passthrough"
     }
+    kind = raw.get("type", "")
     fields = {
         "file_search_call": ("queries", "results"),
         "code_interpreter_call": ("container_id", "code", "outputs"),
         "shell_call": ("call_id", "action"),
         "shell_call_output": ("call_id", "output"),
         "image_generation_call": ("result", "revised_prompt"),
-    }.get(raw.get("type", ""))
+    }.get(kind)
     if fields is None or not raw.get("id"):
         return None
     return {
-        "type": raw["type"],
+        "type": kind,
         "id": raw["id"],
         "turn_id": turn_id,
-        "status": raw["status"],
+        "status": (
+            (raw.get("status") or "unknown")
+            if kind in {"shell_call", "shell_call_output"}
+            else raw["status"]
+        ),
         "provider_data": raw,
         **{key: raw.get(key) for key in fields},
     }

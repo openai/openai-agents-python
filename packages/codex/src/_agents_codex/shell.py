@@ -1,0 +1,172 @@
+"""Application-owned shell callbacks using the native FunctionTool owner."""
+
+from __future__ import annotations
+
+import inspect
+import json
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Generic, Literal, TypeAlias, TypeVar, cast
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from typing_extensions import TypedDict
+
+from ._function_tools import (
+    FunctionTool,
+    ToolContext,
+    _AfterPolicy,
+    _BeforePolicy,
+    _BodyErrorFormatter,
+    _policy_hints,
+    _requires_context,
+)
+from ._public import preserve_module_identity as _preserve_module_identity
+from .tools import _CapturedFunction
+
+_ContextT = TypeVar("_ContextT")
+
+
+class ShellSkill(TypedDict):
+    description: str
+    name: str
+    path: str
+
+
+class ShellAction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    commands: list[str]
+    timeout_ms: int | None = None
+    max_output_length: int | None = None
+
+
+class ShellCall(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    type: Literal["shell_call"]
+    call_id: str
+    action: ShellAction
+    id: str | None = None
+    status: str | None = None
+
+
+class ShellExit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["exit"] = "exit"
+    exit_code: int
+
+
+class ShellTimeout(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["timeout"] = "timeout"
+
+
+class ShellCommandOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stdout: str
+    stderr: str
+    outcome: ShellExit | ShellTimeout = Field(discriminator="type")
+
+
+class ShellOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    output: list[ShellCommandOutput]
+    max_output_length: int | None = Field(default=None, ge=0)
+
+
+_ShellBinder: TypeAlias = Callable[
+    [_ContextT, object, FunctionTool[Any, Any, Any]], _CapturedFunction
+]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _CapturedShell(_CapturedFunction):
+    def _arguments(self, parsed: BaseModel) -> dict[str, Any]:
+        return {"call": cast(ShellCall, parsed)}
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ShellTool(FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]], Generic[_ContextT]):
+    shell_spec: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if (
+            self.name != "shell"
+            or self.namespace is not None
+            or self.defer_loading
+            or self.finish_turn
+            or self.strict
+            or self.output_schema is not None
+            or self.input_type is not ShellCall
+            or self.output_type is not ShellOutput
+        ):
+            raise TypeError("shell_tool uses the native local shell declaration")
+
+    def _spec_json(self) -> str:
+        return self.shell_spec
+
+
+def shell_tool(
+    executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]],
+    *,
+    skills: Sequence[ShellSkill] = (),
+    needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]] = False,
+    before: _BeforePolicy[_ContextT] | None = None,
+    after: _AfterPolicy[_ContextT] | None = None,
+    callback_timeout: float | None = None,
+    error_function: _BodyErrorFormatter[_ContextT] | None = None,
+) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:
+    """Application-managed Shell with the native function-tool policies.
+
+    Command execution and filesystem access through `executor`, after any
+    approval required by `needs_approval`.
+    """
+    spec: dict[str, Any] = {"type": "shell"}
+    if skills:
+        spec["skills"] = list(skills)
+    shell_spec = json.dumps(spec)
+    parameter = next(iter(inspect.signature(executor).parameters))
+    requires_context = _requires_context(_policy_hints(executor).get(parameter, Any))
+
+    def invoke(
+        context: ToolContext[_ContextT], *, call: ShellCall
+    ) -> ShellOutput | Awaitable[ShellOutput]:
+        return executor(context, call)
+
+    def bind(
+        context: _ContextT, policy_context: object, tool: FunctionTool[Any, Any, Any]
+    ) -> _CapturedShell:
+        return _CapturedShell(
+            name=tool.name,
+            spec_json=tool._spec_json(),
+            model=ShellCall,
+            field_names=(),
+            output_adapter=TypeAdapter(ShellOutput),
+            callback=invoke,
+            context_parameter=inspect.Parameter("context", inspect.Parameter.POSITIONAL_ONLY),
+            callback_timeout=tool.callback_timeout,
+            timeout_behavior=tool.timeout_behavior,
+            timeout_error_function=tool.timeout_error_function,
+            before=tool.before,
+            after=tool.after,
+            context=context,
+            input_error_function=tool.input_error_function,
+            error_function=tool.error_function,
+        )
+
+    return _ShellTool(
+        name="shell",
+        description="Execute shell commands through the application's callback",
+        input_type=ShellCall,
+        output_type=ShellOutput,
+        _bind=bind,
+        _requires_context=requires_context,
+        needs_approval=needs_approval,
+        before=before,
+        after=after,
+        callback_timeout=callback_timeout,
+        error_function=error_function,
+        shell_spec=shell_spec,
+    )
+
+
+_preserve_module_identity(globals(), "agents.shell")

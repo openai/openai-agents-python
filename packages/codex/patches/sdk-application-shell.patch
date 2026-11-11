@@ -1,0 +1,1162 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 8787f3702ed80a817d6adb3527b7969fc2c9ccb5..8374c57e01cf4657a2ee35f8e2eb9cdeb0b68e9d 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -394,6 +394,11 @@ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+                     return Err("duplicate dynamic computer tool".into());
+                 }
+             }
++            DynamicToolSpec::Shell(_) => {
++                if !seen_tools.insert("shell") {
++                    return Err("duplicate dynamic shell tool".into());
++                }
++            }
+             DynamicToolSpec::Function(tool) => {
+                 validate_dynamic_tool(tool, /*namespace*/ None, &mut seen_tools)?;
+             }
+@@ -1461,7 +1466,9 @@ impl ThreadRequestProcessor {
+         let dynamic_tool_count: usize = dynamic_tools
+             .iter()
+             .map(|tool| match tool {
+-                DynamicToolSpec::Computer(_) | DynamicToolSpec::Function(_) => 1,
++                DynamicToolSpec::Computer(_)
++                | DynamicToolSpec::Function(_)
++                | DynamicToolSpec::Shell(_) => 1,
+                 DynamicToolSpec::Namespace(namespace) => namespace.tools.len(),
+             })
+             .sum();
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+index 6dd8e2e4f26be2c5ddaf33ed16c552e51146b62e..71bfaa87c2a7db2e9711cfc5e8f0e1cb1738c343 100644
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -306,6 +306,20 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
+         ResponseItem::ComputerCallOutput { call_id, .. } => {
+             remove_first_matching(items, |item| matches!(item, ResponseItem::ComputerCall { call_id: existing, .. } if existing == call_id));
+         }
++        ResponseItem::ShellCall { provider_fields, .. }
++        | ResponseItem::ShellCallOutput { provider_fields, .. } => {
++            if let Some(call_id) = provider_fields.get("call_id").and_then(serde_json::Value::as_str) {
++                let removing_call = matches!(item, ResponseItem::ShellCall { .. });
++                remove_first_matching(items, |candidate| {
++                    let candidate_fields = match candidate {
++                        ResponseItem::ShellCall { provider_fields, .. } if !removing_call => provider_fields,
++                        ResponseItem::ShellCallOutput { provider_fields, .. } if removing_call => provider_fields,
++                        _ => return false,
++                    };
++                    candidate_fields.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id)
++                });
++            }
++        }
+         ResponseItem::CustomToolCall { call_id, .. } => {
+             remove_first_matching(items, |i| {
+                 matches!(
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 729130d90885d2dc974a3a491df0df0d6117554c..79fd81689d31dbbdc9e2a654fb4dd69ee70c91d7 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -16,7 +16,6 @@ use crate::session::turn_context::TurnContext;
+ use crate::tools::call_trace;
+ use crate::tools::parallel::DirectToolResult;
+ use crate::tools::parallel::ToolCallRuntime;
+-use crate::tools::router::ToolRouter;
+ use codex_memories_read::citations::parse_memory_citation;
+ use codex_memories_read::citations::thread_ids_from_memory_citation;
+ use codex_protocol::error::CodexErr;
+@@ -311,7 +310,7 @@ pub(crate) async fn handle_output_item_done(
+     let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
+     ctx.tool_runtime.observe_requested_item(&item);
+ 
+-    match ToolRouter::build_tool_call(item.clone()) {
++    match ctx.tool_runtime.build_model_tool_call(item.clone()) {
+         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
+         Ok(Some(call)) => {
+             call_trace::received(
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index dad4c6353b7f17472bfea055d98b1a1fa53c2ecf..0b3a35c11c2b64c5127a0467183eeb4fe4c0eef0 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -116,6 +116,15 @@ impl ToolInvocation {
+                 {
+                     id.clone()
+                 }
++                ResponseItem::ShellCall {
++                    id,
++                    provider_fields,
++                    ..
++                } if provider_fields.get("call_id").and_then(JsonValue::as_str)
++                    == Some(self.call_id.as_str()) =>
++                {
++                    id.clone()
++                }
+                 _ => None,
+             });
+         Some(ToolCallOrigin {
+diff --git a/codex-rs/core/src/tools/executed_tool_calls.rs b/codex-rs/core/src/tools/executed_tool_calls.rs
+index b1c89ee996a2054b3d8b5e6c93e605599e7edfcb..03443d8455d15c2bd0066d1e34ee2f5343912f63 100644
+--- a/codex-rs/core/src/tools/executed_tool_calls.rs
++++ b/codex-rs/core/src/tools/executed_tool_calls.rs
+@@ -739,9 +739,9 @@ fn is_code_mode_wrapper(call: &ToolCall, source: &ToolCallSource, tool_mode: Too
+ 
+ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
+     let original_bytes = match &call.payload {
+-        ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+-            arguments.len()
+-        }
++        ToolPayload::Computer { arguments }
++        | ToolPayload::Function { arguments }
++        | ToolPayload::Shell { arguments } => arguments.len(),
+         ToolPayload::Custom { input } => serialized_json_bytes(input).unwrap_or(usize::MAX),
+         ToolPayload::ToolSearch { arguments } => {
+             serialized_json_bytes(arguments).unwrap_or(usize::MAX)
+@@ -752,10 +752,10 @@ fn recorded_call(call: &ToolCall) -> (ExecutedToolCall, usize) {
+         ExecutedToolCall::truncated(name, original_bytes, MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES)
+     } else {
+         let arguments = match &call.payload {
+-            ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+-                serde_json::from_str(arguments)
+-                    .unwrap_or_else(|_| JsonValue::String(arguments.clone()))
+-            }
++            ToolPayload::Computer { arguments }
++            | ToolPayload::Function { arguments }
++            | ToolPayload::Shell { arguments } => serde_json::from_str(arguments)
++                .unwrap_or_else(|_| JsonValue::String(arguments.clone())),
+             ToolPayload::Custom { input } => JsonValue::String(input.clone()),
+             ToolPayload::ToolSearch { arguments } => {
+                 serde_json::to_value(arguments).unwrap_or_default()
+diff --git a/codex-rs/core/src/tools/handlers/application_shell.rs b/codex-rs/core/src/tools/handlers/application_shell.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..130a062d0dc1fd1495bc2cd965be5074ac928c62
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/application_shell.rs
+@@ -0,0 +1,77 @@
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolOutput;
++use crate::tools::context::ToolPayload;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use crate::tools::registry::ToolExposure;
++use codex_protocol::dynamic_tools::DynamicShellToolSpec;
++use codex_tools::ApplicationShellOutput;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use codex_tools::application_shell_spec;
++
++pub(crate) struct ApplicationShellHandler {
++    spec: ToolSpec,
++}
++
++impl ApplicationShellHandler {
++    pub(crate) fn new(spec: &DynamicShellToolSpec) -> Self {
++        Self {
++            spec: application_shell_spec(spec),
++        }
++    }
++}
++
++impl ToolExecutor<ToolInvocation> for ApplicationShellHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("shell")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        self.spec.clone()
++    }
++
++    fn exposure(&self) -> ToolExposure {
++        ToolExposure::DirectModelOnly
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let ToolPayload::Shell { arguments } = &invocation.payload else {
++                return Err(FunctionCallError::Fatal(
++                    "expected native shell call".into(),
++                ));
++            };
++            let parsed = serde_json::from_str(arguments)
++                .map_err(|_| FunctionCallError::Fatal("invalid native shell call".into()))?;
++            let response = super::dynamic::request_dynamic_tool(
++                &invocation.session,
++                &invocation.turn,
++                invocation.call_id,
++                self.tool_name(),
++                parsed,
++            )
++            .await
++            .ok_or_else(|| {
++                FunctionCallError::RespondToModel("native shell call cancelled".into())
++            })?;
++            Ok(Box::new(ApplicationShellOutput::from_dynamic_response(
++                arguments, response,
++            )?) as Box<dyn ToolOutput>)
++        })
++    }
++}
++
++impl CoreToolRuntime for ApplicationShellHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Shell { .. })
++    }
++
++    fn is_third_party_tool(&self) -> bool {
++        true
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index f2e3b686a93bbf5980e3cff8a78cfc85e6960da5..58019ad574bdf5e45b301f17a4e2a65e44de05c2 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -122,9 +122,12 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 self.0.spec(),
+                 ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
+             ),
++            ToolPayload::Shell { .. } => matches!(self.0.spec(), ToolSpec::ApplicationShell { .. }),
+             ToolPayload::Function { .. } => !matches!(
+                 self.0.spec(),
+-                ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. }
++                ToolSpec::Computer { .. }
++                    | ToolSpec::ComputerUsePreview { .. }
++                    | ToolSpec::ApplicationShell { .. }
+             ),
+             ToolPayload::Custom { .. } => match self.0.spec() {
+                 ToolSpec::Freeform(_) => true,
+@@ -140,6 +143,7 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::Shell(_)
++                | ToolSpec::ApplicationShell { .. }
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 519b555ae82f69412851eea7d9559527975c6777..b6404bd0e071a6d9a5383a5f11ada711d3bbd533 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -1,3 +1,4 @@
++pub(crate) mod application_shell;
+ pub(crate) mod apply_patch;
+ pub(crate) mod apply_patch_spec;
+ pub(crate) mod computer;
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index f69668a1ebd9ff61c254317aa87bfffddc2ac0ef..bd18d3ab5d08f7bf39656856210b69420ffac05e 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -20,6 +20,7 @@ use crate::tools::call_trace;
+ use crate::tools::context::AbortedToolOutput;
+ use crate::tools::context::SharedTurnDiffTracker;
+ use crate::tools::context::ToolCallState;
++use crate::tools::context::ToolOutput;
+ use crate::tools::context::ToolPayload;
+ use crate::tools::lifecycle::notify_tool_aborted;
+ use crate::tools::registry::AnyToolResult;
+@@ -151,6 +152,13 @@ impl ToolCallRuntime {
+         }
+     }
+ 
++    pub(crate) fn build_model_tool_call(
++        &self,
++        item: codex_protocol::models::ResponseItem,
++    ) -> Result<Option<ToolCall>, FunctionCallError> {
++        self.step_context.tool_router.build_model_tool_call(item)
++    }
++
+     pub(crate) fn ignores_handoff(&self, name: &codex_tools::ToolName, call_id: &str) -> bool {
+         self.handoff_target(name).is_some()
+             && self
+@@ -477,7 +485,11 @@ impl ToolCallRuntime {
+ 
+     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
+         let message = err.to_string();
+-        match call.payload {
++        match &call.payload {
++            ToolPayload::Shell { arguments } => {
++                codex_tools::ApplicationShellOutput::error(arguments, message)
++                    .to_response_item(&call.call_id, &call.payload)
++            }
+             ToolPayload::ToolSearch { .. } => ResponseInputItem::ToolSearchOutput {
+                 call_id: call.call_id,
+                 status: "completed".to_string(),
+@@ -503,13 +515,18 @@ impl ToolCallRuntime {
+     }
+ 
+     fn aborted_response(call: &ToolCall, secs: f32) -> AnyToolResult {
++        let message = Self::abort_message(call, secs);
++        let result: Box<dyn ToolOutput> = match &call.payload {
++            ToolPayload::Shell { arguments } => Box::new(
++                codex_tools::ApplicationShellOutput::error(arguments, message),
++            ),
++            _ => Box::new(AbortedToolOutput { message }),
++        };
+         AnyToolResult {
+             harness_metadata: None,
+             call_id: call.call_id.clone(),
+             payload: call.payload.clone(),
+-            result: Box::new(AbortedToolOutput {
+-                message: Self::abort_message(call, secs),
+-            }),
++            result,
+             post_tool_use_payload: None,
+             pending_exec: None,
+         }
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 0be3c4a2a406c41aaa761d4e4650fd3b43b7680a..ec6c3a1baa9319aeec30647efcf23184d8199c85 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -522,6 +522,7 @@ impl ToolRegistry {
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::Shell(_)
++                | ToolSpec::ApplicationShell { .. }
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::Computer { .. }
+                 | ToolSpec::ComputerUsePreview { .. }
+@@ -853,6 +854,18 @@ impl ToolRegistry {
+                             "native computer result must retain its protocol type and call ID".into(),
+                         ));
+                     }
++                    if matches!(invocation.payload, ToolPayload::Shell { .. })
++                        && !matches!(
++                            &final_item,
++                            codex_protocol::models::ResponseItem::ShellCallOutput { provider_fields, .. }
++                                if provider_fields.get("call_id").and_then(serde_json::Value::as_str)
++                                    == Some(invocation.call_id.as_str())
++                        )
++                    {
++                        return Err(FunctionCallError::Fatal(
++                            "native shell result must retain its protocol type and call ID".into(),
++                        ));
++                    }
+                     crate::file_admission::validate_response_items(
+                         invocation
+                             .session
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 8115fe4a1b18e470cc1925d9b7422d3541275c2f..228f6afe8090ab62025a8ecc00debbb97cf880f0 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -206,6 +206,9 @@ impl ToolRouter {
+                 ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                     name.is_default_namespace() && name.name == "computer"
+                 }
++                ToolSpec::ApplicationShell { .. } => {
++                    name.is_default_namespace() && name.name == "shell"
++                }
+                 ToolSpec::ToolSearch { .. }
+                 | ToolSpec::FileSearch(_)
+                 | ToolSpec::CodeInterpreter(_)
+@@ -300,9 +303,63 @@ impl ToolRouter {
+         Self::parse_tool_call(item)
+     }
+ 
++    pub(crate) fn build_model_tool_call(
++        &self,
++        item: ResponseItem,
++    ) -> Result<Option<ToolCall>, FunctionCallError> {
++        if !matches!(
++            &item,
++            ResponseItem::ShellCall { .. } | ResponseItem::ShellCallOutput { .. }
++        ) || !self
++            .model_visible_specs
++            .iter()
++            .any(|spec| matches!(spec, ToolSpec::ApplicationShell { .. }))
++        {
++            return Self::build_tool_call(item);
++        }
++        let ResponseItem::ShellCall {
++            ref provider_fields,
++            ..
++        } = item
++        else {
++            return Err(FunctionCallError::Fatal(
++                "Model returned a receipt for an application shell call".into(),
++            ));
++        };
++        if provider_fields
++            .get("environment")
++            .filter(|value| !value.is_null())
++            .is_some_and(|value| value["type"] != "local")
++            || provider_fields
++                .get("container_id")
++                .is_some_and(|value| !value.is_null())
++        {
++            return Ok(None);
++        }
++        // Responses uses the same item type for hosted and application shell calls.
++        if self
++            .model_visible_specs
++            .iter()
++            .any(|spec| matches!(spec, ToolSpec::Shell(_)))
++        {
++            return Err(FunctionCallError::Fatal(
++                "A step cannot use both hosted and application shell tools".into(),
++            ));
++        }
++        let arguments = serde_json::to_string(&item)
++            .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
++        let call = codex_tools::ApplicationShellCall::parse(&arguments)?;
++        Ok(Some(ToolCall {
++            tool_name: ToolName::plain("shell"),
++            call_id: call.call_id,
++            payload: ToolPayload::Shell { arguments },
++            encrypted_function_args: None,
++        }))
++    }
++
+     /// Check the retained dispatch plan without hooks, accounting, or parse-error logging.
+     pub(crate) fn admits_response_item(&self, item: &ResponseItem) -> bool {
+-        Self::parse_tool_call(item.clone())
++        self.build_model_tool_call(item.clone())
+             .ok()
+             .flatten()
+             .and_then(|call| {
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index b518485e322f848ad62a24aefd21213373bfa4ea..e23d4c356d253dc53e57a9ef1662e502dd8cc69c 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -44,6 +44,86 @@ use super::tool_log_payload;
+ 
+ struct ExtensionEchoContributor;
+ 
++#[test]
++fn shell_dispatch_uses_the_captured_provider_declaration() {
++    let shell_call: ResponseItem = serde_json::from_value(json!({
++        "type": "shell_call",
++        "call_id": "shell-1",
++        "action": {"commands": ["fixture"]},
++    }))
++    .unwrap();
++    let shell_output: ResponseItem = serde_json::from_value(json!({
++        "type": "shell_call_output",
++        "call_id": "shell-1",
++        "output": [],
++    }))
++    .unwrap();
++    let hosted: codex_tools::HostedToolSpec = serde_json::from_value(json!({
++        "type": "shell",
++        "environment": {"type": "container_auto"},
++    }))
++    .unwrap();
++    let hosted = ToolSpec::from(hosted);
++    let local =
++        codex_tools::application_shell_spec(&codex_protocol::dynamic_tools::DynamicShellToolSpec {
++            skills: Vec::new(),
++        });
++    let router = |specs| {
++        ToolRouter::from_parts(
++            crate::tools::registry::ToolRegistry::default(),
++            specs,
++            codex_protocol::openai_models::ToolMode::Direct,
++            BTreeMap::new(),
++            None,
++            &[],
++            None,
++        )
++    };
++
++    let hosted_router = router(vec![hosted.clone()]);
++    assert!(
++        hosted_router
++            .build_model_tool_call(shell_call.clone())
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        hosted_router
++            .build_model_tool_call(shell_output.clone())
++            .unwrap()
++            .is_none()
++    );
++
++    let local_router = router(vec![local.clone()]);
++    let call = local_router
++        .build_model_tool_call(shell_call.clone())
++        .unwrap()
++        .unwrap();
++    assert_eq!(call.call_id, "shell-1");
++    assert_eq!(call.tool_name, ToolName::plain("shell"));
++    assert!(matches!(call.payload, ToolPayload::Shell { .. }));
++    let mut hosted_call = shell_call.clone();
++    let ResponseItem::ShellCall {
++        provider_fields, ..
++    } = &mut hosted_call
++    else {
++        unreachable!()
++    };
++    provider_fields.insert("environment".into(), json!({"type": "container_reference"}));
++    assert!(
++        local_router
++            .build_model_tool_call(hosted_call)
++            .unwrap()
++            .is_none()
++    );
++    assert!(local_router.build_model_tool_call(shell_output).is_err());
++    assert!(
++        router(vec![local, hosted])
++            .build_model_tool_call(shell_call)
++            .is_err()
++    );
++}
++
+ #[test]
+ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
+     let payload = ToolPayload::Function {
+@@ -660,6 +740,7 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Shell(_)
++            | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::WebSearch { .. }
+             | ToolSpec::Namespace(_) => None,
+         })
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 48548828b3b16b0b31380894a7c7d9fa81a7b947..9aa100852b0c2988a9ee79b11ae814af85f2923e 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -681,6 +681,7 @@ fn finalize_selected_tool_router(
+                     ToolSpec::FileSearch(_)
+                     | ToolSpec::CodeInterpreter(_)
+                     | ToolSpec::Shell(_)
++                    | ToolSpec::ApplicationShell { .. }
+                     | ToolSpec::ImageGeneration(_)
+                     | ToolSpec::Computer { .. }
+                     | ToolSpec::ComputerUsePreview { .. }
+@@ -1121,6 +1122,7 @@ fn register_code_mode_executors(
+             | ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::Shell(_)
++            | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+@@ -1723,6 +1725,11 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
+                     registry.register_external(Arc::new(handler));
+                 }
+             }
++            DynamicToolSpec::Shell(tool) => {
++                registry.register_external(Arc::new(
++                    super::handlers::application_shell::ApplicationShellHandler::new(tool),
++                ));
++            }
+             DynamicToolSpec::Function(tool) => {
+                 let Some(handler) = DynamicToolHandler::new(tool) else {
+                     tracing::error!(
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 2b019ca5e0bf47c5a2bd502284a1358b04d898ca..27f595448627a138ea48c918673f1a70903cf381 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -116,6 +116,7 @@ impl ToolPlanProbe {
+                 | ToolSpec::CodeInterpreter(_)
+                 | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::Shell(_)
++                | ToolSpec::ApplicationShell { .. }
+                 | ToolSpec::WebSearch { .. }
+                 | ToolSpec::Freeform(_) => None,
+             })
+diff --git a/codex-rs/core/src/tools/tool_dispatch_trace.rs b/codex-rs/core/src/tools/tool_dispatch_trace.rs
+index 9f13a08b2ab2854ccb7cbd792689b3310d905912..a6dcb2eb0b7813117ab9a69f593c5ab2c22678ca 100644
+--- a/codex-rs/core/src/tools/tool_dispatch_trace.rs
++++ b/codex-rs/core/src/tools/tool_dispatch_trace.rs
+@@ -111,11 +111,11 @@ fn tool_dispatch_result(
+ 
+ fn tool_dispatch_payload(payload: &ToolPayload) -> ToolDispatchPayload {
+     match payload {
+-        ToolPayload::Computer { arguments } | ToolPayload::Function { arguments } => {
+-            ToolDispatchPayload::Function {
+-                arguments: arguments.clone(),
+-            }
+-        }
++        ToolPayload::Computer { arguments }
++        | ToolPayload::Function { arguments }
++        | ToolPayload::Shell { arguments } => ToolDispatchPayload::Function {
++            arguments: arguments.clone(),
++        },
+         ToolPayload::ToolSearch { arguments } => ToolDispatchPayload::ToolSearch {
+             arguments: arguments.clone(),
+         },
+diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
+index 9b656221b785442ce62fd9a3b38125ce7caa71fb..3d91b344fd1c9205b8ff53e5c3a2c7f4f32863b8 100644
+--- a/codex-rs/core/src/tools/tool_namespaces_info.rs
++++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
+@@ -43,6 +43,7 @@ pub(super) fn collect_tool_namespaces_info(
+             ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::Shell(_)
++            | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+index 80fc064ea2c049927f4606832613951ad615c21e..b8005b8883d9cc21e279cfbe34360a1b7a508bf6 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/action.rs
+@@ -22,7 +22,9 @@ pub(super) enum ActionRenderError {
+ impl GuardianAction {
+     pub(super) fn render(self, max_action_tokens: usize) -> Result<String, ActionRenderError> {
+         let arguments = match self.payload {
+-            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } => {
++            ToolPayload::Function { arguments }
++            | ToolPayload::Computer { arguments }
++            | ToolPayload::Shell { arguments } => {
+                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::String(arguments))
+             }
+             ToolPayload::Custom { input } => serde_json::Value::String(input),
+diff --git a/codex-rs/protocol/src/dynamic_tools.rs b/codex-rs/protocol/src/dynamic_tools.rs
+index 26ec2242770bdc14d016df8ae68279ccf161f896..7a067e62fef2c97499c661d49705d76e819ef311 100644
+--- a/codex-rs/protocol/src/dynamic_tools.rs
++++ b/codex-rs/protocol/src/dynamic_tools.rs
+@@ -14,6 +14,38 @@ pub enum DynamicToolSpec {
+     Computer(DynamicComputerToolSpec),
+     Function(DynamicToolFunctionSpec),
+     Namespace(DynamicToolNamespaceSpec),
++    Shell(DynamicShellToolSpec),
++}
++
++/// Shell execution is supplied by the SDK host. Skills describe its local environment.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct DynamicShellToolSpec {
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    pub skills: Vec<LocalShellSkill>,
++}
++
++impl DynamicShellToolSpec {
++    pub fn callback_spec(&self) -> DynamicToolFunctionSpec {
++        DynamicToolFunctionSpec {
++            strict: false,
++            output_schema: None,
++            name: "shell".into(),
++            description: "Native application shell callback".into(),
++            input_schema: serde_json::json!({"type": "object"}),
++            defer_loading: false,
++        }
++    }
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(deny_unknown_fields)]
++#[ts(export_to = "v2/")]
++pub struct LocalShellSkill {
++    pub description: String,
++    pub name: String,
++    pub path: String,
+ }
+ 
+ /// Native computer declaration. The host retains execution and safety-policy authority.
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index fed04103af14612da69c12234e55e7654f391a7b..ddaf5cf8c7f8bde2cbc113edde2130ffd6b2c194 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -845,6 +845,13 @@ pub enum ResponseInputItem {
+         #[serde(default, skip_serializing_if = "Vec::is_empty")]
+         acknowledged_safety_checks: Vec<serde_json::Value>,
+     },
++    ShellCallOutput {
++        call_id: String,
++        output: Vec<ShellCommandOutput>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        max_output_length: Option<u64>,
++    },
+     Message {
+         role: String,
+         content: Vec<ContentItem>,
+@@ -1285,7 +1292,9 @@ pub enum ResponseItem {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         id: Option<ResponseItemId>,
+-        status: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        status: Option<String>,
+         #[serde(flatten)]
+         provider_fields: serde_json::Map<String, serde_json::Value>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -1296,7 +1305,9 @@ pub enum ResponseItem {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         id: Option<ResponseItemId>,
+-        status: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        status: Option<String>,
+         #[serde(flatten)]
+         provider_fields: serde_json::Map<String, serde_json::Value>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -2060,6 +2071,25 @@ impl From<ResponseInputItem> for ResponseItem {
+                 acknowledged_safety_checks,
+                 internal_chat_message_metadata_passthrough: None,
+             },
++            ResponseInputItem::ShellCallOutput {
++                call_id,
++                output,
++                max_output_length,
++            } => {
++                let mut provider_fields = serde_json::Map::from_iter([
++                    ("call_id".to_string(), call_id.into()),
++                    ("output".to_string(), serde_json::json!(output)),
++                ]);
++                if let Some(max_output_length) = max_output_length {
++                    provider_fields.insert("max_output_length".into(), max_output_length.into());
++                }
++                Self::ShellCallOutput {
++                    id: None,
++                    status: None,
++                    provider_fields,
++                    internal_chat_message_metadata_passthrough: None,
++                }
++            }
+             ResponseInputItem::Message {
+                 role,
+                 content,
+@@ -2118,6 +2148,23 @@ impl From<ResponseInputItem> for ResponseItem {
+     }
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++pub struct ShellCommandOutput {
++    pub stdout: String,
++    pub stderr: String,
++    pub outcome: ShellCommandOutcome,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum ShellCommandOutcome {
++    Exit {
++        #[ts(type = "number")]
++        exit_code: i64,
++    },
++    Timeout,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "snake_case")]
+ pub enum LocalShellStatus {
+diff --git a/codex-rs/tools/src/application_shell.rs b/codex-rs/tools/src/application_shell.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b45e38a73b9931c7a49f35633231deb07eddbf80
+--- /dev/null
++++ b/codex-rs/tools/src/application_shell.rs
+@@ -0,0 +1,246 @@
++use crate::FunctionCallError;
++use crate::ToolOutput;
++use crate::ToolPayload;
++use crate::ToolSpec;
++use codex_protocol::dynamic_tools::DynamicShellToolSpec;
++use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
++use codex_protocol::dynamic_tools::DynamicToolResponse;
++use codex_protocol::dynamic_tools::LocalShellSkill;
++use codex_protocol::models::ResponseInputItem;
++use codex_protocol::models::ShellCommandOutcome;
++use codex_protocol::models::ShellCommandOutput;
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Value;
++
++#[derive(Debug, Clone, Serialize, PartialEq)]
++pub struct ApplicationShellEnvironment {
++    #[serde(rename = "type")]
++    kind: &'static str,
++    #[serde(skip_serializing_if = "Vec::is_empty")]
++    skills: Vec<LocalShellSkill>,
++}
++
++pub fn application_shell_spec(spec: &DynamicShellToolSpec) -> ToolSpec {
++    ToolSpec::ApplicationShell {
++        environment: ApplicationShellEnvironment {
++            kind: "local",
++            skills: spec.skills.clone(),
++        },
++    }
++}
++
++#[derive(Deserialize)]
++pub struct ApplicationShellCall {
++    pub call_id: String,
++    pub action: ApplicationShellAction,
++}
++
++#[derive(Deserialize)]
++pub struct ApplicationShellAction {
++    pub commands: Vec<String>,
++    pub timeout_ms: Option<u64>,
++    pub max_output_length: Option<u64>,
++}
++
++impl ApplicationShellCall {
++    pub fn parse(arguments: &str) -> Result<Self, FunctionCallError> {
++        let call: Self = serde_json::from_str(arguments)
++            .map_err(|_| FunctionCallError::Fatal("invalid native shell call".into()))?;
++        if call.call_id.is_empty() {
++            return Err(FunctionCallError::Fatal(
++                "missing native shell call ID".into(),
++            ));
++        }
++        Ok(call)
++    }
++}
++
++#[derive(Deserialize)]
++pub struct ApplicationShellOutput {
++    output: Vec<ShellCommandOutput>,
++    max_output_length: Option<u64>,
++    #[serde(skip)]
++    succeeded: bool,
++}
++
++impl ApplicationShellOutput {
++    pub fn from_dynamic_response(
++        arguments: &str,
++        response: DynamicToolResponse,
++    ) -> Result<Self, FunctionCallError> {
++        if !response.success {
++            let message = response
++                .content_items
++                .into_iter()
++                .find_map(|item| match item {
++                    DynamicToolCallOutputContentItem::InputText { text } => Some(text),
++                    _ => None,
++                });
++            return Ok(Self::error(
++                arguments,
++                message.unwrap_or_else(|| "Native shell execution failed".into()),
++            ));
++        }
++        let [DynamicToolCallOutputContentItem::InputText { text }] =
++            response.content_items.as_slice()
++        else {
++            return Err(FunctionCallError::Fatal(
++                "invalid native shell output".into(),
++            ));
++        };
++        let mut result: Self = serde_json::from_str(text)
++            .map_err(|_| FunctionCallError::Fatal("invalid native shell output".into()))?;
++        result.succeeded = true;
++        result.apply_limit(
++            ApplicationShellCall::parse(arguments)?
++                .action
++                .max_output_length,
++        );
++        Ok(result)
++    }
++
++    pub fn error(arguments: &str, message: String) -> Self {
++        let mut result = Self {
++            output: vec![ShellCommandOutput {
++                stdout: String::new(),
++                stderr: message,
++                outcome: ShellCommandOutcome::Exit { exit_code: 1 },
++            }],
++            max_output_length: None,
++            succeeded: false,
++        };
++        let requested = ApplicationShellCall::parse(arguments)
++            .ok()
++            .and_then(|call| call.action.max_output_length);
++        result.apply_limit(requested);
++        result
++    }
++
++    fn apply_limit(&mut self, requested: Option<u64>) {
++        self.max_output_length = requested.into_iter().chain(self.max_output_length).min();
++        if let Some(limit) = self.max_output_length {
++            let mut remaining = usize::try_from(limit).unwrap_or(usize::MAX);
++            for part in &mut self.output {
++                truncate(&mut part.stdout, &mut remaining);
++                truncate(&mut part.stderr, &mut remaining);
++            }
++        }
++    }
++}
++
++fn truncate(text: &mut String, remaining: &mut usize) {
++    if let Some((offset, _)) = text.char_indices().nth(*remaining) {
++        text.truncate(offset);
++        *remaining = 0;
++    } else {
++        *remaining -= text.chars().count();
++    }
++}
++
++impl ToolOutput for ApplicationShellOutput {
++    fn log_output(&self) -> String {
++        format!("{} native shell command results", self.output.len())
++    }
++
++    fn success_for_logging(&self) -> bool {
++        self.succeeded
++    }
++
++    fn to_response_item(&self, call_id: &str, _payload: &ToolPayload) -> ResponseInputItem {
++        ResponseInputItem::ShellCallOutput {
++            call_id: call_id.to_string(),
++            output: self.output.clone(),
++            max_output_length: self.max_output_length,
++        }
++    }
++
++    fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
++        serde_json::json!({
++            "output": self.output,
++            "max_output_length": self.max_output_length,
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::models::ResponseItem;
++    use serde_json::json;
++
++    #[test]
++    fn application_shell_keeps_the_provider_declaration_and_result_shape() {
++        let spec = DynamicShellToolSpec {
++            skills: vec![LocalShellSkill {
++                name: "build".into(),
++                description: "Build the project".into(),
++                path: "skills/build/SKILL.md".into(),
++            }],
++        };
++        assert_eq!(
++            serde_json::to_value(application_shell_spec(&spec)).unwrap(),
++            json!({
++                "type": "shell",
++                "environment": {
++                    "type": "local",
++                    "skills": [{"name": "build", "description": "Build the project", "path": "skills/build/SKILL.md"}],
++                },
++            }),
++        );
++
++        let arguments = json!({
++            "type": "shell_call", "call_id": "call-1",
++            "action": {"commands": ["first", "second"], "timeout_ms": 100, "max_output_length": 8},
++        })
++        .to_string();
++        let response = DynamicToolResponse {
++            content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                text: json!({
++                    "output": [
++                        {"stdout": "éλ", "stderr": "1234", "outcome": {"type": "exit", "exit_code": 3_221_225_477_i64}},
++                        {"stdout": "partial", "stderr": "", "outcome": {"type": "timeout"}},
++                    ],
++                    "max_output_length": 3,
++                })
++                .to_string(),
++            }],
++            success: true,
++        };
++        let output = ApplicationShellOutput::from_dynamic_response(&arguments, response).unwrap();
++        let item = ResponseItem::from(
++            output.to_response_item("call-1", &ToolPayload::Shell { arguments }),
++        );
++        assert_eq!(
++            serde_json::to_value(item).unwrap(),
++            json!({
++                "type": "shell_call_output",
++                "call_id": "call-1",
++                "max_output_length": 3,
++                "output": [
++                    {"stdout": "éλ", "stderr": "1", "outcome": {"type": "exit", "exit_code": 3_221_225_477_i64}},
++                    {"stdout": "", "stderr": "", "outcome": {"type": "timeout"}},
++                ],
++            }),
++        );
++    }
++
++    #[test]
++    fn application_shell_preserves_a_failed_result_as_a_shell_output() {
++        let arguments =
++            json!({"call_id": "call-2", "action": {"commands": ["denied"]}}).to_string();
++        let error = ApplicationShellOutput::error(&arguments, "blocked".into());
++        assert!(!error.success_for_logging());
++        assert_eq!(
++            serde_json::to_value(
++                error.to_response_item("call-2", &ToolPayload::Shell { arguments })
++            )
++            .unwrap(),
++            json!({
++                "type": "shell_call_output",
++                "call_id": "call-2",
++                "output": [{"stdout": "", "stderr": "blocked", "outcome": {"type": "exit", "exit_code": 1}}],
++            }),
++        );
++    }
++}
+diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
+index 179f5cf65f8adf49a3e3b5254bea978e14410a93..ae01b6c466e6562decf2c60b0d01b7306e9a387f 100644
+--- a/codex-rs/tools/src/code_mode.rs
++++ b/codex-rs/tools/src/code_mode.rs
+@@ -227,6 +227,7 @@ fn code_mode_tool_definitions_for_spec(
+         | ToolSpec::FileSearch(_)
+         | ToolSpec::CodeInterpreter(_)
+         | ToolSpec::Shell(_)
++        | ToolSpec::ApplicationShell { .. }
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index 41313ff0e18fe774c59375c294409c06004e7432..73d2def297e134d5f6f011e61f7e445f57874045 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -1,6 +1,7 @@
+ //! Shared tool definitions and Responses API tool primitives that can live
+ //! outside `codex-core`.
+ 
++mod application_shell;
+ mod code_mode;
+ mod computer;
+ mod dynamic_tool;
+@@ -24,6 +25,10 @@ mod tool_payload;
+ mod tool_search;
+ mod tool_spec;
+ 
++pub use application_shell::ApplicationShellCall;
++pub use application_shell::ApplicationShellEnvironment;
++pub use application_shell::ApplicationShellOutput;
++pub use application_shell::application_shell_spec;
+ pub use code_mode::augment_tool_spec_for_code_mode;
+ pub use code_mode::code_mode_name_for_tool_name;
+ pub use code_mode::collect_code_mode_exec_prompt_tool_definitions;
+diff --git a/codex-rs/tools/src/tool_call.rs b/codex-rs/tools/src/tool_call.rs
+index 254fa9ee6a3299de03d9d5eaaa6dc3054a1c0701..0c87ca88d14f31a59c86613925f808adfc8255a9 100644
+--- a/codex-rs/tools/src/tool_call.rs
++++ b/codex-rs/tools/src/tool_call.rs
+@@ -217,9 +217,9 @@ impl ToolCall<'_> {
+ 
+     pub fn function_arguments(&self) -> Result<&str, FunctionCallError> {
+         match &self.payload {
+-            ToolPayload::Function { arguments } | ToolPayload::Computer { arguments } => {
+-                Ok(arguments)
+-            }
++            ToolPayload::Function { arguments }
++            | ToolPayload::Computer { arguments }
++            | ToolPayload::Shell { arguments } => Ok(arguments),
+             _ => Err(FunctionCallError::Fatal(format!(
+                 "tool {} invoked with incompatible payload",
+                 self.tool_name
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 8e0cb91a8bd99f03b38456f45f72528bb807a937..2f51a493325ed6ae589b797382582926421f8f25 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -258,6 +258,7 @@ impl ToolOutput for codex_protocol::mcp::CallToolResult {
+ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue {
+     match response {
+         ResponseInputItem::ComputerCallOutput { output, .. } => output,
++        ResponseInputItem::ShellCallOutput { output, .. } => serde_json::json!(output),
+         ResponseInputItem::Message { content, .. } => content_items_to_code_mode_result(
+             &content
+                 .into_iter()
+diff --git a/codex-rs/tools/src/tool_payload.rs b/codex-rs/tools/src/tool_payload.rs
+index 95cbd6a82dfe2221ec160cf00dd930c873ecd4bc..035abba527a1e94cac747e994fa4c66bc585433c 100644
+--- a/codex-rs/tools/src/tool_payload.rs
++++ b/codex-rs/tools/src/tool_payload.rs
+@@ -6,6 +6,7 @@ use codex_protocol::models::SearchToolCallParams;
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum ToolPayload {
+     Computer { arguments: String },
++    Shell { arguments: String },
+     Function { arguments: String },
+     ToolSearch { arguments: SearchToolCallParams },
+     Custom { input: String },
+@@ -15,6 +16,7 @@ impl ToolPayload {
+     pub fn log_payload(&self) -> Cow<'_, str> {
+         match self {
+             ToolPayload::Computer { .. } => Cow::Borrowed("[native computer call]"),
++            ToolPayload::Shell { .. } => Cow::Borrowed("[native shell call]"),
+             ToolPayload::Function { arguments } => Cow::Borrowed(arguments),
+             ToolPayload::ToolSearch { arguments } => Cow::Owned(arguments.query.clone()),
+             ToolPayload::Custom { input } => Cow::Borrowed(input),
+diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
+index 9c93c2ee3a7ff52ca30118fe055c0f97e12d60c4..c5d88af41f58881aa0f094005738467d6e383b60 100644
+--- a/codex-rs/tools/src/tool_search.rs
++++ b/codex-rs/tools/src/tool_search.rs
+@@ -47,6 +47,7 @@ impl ToolSearchInfo {
+             | ToolSpec::FileSearch(_)
+             | ToolSpec::CodeInterpreter(_)
+             | ToolSpec::Shell(_)
++            | ToolSpec::ApplicationShell { .. }
+             | ToolSpec::ImageGeneration(_)
+             | ToolSpec::Computer { .. }
+             | ToolSpec::ComputerUsePreview { .. }
+@@ -97,6 +98,7 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+         | ToolSpec::FileSearch(_)
+         | ToolSpec::CodeInterpreter(_)
+         | ToolSpec::Shell(_)
++        | ToolSpec::ApplicationShell { .. }
+         | ToolSpec::ImageGeneration(_)
+         | ToolSpec::Computer { .. }
+         | ToolSpec::ComputerUsePreview { .. }
+@@ -150,6 +152,7 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         ToolSpec::FileSearch(_)
+         | ToolSpec::CodeInterpreter(_)
+         | ToolSpec::Shell(_)
++        | ToolSpec::ApplicationShell { .. }
+         | ToolSpec::ImageGeneration(_) => {
+             push_search_part(&mut parts, spec.name().to_string());
+         }
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 0cc7557fc3243d956853206baba98961162167a7..a2ad571b607de0464dded891069abc119a6626a5 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -68,6 +68,10 @@ pub enum ToolSpec {
+     CodeInterpreter(crate::CodeInterpreterTool),
+     #[serde(rename = "shell")]
+     Shell(crate::HostedShellTool),
++    #[serde(rename = "shell")]
++    ApplicationShell {
++        environment: crate::ApplicationShellEnvironment,
++    },
+     #[serde(rename = "image_generation")]
+     ImageGeneration(crate::ImageGenerationTool),
+     #[serde(rename = "custom")]
+@@ -82,6 +86,9 @@ impl ToolSpec {
+             ToolSpec::Computer { .. } | ToolSpec::ComputerUsePreview { .. } => {
+                 target.is_default_namespace() && target.name == "computer"
+             }
++            Self::ApplicationShell { .. } => {
++                target.is_default_namespace() && target.name == "shell"
++            }
+             Self::Function(tool) => {
+                 target.is_default_namespace()
+                     && tool.name == target.name
+@@ -127,7 +134,7 @@ impl ToolSpec {
+             ToolSpec::WebSearch { .. } => "web_search",
+             ToolSpec::FileSearch(_) => "file_search",
+             ToolSpec::CodeInterpreter(_) => "code_interpreter",
+-            ToolSpec::Shell(_) => "shell",
++            ToolSpec::Shell(_) | ToolSpec::ApplicationShell { .. } => "shell",
+             ToolSpec::ImageGeneration(_) => "image_generation",
+             ToolSpec::Freeform(tool) => tool.name.as_str(),
+         }
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index ce42b41abfba4d6f6032cb93cb751d1b01a3e895..a7ad418ee1ba41547d96ff892e15add012b53a54 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -264,7 +264,7 @@ pub(crate) fn non_delegation_tool_specs() -> Vec<DynamicToolSpec> {
+     tool_specs()
+         .into_iter()
+         .filter_map(|spec| match spec {
+-            DynamicToolSpec::Computer(tool) => Some(DynamicToolSpec::Computer(tool)),
++            spec @ (DynamicToolSpec::Computer(_) | DynamicToolSpec::Shell(_)) => Some(spec),
+             DynamicToolSpec::Function(function) => (!DELEGATION_TOOLS
+                 .contains(&function.name.as_str()))
+             .then_some(DynamicToolSpec::Function(function)),
+diff --git a/codex-rs/tui/src/dynamic_tools_mcp.rs b/codex-rs/tui/src/dynamic_tools_mcp.rs
+index dc2f3e8c76347b200264ec074d2c5b749c54ec38..0e806377d6cbc5b98be637db9ac97068210d6726 100644
+--- a/codex-rs/tui/src/dynamic_tools_mcp.rs
++++ b/codex-rs/tui/src/dynamic_tools_mcp.rs
+@@ -262,7 +262,7 @@ impl ServerHandler for DynamicToolMcpHandler {
+         }
+         for spec in specs {
+             let functions = match spec {
+-                DynamicToolSpec::Computer(_) => continue,
++                DynamicToolSpec::Computer(_) | DynamicToolSpec::Shell(_) => continue,
+                 DynamicToolSpec::Function(function) => vec![function],
+                 DynamicToolSpec::Namespace(namespace) => namespace
+                     .tools

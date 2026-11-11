@@ -2608,9 +2608,10 @@ def _capture_tools(
 
 
 def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
-    if spec.get("type") == "computer":
-        return ToolRef("computer")
-    if spec.get("type") == "namespace":
+    kind = spec.get("type")
+    if kind in ("computer", "shell"):
+        return ToolRef(kind)
+    if kind == "namespace":
         tools = spec.get("tools")
         if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
             return None

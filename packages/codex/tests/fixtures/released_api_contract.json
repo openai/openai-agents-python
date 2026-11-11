@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.8",
-  "baseline_commit": "47b84369f4b59e31de3623ae968d8c1a6fe56122",
+  "baseline_commit": "a4bd61e7c6d5b62fa8562092b4e37a0e46e1ef22",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -1499,6 +1499,46 @@
           "_ToolCatalog": "agents.tools._ToolCatalog"
         }
       },
+      "agents.shell": {
+        "declarations": [
+          "_ContextT = TypeVar('_ContextT')",
+          "class ShellSkill(TypedDict):\n    description: str\n    name: str\n    path: str",
+          "class ShellAction(BaseModel):\n    model_config = ConfigDict(extra='allow')\n    commands: list[str]\n    timeout_ms: int | None = None\n    max_output_length: int | None = None",
+          "class ShellCall(BaseModel):\n    model_config = ConfigDict(extra='allow')\n    type: Literal['shell_call']\n    call_id: str\n    action: ShellAction\n    id: str | None = None\n    status: str | None = None",
+          "class ShellExit(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['exit'] = 'exit'\n    exit_code: int",
+          "class ShellTimeout(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['timeout'] = 'timeout'",
+          "class ShellCommandOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    stdout: str\n    stderr: str\n    outcome: ShellExit | ShellTimeout = Field(discriminator='type')",
+          "class ShellOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    output: list[ShellCommandOutput]\n    max_output_length: int | None = Field(default=None, ge=0)",
+          "_ShellBinder: TypeAlias = Callable[[_ContextT, object, FunctionTool[Any, Any, Any]], _CapturedFunction]",
+          "def shell_tool(executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]], *, skills: Sequence[ShellSkill]=(), needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, before: _BeforePolicy[_ContextT] | None=None, after: _AfterPolicy[_ContextT] | None=None, callback_timeout: float | None=None, error_function: _BodyErrorFormatter[_ContextT] | None=None) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:\n    pass"
+        ],
+        "exports": {
+          "ShellAction": "agents.shell.ShellAction",
+          "ShellCall": "agents.shell.ShellCall",
+          "ShellCommandOutput": "agents.shell.ShellCommandOutput",
+          "ShellExit": "agents.shell.ShellExit",
+          "ShellOutput": "agents.shell.ShellOutput",
+          "ShellSkill": "agents.shell.ShellSkill",
+          "ShellTimeout": "agents.shell.ShellTimeout",
+          "shell_tool": "agents.shell.shell_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Sequence",
+          "from typing import Any, Literal, TypeAlias, TypeVar",
+          "from pydantic import BaseModel, ConfigDict, Field",
+          "from typing_extensions import TypedDict",
+          "from ._function_tools import FunctionTool, ToolContext, _AfterPolicy, _BeforePolicy, _BodyErrorFormatter",
+          "from .tools import _CapturedFunction"
+        ],
+        "references": {
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "_AfterPolicy": "agents._function_tools._AfterPolicy",
+          "_BeforePolicy": "agents._function_tools._BeforePolicy",
+          "_BodyErrorFormatter": "agents._function_tools._BodyErrorFormatter",
+          "_CapturedFunction": "agents.tools._CapturedFunction"
+        }
+      },
       "agents.state": {
         "declarations": [
           "@dataclass(frozen=True)\nclass LocalStorage:\n    path: Path",
@@ -2043,6 +2083,13 @@
       "SessionState": "agents.state.SessionState",
       "SessionStore": "agents.canonical_storage.SessionStore",
       "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
+      "ShellAction": "agents.shell.ShellAction",
+      "ShellCall": "agents.shell.ShellCall",
+      "ShellCommandOutput": "agents.shell.ShellCommandOutput",
+      "ShellExit": "agents.shell.ShellExit",
+      "ShellOutput": "agents.shell.ShellOutput",
+      "ShellSkill": "agents.shell.ShellSkill",
+      "ShellTimeout": "agents.shell.ShellTimeout",
       "SignInWithChatGPT": "agents.agent.SignInWithChatGPT",
       "SignInWithChatGPTCredentials": "agents.agent.SignInWithChatGPTCredentials",
       "StaleTurnError": "agents.session.StaleTurnError",
@@ -2080,7 +2127,8 @@
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
-      "run_demo_loop": "agents.repl.run_demo_loop"
+      "run_demo_loop": "agents.repl.run_demo_loop",
+      "shell_tool": "agents.shell.shell_tool"
     },
     "root_declarations": [],
     "root_definitions": {
@@ -4868,6 +4916,13 @@
       "SessionState",
       "SessionStore",
       "SessionStoreCleanup",
+      "ShellAction",
+      "ShellCall",
+      "ShellCommandOutput",
+      "ShellExit",
+      "ShellOutput",
+      "ShellSkill",
+      "ShellTimeout",
       "SignInWithChatGPT",
       "SignInWithChatGPTCredentials",
       "StaleTurnError",
@@ -4905,7 +4960,8 @@
       "computer_tool",
       "function_tool",
       "get_cleanup",
-      "run_demo_loop"
+      "run_demo_loop",
+      "shell_tool"
     ],
     "root_imports": [
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
@@ -4932,6 +4988,7 @@
       "from .repl import run_demo_loop as run_demo_loop",
       "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, OutputValidationIssue as OutputValidationIssue, PromptedOutput as PromptedOutput",
       "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ProducedItem as ProducedItem, ResponseIntegrityReason as ResponseIntegrityReason, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup",
+      "from .shell import ShellAction as ShellAction, ShellCall as ShellCall, ShellCommandOutput as ShellCommandOutput, ShellExit as ShellExit, ShellOutput as ShellOutput, ShellSkill as ShellSkill, ShellTimeout as ShellTimeout, shell_tool as shell_tool",
       "from .state import ApplicationToolOutput as ApplicationToolOutput, ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
       "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, WebSearch as WebSearch",
