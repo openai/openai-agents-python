@@ -259,7 +259,18 @@ async def test_native_hosted_mcp_callback_preserves_request_and_typed_reply(
                     await session.compact(
                         summary="The provider approval was processed.",
                         snapshot=snapshot,
-                        retain=[request, response] if approve else [],
+                        retain=[request, response],
+                    )
+                    retained = await session.model_context()
+                    assert [
+                        item
+                        for item in retained.items
+                        if item["type"] in ("mcp_approval_request", "mcp_approval_response")
+                    ] == [snapshot.items[request], snapshot.items[response]]
+                    await session.compact(
+                        summary="The provider approval was processed.",
+                        snapshot=retained,
+                        retain=[],
                     )
                     responses.respond(assistant_output("Ready."))
                     continuation = await (await session.submit("Continue.")).get_result()
