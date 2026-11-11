@@ -54,6 +54,8 @@ Restore uses the checkpoint's model and settings. Any non-`None` opening `model`
 
 Matching development builds have also been supporting `Agent.handoffs`, `await session.get_active_agent()` and idle `await session.update(agent=target)`. The [Agent handoff guide](sessions.md#hand-off-the-conversation-to-another-agent) has been explaining captured targets, operation tool limits and restore through the original graph root.
 
+Matching development builds have been accepting `input_guardrails=` and `output_guardrails=` on `Agent`, `run()`, `run_sync()`, and `session()`. The [guardrail example](guardrails.md) has been showing how to read check results and handle `GuardrailTripwire`.
+
 ## Sessions and turns
 
 ### Session

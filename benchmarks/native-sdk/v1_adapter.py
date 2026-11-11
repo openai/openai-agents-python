@@ -20,7 +20,14 @@ class Adapter:
         response_mode: str = "streaming",
         transport: str = "http",
         default_host: bool = False,
+        provider_mode: str = "caller-owned",
     ):
+        if provider_mode not in ("caller-owned", "omitted"):
+            raise ValueError("Unknown native Provider mode")
+        if provider_mode == "omitted" and (
+            not default_host or with_tool or stream or response_mode != "streaming"
+        ):
+            raise ValueError("Omitted Provider mode: default-host final-only no-tool calls only")
         if transport not in ("http", "websocket") or (
             transport == "websocket" and response_mode != "streaming"
         ):
@@ -35,7 +42,11 @@ class Adapter:
         self.tool_calls = 0
         if not default_host:
             provider_options.update(base_url=base_url, supports_websockets=transport == "websocket")
-        self.provider = NativeProvider(api_key="synthetic-benchmark-key", **provider_options)
+        self.provider = (
+            NativeProvider(api_key="synthetic-benchmark-key", **provider_options)
+            if provider_mode == "caller-owned"
+            else None
+        )
 
         def synchronous_echo(value: str) -> str:
             """Return the supplied value unchanged."""
@@ -54,20 +65,22 @@ class Adapter:
             name="benchmark",
             instructions="Follow the benchmark request and return the result.",
             model=model,
-            provider=self.provider,
             tools=tools,
+            **({"provider": self.provider} if self.provider is not None else {}),
         )
 
     async def __aenter__(self):
         # All exporters default to None. Own this process-wide configuration
         # explicitly, matching the stable adapter's disabled tracing.
         await telemetry.configure()
-        await self.provider.__aenter__()
+        if self.provider is not None:
+            await self.provider.__aenter__()
         return self
 
     async def __aexit__(self, *exc):
         try:
-            await self.provider.__aexit__(*exc)
+            if self.provider is not None:
+                await self.provider.__aexit__(*exc)
         finally:
             await telemetry.shutdown()
 
@@ -80,6 +93,8 @@ class Adapter:
 
     @asynccontextmanager
     async def conversation(self):
+        if self.provider is None:
+            raise ValueError("Omitted Provider mode: fresh Agent.run calls only")
         async with self.agent.session() as session:
             yield Conversation(session, self.stream)
 

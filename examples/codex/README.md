@@ -113,6 +113,8 @@ These programs use the current SDK and model credentials:
 | Own native Session storage | [Application-owned storage](canonical_storage/README.md) | A persistent POSIX reference adapter, writer ownership, and verified tool-result recovery. |
 | Store application memory across Sessions | [Packaged memory](packaged_memory.md) | The packaged `SQLiteMemory` store and tools, trusted scope selection, and deletion. Uses scripted responses. |
 | Check and repair a JSON artifact (development-only) | [Packaged artifact validation](packaged_artifact.md) | Matching source builds have been providing `json_artifact_tool` for validation and correction through scripted responses. |
+| Publish accepted output | [Accepted output](recipes/accepted-output.md) | Show application progress while a native Turn reviews and validates its answer. Uses scripted responses. |
+| Route to an authorized specialist | [Decisions routing](decisions-guide.md#route-to-an-authorized-specialist) | Choose a specialist through a separate Decisions provider while the main model continues orchestration. Uses a matching source build and scripted responses. |
 | Test application behavior | [Task recipe chooser](../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
 | Read or revise selected text files | [Selected documents](selected_documents.md) | Bounded pages and search, application-selected writable aliases, and serialized revision checks. The application extracts PDF text. |
 | Discover and read selected collection sources | [Selective collection](selective_collection.md) | Application-authorized metadata search and on-demand UTF-8 staging; includes a local 10,000-file fixture and scripted benchmark. |
@@ -127,6 +129,7 @@ These programs use the current SDK and model credentials:
 | Supervise local coding workers | [Supervised workers](supervised_worker/README.md) | Separate workspaces, native histories, artifact checks, and publication records. Requires matching native helpers and model credentials. |
 | Debug tool and provider failures | [Trace walkthrough](observability/README.md) | A local collector, viewer, and history reader. Uses synthetic data without provider credentials. |
 | Continue a trace across workers | [Explicit trace context](observability/README.md#continue-a-parent-trace-into-another-worker) | A synthetic parent trace and a second Agent. Requires alpha.7 or later. |
+| Trace a business workflow across services | [Business workflow tracing](observability/business-workflow.md) | Configure metadata-only tracing in two processes and check export delivery against a local sink. |
 | Compare model configurations | [Evaluation runner](evaluation/README.md) | Repeated cases, baseline comparisons, and failure artifacts. Scripted mode checks the runner; live mode needs model credentials. |
 
 ## Connect an executor
