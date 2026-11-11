@@ -3636,10 +3636,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             # Owned defaults keep ordinary startup and its existing close custody.
             _private_default_opening = (
-                _atomic_first_turn
-                and _private_text_run
-                and agent.provider is None
-                and not available
+                _atomic_first_turn and _private_text_run and agent.provider is None
             )
             _atomic_first_turn = _atomic_first_turn and agent.provider is not None
             environment = opening.environment
@@ -3867,7 +3864,11 @@ class Session(Generic[ContextT, OutputT]):
                     return use_completed_owner, websockets_enabled, private_http
 
                 use_completed_owner, websockets_enabled, private_http = private_run_policy(provider)
-                _atomic_first_turn = _atomic_first_turn or use_completed_owner
+                _atomic_first_turn = (
+                    _atomic_first_turn
+                    or use_completed_owner
+                    or (private_http and owned_provider and bool(available))
+                )
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4157,6 +4158,11 @@ class Session(Generic[ContextT, OutputT]):
                                 provider_lease=provider_lease,
                                 _share_model_http=True,
                                 _private_http=private_http,
+                                **(
+                                    {"_process_private_http": True}
+                                    if private_http and owned_provider
+                                    else {}
+                                ),
                             )
                         ),
                     )

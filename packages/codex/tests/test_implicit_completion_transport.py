@@ -502,7 +502,23 @@ async def test_sign_in_with_chatgpt_keeps_external_bearer_and_original_http(
 
 
 @pytest.mark.parametrize(
-    "profile", ["small", "large", "session", "tool", "hook", "state", "context", "events"]
+    "profile",
+    [
+        "small",
+        "large",
+        "session",
+        "tool",
+        "large-tool",
+        "namespaced-tool",
+        "manual-tool",
+        "approval-tool",
+        "deferred-tool",
+        "terminal-tool",
+        "hook",
+        "state",
+        "context",
+        "events",
+    ],
 )
 async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     openings: list[tuple[str, dict[str, Any], dict[str, Any], Any]],
@@ -543,8 +559,27 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
     monkeypatch.setattr(native, "create_engine", create_engine)
     agent_options: dict[str, Any] = {}
     run_options: dict[str, Any] = {}
-    if profile == "tool":
-        agent_options["tools"] = [optional_tool]
+    if profile in (
+        "tool",
+        "large-tool",
+        "namespaced-tool",
+        "manual-tool",
+        "approval-tool",
+        "deferred-tool",
+        "terminal-tool",
+    ):
+        tool = optional_tool
+        if profile == "namespaced-tool":
+            tool = replace(tool, namespace="records", namespace_description="Record lookup")
+        elif profile == "manual-tool":
+            tool = replace(tool, _bind=None)
+        elif profile == "approval-tool":
+            tool = replace(tool, needs_approval=True)
+        elif profile == "deferred-tool":
+            tool = replace(tool, defer_loading=True)
+        elif profile == "terminal-tool":
+            tool = replace(tool, finish_turn=True)
+        agent_options["tools"] = [tool]
     elif profile == "hook":
         agent_options["before_complete"] = lambda *args: None
     elif profile == "state":
@@ -560,10 +595,14 @@ async def test_omitted_provider_process_http_intent_preserves_excluded_startup(
             async with agent.session():
                 raise AssertionError("Native startup was not captured")
         else:
-            await agent.run("x" * (512 * 1024 if profile == "large" else 8), **run_options)
-    if profile in ("small", "large"):
+            await agent.run(
+                "x" * (512 * 1024 if profile in ("large", "large-tool") else 8), **run_options
+            )
+    if profile in ("small", "large", "tool", "large-tool", "namespaced-tool", "terminal-tool"):
         route, config, kwargs, runtime = openings.pop()
-        assert route == "_prepare_run_conversation"
+        assert route == (
+            "_prepare_run_conversation" if profile in ("small", "large") else "_open_conversation"
+        )
         assert kwargs["api_key"] == "synthetic-implicit-process-policy"
         assert kwargs["_private_http"] is True and kwargs["_process_private_http"] is True
         assert "codex_home" not in runtime and "cwd" not in runtime

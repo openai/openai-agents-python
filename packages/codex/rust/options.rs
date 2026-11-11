@@ -143,6 +143,14 @@ struct InstructionText {
 
 impl ThreadOptions {
     pub(crate) fn permits_private_disposable(&self) -> bool {
+        self.permits_private_opening(false)
+    }
+
+    pub(crate) fn permits_private_functions(&self) -> bool {
+        self.permits_private_opening(true)
+    }
+
+    fn permits_private_opening(&self, functions: bool) -> bool {
         self.permits_initial_config()
             && self.application_instructions.is_some()
             && self
@@ -161,7 +169,7 @@ impl ThreadOptions {
             && self.thread_source.is_none()
             && self.dynamic_tools.is_empty()
             && self.manual_tool_slots.is_empty()
-            && self.terminal_tool_slots.is_empty()
+            && (functions || self.terminal_tool_slots.is_empty())
             && self.hosted_tools.is_empty()
             && self.metrics_service_name.is_none()
             && self.parent_trace.is_none()
@@ -171,7 +179,13 @@ impl ThreadOptions {
             && self.chatgpt_apps.is_none()
             && self.user_instructions.is_none()
             && self.tool_policy.as_ref().is_some_and(|p| {
-                p.allowed_tools.as_ref().is_some_and(Vec::is_empty)
+                p.allowed_tools.as_ref().is_some_and(|tools| {
+                    if functions {
+                        !tools.is_empty()
+                    } else {
+                        tools.is_empty()
+                    }
+                }) && (!functions || p.allowed_mcp_tools.as_ref().is_none_or(Vec::is_empty))
                     && !p.require_managed_sandbox
                     && !p.require_unified_exec
                     && p.expose_additional_permissions != Some(true)
@@ -574,5 +588,47 @@ fn merge_objects(base: &mut Value, overrides: Value) {
             }
         }
         (base, value) => *base = value,
+    }
+}
+
+#[cfg(test)]
+mod private_function_tests {
+    use super::*;
+
+    #[test]
+    fn private_functions_keep_completed_admission_tool_free() {
+        let mut options: ThreadOptions = config::decode(serde_json::json!({
+            "_application_instructions": "Use the tool.",
+            "tool_policy": {"allowed_tools": [{"namespace": "functions", "name": "lookup"}]}
+        }))
+        .unwrap();
+        assert!(options.permits_private_functions());
+        assert!(!options.permits_private_disposable());
+        assert!(!options.private_disposable);
+        options.tool_policy.as_mut().unwrap().allowed_tools = Some(Vec::new());
+        assert!(!options.permits_private_functions());
+        assert!(options.permits_private_disposable());
+    }
+
+    #[test]
+    fn private_functions_reject_manual_and_mcp_profiles() {
+        let raw = serde_json::json!({
+            "_application_instructions": "Use the tool.",
+            "tool_policy": {"allowed_tools": [{"namespace": "functions", "name": "lookup"}]}
+        });
+        let mut terminal = raw.clone();
+        terminal["_terminal_tool_slots"] = serde_json::json!([0]);
+        let options: ThreadOptions = config::decode(terminal).unwrap();
+        assert!(options.permits_private_functions());
+        let mut manual = raw.clone();
+        manual["_manual_tool_slots"] = serde_json::json!([0]);
+        let options: ThreadOptions = config::decode(manual).unwrap();
+        assert!(!options.permits_private_functions());
+        let mut excluded = raw;
+        excluded["tool_policy"]["allowed_mcp_tools"] = serde_json::json!([
+            ["server", "lookup", {"namespace": "functions", "name": "lookup"}]
+        ]);
+        let options: ThreadOptions = config::decode(excluded).unwrap();
+        assert!(!options.permits_private_functions());
     }
 }

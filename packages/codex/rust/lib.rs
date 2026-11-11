@@ -3872,7 +3872,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false, _process_private_http=false))]
 fn _open_conversation<'py>(
     py: Python<'py>,
     config_json: String,
@@ -3884,6 +3884,7 @@ fn _open_conversation<'py>(
     provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
     _private_http: bool,
+    _process_private_http: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let opening = conversation_opening(
         config_json,
@@ -3896,7 +3897,7 @@ fn _open_conversation<'py>(
         _share_model_http,
         _private_http,
         false,
-        false,
+        _process_private_http,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -3940,14 +3941,28 @@ fn conversation_opening(
     }
     let instructions = options.application_instructions.clone().unwrap_or_default();
     let files = options.sdk_instruction_files.clone().unwrap_or_default();
-    let specs: Vec<codex_protocol::dynamic_tools::DynamicToolSpec> =
-        serde_json::from_str(specs_json).map_err(py_error)?;
+    use codex_protocol::dynamic_tools::{DynamicToolNamespaceTool, DynamicToolSpec};
+
+    let specs: Vec<DynamicToolSpec> = serde_json::from_str(specs_json).map_err(py_error)?;
     let process_private_http = process_private_http
         && private_http
-        && private_disposable
         && cfg!(target_os = "linux")
-        && options.permits_private_disposable()
-        && specs.is_empty();
+        && ((private_disposable && options.permits_private_disposable() && specs.is_empty())
+            || (!private_disposable
+                && options.permits_private_functions()
+                && !specs.is_empty()
+                && specs.iter().all(|spec| match spec {
+                    DynamicToolSpec::Function(function) => !function.defer_loading,
+                    DynamicToolSpec::Namespace(namespace) => {
+                        !namespace.tools.is_empty()
+                            && namespace.tools.iter().all(|tool| match tool {
+                                DynamicToolNamespaceTool::Function(function) => {
+                                    !function.defer_loading
+                                }
+                            })
+                    }
+                    _ => false,
+                })));
     if process_private_http {
         provider_owner::check_process_runtime_pid()?;
     }
