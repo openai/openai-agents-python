@@ -32,6 +32,39 @@ def _steps() -> list[dict]:
     return _native_job()["steps"]
 
 
+def test_ci_shards_collect_every_case_once(tmp_path: Path) -> None:
+    (tmp_path / "test_cases.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('case', range(32))\n"
+        "def test_case(case):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT / "packages" / "codex"),
+        "PYTEST_ADDOPTS": "",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+
+    def collect(*options: str) -> set[str]:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", *options],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return {line for line in result.stdout.splitlines() if line.startswith("test_cases.py::")}
+
+    first = collect("-p", "tests.ci_shard", "--ci-shard", "0")
+    second = collect("-p", "tests.ci_shard", "--ci-shard", "1")
+    assert first and second
+    assert first.isdisjoint(second)
+    assert first | second == collect()
+
+
 def test_native_producer_uses_only_verified_products_across_runs() -> None:
     steps = _steps()
     assert not any("actions/cache" in step.get("uses", "") for step in steps)
