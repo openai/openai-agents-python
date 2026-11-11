@@ -196,6 +196,8 @@ async def test_native_large_workspace_guidance_preserves_paths_and_policy(
     assert "UNDISCOVERED_GLOBAL_RULE" not in text
     assert "UNDISCOVERED_PROJECT_RULE" not in text
     if scenario == "dense_mounts":
+        assert str(peer.root) != root
+        assert "Working directory: " + json.dumps(str(peer.root)) in text
         assert "Do not run commands on remote-mounted paths." not in text
         assert (
             "Only use these commands on remote-mounted paths: "

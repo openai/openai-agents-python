@@ -431,6 +431,10 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
     used_bytes = len(
         "\n\n".join([*compact_sections, mount_commands, storage_prefix + "]"]).encode("utf-8")
     )
+    working_directory_bytes = len(working_directory.encode("utf-8")) + 2
+    if used_bytes + working_directory_bytes <= max_bytes:
+        compact_sections.append(working_directory)
+        used_bytes += working_directory_bytes
     if policy is not None and captured.remote_mount_command_allowlist:
         allowlist = (
             "Only use these commands on remote-mounted paths: "
@@ -501,11 +505,9 @@ def _render_workspace_instructions(manifest: Manifest, environment: Environment[
     compact_sections.extend([mount_commands, storage_prefix + ",".join(storage_rows) + "]"])
     if filesystem_rows:
         compact_sections.append(filesystem_prefix + ",".join(filesystem_rows) + "]")
-    for metadata in ("Workspace: " + encode(captured.root), working_directory):
-        added_bytes = len(metadata.encode("utf-8")) + 2
-        if used_bytes + added_bytes <= max_bytes:
-            compact_sections.append(metadata)
-            used_bytes += added_bytes
+    workspace = "Workspace: " + encode(captured.root)
+    if used_bytes + len(workspace.encode("utf-8")) + 2 <= max_bytes:
+        compact_sections.append(workspace)
     return "\n\n".join(compact_sections)
 
 
