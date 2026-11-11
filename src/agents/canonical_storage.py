@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from _agents_codex.canonical_storage import (
     CustomStorage as CustomStorage,
+    DaprSessionStore as DaprSessionStore,
     EncryptedSessionStore as EncryptedSessionStore,
     Iterator as Iterator,
     MongoDBSessionStore as MongoDBSessionStore,
