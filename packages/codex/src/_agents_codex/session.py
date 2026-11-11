@@ -3062,6 +3062,22 @@ async def _release_environment(lease: _EnvironmentLease) -> None:
         lease.detach_borrower()
 
 
+def _validate_restored_executor_policy(
+    saved: SessionState, executor: Environment[Any] | None
+) -> None:
+    if saved.executor_read_only != (executor is not None and executor.read_only):
+        raise ValueError("Checkpoint and Environment must agree on read-only execution")
+    current_policy = executor._network_policy_digest() if executor is not None else None
+    if saved.network_policy_digest != current_policy:
+        raise ValueError("Checkpoint and Environment must agree on the command network policy")
+    recorded_strict = (
+        saved.executor_policy_digest is not None
+        and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+    )
+    if recorded_strict != (executor is not None and executor.writable_roots is not None):
+        raise ValueError("Checkpoint and Environment must agree on the applied executor policy")
+
+
 def _validate_storage_opening(
     storage: LocalStorage | CustomStorage | None,
     state: SessionState | None,
@@ -3761,23 +3777,7 @@ class Session(Generic[ContextT, OutputT]):
                             f"Python tool collides with enabled environment tool: {tool.name}"
                         )
             if state is not None:
-                if saved.executor_read_only != (executor is not None and executor.read_only):
-                    raise ValueError("Checkpoint and Environment must agree on read-only execution")
-                current_policy = executor._network_policy_digest() if executor is not None else None
-                if saved.network_policy_digest != current_policy:
-                    raise ValueError(
-                        "Checkpoint and Environment must agree on the command network policy"
-                    )
-                recorded_strict = (
-                    saved.executor_policy_digest is not None
-                    and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
-                )
-                if recorded_strict != (
-                    executor is not None and executor.writable_roots is not None
-                ):
-                    raise ValueError(
-                        "Checkpoint and Environment must agree on the applied executor policy"
-                    )
+                _validate_restored_executor_policy(saved, executor)
             _check_native_agents_environment(native_agents, executor)
             if restored_defaults is not None:
                 # Resolve only against destination declarations, without acquiring

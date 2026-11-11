@@ -225,10 +225,10 @@ async def _tool_frames(
     outputs: dict[str, Mapping[str, Any]] = {}
     size = 0
     async for item in session.items(subagent_id=child_id):
-        if item["turn_id"] != turn_id or item["type"] not in (
-            "function_call",
-            "function_call_output",
-            "mcp_call",
+        if item["turn_id"] != turn_id or (
+            item["type"] != "function_call"
+            and item["type"] != "function_call_output"
+            and item["type"] != "mcp_call"
         ):
             continue
         size += len(json.dumps(item, ensure_ascii=False).encode("utf-8"))

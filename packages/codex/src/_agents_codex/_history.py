@@ -230,7 +230,7 @@ def project_history(
         recorded_id: bool = True,
         original_input: JsonValue | None = None,
     ) -> _HistoryItem:
-        kind = item["type"]
+        kind: str = item["type"]
         is_output = kind in _CALL_TYPES_BY_OUTPUT
         is_execution = kind in _EXECUTION_TYPES
         # Execution records describe what ran. Keep them separate from the model's call and output.
