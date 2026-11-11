@@ -286,3 +286,246 @@ jobs:
           for first, last in [(510, 565), (625, 645)]:
               for index in range(first-1, min(last, len(lines))):
                   print(f'airlock.sb:{index+1}: {lines[index]}')
+      - name: Test launchd-owned creation policy and authority controls
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/seatbelt-base.sb" <<'POLICY_SOURCE'
+          (version 1)
+          
+          ; inspired by Chrome's sandbox policy:
+          ; https://source.chromium.org/chromium/chromium/src/+/main:sandbox/policy/mac/common.sb;l=273-319;drc=7b3962fe2e5fc9e2ee58000dc8fbf3429d84d3bd
+          ; https://source.chromium.org/chromium/chromium/src/+/main:sandbox/policy/mac/renderer.sb;l=64;drc=7b3962fe2e5fc9e2ee58000dc8fbf3429d84d3bd
+          
+          ; start with closed-by-default
+          (deny default)
+          
+          ; child processes inherit the policy of their parent
+          (allow process-exec)
+          (allow process-fork)
+          (allow signal (target same-sandbox))
+          
+          ; process-info
+          (allow process-info* (target same-sandbox))
+          
+          (allow file-write-data
+            (require-all
+              (path "/dev/null")
+              (vnode-type CHARACTER-DEVICE)))
+          
+          ; sysctls permitted.
+          (allow sysctl-read
+            (sysctl-name "hw.activecpu")
+            (sysctl-name "hw.busfrequency_compat")
+            (sysctl-name "hw.byteorder")
+            (sysctl-name "hw.cacheconfig")
+            (sysctl-name "hw.cachelinesize_compat")
+            (sysctl-name "hw.cpufamily")
+            (sysctl-name "hw.cpufrequency_compat")
+            (sysctl-name "hw.cputype")
+            (sysctl-name "hw.l1dcachesize_compat")
+            (sysctl-name "hw.l1icachesize_compat")
+            (sysctl-name "hw.l2cachesize_compat")
+            (sysctl-name "hw.l3cachesize_compat")
+            (sysctl-name "hw.logicalcpu_max")
+            (sysctl-name "hw.machine")
+            (sysctl-name "hw.model")
+            (sysctl-name "hw.memsize")
+            (sysctl-name "hw.ncpu")
+            (sysctl-name "hw.nperflevels")
+            ; Chrome locks these CPU feature detection down a bit more tightly,
+            ; but mostly for fingerprinting concerns which isn't an issue for codex.
+            (sysctl-name-prefix "hw.optional.arm.")
+            (sysctl-name-prefix "hw.optional.armv8_")
+            (sysctl-name "hw.packages")
+            (sysctl-name "hw.pagesize_compat")
+            (sysctl-name "hw.pagesize")
+            (sysctl-name "hw.physicalcpu")
+            (sysctl-name "hw.physicalcpu_max")
+            (sysctl-name "hw.logicalcpu")
+            (sysctl-name "hw.cpufrequency")
+            (sysctl-name "hw.tbfrequency_compat")
+            (sysctl-name "hw.vectorunit")
+            (sysctl-name "machdep.cpu.brand_string")
+            (sysctl-name "kern.argmax")
+            (sysctl-name "kern.hostname")
+            (sysctl-name "kern.maxfilesperproc")
+            (sysctl-name "kern.maxproc")
+            (sysctl-name "kern.osproductversion")
+            (sysctl-name "kern.osrelease")
+            (sysctl-name "kern.ostype")
+            (sysctl-name "kern.osvariant_status")
+            (sysctl-name "kern.osversion")
+            (sysctl-name "kern.secure_kernel")
+            ; Python's ProcessPoolExecutor queries this through sysconf(_SC_SEM_NSEMS_MAX).
+            (sysctl-name "kern.sysv.semmns")
+            (sysctl-name "kern.usrstack64")
+            (sysctl-name "kern.version")
+            (sysctl-name "sysctl.proc_cputype")
+            (sysctl-name "vm.loadavg")
+            (sysctl-name-prefix "hw.perflevel")
+            (sysctl-name-prefix "kern.proc.pgrp.")
+            (sysctl-name-prefix "kern.proc.pid.")
+            (sysctl-name-prefix "net.routetable.")
+          )
+          
+          ; Allow Java to read some CPU info. This is misclassified as a "write" because
+          ; userspace passes a memory buffer to the sysctl, but conceptually it is a read.
+          (allow sysctl-write
+            (sysctl-name "kern.grade_cputype"))
+          
+          ; IOKit
+          (allow iokit-open
+            (iokit-registry-entry-class "RootDomainUserClient")
+          )
+          
+          ; needed to look up user info, see https://crbug.com/792228
+          (allow mach-lookup
+            (global-name "com.apple.system.opendirectoryd.libinfo")
+          )
+          
+          ; Needed for python multiprocessing on MacOS for the SemLock
+          (allow ipc-posix-sem)
+          
+          ; Needed for PyTorch/libomp on macOS to register OpenMP runtimes.
+          (allow ipc-posix-shm-read-data
+            ipc-posix-shm-write-create
+            ipc-posix-shm-write-unlink
+            (ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$"))
+          
+          (allow mach-lookup
+            (global-name "com.apple.PowerManagement.control")
+          )
+          
+          ; allow openpty()
+          (allow pseudo-tty)
+          (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+          (allow file-read* file-write*
+            (require-all
+              (regex #"^/dev/ttys[0-9]+")
+              (extension "com.apple.sandbox.pty")))
+          ; PTYs created before entering seatbelt may lack the extension; allow ioctl
+          ; on those slave ttys so interactive shells detect a TTY and remain functional.
+          (allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
+          POLICY_SOURCE
+          cat > "$RUNNER_TEMP/denied-helper.c" <<'POLICY_SOURCE'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+          int main(void) {
+            mach_port_t result=MACH_PORT_NULL, receive=MACH_PORT_NULL;
+            kern_return_t lookup=bootstrap_look_up(bootstrap_port,"com.apple.xpc.launchd",&result);
+            int lookup_denied=lookup!=KERN_SUCCESS && result==MACH_PORT_NULL;
+            if(result)mach_port_deallocate(mach_task_self(),result);
+            if(mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&receive)!=KERN_SUCCESS)return 150;
+            if(mach_port_insert_right(mach_task_self(),receive,receive,MACH_MSG_TYPE_MAKE_SEND)!=KERN_SUCCESS)return 151;
+            char service[128];snprintf(service,sizeof(service),"com.openai.codex.uidprobe.registration.%d",getpid());
+            kern_return_t registered=bootstrap_register(bootstrap_port,service,receive);
+            if(registered==KERN_SUCCESS)bootstrap_register(bootstrap_port,service,MACH_PORT_NULL);
+            mach_port_mod_refs(mach_task_self(),receive,MACH_PORT_RIGHT_RECEIVE,-1);
+            mach_port_deallocate(mach_task_self(),receive);
+            return lookup_denied && registered!=KERN_SUCCESS?0:152;
+          }
+          POLICY_SOURCE
+          cat > "$RUNNER_TEMP/launchd-policy-probe.py" <<'POLICY_SOURCE'
+          import json
+          import os
+          from pathlib import Path
+          import plistlib
+          import subprocess
+          import sys
+          import tempfile
+          import time
+          import uuid
+          
+          
+          def run(args, timeout=5):
+              try:
+                  completed = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+                  return completed.returncode
+              except subprocess.TimeoutExpired:
+                  return 124
+          
+          
+          def emit(**values):
+              print(json.dumps(values), flush=True)
+          
+          
+          def worker(root):
+              root = Path(root)
+              info = json.loads((root / 'input.json').read_text())
+              results = []
+              for profile in ('strict', 'trusted'):
+                  prefix = ['/usr/bin/sandbox-exec', '-f', str(root / (profile + '.sb'))]
+                  commands = {
+                      'uid': ['/usr/bin/id', '-F'],
+                      'ssh': ['/usr/bin/ssh', '-G', '-F', '/dev/null', '-o', 'CanonicalizeHostname=no', '-o', 'ProxyCommand=none', 'example.invalid'],
+                      'denied-service-and-registration': [info['helper']],
+                      'bootstrap': ['/bin/launchctl', 'bootstrap', info['domain'], str(root / 'workspace/new-job.plist')],
+                      'submit': ['/bin/launchctl', 'submit', '-l', info['submit'], '--', '/usr/bin/touch', str(root / 'escaped-submit')],
+                      'kickstart': ['/bin/launchctl', 'kickstart', info['domain'] + '/' + info['target']],
+                      'bootout-existing': ['/bin/launchctl', 'bootout', info['domain'] + '/' + info['target']],
+                  }
+                  for name, argv in commands.items():
+                      result = dict(profile=profile, operation=name, exit=run(prefix + argv))
+                      results.append(result)
+                      emit(**result)
+              (root / 'worker-result.json').write_text(json.dumps(results))
+          
+          
+          def parent():
+              root = Path(tempfile.mkdtemp(prefix='codex-uid-policy-', dir=os.environ['RUNNER_TEMP']))
+              (root / 'workspace').mkdir()
+              suffix = uuid.uuid4().hex
+              domain = 'user/' + str(os.getuid())
+              labels = {name: 'com.openai.codex.uidprobe.' + suffix + '.' + name for name in ('target', 'candidate', 'new', 'submit')}
+              script = str(Path(__file__).resolve())
+              info = dict(domain=domain, target=labels['target'], submit=labels['submit'], helper=str(Path(os.environ['RUNNER_TEMP']) / 'denied-helper'))
+              (root / 'input.json').write_text(json.dumps(info))
+              base = Path(os.environ['RUNNER_TEMP'], 'seatbelt-base.sb').read_text()
+              (root / 'strict.sb').write_text(base + '\n(allow file-read*)\n(allow file-write* (subpath ' + json.dumps(str(root / 'workspace')) + '))\n')
+              (root / 'trusted.sb').write_text(base + '\n(allow file-read* file-write*)\n')
+              jobs = {
+                  'target': {'Label': labels['target'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-target')], 'RunAtLoad': False},
+                  'new': {'Label': labels['new'], 'ProgramArguments': ['/usr/bin/touch', str(root / 'escaped-bootstrap')], 'RunAtLoad': True},
+                  'candidate': {'Label': labels['candidate'], 'ProgramArguments': [sys.executable, script, '--worker', str(root)], 'RunAtLoad': True, 'Policies': {'DenyCreatingOtherJobs': True}, 'StandardOutPath': str(root / 'candidate.log'), 'StandardErrorPath': str(root / 'candidate-error.log')},
+              }
+              for name, data in jobs.items():
+                  path = root / ('workspace/new-job.plist' if name == 'new' else name + '.plist')
+                  path.write_bytes(plistlib.dumps(data))
+              try:
+                  host_registration = run(['/bin/launchctl', 'bootstrap', domain, str(root / 'target.plist')])
+                  emit(profile='host', operation='register-target', exit=host_registration)
+                  candidate_registration = run(['/bin/launchctl', 'bootstrap', domain, str(root / 'candidate.plist')])
+                  emit(profile='host', operation='register-policy-candidate', exit=candidate_registration)
+                  deadline = time.monotonic() + 30
+                  while not (root / 'worker-result.json').exists() and time.monotonic() < deadline:
+                      time.sleep(.1)
+                  if (root / 'worker-result.json').exists():
+                      for row in json.loads((root / 'worker-result.json').read_text()):
+                          emit(**row)
+                  else:
+                      emit(worker_completed=False)
+                  emit(escaped_submit=(root / 'escaped-submit').exists(), escaped_bootstrap=(root / 'escaped-bootstrap').exists(), escaped_target=(root / 'escaped-target').exists())
+                  emit(profile='host', operation='target-still-registered', exit=run(['/bin/launchctl', 'print', domain + '/' + labels['target']]))
+                  host_kickstart = run(['/bin/launchctl', 'kickstart', domain + '/' + labels['target']])
+                  deadline = time.monotonic() + 3
+                  while not (root / 'escaped-target').exists() and time.monotonic() < deadline:
+                      time.sleep(.05)
+                  emit(profile='host', operation='kickstart-target', exit=host_kickstart, marker=(root / 'escaped-target').exists())
+              finally:
+                  for label in labels.values():
+                      run(['/bin/launchctl', 'bootout', domain + '/' + label])
+                      run(['/bin/launchctl', 'remove', label])
+                  emit(owned_jobs_cleanup_completed=True)
+          
+          
+          if __name__ == '__main__':
+              if len(sys.argv) == 3 and sys.argv[1] == '--worker':
+                  worker(sys.argv[2])
+              else:
+                  parent()
+          POLICY_SOURCE
+          clang -Wall -Wextra -Werror "$RUNNER_TEMP/denied-helper.c" -o "$RUNNER_TEMP/denied-helper"
+          python3 "$RUNNER_TEMP/launchd-policy-probe.py"
