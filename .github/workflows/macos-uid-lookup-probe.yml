@@ -81,10 +81,10 @@ jobs:
                 if (mach_ports_register(mach_task_self(),empty,3)!=KERN_SUCCESS ||
                     task_set_special_port(mach_task_self(),TASK_BOOTSTRAP_PORT,endpoint)!=KERN_SUCCESS) _exit(123);
               }
+              if (mode==2) execl(self,self,"--post-exec",command,(char*)NULL);
               int null=open("/dev/null",O_RDWR);
               if (null<0 || dup2(null,STDOUT_FILENO)<0 || dup2(null,STDERR_FILENO)<0) _exit(124);
               if (null>2) close(null);
-              if (mode==2) execl(self,self,"--post-exec",command,(char*)NULL);
               if (!strcmp(command,"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
               else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
               _exit(125);
@@ -161,10 +161,15 @@ jobs:
               struct sentinel note={0}; note.h.msgh_bits=MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,MACH_MSG_TYPE_MAKE_SEND_ONCE);
               note.h.msgh_size=sizeof(note); note.h.msgh_remote_port=endpoint; note.h.msgh_local_port=reply;
               note.h.msgh_id=sentinel_id; note.global_matches_task=bootstrap_port==endpoint;
-              if(mach_msg(&note.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(note),0,MACH_PORT_NULL,500,MACH_PORT_NULL)!=KERN_SUCCESS) return 129;
+              kern_return_t sent=mach_msg(&note.h,MACH_SEND_MSG|MACH_SEND_TIMEOUT,sizeof(note),0,MACH_PORT_NULL,500,MACH_PORT_NULL);
+              printf("{\"command\":\"%s\",\"task_bootstrap_name\":%u,\"global_bootstrap_name\":%u,\"sentinel_send_result\":%d}\n",argv[2],endpoint,bootstrap_port,sent); fflush(stdout);
+              if(sent!=KERN_SUCCESS) return 129;
               struct { mig_reply_error_t response; mach_msg_max_trailer_t trailer; } answer={0};
-              if(mach_msg(&answer.response.Head,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(answer),reply,1000,MACH_PORT_NULL)!=KERN_SUCCESS || answer.response.Head.msgh_id!=sentinel_id+100 || answer.response.RetCode!=MIG_BAD_ID) return 130;
+              kern_return_t received=mach_msg(&answer.response.Head,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,sizeof(answer),reply,1000,MACH_PORT_NULL);
+              printf("{\"command\":\"%s\",\"sentinel_receive_result\":%d,\"reply_id\":%d,\"reply_result\":%d}\n",argv[2],received,answer.response.Head.msgh_id,answer.response.RetCode); fflush(stdout);
+              if(received!=KERN_SUCCESS || answer.response.Head.msgh_id!=sentinel_id+100 || answer.response.RetCode!=MIG_BAD_ID) return 130;
               if(!note.global_matches_task) return 131;
+              int null=open("/dev/null",O_RDWR); if(null<0 || dup2(null,1)<0 || dup2(null,2)<0) return 133; if(null>2)close(null);
               if (!strcmp(argv[2],"id")) execl("/usr/bin/id","id","-F",(char*)NULL);
               else execl("/usr/bin/ssh","ssh","-G","-F","/dev/null","-o","CanonicalizeHostname=no","-o","ProxyCommand=none","example.invalid",(char*)NULL);
               return 132;
