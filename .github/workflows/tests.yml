@@ -275,7 +275,9 @@ jobs:
               # Python sources and dependencies are repacked and qualified afresh.
               controls = ('.github/actions/setup-native/action.yml',
                           '.github/scripts/download-native-snapshot.py',
+                          '.github/scripts/install-linux-native-build-tools.sh',
                           '.github/scripts/native-dependencies.py',
+                          '.github/scripts/use-ubuntu-archive-if-needed.sh',
                           '.github/scripts/detect-changes.sh',
                           'packages/codex/tests/fixtures/exec_server.rs')
               for path in controls:
