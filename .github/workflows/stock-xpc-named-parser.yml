@@ -1,0 +1,78 @@
+name: Stock macOS named XPC parser inspection
+
+on:
+  push:
+    branches:
+      - diagnostics/nov9-stock-xpc-decode-a12
+    paths:
+      - .github/workflows/stock-xpc-named-parser.yml
+      - .github/diagnostics/stock_xpc_named_parser.py
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-stock-named-lookup:
+    runs-on: macos-15
+    timeout-minutes: 4
+    steps:
+      - name: Check out the exact diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Inspect fixture request metadata and stock client code
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          /usr/bin/sw_vers
+          test "$(/usr/bin/sw_vers -productVersion)" = 15.8.2
+          test "$(/usr/bin/sw_vers -buildVersion)" = 24H232
+          test "$(/usr/bin/uname -m)" = arm64
+          test "$(/usr/bin/id -u)" -ne 0
+          temp_dir="$(/usr/bin/mktemp -d "$RUNNER_TEMP/stock-xpc-named-parser.XXXXXXXX")"
+          trap '/bin/rm -rf -- "$temp_dir"' EXIT
+          source=.github/diagnostics/stock-xpc-decode-control.c
+          observer=.github/diagnostics/stock_xpc_named_parser.py
+          python3 "$observer" "$source" "$temp_dir/named.c"
+          /bin/cp "$observer" "$temp_dir/"
+          /usr/bin/xcrun --sdk macosx clang -std=c11 -arch arm64 -g -O0 -fblocks -D_DARWIN_C_SOURCE \
+            -Wall -Wextra -Werror -Wno-deprecated-declarations \
+            "$temp_dir/named.c" -lbsm -o "$temp_dir/named"
+          python3 - "$temp_dir" <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          def bounded(command, directory, label, env=None):
+              with subprocess.Popen(command, cwd=directory, env=env, start_new_session=True) as proc:
+                  try:
+                      status = proc.wait(timeout=25)
+                  except subprocess.TimeoutExpired:
+                      try:
+                          os.killpg(proc.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      proc.wait()
+                      status = 124
+              print(f"{label}_exit={status}", flush=True)
+              return status
+
+          workdir = sys.argv[1]
+          binary = f"{workdir}/named"
+          metadata = bounded([binary, "named-raw"], workdir, "metadata",
+                             env={"PATH": "/usr/bin:/bin"})
+          stock = bounded([
+              "/usr/bin/xcrun", "lldb", "--batch", "--no-lldbinit", "--no-use-colors",
+              "-o", "settings set target.disable-aslr false",
+              "-o", "breakpoint set --name main --shlib named",
+              "-o", "run",
+              "-o", "command script import ./stock_xpc_named_parser.py",
+              "-o", "inspect-named-xpc",
+              "-o", "process kill",
+              "--", binary,
+          ], workdir, "static_inspection")
+          sys.exit(0 if metadata == stock == 0 else 1)
+          PY
