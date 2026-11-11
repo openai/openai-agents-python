@@ -256,6 +256,7 @@ from .state import (
     LocalStorage as LocalStorage,
     NativeGoal as NativeGoal,
     SessionState as SessionState,
+    _GuardrailCheckpointRecord,
 )
 from .subagents import Subagent as Subagent, _subagent as _subagent
 from .telemetry import (
@@ -2459,7 +2460,9 @@ def _capture_profile_runtimes(
                 ),
                 "transform_context": declaration.transform_context is not None
                 or declaration.hosted_prompt is not None,
-                "before_compact": declaration.before_compact is not None,
+                "before_compact": declaration.before_compact is not None
+                or declaration.compaction is not None,
+                **({"post_turn_compact": True} if declaration.compaction is not None else {}),
                 "before_complete": _needs_before_complete(
                     declaration, input_guardrails, output_guardrails
                 ),
@@ -3314,6 +3317,7 @@ def _capture_opening_agent(
         programmatic_tool_calling=agent.programmatic_tool_calling,
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
+        compaction=agent.compaction,
         before_complete=agent.before_complete,
         input_guardrails=agent.input_guardrails,
         output_guardrails=agent.output_guardrails,
@@ -3333,6 +3337,7 @@ def _supports_atomic_first_turn(
         and agent.transform_context is None
         and agent.hosted_prompt is None
         and agent.before_compact is None
+        and agent.compaction is None
         and agent.before_complete is None
         and not agent.output_guardrails
         and not agent.input_guardrails
@@ -4014,7 +4019,9 @@ class Session(Generic[ContextT, OutputT]):
                     "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None
                     or agent.hosted_prompt is not None,
-                    "_before_compact": agent.before_compact is not None,
+                    "_before_compact": agent.before_compact is not None
+                    or agent.compaction is not None,
+                    "_post_turn_compact": agent.compaction is not None,
                     "_before_complete": _needs_before_complete(
                         agent, input_guardrails, output_guardrails
                     ),
@@ -4427,6 +4434,7 @@ class Session(Generic[ContextT, OutputT]):
                     ).hexdigest()
                     active = _Submission(
                         restored_output,
+                        guardrail_results=session._restore_guardrail_records(saved),
                         run_usage=_UsageCollector(saved.run_usage),
                         restored_pending=True,
                         observation_after=session._observations.sequence,
@@ -5181,12 +5189,75 @@ class Session(Generic[ContextT, OutputT]):
         )
         return self._agent_for_profile(receipt)
 
+    def _checkpoint_guardrail_records(self, state: _Submission) -> list[_GuardrailCheckpointRecord]:
+        root = None if self._profiles else self._original_agent_for_message({})
+        runtimes = {**self._voice_profiles, **self._profiles}
+        profiles = {id(runtime.profile.agent): key for key, runtime in runtimes.items()}
+        records = []
+        for record in state.guardrail_results:
+            profile = None if record.agent is root else profiles.get(id(record.agent))
+            if profile is None and record.agent is not root:
+                raise NativeError("Guardrail checkpoint has no captured source Agent")
+            records.append(
+                _GuardrailCheckpointRecord(
+                    kind=record.kind,
+                    name=record.name,
+                    agent_profile=profile,
+                    session_id=record.session_id,
+                    turn_id=record.turn_id,
+                    subagent_id=record.subagent_id,
+                    tripwire_triggered=record.result.tripwire_triggered,
+                    output_info=record.result.output_info,
+                    tool_call=record.tool_call,
+                )
+            )
+        return records
+
+    def _restore_guardrail_records(self, saved: SessionState) -> list[GuardrailRecord]:
+        records = []
+        for record in saved.guardrail_results:
+            if record.agent_profile is None:
+                if self._profiles:
+                    raise NativeError("Guardrail checkpoint has no captured source Agent")
+                agent = self._original_agent_for_message({})
+            else:
+                agent = self._source_profile_runtime(record.agent_profile).profile.agent
+            records.append(
+                GuardrailRecord(
+                    kind=record.kind,
+                    name=record.name,
+                    agent=agent,
+                    session_id=record.session_id,
+                    turn_id=record.turn_id,
+                    subagent_id=record.subagent_id,
+                    result=GuardrailResult(record.tripwire_triggered, record.output_info),
+                    tool_call=record.tool_call,
+                )
+            )
+        return records
+
     def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
         captured = self._agent_for_message(message)
         profile_id = message.get("profile_id")
         if isinstance(profile_id, str):
             return self._source_profile_runtime(profile_id).profile.agent
         return self._agent if self._agent is not None else captured
+
+    def _original_agent_for_profile(self, receipt: Mapping[str, Any] | None) -> Agent[Any, Any]:
+        """Expose application identity after validating the captured source receipt."""
+        captured = self._agent_for_profile(receipt)
+        profile_id = receipt.get("profile_id") if receipt is not None else None
+        if isinstance(profile_id, str):
+            return self._source_profile_runtime(profile_id).profile.agent
+        return self._agent if self._agent is not None else captured
+
+    def _original_agent_for_message(self, message: Mapping[str, Any]) -> Agent[Any, Any]:
+        receipt = (
+            {"profile_id": message.get("profile_id"), "epoch": message.get("profile_epoch")}
+            if "profile_id" in message or "profile_epoch" in message
+            else None
+        )
+        return self._original_agent_for_profile(receipt)
 
     async def _realtime_tool_enabled(
         self,
@@ -6937,7 +7008,7 @@ class Session(Generic[ContextT, OutputT]):
                     }
                 )
                 reply_reason = await self._realtime._format_approval_rejection(
-                    self._agent_for_profile(source_receipt),
+                    self._original_agent_for_profile(source_receipt),
                     request.name,
                     request.call_id,
                     reason,
@@ -10163,6 +10234,7 @@ class Session(Generic[ContextT, OutputT]):
             model_settings=settings,
             transform_context=source_agent.transform_context,
             before_compact=source_agent.before_compact,
+            compaction=source_agent.compaction,
         )
         # The original owner may still hold its completion receipt. A graceful
         # stop prevents any new correction from starting in either path.
@@ -11189,7 +11261,7 @@ class Session(Generic[ContextT, OutputT]):
         self,
         state: _CallbackState,
         message: dict[str, Any],
-        prepare: Callable[[], tuple[Callable[..., Any], object]],
+        prepare: Callable[[Callable[[], bool]], tuple[Callable[..., Any], object]],
         reply: Callable[[Any], None],
         reject: Callable[[], None],
     ) -> None:
@@ -11218,7 +11290,7 @@ class Session(Generic[ContextT, OutputT]):
         try:
             if not active():
                 return
-            callback, request = prepare()
+            callback, request = prepare(active)
             if isinstance(request, CompletionContext):
                 result = await self._call_completion_callback(
                     state, message, callback, active, request
@@ -11253,7 +11325,9 @@ class Session(Generic[ContextT, OutputT]):
                 tracing.set_outcome(status="error", category="callback_error")
 
     async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
-        def prepare() -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
+        def prepare(
+            _active: Callable[[], bool],
+        ) -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
             declaration = self._agent_for_message(message)
             callback = declaration.transform_context
             source = declaration.hosted_prompt
@@ -11375,17 +11449,33 @@ class Session(Generic[ContextT, OutputT]):
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
     async def _before_compact(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        policy = message["type"] == "_sdk_before_compact_policy"
         with _owned_span(
-            "compaction callback", "callback", message.get("tracing_context")
+            "compaction policy" if policy else "compaction callback",
+            "callback",
+            message.get("tracing_context"),
         ) as tracing:
-            await self._before_compact_body(state, message)
+            await self._before_compact_body(state, message, policy=policy, tracing=tracing)
             if tracing is not None and state.failure.done():
                 tracing.set_outcome(status="error", category="callback_error")
 
-    async def _before_compact_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
-        def prepare() -> tuple[Callable[..., Any], CompactionContext[ContextT]]:
-            callback = self._agent_for_message(message).before_compact
-            if callback is None:
+    async def _before_compact_body(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        *,
+        policy: bool,
+        tracing: TraceScope | None,
+    ) -> None:
+        failed = object()
+
+        def prepare(
+            active: Callable[[], bool],
+        ) -> tuple[Callable[..., Any], CompactionContext[ContextT]]:
+            declaration = self._agent_for_message(message)
+            factory = declaration.compaction
+            callback = declaration.before_compact
+            if factory is None and callback is None:
                 raise NativeError("Compaction callback has no application owner")
             request = CompactionContext(
                 context=cast(ContextT, self._context),
@@ -11396,22 +11486,107 @@ class Session(Generic[ContextT, OutputT]):
                 model=message["model"],
                 trigger=message["trigger"],
             )
-            return callback, request
+            if not policy and factory is None:
+                assert callback is not None
+                return callback, request
+            collector = state.run_usage
+            budget = state.budget if isinstance(state, _Submission) else None
 
-        def reply(summary: Any) -> None:
-            if summary is not None:
-                if not isinstance(summary, str):
-                    raise TypeError("before_compact must return a summary string or None")
-                if not summary.strip():
-                    raise ValueError("before_compact summary must not be empty")
-            self._native._reply_compaction(
-                message["step_id"], summary, message["thread"], message["instance"]
-            )
+            def observe(usage: TokenUsage | None) -> None:
+                collector.report(usage)
+                if budget is not None:
+                    budget.observe(
+                        None
+                        if usage is None
+                        else {
+                            name: getattr(usage, name) for name in TokenUsage.__dataclass_fields__
+                        }
+                    )
+
+            async def invoke(request: CompactionContext[ContextT]) -> Any:
+                try:
+                    if factory is None:
+                        return None
+                    prepared = factory._context(
+                        request,
+                        candidates=tuple(
+                            request.items[index] for index in message["candidate_indexes"]
+                        ),
+                        provider_response=message.get("provider_response"),
+                        model_omitted=message["model_omitted"],
+                    )
+                    if policy:
+                        predicate = factory.should_compact
+                        if predicate is None:
+                            decision = len(prepared.candidates) >= 10
+                        else:
+                            decision = await self._call_decision_callback(
+                                state,
+                                message,
+                                predicate,
+                                active,
+                                prepared,
+                            )
+                        if not active():
+                            raise asyncio.CancelledError
+                        if type(decision) is not bool:
+                            raise TypeError("should_compact must return a bool")
+                        return decision
+                    if not active():
+                        raise asyncio.CancelledError
+                    return await factory._window(
+                        prepared,
+                        provider_response=message.get("provider_response"),
+                        observe=observe,
+                    )
+                except Exception:
+                    if policy or message.get("optional", False):
+                        if tracing is not None:
+                            tracing.set_outcome(status="error", category="callback_error")
+                        return failed
+                    raise
+
+            return invoke, request
+
+        def reply(result: Any) -> None:
+            if policy:
+                if result is not failed and result is not None and type(result) is not bool:
+                    raise TypeError("Compaction policy must return a bool or None")
+                self._native._reply_compaction_policy(
+                    message["step_id"],
+                    None if result is failed else result,
+                    message["thread"],
+                    message["instance"],
+                    error=result is failed,
+                )
+            elif result is failed:
+                reject()
+            elif self._agent_for_message(message).compaction is not None:
+                self._native._reply_compaction(
+                    message["step_id"],
+                    None,
+                    message["thread"],
+                    message["instance"],
+                    window_json=json.dumps(result, allow_nan=False),
+                )
+            else:
+                if result is not None:
+                    if not isinstance(result, str):
+                        raise TypeError("before_compact must return a summary string or None")
+                    if not result.strip():
+                        raise ValueError("before_compact summary must not be empty")
+                self._native._reply_compaction(
+                    message["step_id"],
+                    result,
+                    message["thread"],
+                    message["instance"],
+                )
 
         def reject() -> None:
-            self._native._reply_compaction(
-                message["step_id"], None, message["thread"], message["instance"], error=True
+            reply = (
+                self._native._reply_compaction_policy if policy else self._native._reply_compaction
             )
+            reply(message["step_id"], None, message["thread"], message["instance"], error=True)
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
@@ -11762,7 +11937,7 @@ class Session(Generic[ContextT, OutputT]):
             proposal = _ToolCompletionProposal(message["step_id"], call, wire, value)
             return {"action": "accept", "final_output": wire}
 
-        def prepare() -> tuple[Callable[..., Any], object]:
+        def prepare(_active: Callable[[], bool]) -> tuple[Callable[..., Any], object]:
             return convert, None
 
         def reply(decision: dict[str, Any]) -> None:
@@ -11808,7 +11983,9 @@ class Session(Generic[ContextT, OutputT]):
     async def _before_complete_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
         state.tool_completion = None
 
-        def prepare() -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
+        def prepare(
+            _active: Callable[[], bool],
+        ) -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
             callback = self._agent_for_message(message).before_complete
             if callback is None:
                 if not (
@@ -12315,6 +12492,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_select_step": self._select_step,
             "_sdk_transform_context": self._transform_context,
             "_sdk_before_compact": self._before_compact,
+            "_sdk_before_compact_policy": self._before_compact,
             "_sdk_before_complete": self._before_complete,
             "_sdk_tool_completion": self._propose_tool_completion,
         }
@@ -14052,13 +14230,22 @@ class Session(Generic[ContextT, OutputT]):
             raise ValueError("before_turn_id must be a nonempty string")
         await self._close_stored_history({"kind": "revert", "before_turn_id": before_turn_id})
 
-    async def delete_stored(self) -> None:
+    async def delete_stored(self, *, preserve_descendants: bool = False) -> None:
         """Core has been closing this Session before deleting its stored conversation.
 
-        LocalStorage only; native writer/reference exclusion and sidecar cleanup.
+        LocalStorage only. Default: physical deletion with native reference checks.
+        preserve_descendants=True: logical owner retirement, with shared journal
+        bytes retained at their exact paths for descendants and prior checkpoints.
+        Retired source ID/path admission and discovery in this LocalStorage: rejected.
+        Portable exports: valid independent copies in separate memory storage.
+        No secure-erasure or cross-version revocation guarantee; no source ID reuse.
         Explicit rejection after a concurrent prior close; no silent success.
         """
-        await self._close_stored_history({"kind": "delete"})
+        if not isinstance(preserve_descendants, bool):
+            raise TypeError("preserve_descendants must be a bool")
+        await self._close_stored_history(
+            {"kind": "delete", "preserve_descendants": preserve_descendants}
+        )
 
     async def _close_stored_history(self, action: dict[str, Any]) -> None:
         self._check_callback_operation("change stored history while closing its own Session")
@@ -14765,6 +14952,10 @@ class Session(Generic[ContextT, OutputT]):
                 payload["executor_read_only"] = True
             if active is not None:
                 usage = active.run_usage.snapshot()
+                payload["guardrail_results"] = [
+                    record.model_dump(mode="json")
+                    for record in self._checkpoint_guardrail_records(active)
+                ]
                 payload["run_usage"] = {
                     name: getattr(usage, name) for name in RunUsage.__dataclass_fields__
                 }

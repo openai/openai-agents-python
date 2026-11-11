@@ -1471,6 +1471,20 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) async fn retire_thread_owner(&self, id: ThreadId) -> ThreadStoreResult<()> {
+        let mut writers = self.writers.lock().await;
+        self.check_durability()?;
+        if let Some(writer) = writers.get(&id) {
+            writer.check()?;
+            if writer.loss.is_some() {
+                return Err(checklist_error("local writer is suspending its lost owner"));
+            }
+        }
+        self.inner.retire_thread_owner(id).await?;
+        writers.remove(&id);
+        Ok(())
+    }
+
     pub(crate) async fn list_threads_including_empty_preview(
         &self,
         params: codex_thread_store::ListThreadsParams,

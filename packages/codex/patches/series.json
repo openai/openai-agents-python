@@ -659,7 +659,23 @@
     {
       "path": "sdk-model-cohort-core-test-fixtures.patch",
       "sha256": "7cbb510d137129da06bddbbd0e15fd0a93f137039ca8ccf1f16f8add3c253007"
+    },
+    {
+      "path": "sdk-stored-owner-retirement.patch",
+      "sha256": "6e2609766301ec2703199766402600eed66ada05e9ae5d497d7f46542dae76a5"
+    },
+    {
+      "path": "sdk-borrowed-responses-compaction.patch",
+      "sha256": "0678949ba0884e29db36bce730f1a7e00fd408656558c1e5fe6091b1606a76df"
+    },
+    {
+      "path": "sdk-trace-delivery-controls.patch",
+      "sha256": "2eee67cd8141831466a0c35a6c9ccb3a1dbecefeb763369504b4a25640ad49ca"
+    },
+    {
+      "path": "sdk-realtime-provider-error-observation.patch",
+      "sha256": "69a74476497a8189f717036a231c5f48a3e391dc06191693dc7507851c81e7dc"
     }
   ],
-  "result_tree": "ad4dd2388da483319b6d51e7e6c9f60c3d0e7559"
+  "result_tree": "5d022eaa2cff4dc3b23ebad93aa80ff60e3d02b0"
 }

@@ -78,6 +78,8 @@ pub struct ThreadOptions {
     pub(crate) transform_context: bool,
     #[serde(rename = "_before_compact")]
     pub(crate) before_compact: bool,
+    #[serde(rename = "_post_turn_compact")]
+    pub(crate) post_turn_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
     #[serde(rename = "_buffered_responses")]

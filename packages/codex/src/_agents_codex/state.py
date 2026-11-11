@@ -19,7 +19,7 @@ from ._events import RequiredAction as RequiredAction, SessionItem as SessionIte
 from ._public import preserve_module_identity as _preserve_module_identity
 from .history import RecordedTurn as RecordedTurn
 from .subagents import SubagentConfig as SubagentConfig
-from .tools import ToolRef as ToolRef
+from .tools import ToolCallInfo as _ToolCallInfo, ToolRef as ToolRef
 from .usage import RunUsage as RunUsage, TokenUsage as TokenUsage
 
 
@@ -193,6 +193,22 @@ class _ManualContinuation(BaseModel):
     output_schema: dict[str, Any] | None = None
 
 
+class _GuardrailCheckpointRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+    kind: Literal["input", "output"]
+    name: str
+    agent_profile: str | None
+    session_id: str
+    turn_id: str
+    subagent_id: str | None = None
+    tripwire_triggered: bool
+    output_info: Any = None
+    tool_call: _ToolCallInfo | None = None
+
+
+_GuardrailCheckpointRecord.model_rebuild(_types_namespace=globals())
+
+
 class SessionState(BaseModel):
     """Conversation state, not live execution or a workspace backup.
 
@@ -233,6 +249,7 @@ class SessionState(BaseModel):
     step_mcp_tools: list[_StepMcpTool] | None = None
     native_continuation: _ManualContinuation | None = None
     run_usage: RunUsage | None = None
+    guardrail_results: list[_GuardrailCheckpointRecord] = Field(default_factory=list)
     # SDK contract identity is checked before importing native state or grants.
     output_version: Literal[1] | None = None
     output_fingerprint: str | None = None

@@ -426,6 +426,7 @@ async def test_agent_guardrail_defaults_follow_issuing_receipt_after_source_chan
         _opening_agent=original,
         _context=None,
         _agent_for_profile=lambda receipt: sources[receipt["profile_id"]],
+        _original_agent_for_profile=lambda receipt: sources[receipt["profile_id"]],
     )
     owner = RealtimeSession(session, config=RealtimeConfig(output_guardrails=(check("global"),)))
     owner._live = True

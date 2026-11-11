@@ -17,7 +17,11 @@ from agents.realtime import RealtimeGuardrailInput, RealtimeGuardrailResult, Rea
 def owner_for(callback: Any, threshold: int | None = 1) -> RealtimeSession:
     session = cast(
         Session[Any, Any],
-        SimpleNamespace(_context=None, _agent_for_profile=lambda _: None),
+        SimpleNamespace(
+            _context=None,
+            _agent_for_profile=lambda _: None,
+            _original_agent_for_profile=lambda _: None,
+        ),
     )
     owner = RealtimeSession(
         session,

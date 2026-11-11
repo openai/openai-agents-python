@@ -21,6 +21,7 @@ from concurrent.futures import Future as Future
 from contextlib import contextmanager as contextmanager
 from contextvars import ContextVar as ContextVar, Token as Token
 from dataclasses import dataclass as dataclass, field as field, replace as replace
+from math import isfinite as _isfinite
 from pathlib import Path as Path
 from threading import Event as Event, Lock as Lock, RLock as RLock
 from time import monotonic as monotonic
@@ -99,9 +100,53 @@ class ConsoleDiagnostics:
     include_fields: bool = False
 
 
+@dataclass(frozen=True, kw_only=True)
+class TraceDeliveryConfig:
+    """Native queue limits, batch scheduling, and Python callback budget."""
+
+    max_queue_size: int = 2048
+    max_queue_bytes: int = 4 * 1024 * 1024
+    max_batch_size: int = 64
+    schedule_delay_ms: int = 0
+    export_trigger_ratio: float = 0.7
+    callback_timeout_ms: int | None = 1000
+    """Per-callback budget; None disables this deadline, including for batched callbacks."""
+
+
+def _trace_delivery_options(value: TraceDeliveryConfig) -> tuple[dict[str, Any], float | None]:
+    if not isinstance(value, TraceDeliveryConfig):
+        raise TypeError("trace_delivery must be a TraceDeliveryConfig or None")
+    options: dict[str, Any] = {}
+    for name in ("max_queue_size", "max_queue_bytes", "max_batch_size", "schedule_delay_ms"):
+        item = getattr(value, name)
+        minimum = 0 if name == "schedule_delay_ms" else 1
+        if type(item) is not int or not minimum <= item <= 4294967295:
+            raise ValueError(
+                f"trace_delivery {name} must be an integer from {minimum} to 4294967295"
+            )
+        options[name] = item
+    ratio = value.export_trigger_ratio
+    if (
+        not isinstance(ratio, (int, float))
+        or isinstance(ratio, bool)
+        or not _isfinite(ratio)
+        or not 0 <= ratio <= 1
+    ):
+        raise ValueError("trace_delivery export_trigger_ratio must be a finite number from 0 to 1")
+    options["export_trigger_ratio"] = ratio
+    timeout = value.callback_timeout_ms
+    if timeout is not None and (type(timeout) is not int or not 1 <= timeout <= 60000):
+        raise ValueError(
+            "trace_delivery callback_timeout_ms must be an integer from 1 to 60000 or None"
+        )
+    return options, None if timeout is None else timeout / 1000
+
+
 # Immutable options from the one successful configure. Native still owns
 # engine admission, subscriber conflicts and terminal failure/shutdown.
 _engine_options: str | None = None
+_processor_batch_size = 64
+_processor_callback_timeout: float | None = 1.0
 
 
 @dataclass
@@ -177,6 +222,7 @@ async def configure(
     tool_result_max_bytes: int = 0,
     processors: Sequence[TraceProcessor] = (),
     diagnostics: ConsoleDiagnostics | None = None,
+    trace_delivery: TraceDeliveryConfig | None = None,
 ) -> None:
     """Configure once, before opening the first Session.
 
@@ -191,6 +237,10 @@ async def configure(
     """
     options: dict[str, Any] = {}
     try:
+        delivery_options, callback_timeout = _trace_delivery_options(
+            TraceDeliveryConfig() if trace_delivery is None else trace_delivery
+        )
+        batch_size = delivery_options["max_batch_size"]
         processors = tuple(processors)
         _validate_processors(processors)
         # Native gates response records on either OTLP kind, not its destination.
@@ -226,6 +276,8 @@ async def configure(
             }
         if processors:
             options["otel.trace_processors"] = True
+        if trace_delivery is not None:
+            options["sdk.trace_delivery"] = delivery_options
         options.update({key: item for key, item in emission.items() if key != "otel.exporter"})
         private = _NativeConfig(json.dumps(options))
     finally:
@@ -234,6 +286,7 @@ async def configure(
 
     async def initialize() -> None:
         global _engine_options, _processor_closing, _processor_starting
+        global _processor_batch_size, _processor_callback_timeout
         reserved: asyncio.Task[None] | None = None
         ready: asyncio.Future[None] | None = None
         owns_startup = False
@@ -263,6 +316,7 @@ async def configure(
                 # Only fixed native diagnostics may leave this credential boundary.
                 if str(error) in (
                     "Invalid console diagnostic options",
+                    "Invalid trace delivery options",
                     "Codex telemetry can only be configured once per process",
                     "Configure telemetry before creating any Codex clients",
                     "A Rust tracing subscriber is already installed; "
@@ -278,6 +332,8 @@ async def configure(
                 raise RuntimeError(message)
             with _processor_lock:
                 _processor_closing = False
+                _processor_batch_size = batch_size
+                _processor_callback_timeout = callback_timeout
                 if processors:
                     _set_processors(processors, replace=False, _startup=(reserved, ready))
                 _engine_options = snapshot
@@ -899,7 +955,8 @@ class TraceProcessor(Protocol):
     batch instead of individual callbacks. The SDK awaits that callback before
     acknowledging any event in the batch; failures count against every event.
     This native interface is separate from classic v0 processors. Each event
-    runs on a private worker loop and has a one-second delivery budget. At most
+    runs on a private worker loop. Default delivery budget: one second,
+    configurable through TraceDeliveryConfig.callback_timeout_ms. At most
     16 workers may remain live, including stalled removed routes. A stalled
     route or exhausted worker capacity loses further events. Flush reports
     those failures without changing runs. Callbacks must cooperate to release
@@ -1107,6 +1164,7 @@ class _ProcessorDelivery:
 class _ProcessorBatch:
     deliveries: tuple[_ProcessorDelivery, ...]
     loss_epoch: int = 0
+    callback_timeout: float | None = 1.0
     admitted_at: float = field(default_factory=monotonic)
     stopped: Event = field(default_factory=Event)
     completion: Future[None] | None = None
@@ -1124,7 +1182,11 @@ class _ProcessorBatch:
                 if delivery.result.done():
                     success, previous_finished = delivery.result.result()
                 else:
-                    remaining = max(0.0, previous_finished + 1.0 - monotonic())
+                    remaining = (
+                        None
+                        if self.callback_timeout is None
+                        else max(0.0, previous_finished + self.callback_timeout - monotonic())
+                    )
                     completion = asyncio.wrap_future(delivery.result)
                     done, _ = await asyncio.wait((completion,), timeout=remaining)
                     if not done:
@@ -1183,10 +1245,13 @@ class _ProcessorRoute:
 
     async def _invoke_batch(self, batch: _ProcessorBatch) -> None:
         previous_finished = batch.admitted_at
+        timeout = batch.callback_timeout
         callback = getattr(self.processor, "on_trace_events", None)
         if callable(callback):
             success = False
-            if not batch.stopped.is_set() and monotonic() < previous_finished + 1.0:
+            if not batch.stopped.is_set() and (
+                timeout is None or monotonic() < previous_finished + timeout
+            ):
                 try:
                     await self._recover_loss(batch.loss_epoch)
                     await self._invoke(
@@ -1195,7 +1260,9 @@ class _ProcessorRoute:
                         delivery=batch.credential_delivery,
                         events=tuple(item.event for item in batch.deliveries),
                     )
-                    success = monotonic() < previous_finished + 1.0 and not batch.stopped.is_set()
+                    success = (
+                        timeout is None or monotonic() < previous_finished + timeout
+                    ) and not batch.stopped.is_set()
                 except Exception:
                     pass
             if not success:
@@ -1206,8 +1273,8 @@ class _ProcessorRoute:
             return
         for delivery in batch.deliveries:
             now = monotonic()
-            deadline = previous_finished + 1.0
-            if batch.stopped.is_set() or now >= deadline:
+            deadline = None if timeout is None else previous_finished + timeout
+            if batch.stopped.is_set() or (deadline is not None and now >= deadline):
                 batch.stopped.set()
                 delivery.result.set_result((False, now))
                 continue
@@ -1223,7 +1290,7 @@ class _ProcessorRoute:
             except Exception:
                 success = False
             finished = monotonic()
-            if finished >= deadline:
+            if deadline is not None and finished >= deadline:
                 # Check on the worker too: a delayed host timer must not let a
                 # late-returning callback start the remainder of this group.
                 batch.stopped.set()
@@ -1274,7 +1341,9 @@ class _ProcessorRoute:
                     _worker_count -= 1
                 raise
         batch = _ProcessorBatch(
-            tuple(_ProcessorDelivery(event) for event in events), loss_epoch=loss_epoch
+            tuple(_ProcessorDelivery(event) for event in events),
+            loss_epoch=loss_epoch,
+            callback_timeout=_processor_callback_timeout,
         )
         batch.credential_delivery = _TraceDeliveryOwner(
             events, credential_routes or {}, batch.stopped, processor_id
@@ -1348,7 +1417,7 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
     global _processor_recovery_epoch
     native = _native_tracing()
     while True:
-        drain = _ProcessorDrain(native.drain_trace_events(64))
+        drain = _ProcessorDrain(native.drain_trace_events(_processor_batch_size))
         deliveries: list[_ProcessorBatch] = []
         batch: Any = None
         empty = True

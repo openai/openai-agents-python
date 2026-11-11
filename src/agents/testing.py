@@ -31,9 +31,11 @@ from _agents_codex.testing import (
     JsonValue as JsonValue,
     Lock as Lock,
     Mapping as Mapping,
+    ModelError as ModelError,
     NativeProvider as NativeProvider,
     RealtimeConnectCall as RealtimeConnectCall,
     RealtimeStep as RealtimeStep,
+    ScriptedModel as ScriptedModel,
     ScriptedRealtimeAdapter as ScriptedRealtimeAdapter,
     ScriptedResponse as ScriptedResponse,
     ScriptedResponses as ScriptedResponses,
@@ -62,6 +64,8 @@ from _agents_codex.testing import (
 )
 
 __all__ = [
+    "ModelError",
+    "ScriptedModel",
     "ScriptedResponse",
     "ScriptedResponses",
     "text",

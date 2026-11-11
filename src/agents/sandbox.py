@@ -37,11 +37,14 @@ from _agents_codex.sandbox import (
     apply_diff as apply_diff,
     cleanup_stale_default_local_snapshots as cleanup_stale_default_local_snapshots,
     default_local_snapshot_base_dir as default_local_snapshot_base_dir,
+    formatted_truncate_text as formatted_truncate_text,
+    formatted_truncate_text_with_token_count as formatted_truncate_text_with_token_count,
     render_storage_layout as render_storage_layout,
     resolve_default_local_snapshot_spec as resolve_default_local_snapshot_spec,
     retry_async as retry_async,
     sandbox_environment as sandbox_environment,
     truncate_text as truncate_text,
+    truncate_with_token_budget as truncate_with_token_budget,
 )
 
 __all__ = [
@@ -56,6 +59,9 @@ __all__ = [
     "LocalSnapshotSpec",
     "LocalSnapshot",
     "truncate_text",
+    "formatted_truncate_text",
+    "formatted_truncate_text_with_token_count",
+    "truncate_with_token_budget",
     "TruncationPolicy",
     "retry_async",
     "BackoffStrategy",

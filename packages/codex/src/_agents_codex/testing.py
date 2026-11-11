@@ -48,6 +48,7 @@ from ._lifecycle import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from .agent import NativeProvider as NativeProvider
+from .testing_model import ModelError as ModelError, ScriptedModel as ScriptedModel
 from .testing_realtime import (
     RealtimeConnectCall as RealtimeConnectCall,
     RealtimeStep as RealtimeStep,
