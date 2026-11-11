@@ -3952,7 +3952,7 @@ class Session(Generic[ContextT, OutputT]):
                     tools=available,
                 )
             )
-            # Owned defaults keep ordinary startup and its existing close custody.
+            # Capture owned eligibility before narrowing explicit-provider atomic admission.
             _private_wss_candidate, _private_default_opening = _private_default_opening_candidates(
                 agent,
                 atomic_first_turn=_atomic_first_turn,
@@ -4165,7 +4165,7 @@ class Session(Generic[ContextT, OutputT]):
                 use_completed_owner, websockets_enabled, private_http, private_wss_tls = (
                     private_run_policy(provider)
                 )
-                _atomic_first_turn = _atomic_first_turn or use_completed_owner
+                _atomic_first_turn = any((_atomic_first_turn, use_completed_owner, private_wss_tls))
                 config = _native_session_config(
                     executor=executor,
                     provider_config=provider_config,
@@ -4456,8 +4456,9 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps(settings),
                                 api_key=opening.api_key or "",
                                 provider_lease=provider_lease,
-                                _share_model_http=True,
+                                _share_model_http=not private_wss_tls,
                                 _private_http=private_http,
+                                **({"_process_private_runtime": True} if private_wss_tls else {}),
                             )
                         ),
                     )
