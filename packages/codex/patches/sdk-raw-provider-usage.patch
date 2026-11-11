@@ -1,5 +1,5 @@
 diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
-index a8232d2..860f2ce 100644
+index a8232d2a..860f2ce1 100644
 --- a/codex-rs/codex-api/src/common.rs
 +++ b/codex-rs/codex-api/src/common.rs
 @@ -78,10 +78,25 @@ pub struct MemorySummarizeOutput {
@@ -30,7 +30,7 @@ index a8232d2..860f2ce 100644
          /// Existing server response ID, when supplied by the stream.
          response_id: Option<String>,
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-index acf03a3..e5e9dca 100644
+index acf03a3a..e5e9dcaa 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 @@ -98,7 +98,7 @@ async fn complete_received_facts_precede_late_refusal_without_earlier_tool_effec
@@ -43,7 +43,7 @@ index acf03a3..e5e9dca 100644
      assert!(
          matches!(&events[2], Ok(ResponseEvent::ResponseFact(received)) if matches!(&received.fact,
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 535b936..e2c6e48 100644
+index 535b9366..e2c6e484 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -1177,6 +1177,7 @@ mod tests {
@@ -55,7 +55,7 @@ index 535b936..e2c6e48 100644
          assert_eq!(
              observation.status,
 diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
-index 625475f..9cdd54d 100644
+index 88a38dec..42adf875 100644
 --- a/codex-rs/codex-api/src/lib.rs
 +++ b/codex-rs/codex-api/src/lib.rs
 @@ -34,6 +34,7 @@ pub use crate::auth::auth_header_telemetry;
@@ -67,7 +67,7 @@ index 625475f..9cdd54d 100644
  pub use crate::common::OpenAiVerbosity;
  pub use crate::common::PromptCacheOptions;
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index bdba739..52973e8 100644
+index bdba7398..52973e8e 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -265,10 +265,8 @@ impl ResponsesStreamEvent {
@@ -181,7 +181,7 @@ index bdba739..52973e8 100644
              observation.status,
              codex_protocol::protocol::ResponseObservationStatus::Failed
 diff --git a/codex-rs/codex-api/src/sse/responses_error_tests.rs b/codex-rs/codex-api/src/sse/responses_error_tests.rs
-index dd81df0..b45faa4 100644
+index dd81df05..b45faa49 100644
 --- a/codex-rs/codex-api/src/sse/responses_error_tests.rs
 +++ b/codex-rs/codex-api/src/sse/responses_error_tests.rs
 @@ -49,6 +49,7 @@ async fn flex_failure_with_retry_header_ends_stream_immediately() {
@@ -193,7 +193,7 @@ index dd81df0..b45faa4 100644
                      assert_eq!(
                          observation.status,
 diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
-index aba43ce..11b6cf9 100644
+index aba43ce9..11b6cf91 100644
 --- a/codex-rs/codex-api/tests/sse_end_to_end.rs
 +++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
 @@ -166,6 +166,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()>
@@ -205,7 +205,7 @@ index aba43ce..11b6cf9 100644
              assert_eq!(
                  observation.status,
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 832d20f..c6f74d3 100644
+index 832d20f7..c6f74d3a 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -3012,12 +3012,14 @@ where
@@ -225,7 +225,7 @@ index 832d20f..c6f74d3 100644
                              && observation.status == codex_protocol::protocol::ResponseObservationStatus::Incomplete
                              && observation.incomplete_reason == Some(codex_protocol::protocol::ResponseIncompleteReason::MaxOutputTokens);
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 2cac85d..c903f58 100644
+index 2cac85dd..c903f58b 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -2832,18 +2832,19 @@ async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Resu
@@ -254,7 +254,7 @@ index 2cac85d..c903f58 100644
          }
          let api_stream = futures::stream::iter([
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index ad7fb7e..80ca010 100644
+index ad7fb7e1..80ca0103 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -328,6 +328,31 @@ impl CodexThread {
@@ -290,7 +290,7 @@ index ad7fb7e..80ca010 100644
      pub fn thread_extension_data(&self) -> &codex_extension_api::ExtensionData {
          &self.session.services.thread_extension_data
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index d43452c..20ac764 100644
+index d43452c1..20ac7649 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -17,6 +17,8 @@ use crate::hook_runtime::run_pre_compact_hooks;
@@ -363,7 +363,7 @@ index d43452c..20ac764 100644
                      output,
                  });
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 2102d4c..e926bfa 100644
+index 591db25d..d6b0b4aa 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -27,6 +27,8 @@ use crate::responses_retry::ResponsesStreamRequest;
@@ -414,7 +414,7 @@ index 2102d4c..e926bfa 100644
          compaction_output,
          response_id,
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 8573cb7..241b453 100644
+index 8573cb7f..241b4531 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -26,8 +26,6 @@ pub use responses_headers::CodexResponsesHeaders;
@@ -444,7 +444,7 @@ index 8573cb7..241b453 100644
  pub use thread_startup_metadata::ThreadStartupMetadata;
  mod agent;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 54bdeda..eba2b10 100644
+index 0b6f3344..0c4e80f6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -264,6 +264,7 @@ mod retained_context;
@@ -457,10 +457,10 @@ index 54bdeda..eba2b10 100644
  pub(crate) mod startup_prewarm;
 diff --git a/codex-rs/core/src/session/sdk_raw_usage.rs b/codex-rs/core/src/session/sdk_raw_usage.rs
 new file mode 100644
-index 0000000..54e997d
+index 00000000..e16ce104
 --- /dev/null
 +++ b/codex-rs/core/src/session/sdk_raw_usage.rs
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,195 @@
 +use crate::session::turn_context::TurnContext;
 +use std::io;
 +use std::io::Write;
@@ -530,6 +530,13 @@ index 0000000..54e997d
 +pub struct SdkRawUsageLink(Weak<Mutex<Capture>>);
 +
 +impl SdkRawUsageLink {
++    /// Reports whether this existing invocation still accepts capture.
++    pub fn is_active(&self) -> bool {
++        self.0.upgrade().is_some_and(|capture| {
++            !capture.lock().unwrap_or_else(|error| error.into_inner()).finished
++        })
++    }
++
 +    /// Attach this invocation's capture without extending its lifetime.
 +    pub fn attach(&self, store: &codex_extension_api::ExtensionData) {
 +        if self.0.strong_count() == 0 {
@@ -650,10 +657,10 @@ index 0000000..54e997d
 +    }
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 339a905..5e6344d 100644
+index 6e165b6f..b7dfe575 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -3513,6 +3513,11 @@ async fn try_run_sampling_request(
+@@ -3590,6 +3590,11 @@ async fn try_run_sampling_request(
      let mut should_emit_turn_diff = false;
      let mut should_emit_token_count = false;
      let mut response_observation_id = None;
@@ -665,7 +672,7 @@ index 339a905..5e6344d 100644
      const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
      let mut analytics_tool_call_ids = Vec::new();
      let reasoning_effort = step_context
-@@ -3972,7 +3977,17 @@ async fn try_run_sampling_request(
+@@ -4050,7 +4055,17 @@ async fn try_run_sampling_request(
                          .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
                          .await;
                  }
@@ -684,7 +691,7 @@ index 339a905..5e6344d 100644
                      let result = sess
                          .record_response_observation(&turn_context, observation)
                          .await;
-@@ -4045,6 +4060,18 @@ async fn try_run_sampling_request(
+@@ -4123,6 +4138,18 @@ async fn try_run_sampling_request(
                      if let Err(err) = budget_result {
                          break Err(err);
                      }

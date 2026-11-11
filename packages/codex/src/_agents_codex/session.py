@@ -10842,7 +10842,9 @@ class Session(Generic[ContextT, OutputT]):
                         return value
                     if not isinstance(value, ModelResponse):
                         raise TypeError("NativeModel.complete must return ModelResponse")
-                    return value._capture()
+                    return value._capture(
+                        capture_raw_usage=message.get("capture_raw_usage") is True
+                    )
                 finally:
                     del request, value
 
@@ -10850,7 +10852,9 @@ class Session(Generic[ContextT, OutputT]):
             # Awaited producers settle on this loop. Capture immediately, before
             # another await or handing the retained value back to the application.
             if isinstance(produced, ModelResponse):
-                reply = produced._capture()
+                reply = produced._capture(
+                    capture_raw_usage=message.get("capture_raw_usage") is True
+                )
             elif produced is not None and not isinstance(produced, str):
                 raise TypeError("NativeModel.complete must return ModelResponse")
             else:

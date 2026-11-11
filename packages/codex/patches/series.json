@@ -650,7 +650,7 @@
     },
     {
       "path": "sdk-native-model-response-stream.patch",
-      "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+      "sha256": "0c23bbf1515d26979e84697b7e457dfaf4507cb489dd593927b073b7a5142ae6"
     },
     {
       "path": "sdk-provider-item-references.patch",
@@ -661,9 +661,13 @@
       "sha256": "b2381c223988ede75ad31b30a4e67a40d230963d5608838713f32935e0ef134f"
     },
     {
+      "path": "sdk-function-provider-schemas.patch",
+      "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
+    },
+    {
       "path": "sdk-raw-provider-usage.patch",
-      "sha256": "7d7e468d9d13730fedf955647ac79e9fa615aea4bcbf98f15c5e32ed1bca9090"
+      "sha256": "5f37f1b4a522031ffb6448d2bc5a48e113364b74cbe71484bdac9086077681ca"
     }
   ],
-  "result_tree": "d02fb911c87c26a816469d950c6ba78151c6c636"
+  "result_tree": "4e1575e2404e2bdf6e2487099defcd5f48e72e2e"
 }

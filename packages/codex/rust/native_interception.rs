@@ -811,6 +811,15 @@ impl Control {
         }
     }
 
+    pub(crate) fn raw_usage_active(&self) -> bool {
+        self.channel
+            .raw_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|link| link.is_active())
+    }
+
     pub(crate) fn set_raw_usage_link(&self, link: codex_core::SdkRawUsageLink) {
         *self
             .channel
