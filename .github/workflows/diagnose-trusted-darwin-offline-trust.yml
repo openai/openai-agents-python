@@ -1,18 +1,18 @@
-name: Verify Python stock Darwin account and launchd authority
+name: Diagnose Python stock Darwin launchd effects
 
 on:
   push:
     branches: [diag/python-trusted-darwin-offline-trust-5787]
     paths:
       - .github/workflows/diagnose-trusted-darwin-offline-trust.yml
-      - .github/diagnostics/5787-mac-fixture-cleanup.patch
+      - .github/diagnostics/test_native_launchd_effect.py
 
 permissions:
   actions: read
   contents: read
 
 jobs:
-  stock-darwin-authority:
+  stock-darwin-launchd-effects:
     if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
     runs-on: macos-15
     timeout-minutes: 12
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
           sparse-checkout: |
-            .github/diagnostics/5787-mac-fixture-cleanup.patch
+            .github/diagnostics/test_native_launchd_effect.py
           sparse-checkout-cone-mode: false
       - name: Check out the exact qualified source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -54,21 +54,15 @@ jobs:
           test "$(git rev-parse HEAD)" = d9c8916aa01417e776201fb633bc1ebd8bbc831f
           test "$(git rev-parse 'HEAD^{tree}')" = b8ed399e62f503bc9b4881b7f508c1e88a683de3
           test "$(git -C ../diagnostic rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git -C ../diagnostic show -s --format=%P HEAD)" = e365b060e9e26913f3c2a8f3c6d1b49f4ab1c430
+          test "$(git -C ../diagnostic show -s --format=%P HEAD)" = 0be9fd9a2cc7e63b605c51d573010dae17c9b333
           expected_paths="$(printf '%s\n' \
-            .github/diagnostics/5787-mac-fixture-cleanup.patch \
+            .github/diagnostics/test_native_launchd_effect.py \
             .github/workflows/diagnose-trusted-darwin-offline-trust.yml)"
           test "$(git -C ../diagnostic diff-tree --no-commit-id --name-only -r HEAD)" = "$expected_paths"
           test "$(git cat-file -p HEAD | sed -n '3p')" = 'parent c4b733d30ac4a8670c4d8720f2614c16c60cba88'
-          patch=../diagnostic/.github/diagnostics/5787-mac-fixture-cleanup.patch
-          printf '%s  %s\n' ff7153ba8f8e21edd8e50618660a914eab82ca40c455b7e466ab342422ce33f4 "$patch" \
-            | shasum -a 256 -c -
-          git apply --index --check "$patch"
-          git apply --index "$patch"
-          test "$(git diff --cached --name-only)" = packages/codex/tests/test_native_executor_local.py
-          test "$(git hash-object packages/codex/tests/test_native_executor_local.py)" = d8dd90a9417f86bc28963e3569360545d733bb34
-          test "$(git write-tree)" = 18bb15256e0268fcfedebbdc3bb0f533edc31229
-          printf 'Diagnostic commit %s, patched test tree %s\n' "$GITHUB_SHA" "$(git write-tree)"
+          probe=../diagnostic/.github/diagnostics/test_native_launchd_effect.py
+          printf '%s  %s\n' b6f5eebb4dd0b6e474990bb2b070b42d85b87c8d886926a1580f3fc7a845d4bf "$probe" | shasum -a 256 -c -
+          printf 'Diagnostic commit %s\n' "$GITHUB_SHA"
           python -I -S - <<'PY'
           import runpy
           from pathlib import Path
@@ -96,7 +90,8 @@ jobs:
           native="$RUNNER_TEMP/stock-authority-native"
           tests="$stage/packages/codex/tests"
           mkdir -p "$tests"
-          cp packages/codex/tests/{__init__,_asyncio,conftest,native_fixtures,native_executor_fixtures,native_planning_fixtures,test_native_executor_local}.py "$tests/"
+          cp packages/codex/tests/{__init__,_asyncio,conftest,native_fixtures}.py "$tests/"
+          cp ../diagnostic/.github/diagnostics/test_native_launchd_effect.py "$tests/"
           printf '%s  %s\n' \
             961a919d2c26ceec57dc14a5c44be6cdf7905c024dcafb928564a02321a11b55 "$native/exec-server-fixture" \
             | shasum -a 256 -c -
@@ -139,35 +134,36 @@ jobs:
           assert agents._native.CODEX_REVISION == "7c2ce90716335c889a5076ded9a630459f9c9899"
           print("Installed native revision:", agents._native.CODEX_REVISION)
           PY
-      - name: Require three installed stock Darwin cases
+      - name: Observe all six stock Darwin launchd cases
         run: |
           stage="$RUNNER_TEMP/stock-authority-probe"
           probe_python="$stage/venv/bin/python"
           report="$stage/result.xml"
           cd "$stage"
-          test_path=packages/codex/tests/test_native_executor_local.py
+          status=0
           env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
             -u OPENAI_API_KEY -u CODEX_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+            -u PYTEST_ADDOPTS \
             CODEX_EXEC_SERVER_TEST_BINARY="$RUNNER_TEMP/stock-authority-native/exec-server-fixture" \
-            "$probe_python" -I -B -m pytest -vv -s -o "pythonpath=$stage/packages/codex" \
-            -o asyncio_mode=auto -o 'markers=requires_native_macos_sandbox: requires macOS Seatbelt' \
-            --junitxml="$report" \
-            "${test_path}::test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_writes" \
-            "${test_path}::test_macos_local_command_cannot_delegate_execution_to_launchd[strict]" \
-            "${test_path}::test_macos_local_command_cannot_delegate_execution_to_launchd[trusted_workspace_write]"
-          "$probe_python" -I -B - "$report" <<'PY'
+            "$probe_python" -I -B -m pytest -vv -s --tb=short -p no:cacheprovider \
+            -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
+            -o 'markers=requires_native_macos_sandbox: requires macOS Seatbelt' \
+            --junitxml="$report" packages/codex/tests/test_native_launchd_effect.py || status=$?
+          "$probe_python" -I -B - "$report" <<'PYTHON'
           import sys
           from xml.etree import ElementTree
 
           cases = ElementTree.parse(sys.argv[1]).findall(".//testcase")
           expected = {
-              "test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_writes",
-              "test_macos_local_command_cannot_delegate_execution_to_launchd[strict]",
-              "test_macos_local_command_cannot_delegate_execution_to_launchd[trusted_workspace_write]",
+              f"test_macos_launchd_effect[{operation}-{policy}]"
+              for operation in ("bootstrap", "kickstart", "submit")
+              for policy in ("strict", "trusted_workspace_write")
           }
           assert len(cases) == len(expected)
           assert {case.attrib["name"] for case in cases} == expected
           for case in cases:
-              assert not any(node.tag in {"skipped", "failure", "error"} for node in case)
-              print(f"Installed stock PASS {case.attrib['name']}")
-          PY
+              problems = [node.tag for node in case if node.tag in {"skipped", "failure", "error"}]
+              print(f"STOCK_LAUNCHD_CASE {case.attrib['name']} {','.join(problems) or 'passed'}")
+              assert "skipped" not in problems, case.attrib["name"]
+          PYTHON
+          exit "$status"
