@@ -46,7 +46,7 @@ from agents.model_context import ModelContextSnapshot as SnapshotFromModule
 from agents._events import URLCitation, WebSearchSource
 from agents.observation import ModelOutputItemCompleted
 from agents.state import SessionState
-from agents.tools import WebSearch, WebSearchLocation
+from agents.tools import WebSearch, WebSearchImageSettings, WebSearchLocation
 
 from agents import decisions
 import _agents_codex.decisions as decision_implementation
@@ -93,6 +93,7 @@ assert agent.name == 'Reader'
 assert Agent(instructions='Answer.').name is None
 assert WebSearch is agents.WebSearch
 assert WebSearchLocation.__module__ == 'agents.tools'
+assert WebSearchImageSettings.__module__ == 'agents.tools'
 assert URLCitation.__module__ == WebSearchSource.__module__ == 'agents._events'
 assert ModelOutputItemCompleted.__module__ == 'agents.observation'
 assert 'ModelOutputItemCompleted' in agents.observation.__all__
