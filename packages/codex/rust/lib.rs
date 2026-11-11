@@ -30,6 +30,7 @@ mod native_interception;
 mod ops;
 mod options;
 mod plan_usage;
+mod private_http;
 mod project_search;
 mod provider_owner;
 mod python_tools;
@@ -3683,7 +3684,7 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
 fn _open_conversation<'py>(
     py: Python<'py>,
     config_json: String,
@@ -3694,6 +3695,7 @@ fn _open_conversation<'py>(
     api_key: String,
     provider_lease: PyRef<'py, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
+    _private_http: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let opening = conversation_opening(
         config_json,
@@ -3704,6 +3706,7 @@ fn _open_conversation<'py>(
         api_key,
         provider_lease.inner.clone(),
         _share_model_http,
+        _private_http,
     )?;
     async_bridge::future_factory_into_py(py, move || opening)
 }
@@ -3717,6 +3720,7 @@ fn conversation_opening(
     api_key: String,
     lease: Arc<provider_owner::Lease>,
     share_model_http: bool,
+    private_http: bool,
 ) -> PyResult<
     impl std::future::Future<
         Output = PyResult<(
@@ -3727,8 +3731,9 @@ fn conversation_opening(
     > + Send
     + use<>,
 > {
-    let options: options::ThreadOptions =
+    let mut options: options::ThreadOptions =
         config::decode(serde_json::from_str(options_json).map_err(py_error)?).map_err(py_error)?;
+    options.private_http = private_http;
     if !options.permits_initial_config()
         || options.agent_profiles.is_some()
         || !options.manual_tool_slots.is_empty()
@@ -3751,9 +3756,13 @@ fn conversation_opening(
     let settings = ops::model_settings(settings_value)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(async move {
-        let (state, generated_home) = lease
+        let (mut state, generated_home) = lease
             .conversation_engine(config_json, runtime_json, api_key, share_model_http)
             .await?;
+        if private_http {
+            // Only this scope selects the retained handshake-fresh owner.
+            state.model_http_pool = Some(lease.private_model_http_pool()?);
+        }
         let mut engine = Engine::new(state);
         lease.register_engine(engine.inner.clone())?;
         engine.managed_lease = Some(Arc::downgrade(&lease));
@@ -3812,7 +3821,7 @@ fn conversation_opening(
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false))]
+#[pyo3(signature = (config_json, runtime_json, options_json, specs_json, settings_json, input_json, *, api_key, provider_lease, _share_model_http=false, _private_http=false))]
 fn _prepare_run_conversation(
     config_json: String,
     runtime_json: String,
@@ -3823,6 +3832,7 @@ fn _prepare_run_conversation(
     api_key: String,
     provider_lease: PyRef<'_, provider_owner::NativeProviderLease>,
     _share_model_http: bool,
+    _private_http: bool,
 ) -> PyResult<agent_run::NativeRun> {
     provider_lease.inner.check_live()?;
     if !provider_lease.inner.keeps_unpublished_owner() {
@@ -3839,6 +3849,7 @@ fn _prepare_run_conversation(
         api_key,
         provider_lease.inner.clone(),
         _share_model_http,
+        _private_http,
     )?;
     Ok(agent_run::NativeRun::new(
         opening,
