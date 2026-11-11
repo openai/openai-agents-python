@@ -37,45 +37,6 @@ For the synchronous `SessionStore` contract, persistent SQLite adapter, and reco
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 
-
-## Reopen a conversation from Dapr
-
-Install `openai-agents[dapr]` and configure a Dapr `state.redis` component backed
-by persistent Redis. Keep the canonical keys free of expiry and eviction. SDK
-workers sharing the component need the same key namespace and synchronized
-clocks.
-
-```python
-from agents import Agent, CustomStorage, DaprSessionStore
-
-
-async def run() -> None:
-    store = await DaprSessionStore.from_address(
-        "localhost:50001", state_store_name="statestore"
-    )
-    try:
-        storage = CustomStorage(store)
-        agent = Agent(instructions="Help the user.")
-        async with agent.session(storage=storage) as session:
-            session_id = session.id
-            turn = await session.submit("My preferred language is Python.")
-            await turn.get_result()
-
-        async with agent.session(storage=storage, resume=session_id) as session:
-            turn = await session.submit("What language did I choose?")
-            print((await turn.get_result()).final_output)
-    finally:
-        await store.aclose()
-```
-
-With an existing async Dapr client, pass it to
-`DaprSessionStore(client, state_store_name="statestore")`. Close the store after
-its Sessions and close the supplied client separately. The store renews the
-writer lease while a Session remains open. After a process exit, the lease
-expires and the next writer can reopen the last committed snapshot. Redis
-persistence and replication determine whether that snapshot survives server
-loss.
-
 ## Reopen a conversation from local storage
 
 Keep the profile separate from the executor workspace. The SDK rejects a local working directory or writable root that overlaps the session store. For example, put the worker in `worker/workspace` and keep its session history in `worker/history`.
