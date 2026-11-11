@@ -650,7 +650,7 @@
     },
     {
       "path": "sdk-native-model-response-stream.patch",
-      "sha256": "043d40e59af9ce390c8cb8e3eedd9d5104b413a14e943cfa0c09241b8a57f533"
+      "sha256": "0c23bbf1515d26979e84697b7e457dfaf4507cb489dd593927b073b7a5142ae6"
     },
     {
       "path": "sdk-provider-item-references.patch",
@@ -659,7 +659,27 @@
     {
       "path": "sdk-reset-tool-choice-after-use.patch",
       "sha256": "b2381c223988ede75ad31b30a4e67a40d230963d5608838713f32935e0ef134f"
+    },
+    {
+      "path": "sdk-function-provider-schemas.patch",
+      "sha256": "2dc9df2134da65d9f7ebf158260a6a3504d370c22d906f213b38abceeafec55f"
+    },
+    {
+      "path": "sdk-tool-batch-completion.patch",
+      "sha256": "1090afd706b9ce7ef2f1337dc66c42bf8f7b2cf4d8e5cbbd17275b143724bb70"
+    },
+    {
+      "path": "sdk-raw-provider-events.patch",
+      "sha256": "192f9f23ac35e03a1f6b91a5ac14a13b0570397c9846f0e238c08c750460cd9c"
+    },
+    {
+      "path": "sdk-produced-run-items.patch",
+      "sha256": "c2577104f3f07363b5e3703b0219bd7a71d927c73cb84c4c78ebca23160f2e93"
+    },
+    {
+      "path": "sdk-nested-tool-output-acceptance.patch",
+      "sha256": "f385082704b0d3dd5fa1e15645a152c2c7c342ed29551429d9f2051808a79365"
     }
   ],
-  "result_tree": "179a2491a9369198a29d303e465bd04478d42c79"
+  "result_tree": "448f31f467afe839006a6aa46b557c7c1c4e4dbc"
 }

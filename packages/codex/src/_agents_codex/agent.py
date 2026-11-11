@@ -60,9 +60,10 @@ from ._lifecycle import (
 from ._mcp_errors import _protect_mcp_methods
 from ._media import _MAX_AUDIO_INPUT_BYTES, _check_audio_json, _contains_audio
 from ._public import preserve_module_identity as _preserve_module_identity
+from ._tool_errors import ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
-from .completion import _BeforeComplete
+from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
 from .initial_messages import _capture_initial_messages, _initial_messages_json
@@ -925,6 +926,9 @@ class Agent(Generic[ContextT, OutputT]):
     or None to keep the default. Codex publishes the summary in its history.
 
     ``before_complete`` checks proposed completion for roots and native children.
+    ``tool_batch_completion`` can propose a final value once a direct function
+    batch has settled. A ``FinishToolBatch`` value passes through the active
+    output type and completion policy. Returning ``None`` lets the turn continue.
     Return None to accept, ContinueTurn with instructions to keep the same turn
     running, or StopTurn to abort by policy. Rejected text may already have
     streamed; only accepted completion settles the turn.
@@ -957,6 +961,7 @@ class Agent(Generic[ContextT, OutputT]):
     realtime: RealtimeAgentConfig | None
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
     output_guardrails: tuple[OutputGuardrail[ContextT], ...]
+    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -985,6 +990,7 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
@@ -1003,6 +1009,7 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
@@ -1037,6 +1044,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1062,6 +1070,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1086,6 +1095,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1102,6 +1112,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("before_compact must be callable or None")
         if before_complete is not None and not callable(before_complete):
             raise TypeError("before_complete must be callable or None")
+        if tool_batch_completion is not None and not callable(tool_batch_completion):
+            raise TypeError("tool_batch_completion must be callable or None")
         if model is not None and not isinstance(model, str):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
@@ -1134,6 +1146,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
+        object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
         for name, checks, kind in (
             ("input_guardrails", input_guardrails, InputGuardrail),
             ("output_guardrails", output_guardrails, OutputGuardrail),
@@ -1284,9 +1297,11 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1313,9 +1328,11 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1342,9 +1359,11 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1371,9 +1390,11 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1400,6 +1421,9 @@ class Agent(Generic[ContextT, OutputT]):
         retains a limited suffix and reports gaps. This policy is not checkpointed.
         include_model_output_items=True records ordinary assistant messages and
         provider reasoning summaries in the Session's observation stream.
+        include_raw_provider_events=True captures Responses provider JSON. Use
+        include_execution_details=True on the observation reader to receive it.
+        Capture uses the Session's in-memory observation retention policy.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1522,9 +1546,11 @@ class Agent(Generic[ContextT, OutputT]):
                 parent_trace=parent_trace,
                 trace_options=trace_options,
                 on_interaction=on_interaction,
+                tool_error_formatter=tool_error_formatter,
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1556,9 +1582,11 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
@@ -1567,6 +1595,8 @@ class Agent(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> AsyncIterator[Session[SessionContextT, OutputT] | Completed[OutputT]]:
+        if tool_error_formatter is not None and not callable(tool_error_formatter):
+            raise TypeError("tool_error_formatter must be callable or None")
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable or None")
         from .session import Completed, Session
@@ -1596,8 +1626,10 @@ class Agent(Generic[ContextT, OutputT]):
                 project_guidance=project_guidance,
                 reconciled_calls=reconciled_calls,
                 max_function_concurrency=max_function_concurrency,
+                tool_error_formatter=tool_error_formatter,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1649,6 +1681,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1658,6 +1691,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1677,6 +1711,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1686,6 +1721,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1705,6 +1741,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1714,6 +1751,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1732,6 +1770,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -1746,6 +1785,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -1802,6 +1842,9 @@ class Agent(Generic[ContextT, OutputT]):
         return_history=True captures conversation records before close for replay
         through another Session's transact_history. That Session supplies its own instructions.
         History above 4,096 original records or 8 MiB raises NativeError after completion.
+
+        return_items=True retains the accepted assistant and tool items in
+        Completed.items with their producing Agents.
         """
         audio_budget = [_MAX_AUDIO_INPUT_BYTES]
         initial_messages = _capture_initial_messages(
@@ -1815,6 +1858,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not isinstance(input, str):
                 input = cast("UserInput", {"role": "user", "content": _response_content(parts)})
         options: dict[str, Any] = {}
+        produced_items_token = None
         try:
             from ._function_tools import FunctionTool
             from .manual import _CapturedApproval
@@ -1825,6 +1869,7 @@ class Agent(Generic[ContextT, OutputT]):
                 InteractionRequired,
                 NativeError,
                 _handoff_default_names,
+                _produced_items_restore,
                 _split_tools,
             )
             from .state import SessionState
@@ -1851,6 +1896,8 @@ class Agent(Generic[ContextT, OutputT]):
                     )
                     if tools is None and before_step is None and state is None:
                         _check_tools(self.tools)
+            if tool_error_formatter is not None and not callable(tool_error_formatter):
+                raise TypeError("tool_error_formatter must be callable or None")
             if on_interaction is not None and not callable(on_interaction):
                 raise TypeError("on_interaction must be callable")
             if not isinstance(return_state, bool):
@@ -1928,6 +1975,8 @@ class Agent(Generic[ContextT, OutputT]):
             ] = self.session
             if initial_messages is not None:
                 options["initial_messages"] = initial_messages
+            if tool_error_formatter is not None:
+                options["tool_error_formatter"] = tool_error_formatter
             if on_interaction is not None:
                 options["on_interaction"] = on_interaction
             if parent_trace is not None:
@@ -1972,20 +2021,28 @@ class Agent(Generic[ContextT, OutputT]):
                 # instruction receipt to the first ordinary submission.
                 session_factory = self._session_context
                 options["_atomic_first_turn"] = True
-                if not return_history and _private_text_run_eligible(
+                if not (return_history or return_items) and _private_text_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_private_text_run"] = True
-                if not return_history and _completed_run_eligible(
+                if not (return_history or return_items) and _completed_run_eligible(
                     self, input, context, return_state, parent_trace, trace_options
                 ):
                     options["_completed_input"] = input
+            if return_items and resume_manual:
+                assert state is not None
+                produced_items_token = _produced_items_restore.set(
+                    (self, state, asyncio.current_task())
+                )
             async with session_factory(
                 context=cast(SessionContextT, context),
                 **options,
             ) as session:
                 from .session import Completed
 
+                if produced_items_token is not None:
+                    _produced_items_restore.reset(produced_items_token)
+                    produced_items_token = None
                 if isinstance(session, Completed):
                     return session
                 if (
@@ -2110,6 +2167,8 @@ class Agent(Generic[ContextT, OutputT]):
                 session._fail_unhandled_questions = (
                     session._interaction_handler is None and not pause_manual
                 )
+                if return_items:
+                    session._start_produced_items()
                 if resume_manual:
                     restored = session.restored_turn
                     if restored is None:
@@ -2134,6 +2193,7 @@ class Agent(Generic[ContextT, OutputT]):
                         on_interaction,
                         return_state=return_state,
                         return_history=return_history,
+                        return_items=return_items,
                         pause_manual=pause_manual,
                     )
                 result = await submission.get_result()
@@ -2141,8 +2201,12 @@ class Agent(Generic[ContextT, OutputT]):
                     result = replace(result, state=await session.save_state())
                 if return_history:
                     result = replace(result, history=await session._run_history())
+                if return_items:
+                    result = replace(result, items=session._take_produced_items(result.turn))
                 return result
         finally:
+            if produced_items_token is not None:
+                _produced_items_restore.reset(produced_items_token)
             options.pop("trace_options", None)
             del trace_options
 
@@ -2153,6 +2217,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2162,6 +2227,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2181,6 +2247,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2190,6 +2257,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2209,6 +2277,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2218,6 +2287,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2236,6 +2306,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         on_interaction: _InteractionHandler | None = None,
+        tool_error_formatter: ToolErrorFormatter | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
         model_settings: ModelSettings | None = None,
@@ -2250,6 +2321,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         initial_messages: Sequence[InitialMessage] | None = None,
+        return_items: bool = False,
         return_state: bool = False,
         return_history: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
@@ -2263,7 +2335,8 @@ class Agent(Generic[ContextT, OutputT]):
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
-        on_interaction, state, and return_history follow run(). A sync or async handler
+        on_interaction, state, return_history, and return_items follow run().
+        A sync or async handler
         returns request.reply(value); the SDK delivers it before closing.
 
         If opening with a managed Environment fails and automatic cleanup leaves
@@ -2288,10 +2361,14 @@ class Agent(Generic[ContextT, OutputT]):
                     options["state"] = state
                 if initial_messages is not None:
                     options["initial_messages"] = initial_messages
+                if return_items:
+                    options["return_items"] = return_items
                 if return_state is not False:
                     options["return_state"] = return_state
                 if return_history is not False:
                     options["return_history"] = return_history
+                if tool_error_formatter is not None:
+                    options["tool_error_formatter"] = tool_error_formatter
                 if on_interaction is not None:
                     options["on_interaction"] = on_interaction
                 if provider is not None:
@@ -2366,6 +2443,7 @@ def _private_text_run_eligible(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and agent.tool_batch_completion is None
         and not agent.output_guardrails
         and not agent.input_guardrails
         and not return_state

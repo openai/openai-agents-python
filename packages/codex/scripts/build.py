@@ -19,7 +19,11 @@ from source_integrity import verify_pristine_source, verify_rmcp_source
 def training_python_digest(project):
     """Identify the Python inputs used to train this native build."""
     digest = hashlib.sha256()
-    for directory in (project / "src/agents", project / "packages/codex/src/_agents_codex"):
+    for directory in (
+        project / "src/agents",
+        project / "src/_agents_shared",
+        project / "packages/codex/src/_agents_codex",
+    ):
         for path in sorted(directory.rglob("*.py")):
             digest.update(path.relative_to(project).as_posix().encode() + b"\0")
             digest.update(hashlib.sha256(path.read_bytes()).digest())

@@ -39,7 +39,7 @@ from ..session import (
     _ManualBoundaryLost,
 )
 from ..state import SessionState
-from ..tools import ToolRef
+from ..tools import ToolOutput, ToolRef, _capture_application_data
 from ..turn import PendingRequests
 from ._client import _DEFAULT_LIMITS, A2ALimits, _limits
 from ._provider import _json
@@ -575,6 +575,9 @@ class NativeA2AExecutor(AgentExecutor):
                                                 captured_tool.declaration,
                                                 call.call_id,
                                                 captured_tool._encode_result(checked, strict=True),
+                                                _capture_application_data(checked.application_data)
+                                                if isinstance(checked, ToolOutput)
+                                                else None,
                                             )
                                 except Exception:
                                     pass

@@ -55,6 +55,8 @@ pub(crate) struct ProfileSpec {
     before_compact: bool,
     #[serde(default)]
     before_complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tool_batch_completion: bool,
     #[serde(default)]
     selecting_steps: bool,
     output_fingerprint: String,
@@ -209,12 +211,15 @@ impl OpeningProfiles {
         Ok((saved, slots))
     }
 
-    pub(crate) fn capabilities(&self) -> [bool; 4] {
+    pub(crate) fn capabilities(&self) -> [bool; 5] {
         [
             self.roster.iter().any(|profile| profile.selecting_steps),
             self.roster.iter().any(|profile| profile.transform_context),
             self.roster.iter().any(|profile| profile.before_compact),
             self.roster.iter().any(|profile| profile.before_complete),
+            self.roster
+                .iter()
+                .any(|profile| profile.tool_batch_completion),
         ]
     }
 }
@@ -243,6 +248,8 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                 continue;
             }
             all_declarations.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                strict: false,
+                output_schema: None,
                 name: name.clone(),
                 description: "Native handoff".into(),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -570,6 +577,7 @@ async fn prepare_profile(
         descriptor.transform_context,
         descriptor.before_compact,
         descriptor.before_complete,
+        descriptor.tool_batch_completion,
     ];
     let catalog = if voice {
         tools.voice_profile_catalog(
@@ -1059,6 +1067,7 @@ pub(crate) async fn configure(
                 prepared.catalog.transform_context,
                 prepared.catalog.before_compact,
                 prepared.catalog.before_complete,
+                prepared.catalog.tool_batch_completion,
             ],
             default_slots,
         )?;
@@ -1289,6 +1298,7 @@ pub(crate) async fn replace_tools(
             previous.transform_context,
             previous.before_compact,
             previous.before_complete,
+            previous.tool_batch_completion,
         ],
         false,
     )?;
@@ -1609,6 +1619,8 @@ pub(crate) fn wrap_handoff_callback(
 
 fn handoff_declaration(name: &str, target: &str) -> DynamicToolFunctionSpec {
     DynamicToolFunctionSpec {
+        strict: false,
+        output_schema: None,
         name: name.to_owned(),
         description: format!("Transfer this conversation to captured Agent {target}."),
         input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),

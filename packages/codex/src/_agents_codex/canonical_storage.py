@@ -19,7 +19,13 @@ from collections.abc import Iterator as Iterator
 from contextlib import contextmanager as contextmanager
 from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
-from typing import Any as Any, Literal, Protocol as Protocol, runtime_checkable as runtime_checkable
+from typing import (
+    Any as Any,
+    Literal,
+    Protocol as Protocol,
+    cast,
+    runtime_checkable as runtime_checkable,
+)
 
 from ._legacy_history import (
     check_legacy_history_size as _check_legacy_history_size,
@@ -255,7 +261,7 @@ class SQLiteSessionStore:
             finally:
                 connection.close()
 
-        return await _join(asyncio.create_task(asyncio.to_thread(read)))
+        return cast(list[dict[str, Any]], await _join(asyncio.create_task(asyncio.to_thread(read))))
 
     def _check_database(self, *, create: bool = False) -> None:
         if sys.platform == "win32":

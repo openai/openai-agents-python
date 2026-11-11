@@ -940,6 +940,17 @@ impl NativeThread {
         })
     }
 
+    fn _enable_raw_provider_events(&self) -> PyResult<()> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        let store = inner.thread.thread_extension_data();
+        store.insert(codex_core::ObserveRawProviderEvents);
+        if let Some(control) = store.get::<crate::native_interception::Control>() {
+            control.enable_raw_provider_events();
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (limit=None, for_replay=false))]
     fn _canonical_history<'py>(
         &self,
@@ -1187,6 +1198,26 @@ impl NativeThread {
             .mcp_result_control()?
             .and_then(|control| control.owner(nonce))
             .is_some_and(|control| control.resolve(nonce, turn_id, call_id, reply)))
+    }
+
+    fn _resolve_native_mcp_result_with_assignment<'py>(
+        &self,
+        py: Python<'py>,
+        nonce: u64,
+        turn_id: &str,
+        call_id: &str,
+        reply: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let assignment = self
+            .mcp_result_control()?
+            .and_then(|control| control.owner(nonce))
+            .and_then(|control| control.resolve_with_assignment(nonce, turn_id, call_id, reply));
+        async_bridge::future_into_py(py, async move {
+            Ok(match assignment {
+                Some(assignment) => (true, assignment.await.is_ok()),
+                None => (false, false),
+            })
+        })
     }
 
     fn export_checkpoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -2372,7 +2403,9 @@ impl NativeThread {
             let Some(tools) = tools else {
                 return Ok(false);
             };
-            Ok(tools.push_model_producer_event(request_id, &data_json).await)
+            Ok(tools
+                .push_model_producer_event(request_id, &data_json)
+                .await)
         })
     }
 
@@ -2964,15 +2997,23 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (response_json, *, wait_for_acceptance=false))]
     fn _respond_python_tool<'py>(
         &self,
         py: Python<'py>,
         response_json: &str,
+        wait_for_acceptance: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let response: python_tools::Reply =
             serde_json::from_str(response_json).map_err(py_error)?;
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
+        let (acceptance, accepted) = if wait_for_acceptance {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let delivery = async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             // Suspension cannot seal while an acknowledged real receipt is
             // still in flight between removal from pending and writer flush.
@@ -3065,6 +3106,7 @@ impl NativeThread {
                                     .send(python_tools::ToolReply {
                                         response,
                                         start_response,
+                                        acceptance,
                                     })
                                     .is_ok())
                             })
@@ -3074,6 +3116,7 @@ impl NativeThread {
                             .send(python_tools::ToolReply {
                                 response,
                                 start_response,
+                                acceptance,
                             })
                             .is_ok());
                     }
@@ -3146,6 +3189,7 @@ impl NativeThread {
                                 .send(python_tools::ToolReply {
                                     response,
                                     start_response,
+                                    acceptance,
                                 })
                                 .is_ok())
                         })
@@ -3171,6 +3215,7 @@ impl NativeThread {
                                 .send(python_tools::ToolReply {
                                     response,
                                     start_response,
+                                    acceptance,
                                 })
                                 .is_ok())
                         })
@@ -3181,6 +3226,7 @@ impl NativeThread {
                         .send(python_tools::ToolReply {
                             response,
                             start_response,
+                            acceptance,
                         })
                         .is_ok();
                     if accepted {
@@ -3189,6 +3235,14 @@ impl NativeThread {
                     Ok(accepted)
                 }
             }
+        };
+        async_bridge::future_into_py(py, async move {
+            // Release the writer's leases before joining Core result acceptance.
+            let delivered = delivery.await?;
+            if delivered && let Some(accepted) = accepted {
+                return Ok(accepted.await.is_ok());
+            }
+            Ok(delivered)
         })
     }
 
@@ -3403,6 +3457,19 @@ impl NativeThread {
             drop(cancellation);
             result
         })
+    }
+
+    fn _start_produced_items(&self) -> PyResult<()> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        inner.thread.sdk_start_produced_items();
+        Ok(())
+    }
+
+    fn _take_produced_items(&self, turn_id: &str) -> PyResult<String> {
+        let inner = self.current()?;
+        let _operation = inner.engine.operation(false).map_err(py_error)?;
+        inner.thread.sdk_take_produced_items(turn_id).map_err(py_error)
     }
 
     #[pyo3(signature = (subagent_id=None, *, for_reconciliation=false))]
@@ -3929,6 +3996,7 @@ fn conversation_opening(
         || options.transform_context
         || options.before_compact
         || options.before_complete
+        || options.tool_batch_completion
     {
         return Err(PyValueError::new_err(
             "atomic opening requires a fresh ordinary conversation",

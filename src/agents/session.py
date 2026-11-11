@@ -74,6 +74,7 @@ from _agents_codex.session import (
     PathLike as PathLike,
     PendingRequests as PendingRequests,
     PreparedRequest as PreparedRequest,
+    ProducedItem as ProducedItem,
     Protocol as Protocol,
     ReconciledCall as ReconciledCall,
     RecordedTurn as RecordedTurn,

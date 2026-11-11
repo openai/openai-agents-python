@@ -415,6 +415,8 @@ class ChatCompletionsModel:
                         raise ValueError("Chat adapters support the default function namespace")
                     if tool.get("type") != "function":
                         raise ValueError("ChatCompletionsModel supports native function tools")
+                    if tool.get("output_schema") is not None:
+                        raise ValueError("Tool output schemas require the Responses API")
                     tools.append(
                         {
                             "type": "function",
