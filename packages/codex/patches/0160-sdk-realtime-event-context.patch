@@ -1,0 +1,157 @@
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1542,6 +1542,12 @@
+                                 RealtimeEvent::ResponseCreated(event) => {
+                                     event.profile_receipt = receipt
+                                 }
++                                RealtimeEvent::ResponseDone(event) => {
++                                    event.profile_receipt = receipt
++                                }
++                                RealtimeEvent::ResponseCancelled(event) => {
++                                    event.profile_receipt = receipt
++                                }
+                                 RealtimeEvent::AudioOut(event) => event.profile_receipt = receipt,
+                                 RealtimeEvent::OutputTranscriptDelta(event) => {
+                                     event.profile_receipt = receipt
+@@ -3587,6 +3593,7 @@
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::ResponseCancelled(
+                 RealtimeResponseCancelled {
++                    profile_receipt: None,
+                     response_id: Some("resp_cancelled_1".to_string()),
+                 }
+             ))
+@@ -3612,6 +3619,7 @@
+         assert_eq!(
+             parse_realtime_event(payload.as_str(), RealtimeEventParser::RealtimeV2),
+             Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++                profile_receipt: None,
+                 usage: None,
+                 function_call_ids: Vec::new(),
+                 response_id: None
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_v2.rs
+@@ -82,10 +82,12 @@
+         })),
+         "response.cancelled" => Some(RealtimeEvent::ResponseCancelled(
+             RealtimeResponseCancelled {
++                profile_receipt: None,
+                 response_id: parse_response_event_response_id(&parsed),
+             },
+         )),
+         "response.done" => Some(RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            profile_receipt: None,
+             usage: parsed
+                 .get("response")
+                 .and_then(|response| response.get("usage"))
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -5853,7 +5853,7 @@
+                 text
+             };
+             writer
+-                .send_conversation_function_call_output(call_id.clone(), text)
++                .send_conversation_function_call_output(call_id.clone(), text.clone())
+                 .await?;
+             if sdk.pending.lock().await.remove(&call_id) != Some(true) {
+                 return Ok(());
+@@ -5869,6 +5869,7 @@
+                 .send(RealtimeEvent::FunctionCallFinished {
+                     call_id: call_id.clone(),
+                     succeeded: succeeded && !cancelled,
++                    output: Some(text),
+                 })
+                 .await
+                 .context("SDK function status route closed")?;
+@@ -5925,6 +5926,7 @@
+                     .send(RealtimeEvent::FunctionCallFinished {
+                         call_id: handoff_id.clone(),
+                         succeeded: false,
++                        output: Some(failure.to_owned()),
+                     })
+                     .await
+                     .context("SDK function status route closed")?;
+--- a/codex-rs/core/src/realtime_conversation/item_deletion.rs
++++ b/codex-rs/core/src/realtime_conversation/item_deletion.rs
+@@ -661,6 +661,7 @@
+             .observe(&RealtimeEvent::FunctionCallFinished {
+                 call_id: "native-call".into(),
+                 succeeded: true,
++                output: None,
+             })
+             .unwrap();
+         state.admit_retrieved_item(&value).unwrap();
+--- a/codex-rs/core/src/realtime_conversation_tests.rs
++++ b/codex-rs/core/src/realtime_conversation_tests.rs
+@@ -2208,6 +2208,7 @@
+         }),
+         RealtimeEvent::FunctionCallRequested(request.clone()),
+         RealtimeEvent::ResponseDone(RealtimeResponseDone {
++            profile_receipt: None,
+             usage: None,
+             response_id: Some("A".into()),
+             // The uncorrelated call is not an authoritative member of A.
+@@ -2632,12 +2633,14 @@
+     responses.pending_create = true;
+     for event in [
+         codex_api::RealtimeEvent::ResponseDone(codex_protocol::protocol::RealtimeResponseDone {
++            profile_receipt: None,
+             usage: None,
+             response_id: Some("stale".into()),
+             function_call_ids: Vec::new(),
+         }),
+         codex_api::RealtimeEvent::ResponseCancelled(
+-            codex_protocol::protocol::RealtimeResponseCancelled { response_id: None },
++            codex_protocol::protocol::RealtimeResponseCancelled {
++                profile_receipt: None, response_id: None },
+         ),
+     ] {
+         super::handle_realtime_server_event(
+@@ -2771,6 +2774,7 @@
+     })
+     .await;
+     let done = RealtimeEvent::ResponseDone(RealtimeResponseDone {
++        profile_receipt: None,
+         usage: None,
+         response_id: Some("provider-response".into()),
+         function_call_ids: ids.clone(),
+@@ -3224,6 +3228,7 @@
+         batch.handoff_accepted.store(true, Ordering::Release);
+         let stale = codex_api::RealtimeEvent::ResponseDone(
+             codex_protocol::protocol::RealtimeResponseDone {
++                profile_receipt: None,
+                 usage: None,
+                 response_id: Some("stale-response".into()),
+                 function_call_ids: Vec::new(),
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -579,6 +579,9 @@
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeResponseCancelled {
++    /// The retained configuration that issued this response.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub profile_receipt: Option<crate::agent_profile::AgentProfileReceipt>,
+     pub response_id: Option<String>,
+ }
+ 
+@@ -639,6 +642,9 @@
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct RealtimeResponseDone {
++    /// The retained configuration that issued this response.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub profile_receipt: Option<crate::agent_profile::AgentProfileReceipt>,
+     /// Provider-reported counters. Absence is unknown, never a measured zero.
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub usage: Option<Value>,
+@@ -750,6 +756,9 @@
+     FunctionCallFinished {
+         call_id: String,
+         succeeded: bool,
++        /// Exact model-visible text accepted by the native output writer.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        output: Option<String>,
+     },
+     /// Correlated unavailable function output, published without executing a callback.
+     FunctionCallRejected {
