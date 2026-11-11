@@ -1795,6 +1795,7 @@ async def _call_callback_body(
         args = ()
         kwargs = {}
         enter = None
+        callback = admit = cast(Any, None)
         del worker, value
 
 

@@ -22,9 +22,8 @@ from tests.test_native_realtime_adapter import (
 
 
 def live_owner(monkeypatch: pytest.MonkeyPatch) -> tuple[RealtimeSession, list[dict[str, Any]]]:
-    owner = RealtimeSession(
-        cast(Session[Any, Any], SimpleNamespace(_agent=None)), config=RealtimeConfig()
-    )
+    session = cast(Session[Any, Any], SimpleNamespace(_agent=None))
+    owner = RealtimeSession(session, config=RealtimeConfig())
     owner._live = True
     owner._ready.set_result(None)
     frames: list[dict[str, Any]] = []
