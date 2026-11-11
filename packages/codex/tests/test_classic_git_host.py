@@ -29,6 +29,7 @@ def recording_session() -> SimpleNamespace:
     # Keep this boundary local: observe commands without invoking Git or a provider.
     success = ExecResult(stdout=b"", stderr=b"", exit_code=0)
     return SimpleNamespace(
+        _supports_git_repo=True,
         state=SimpleNamespace(session_id=UUID(int=0)),
         exec=AsyncMock(return_value=success),
         mkdir=AsyncMock(),

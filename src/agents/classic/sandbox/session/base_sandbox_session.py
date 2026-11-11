@@ -238,7 +238,7 @@ class BaseSandboxSession(abc.ABC):
             self.state.manifest,
             provider_backend_id=self.state.type,
         )
-        self.state.manifest._validate_git_repo_hosts()
+        self.state.manifest._validate_git_repo_entries(supports_git_repo=self._supports_git_repo)
         try:
             await self._ensure_backend_started()
             self._start_workspace_root_ready = self.state.workspace_root_ready
@@ -428,6 +428,10 @@ class BaseSandboxSession(abc.ABC):
         """Run provider bookkeeping after stop finishes or fails."""
 
         return
+
+    @property
+    def _supports_git_repo(self) -> bool:
+        return True
 
     def supports_docker_volume_mounts(self) -> bool:
         """Return whether this backend attaches Docker volume mounts before manifest apply."""
@@ -1476,7 +1480,7 @@ class BaseSandboxSession(abc.ABC):
             resolved_manifest,
             provider_backend_id=self.state.type,
         )
-        resolved_manifest._validate_git_repo_hosts()
+        resolved_manifest._validate_git_repo_entries(supports_git_repo=self._supports_git_repo)
 
     @redact_mount_error_data
     async def apply_manifest(self, *, only_ephemeral: bool = False) -> MaterializationResult:

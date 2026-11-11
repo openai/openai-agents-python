@@ -82,9 +82,11 @@ class Dependencies:
 
         The launcher receives the session, the SDK's shell script, and its positional arguments.
         Run the script as `sh -c SCRIPT sandbox-git-copy ARG...` with the image's shell and
-        copy tools. Use a provider transport that starts the shell with a clean environment and
-        tool paths outside the writable workspace. Bind the launcher on the application client
-        that creates or resumes the sandbox.
+        copy tools. Start the shell with a clean environment through a trusted provider transport.
+        Select tools outside the writable workspace. Protect their binaries, libraries, link
+        targets, and parent directories from writes and mount changes by sandbox workloads.
+        Bind the launcher on the client that creates or resumes the sandbox.
+        Docker rejects GitRepo entries even when a launcher is supplied.
         """
         self.git_repo_copy_launcher = git_repo_copy_launcher
         self._bindings: dict[DependencyKey, _Binding] = {}

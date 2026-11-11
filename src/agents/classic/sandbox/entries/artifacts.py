@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal
 
@@ -107,12 +107,25 @@ def _sha256_handle(handle: io.BufferedReader) -> str:
     return digest.hexdigest()
 
 
-def _validate_git_repo_entry_hosts(entries: Iterable[BaseEntry]) -> None:
+_DOCKER_GIT_REPO_ERROR = "Docker sandboxes do not support GitRepo entries."
+
+
+def _git_repos(entries: Iterable[BaseEntry]) -> Iterator[GitRepo]:
     for entry in entries:
         if isinstance(entry, Dir):
-            _validate_git_repo_entry_hosts(entry.children.values())
-        elif isinstance(entry, GitRepo) and entry._validated_host() is None:
+            yield from _git_repos(entry.children.values())
+        elif isinstance(entry, GitRepo):
+            yield entry
+
+
+def _validate_git_repo_entries(entries: Iterable[BaseEntry], *, supports_git_repo: bool) -> None:
+    has_git_repo = False
+    for entry in _git_repos(entries):
+        if entry._validated_host() is None:
             raise _InvalidGitHostError()
+        has_git_repo = True
+    if has_git_repo and not supports_git_repo:
+        raise ValueError(_DOCKER_GIT_REPO_ERROR)
 
 
 class Dir(BaseEntry):
@@ -148,7 +161,9 @@ class Dir(BaseEntry):
         base_dir: Path,
     ) -> list[MaterializedFile]:
         try:
-            _validate_git_repo_entry_hosts(self.children.values())
+            _validate_git_repo_entries(
+                self.children.values(), supports_git_repo=session._supports_git_repo
+            )
             await session.mkdir(dest, parents=True)
             await self._apply_metadata(session, dest)
             return await session._apply_entry_batch(
@@ -831,6 +846,8 @@ class GitRepo(BaseEntry):
         host = self._validated_host()
         if host is None:
             raise _InvalidGitHostError()
+        if not session._supports_git_repo:
+            raise ValueError(_DOCKER_GIT_REPO_ERROR)
         git_subpath = self._validate_subpath()
 
         # Check Git in the same environment that will be used to clone.

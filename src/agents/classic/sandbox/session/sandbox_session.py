@@ -268,6 +268,10 @@ class SandboxSession(BaseSandboxSession):
         return self._inner._runtime_has_protected_mount_authority()
 
     @property
+    def _supports_git_repo(self) -> bool:
+        return self._inner._supports_git_repo
+
+    @property
     def dependencies(self) -> Dependencies:
         return self._inner.dependencies
 

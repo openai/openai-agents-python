@@ -2,7 +2,6 @@ import asyncio
 import errno
 import hashlib
 import io
-import json
 import logging
 import os
 import posixpath
@@ -13,13 +12,11 @@ import tempfile
 import threading
 import time
 import uuid
-from base64 import b64decode
 from collections import deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
-from functools import cache
 from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, Final, Literal, cast
 
@@ -87,8 +84,6 @@ from ..util.retry import (
 )
 from ..util.tar_utils import UnsafeTarMemberError, strip_tar_member_prefix, validate_tarfile
 from ..workspace_paths import (
-    _git_copy_tool_path,
-    _resolve_git_copy_path,
     coerce_posix_path,
     posix_path_as_path,
     posix_path_for_error,
@@ -103,9 +98,6 @@ _DOCKER_EXECUTOR: Final = ThreadPoolExecutor(
 )
 
 logger = logging.getLogger(__name__)
-
-# Docker reports the Go os.FileMode symlink bit in its archive path stat header.
-_DOCKER_PATH_SYMLINK = 1 << 27
 
 
 # Non-seekable payloads are spooled to measure their length; keep small ones in
@@ -318,8 +310,6 @@ class DockerSandboxSession(BaseSandboxSession):
         self._docker_client = docker_client
         self._container = container
         self.state = state
-        # A later manifest can omit a volume that remains attached to this container.
-        self._git_copy_data_roots = _docker_git_copy_data_roots(state.manifest)
         self._workspace_root_ready = state.workspace_root_ready
         self._resume_workspace_probe_pending = False
         self._pty_lock = asyncio.Lock()
@@ -367,6 +357,10 @@ class DockerSandboxSession(BaseSandboxSession):
     async def shutdown(self) -> None:
         async with self._removal_lock:
             await super().shutdown()
+
+    @property
+    def _supports_git_repo(self) -> bool:
+        return False
 
     def supports_docker_volume_mounts(self) -> bool:
         """Docker attaches volume-driver mounts when creating the container."""
@@ -628,7 +622,6 @@ class DockerSandboxSession(BaseSandboxSession):
         timeout: float | None,
         command_for_errors: tuple[str | Path, ...],
         kill_on_timeout: bool,
-        environment: list[str] | None = None,
     ) -> ExecResult:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
@@ -638,7 +631,6 @@ class DockerSandboxSession(BaseSandboxSession):
                 demux=True,
                 workdir=workdir,
                 user=user or "",
-                environment=environment,
             ),
         )
         try:
@@ -736,113 +728,11 @@ class DockerSandboxSession(BaseSandboxSession):
     ) -> ExecResult:
         return await self._exec_internal_for_user(*command, timeout=timeout, user=None)
 
-    async def _exec_git_copy(self, script: str, *arguments: str) -> ExecResult:
-        if self._dependencies is not None and self._dependencies.git_repo_copy_launcher is not None:
-            return await self._dependencies.git_repo_copy_launcher(self, script, arguments)
-        environment = await run_blocking_workspace_io(self._git_copy_environment)
-        if environment is None:
-            return ExecResult(
-                stdout=b"",
-                stderr=b"Unable to locate the provider's Git copy tools",
-                exit_code=127,
-            )
-        return await self._exec_internal_for_user(
-            "sh", "-c", script, "sandbox-git-copy", *arguments, user=None, environment=environment
-        )
-
-    def _git_copy_environment(self) -> list[str] | None:
-        self._container.reload()
-        image = self._container.image
-        if image is None:
-            return None
-        image_config = image.attrs.get("Config") or {}
-        image_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        for entry in image_config.get("Env") or ():
-            if entry.startswith("PATH="):
-                image_path = entry.removeprefix("PATH=")
-
-        # Only carry the image's vetted PATH into the checkout. Other inherited
-        # settings can change meaning when the copy runs from another directory.
-        image_workdir = image_config.get("WorkingDir") or "/"
-        read_link = cache(self._git_copy_link_target)
-        if (
-            read_link(PurePosixPath("/")) is None
-            or _resolve_git_copy_path(coerce_posix_path(self.state.manifest.root), read_link)
-            is None
-        ):
-            return None
-        mounts = self._container.attrs.get("Mounts")
-        if not isinstance(mounts, list):
-            return None
-        data_roots = _docker_git_copy_data_roots(self.state.manifest)
-        for mount in mounts:
-            destination = mount.get("Destination") if isinstance(mount, dict) else None
-            if not isinstance(destination, str) or not PurePosixPath(destination).is_absolute():
-                return None
-            data_roots.add(PurePosixPath(destination))
-        self._git_copy_data_roots.update(data_roots)
-
-        # A declared mount can follow GitRepo in the manifest. Reserve its path even
-        # when the leaf does not exist yet, resolving links in its existing parents.
-        def read_data_link(path: PurePosixPath) -> str:
-            return read_link(path) or ""
-
-        for root in self._git_copy_data_roots.copy():
-            physical = _resolve_git_copy_path(root, read_data_link)
-            if physical is None:
-                return None
-            self._git_copy_data_roots.add(physical)
-        directories = (
-            PurePosixPath(posixpath.join(image_workdir, entry))
-            for entry in f"{image_path}:/usr/bin:/bin".split(":")
-        )
-        copy_path = _git_copy_tool_path(directories, self._git_copy_data_roots, read_link)
-        if not copy_path:
-            return None
-
-        container_config = self._container.attrs.get("Config") or {}
-        container_keys = [entry.partition("=")[0] for entry in container_config.get("Env") or ()]
-        # Docker's exec API removes an inherited value when passed a bare name.
-        return [f"PATH={copy_path}", *(name for name in container_keys if name != "PATH")]
-
-    def _git_copy_link_target(self, path: PurePosixPath) -> str | None:
-        api = self._docker_client.api
-        url = api._url("/containers/{0}/archive", self._container.id)
-        with api.head(url, params={"path": str(path)}, timeout=api.timeout) as response:
-            if response.status_code == 404:
-                return None
-            api._raise_for_status(response)
-            encoded = response.headers.get("X-Docker-Container-Path-Stat")
-            if encoded is None:
-                raise ValueError("Docker path stat response did not contain metadata")
-            mode = json.loads(b64decode(encoded)).get("mode")
-        if not isinstance(mode, int):
-            raise ValueError("Docker path stat response did not contain a file mode")
-        if not mode & _DOCKER_PATH_SYMLINK:
-            return ""
-        # HEAD reports the terminal target. The archive entry preserves the link's raw
-        # target, so the resolver can check intermediate paths too.
-        with api.get(
-            url,
-            params={"path": str(path)},
-            headers={"Accept-Encoding": "identity"},
-            stream=True,
-            timeout=api.timeout,
-        ) as response:
-            api._raise_for_status(response)
-            header = response.raw.read(tarfile.RECORDSIZE)
-        with tarfile.open(fileobj=io.BytesIO(header), mode="r|") as archive:
-            member = archive.next()
-            if member is None or not member.issym():
-                raise ValueError("Docker archive entry did not match the inspected symlink")
-            return member.linkname
-
     async def _exec_internal_for_user(
         self,
         *command: str | Path,
         timeout: float | None = None,
         user: str | None = None,
-        environment: list[str] | None = None,
     ) -> ExecResult:
         # `docker-py` is synchronous and can block indefinitely (e.g. hung
         # process, daemon issues). Run in a worker thread so we can enforce a
@@ -861,7 +751,6 @@ class DockerSandboxSession(BaseSandboxSession):
             timeout=timeout,
             command_for_errors=command,
             kill_on_timeout=True,
-            environment=environment,
         )
 
     async def _stream_into_exec(
@@ -2135,14 +2024,6 @@ def _build_docker_volume_mounts(
         )
 
     return mounts
-
-
-def _docker_git_copy_data_roots(manifest: Manifest) -> set[PurePosixPath]:
-    return {
-        coerce_posix_path(manifest.root),
-        *(coerce_posix_path(target) for _, target in manifest.mount_targets()),
-        *(coerce_posix_path(grant.path) for grant in manifest.extra_path_grants),
-    }
 
 
 def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:

@@ -121,9 +121,11 @@ For native cloud bucket testing, you can either export raw credential environmen
 
 ### GitRepo copies with a custom tool directory
 
-For a hosted image with its own shell and copy tools, pass a `git_repo_copy_launcher` through the client's `Dependencies`. Bind it when creating or resuming the client. The launcher runs the SDK's copy script on the same sandbox through a provider handle that the application trusts.
+For a hosted provider such as Modal, pass a `git_repo_copy_launcher` through the client's `Dependencies` when its image uses a custom shell or copy tools. Bind it when creating or resuming the client. The launcher runs the SDK's copy script on the same sandbox through a provider handle that the application trusts.
 
-This Modal example uses an existing sandbox with its workspace at `/workspace`. Its image includes a statically linked BusyBox at `/opt/image-tools/busybox` and a `cp` applet link in the same directory. Keep that directory, its parents, and all link targets outside writable workspaces and mounts. The absolute BusyBox command clears the inherited environment before starting the shell.
+This Modal example uses an existing sandbox with its workspace at `/workspace`. Its image includes a statically linked BusyBox at `/opt/image-tools/busybox` and a `cp` applet link in the same directory. The absolute BusyBox command clears the inherited environment before starting the shell.
+
+Run sandbox workloads as an unprivileged user. Install the tools outside writable workspaces and mounts. Protect the binary, the link and their parent directories from writes by that user. Keep mount privileges out of the workload so it cannot cover the tools with a different filesystem.
 
 ```python
 import asyncio

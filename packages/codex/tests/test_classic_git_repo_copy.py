@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="requires a POSIX she
 class FixtureGitSession:
     """Replace network cloning with a benign directory fixture."""
 
+    _supports_git_repo = True
     _dependencies: Dependencies | None = None
 
     def __init__(self, fixture: Path, cwd: Path, *, copy_path: str = os.defpath) -> None:
@@ -241,6 +242,52 @@ async def test_unix_local_git_copy_uses_application_tools(
     assert copy_marker.read_text(encoding="utf-8") == "custom copy"
 
 
+@pytest.mark.skipif(not Path("/proc/self/cwd").exists(), reason="requires procfs process links")
+@pytest.mark.parametrize("alias", ["directory", "executable"])
+async def test_unix_local_git_copy_rejects_process_relative_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str
+) -> None:
+    from agents.classic.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    system_copy = shutil.which("cp")
+    assert system_copy is not None
+    host_cwd = tmp_path / "host cwd"
+    host_cwd.mkdir()
+    (host_cwd / "cp").symlink_to(system_copy)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "cp").symlink_to("/proc/self/cwd/cp")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    fixture = tmp_path / "checkout fixture"
+    fixture.mkdir()
+    (fixture / "payload").write_text("working-tree data")
+    marker = workspace / "checkout tool ran"
+    hostile_copy = fixture / "cp"
+    hostile_copy.write_text(f"#!/bin/sh\nprintf hostile > {shlex.quote(str(marker))}\nexit 77\n")
+    hostile_copy.chmod(0o755)
+
+    async def clone(
+        self: GitRepo, *, session: BaseSandboxSession, url: str, tmp_dir: str
+    ) -> ExecResult:
+        shutil.copytree(fixture, tmp_dir, symlinks=True)
+        return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+    monkeypatch.setattr(GitRepo, "_clone_named_ref", clone)
+    monkeypatch.chdir(host_cwd)
+    path = "/proc/self/cwd" if alias == "directory" else str(tools)
+    monkeypatch.setenv("PATH", path + os.pathsep + os.defpath)
+    session = await UnixLocalSandboxClient().create(manifest=Manifest(root=str(workspace)))
+    destination = workspace / "output"
+    try:
+        await GitRepo(repo="fixture/repository", ref="main").apply(session, destination, workspace)
+    finally:
+        await session.aclose()
+
+    assert not marker.exists()
+    assert (destination / "payload").read_text() == "working-tree data"
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -282,146 +329,6 @@ async def test_default_git_copy_uses_a_clean_child_environment(
     )
     assert result.ok()
     assert result.stdout == b"selected directory"
-
-
-def test_docker_git_copy_clears_image_and_manifest_environment() -> None:
-    pytest.importorskip("docker")
-    from agents.classic.sandbox.sandboxes.docker import DockerSandboxSession
-
-    image = SimpleNamespace(attrs={"Config": {"Env": ["PATH=/tools", "SDK_IMAGE_TEST=value"]}})
-    container = SimpleNamespace(
-        image=image,
-        reload=lambda: None,
-        attrs={
-            "Mounts": [],
-            "Config": {
-                "Env": ["PATH=/workspace/tools", "SDK_IMAGE_TEST=value", "SDK_MANIFEST_TEST=value"]
-            },
-        },
-    )
-    session = cast(
-        DockerSandboxSession,
-        SimpleNamespace(
-            _container=container,
-            _git_copy_data_roots=set(),
-            _git_copy_link_target=lambda path: "",
-            state=SimpleNamespace(manifest=Manifest()),
-        ),
-    )
-    assert DockerSandboxSession._git_copy_environment(session) == [
-        "PATH=/tools:/usr/bin:/bin",
-        "SDK_IMAGE_TEST",
-        "SDK_MANIFEST_TEST",
-    ]
-
-
-@pytest.mark.parametrize(
-    "source", ["manifest", "prior-manifest", "retargeted-alias", "bind", "volume", "tool-link"]
-)
-def test_docker_git_copy_skips_tools_supplied_by_mounts(
-    source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    pytest.importorskip("docker")
-    from agents.classic.sandbox.sandboxes.docker import (
-        DockerSandboxSession,
-        DockerSandboxSessionState,
-    )
-    from agents.classic.sandbox.snapshot import NoopSnapshot
-
-    workspace = tmp_path / "workspace"
-    storage = tmp_path / "storage"
-    image_tools = tmp_path / "image-tools"
-    for directory in (workspace, storage, image_tools):
-        directory.mkdir()
-    mount_alias = tmp_path / "mount-alias"
-    mount_alias.symlink_to(storage, target_is_directory=True)
-    marker = workspace / "mounted-tool-ran"
-    mounted_copy = storage / "cp"
-    mounted_copy.write_text(f"#!/bin/sh\nprintf mounted > {shlex.quote(str(marker))}\nexit 77\n")
-    mounted_copy.chmod(0o755)
-    (image_tools / "cp").symlink_to(mounted_copy)
-    path = image_tools if source == "tool-link" else storage
-    manifest = Manifest.model_validate(
-        {
-            "root": str(workspace),
-            "entries": {
-                "data": {
-                    "type": "s3_mount",
-                    "bucket": "fixture",
-                    "mount_path": str(mount_alias),
-                    "mount_strategy": {"type": "docker_volume", "driver": "rclone"},
-                    "ephemeral": False,
-                }
-            }
-            if source in {"manifest", "prior-manifest", "retargeted-alias", "tool-link"}
-            else {},
-        }
-    )
-    container = SimpleNamespace(
-        image=SimpleNamespace(attrs={"Config": {"Env": [f"PATH={path}"]}}),
-        attrs={
-            "Config": {},
-            "Mounts": [{"Type": source, "Destination": str(mount_alias)}]
-            if source in {"bind", "volume"}
-            else [],
-        },
-        reload=lambda: None,
-    )
-    session = DockerSandboxSession(
-        docker_client=None,
-        container=container,
-        state=DockerSandboxSessionState(
-            image="fixture",
-            container_id="fixture",
-            manifest=manifest,
-            snapshot=NoopSnapshot(id="fixture"),
-        ),
-    )
-    if source == "prior-manifest":
-        session.state.manifest = Manifest(root=str(workspace))
-
-    def read_link(path: PurePosixPath) -> str | None:
-        entry = Path(path)
-        if entry.is_symlink():
-            return str(entry.readlink())
-        return "" if entry.exists() else None
-
-    monkeypatch.setattr(session, "_git_copy_link_target", read_link)
-    if source == "retargeted-alias":
-        assert session._git_copy_environment() is not None
-        mount_alias.unlink()
-        mount_alias.symlink_to(image_tools, target_is_directory=True)
-    env = session._git_copy_environment()
-    assert env is not None
-    payload = workspace / "file"
-    payload.write_text("image copy")
-    destination = workspace / "copied"
-    copied = subprocess.run(
-        ["sh", "-c", 'exec cp "$1" "$2"', "copy", str(payload), str(destination)],
-        env=dict(item.split("=", 1) for item in env if "=" in item),
-        check=False,
-    )
-    assert not marker.exists()
-    assert copied.returncode == 0
-    assert destination.read_text() == "image copy"
-
-
-async def test_docker_git_copy_uses_bound_launcher_without_fallback() -> None:
-    pytest.importorskip("docker")
-    from agents.classic.sandbox.sandboxes.docker import DockerSandboxSession
-
-    calls = []
-
-    async def launch(session, script, arguments):
-        calls.append((session, script, arguments))
-        return ExecResult(stdout=b"", stderr=b"application launcher failed", exit_code=73)
-
-    # A bound launcher owns the operation even when the Docker transport is unavailable.
-    session = object.__new__(DockerSandboxSession)
-    session.set_dependencies(Dependencies(git_repo_copy_launcher=launch))
-    result = await session._exec_git_copy("copy script", "argument")
-    assert result.exit_code == 73
-    assert calls == [(session, "copy script", ("argument",))]
 
 
 @pytest.mark.parametrize("subpath", ["missing-directory", "root.txt"])
