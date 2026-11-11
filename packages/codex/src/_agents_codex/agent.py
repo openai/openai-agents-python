@@ -63,7 +63,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._tool_errors import ToolErrorFormatter
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
-from .completion import _BeforeComplete
+from .completion import _BeforeComplete, _ToolBatchCompletion
 from .decisions import DecisionInput, DecisionProvider, _check_provider, _decide
 from .guardrails import InputGuardrail, OutputGuardrail
 from .initial_messages import _capture_initial_messages, _initial_messages_json
@@ -926,6 +926,9 @@ class Agent(Generic[ContextT, OutputT]):
     or None to keep the default. Codex publishes the summary in its history.
 
     ``before_complete`` checks proposed completion for roots and native children.
+    ``tool_batch_completion`` can propose a final value once a direct function
+    batch has settled. A ``FinishToolBatch`` value passes through the active
+    output type and completion policy. Returning ``None`` lets the turn continue.
     Return None to accept, ContinueTurn with instructions to keep the same turn
     running, or StopTurn to abort by policy. Rejected text may already have
     streamed; only accepted completion settles the turn.
@@ -954,6 +957,7 @@ class Agent(Generic[ContextT, OutputT]):
     transform_context: _ContextTransform[ContextT] | None
     before_compact: _BeforeCompact[ContextT] | None
     before_complete: _BeforeComplete[ContextT] | None
+    tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None
     decisions: DecisionProvider | None
     realtime: RealtimeAgentConfig | None
     input_guardrails: tuple[InputGuardrail[ContextT], ...]
@@ -986,6 +990,7 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
@@ -1004,6 +1009,7 @@ class Agent(Generic[ContextT, OutputT]):
             transform_context: _ContextTransform[ContextT] | None = None,
             before_compact: _BeforeCompact[ContextT] | None = None,
             before_complete: _BeforeComplete[ContextT] | None = None,
+            tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
             input_guardrails: Sequence[InputGuardrail[ContextT]] | None = None,
             output_guardrails: Sequence[OutputGuardrail[ContextT]] | None = None,
             **kwargs: Any,
@@ -1038,6 +1044,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1063,6 +1070,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1087,6 +1095,7 @@ class Agent(Generic[ContextT, OutputT]):
         transform_context: _ContextTransform[ContextT] | None = None,
         before_compact: _BeforeCompact[ContextT] | None = None,
         before_complete: _BeforeComplete[ContextT] | None = None,
+        tool_batch_completion: _ToolBatchCompletion[ContextT, OutputT] | None = None,
         realtime: RealtimeAgentConfig | None = None,
         input_guardrails: Sequence[InputGuardrail[ContextT]] = (),
         output_guardrails: Sequence[OutputGuardrail[ContextT]] = (),
@@ -1103,6 +1112,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("before_compact must be callable or None")
         if before_complete is not None and not callable(before_complete):
             raise TypeError("before_complete must be callable or None")
+        if tool_batch_completion is not None and not callable(tool_batch_completion):
+            raise TypeError("tool_batch_completion must be callable or None")
         if model is not None and not isinstance(model, str):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
@@ -1135,6 +1146,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "transform_context", transform_context)
         object.__setattr__(self, "before_compact", before_compact)
         object.__setattr__(self, "before_complete", before_complete)
+        object.__setattr__(self, "tool_batch_completion", tool_batch_completion)
         for name, checks, kind in (
             ("input_guardrails", input_guardrails, InputGuardrail),
             ("output_guardrails", output_guardrails, OutputGuardrail),
@@ -1289,6 +1301,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1319,6 +1332,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1349,6 +1363,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1379,6 +1394,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = _MAX_FUNCTION_CONCURRENCY_UNSET,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         project_guidance: bool = False,
@@ -1405,6 +1421,9 @@ class Agent(Generic[ContextT, OutputT]):
         retains a limited suffix and reports gaps. This policy is not checkpointed.
         include_model_output_items=True records ordinary assistant messages and
         provider reasoning summaries in the Session's observation stream.
+        include_raw_provider_events=True captures Responses provider JSON. Use
+        include_execution_details=True on the observation reader to receive it.
+        Capture uses the Session's in-memory observation retention policy.
 
         max_function_concurrency bounds automatic Python callbacks per turn owner,
         including validation and hooks through reply settlement. None adds no
@@ -1531,6 +1550,7 @@ class Agent(Generic[ContextT, OutputT]):
                 max_function_concurrency=max_function_concurrency,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -1566,6 +1586,7 @@ class Agent(Generic[ContextT, OutputT]):
         max_function_concurrency: int | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
         discover_agents_md: bool = False,
@@ -1608,6 +1629,7 @@ class Agent(Generic[ContextT, OutputT]):
                 tool_error_formatter=tool_error_formatter,
                 observation_retention=observation_retention,
                 include_model_output_items=include_model_output_items,
+                include_raw_provider_events=include_raw_provider_events,
                 input_guardrails=input_guardrails,
                 output_guardrails=output_guardrails,
                 discover_agents_md=discover_agents_md,
@@ -2390,6 +2412,7 @@ def _private_text_run_eligible(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and agent.tool_batch_completion is None
         and not agent.output_guardrails
         and not agent.input_guardrails
         and not return_state

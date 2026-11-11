@@ -130,7 +130,13 @@ from .canonical_storage import (
     SessionStoreCleanup as SessionStoreCleanup,
 )
 from .compaction import CompactionContext
-from .completion import CompletionContext, ContinueTurn
+from .completion import (
+    CompletionContext,
+    ContinueTurn,
+    FinishToolBatch,
+    ToolBatchCompletionContext,
+    ToolBatchResult,
+)
 from .computer import _CapturedComputer, _ComputerCall, _ComputerResources, _ComputerTool
 from .decisions import DecisionProvider, _bind_decisions
 from .executor import (
@@ -212,6 +218,7 @@ from .observation import (
     HostedToolCallProgress,
     ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
+    RawProviderEvent as RawProviderEvent,
     ResponseFactReceived as ResponseFactReceived,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -926,6 +933,7 @@ class Completed(Generic[OutputT, TurnT]):
     state: SessionState | None = field(default=None, repr=False)
     repair_attempts: tuple[RecordedTurn, ...] = ()
     tool_call: ToolCallInfo | None = field(default=None, kw_only=True)
+    tool_batch_call_ids: tuple[str, ...] = field(default=(), kw_only=True)
     guardrail_results: tuple[GuardrailRecord, ...] = field(default=(), kw_only=True)
     history: tuple[dict[str, Any], ...] | None = field(default=None, repr=False, kw_only=True)
     run_usage: RunUsage = field(init=False)
@@ -953,6 +961,7 @@ class _ToolCompletionProposal:
     call: ToolCallInfo
     wire: Any = field(repr=False)
     value: Any = field(repr=False)
+    batch_call_ids: tuple[str, ...] = ()
 
     def matches(self, payload: Mapping[str, Any]) -> bool:
         return (
@@ -960,6 +969,7 @@ class _ToolCompletionProposal:
             and payload.get("name") == self.call.tool.name
             and (payload.get("namespace") or "functions")
             == (self.call.tool.namespace or "functions")
+            and (payload.get("batch_call_ids") or []) == list(self.batch_call_ids)
             and json.dumps(payload.get("final_output"), sort_keys=True, allow_nan=False)
             == json.dumps(self.wire, sort_keys=True, allow_nan=False)
         )
@@ -1238,7 +1248,18 @@ def _project_progress(
 ) -> None:
     message = event["msg"]
     kind = message["type"]
-    if kind == "hosted_tool_call_progress" and event["id"] == turn_id:
+    if kind == "sdk_raw_provider_event" and event["id"] == turn_id:
+        buffer.append(
+            RawProviderEvent(
+                session_id=buffer.session_id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                source=message["source"],
+                transport=message["transport"],
+                payload=message["payload"],
+            )
+        )
+    elif kind == "hosted_tool_call_progress" and event["id"] == turn_id:
         buffer.append(
             HostedToolCallProgress(
                 session_id=buffer.session_id,
@@ -1418,6 +1439,7 @@ def _project_run_prefix(
             and kind
             in {
                 "_sdk_request_metadata",
+                "sdk_raw_provider_event",
                 "token_count",
                 "hosted_tool_call_progress",
                 "agent_message_content_delta",
@@ -2230,6 +2252,33 @@ def _native_tool_refs(refs: Sequence[ToolRef]) -> str:
     return json.dumps([{"name": ref.name, "namespace": ref.namespace} for ref in refs])
 
 
+def _native_tool_output_parts(body: Any) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] | None = None
+    if isinstance(body, str):
+        parts = [{"type": "inputText", "text": body}]
+    elif isinstance(body, list):
+        parts = []
+        kinds = {
+            "input_text": "inputText",
+            "input_image": "inputImage",
+            "input_file": "inputFile",
+            "input_audio": "inputAudio",
+        }
+        for raw in body:
+            if not isinstance(raw, dict) or raw.get("type") not in kinds:
+                parts = None
+                break
+            part: dict[str, Any] = deepcopy(raw)
+            kind = part.pop("type")
+            if kind in {"input_image", "input_audio"}:
+                fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
+                part = {fields.get(key, key): value for key, value in part.items()}
+            parts.append({"type": kinds[kind], **part})
+    if parts is None:
+        raise ValueError("Unsupported native tool output")
+    return parts
+
+
 @dataclass
 class _ApprovalArguments:
     value: Any
@@ -2438,6 +2487,11 @@ def _capture_profile_runtimes(
                 "before_complete": _needs_before_complete(
                     declaration, input_guardrails, output_guardrails
                 ),
+                **(
+                    {"tool_batch_completion": True}
+                    if declaration.tool_batch_completion is not None
+                    else {}
+                ),
                 "selecting_steps": any(
                     check.child_callback is not None
                     for check in (*declaration.input_guardrails, *input_guardrails)
@@ -2485,8 +2539,8 @@ def _install_profile_options(
         "roster": roster,
         "fingerprint": fingerprint,
     }
-    for flag in ("transform_context", "before_compact", "before_complete"):
-        options[f"_{flag}"] = any(row[flag] for row in roster)
+    for flag in ("transform_context", "before_compact", "before_complete", "tool_batch_completion"):
+        options[f"_{flag}"] = any(row.get(flag, False) for row in roster)
     grants = options["tool_policy"]["allowed_tools"]
     for profile in profiles:
         functions, servers, _ = _split_tools(
@@ -3268,6 +3322,7 @@ def _capture_opening_agent(
         transform_context=agent.transform_context,
         before_compact=agent.before_compact,
         before_complete=agent.before_complete,
+        tool_batch_completion=agent.tool_batch_completion,
         input_guardrails=agent.input_guardrails,
         output_guardrails=agent.output_guardrails,
     )
@@ -3286,6 +3341,7 @@ def _supports_atomic_first_turn(
         and agent.transform_context is None
         and agent.before_compact is None
         and agent.before_complete is None
+        and agent.tool_batch_completion is None
         and not agent.output_guardrails
         and not agent.input_guardrails
         and all(
@@ -3328,6 +3384,7 @@ class Session(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = _OBSERVATION_RETENTION_UNSET,
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
         discover_agents_md: bool = False,
         input_guardrails: Sequence[InputGuardrail[Any]] = (),
         output_guardrails: Sequence[OutputGuardrail[Any]] = (),
@@ -3341,6 +3398,8 @@ class Session(Generic[ContextT, OutputT]):
         _private_text_run: bool = False,
         project_guidance: bool = False,
     ) -> Session[ContextT, OutputT] | Completed[OutputT]:
+        if not isinstance(include_raw_provider_events, bool):
+            raise TypeError("include_raw_provider_events must be a bool")
         managed_source = environment if isinstance(environment, _ManagedWorkspaceSource) else None
         if isinstance(state, ManagedWorkspaceCheckpoint):
             if managed_source is None:
@@ -3944,6 +4003,7 @@ class Session(Generic[ContextT, OutputT]):
                     "_before_complete": _needs_before_complete(
                         agent, input_guardrails, output_guardrails
                     ),
+                    "_tool_batch_completion": agent.tool_batch_completion is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -4222,6 +4282,7 @@ class Session(Generic[ContextT, OutputT]):
                     tool_error_formatter=tool_error_formatter,
                     observation_retention=observation_retention,
                     include_model_output_items=include_model_output_items,
+                    include_raw_provider_events=include_raw_provider_events,
                 )
                 session._input_guardrails = input_guardrails
                 session._output_guardrails = output_guardrails
@@ -4619,6 +4680,7 @@ class Session(Generic[ContextT, OutputT]):
         tool_error_formatter: ToolErrorFormatter | None = None,
         observation_retention: Literal["bounded", "all"] = "bounded",
         include_model_output_items: bool = False,
+        include_raw_provider_events: bool = False,
     ) -> None:
         if tool_error_formatter is not None and not callable(tool_error_formatter):
             raise TypeError("tool_error_formatter must be callable or None")
@@ -4652,6 +4714,9 @@ class Session(Generic[ContextT, OutputT]):
         self._uses_siwc = False
         self._native_options: str | None = None
         self._websockets_enabled = False
+        self._include_raw_provider_events = include_raw_provider_events
+        if include_raw_provider_events:
+            thread._enable_raw_provider_events()
         self._engine = engine
         self._native = thread
         # Issued snapshots belong to this Session's current native thread.
@@ -7560,6 +7625,8 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
+            if self._include_raw_provider_events:
+                thread._enable_raw_provider_events()
             # From this point, retirement cannot roll back. Keep the old reader
             # attached until its own native EOF; do not end the Session stream.
             retiring = True
@@ -8718,6 +8785,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise native_error
             payload_json = submission._native._tool_completion()
             tool_call = None
+            tool_batch_call_ids: tuple[str, ...] = ()
             if payload_json is not None:
                 payload = json.loads(payload_json)
                 if (
@@ -8728,17 +8796,19 @@ class Session(Generic[ContextT, OutputT]):
                 turn_id = submission.turn_id
                 if turn_id is None:
                     raise NativeError("Missing child tool completion owner")
-                tool_call = ToolCallInfo(
-                    tool=ToolRef(payload["name"], payload.get("namespace")),
-                    session_id=self.id,
-                    turn_id=turn_id,
-                    call_id=payload["call_id"],
-                    child_id=submission.child_id,
-                    child_incarnation=submission._native.incarnation,
-                    role=None,
-                    model=None,
-                    route="direct",
-                )
+                tool_batch_call_ids = tuple(payload.get("batch_call_ids") or ())
+                if not tool_batch_call_ids:
+                    tool_call = ToolCallInfo(
+                        tool=ToolRef(payload["name"], payload.get("namespace")),
+                        session_id=self.id,
+                        turn_id=turn_id,
+                        call_id=payload["call_id"],
+                        child_id=submission.child_id,
+                        child_incarnation=submission._native.incarnation,
+                        role=None,
+                        model=None,
+                        route="direct",
+                    )
             return cast(
                 Completed[_TurnT],
                 Completed(
@@ -8746,6 +8816,7 @@ class Session(Generic[ContextT, OutputT]):
                     cast(_TurnT, output),
                     _token_usage_info(json.loads(usage)),
                     tool_call=tool_call,
+                    tool_batch_call_ids=tool_batch_call_ids,
                     guardrail_results=submission.guardrail_results,
                 ),
             )
@@ -9747,13 +9818,18 @@ class Session(Generic[ContextT, OutputT]):
                         if state.cleanup_error is not None:
                             raise state.cleanup_error
                 if not state.unsampled_steering:
+                    committed_proposal = proposal if tool_payload is not None else None
+                    batch_call_ids = (
+                        committed_proposal.batch_call_ids if committed_proposal is not None else ()
+                    )
                     outcome = Completed(
                         handle,
                         output,
                         usage,
-                        tool_call=proposal.call
-                        if tool_payload is not None and proposal is not None
+                        tool_call=committed_proposal.call
+                        if committed_proposal is not None and not batch_call_ids
                         else None,
+                        tool_batch_call_ids=batch_call_ids,
                         guardrail_results=tuple(state.guardrail_results),
                         repair_attempts=tuple(
                             deepcopy(t)
@@ -10155,6 +10231,7 @@ class Session(Generic[ContextT, OutputT]):
             _expected_codex_login_binding=self._codex_login_binding,
             parent_trace=state.parent_trace,
             include_model_output_items=self._observations.include_model_output_items,
+            include_raw_provider_events=self._include_raw_provider_events,
         )
         assert isinstance(repair, Session)
         self._repair_session = repair
@@ -10314,35 +10391,12 @@ class Session(Generic[ContextT, OutputT]):
         started = state.terminal_observations.pop(call_id, None)
         if started is None:
             return
-        body = item.get("output")
-        parts: list[dict[str, Any]] | None = None
-        if isinstance(body, str):
-            parts = [{"type": "inputText", "text": body}]
-        elif isinstance(body, list):
-            parts = []
-            kinds = {
-                "input_text": "inputText",
-                "input_image": "inputImage",
-                "input_file": "inputFile",
-                "input_audio": "inputAudio",
-            }
-            for raw in body:
-                if not isinstance(raw, dict) or raw.get("type") not in kinds:
-                    parts = None
-                    break
-                part: dict[str, Any] = dict(raw)
-                kind = part.pop("type")
-                if kind in {"input_image", "input_audio"}:
-                    fields = {"image_url": "imageUrl", "file_id": "fileId", "audio_url": "audioUrl"}
-                    part = {fields.get(key, key): value for key, value in part.items()}
-                parts.append({"type": kinds[kind], **part})
         output = None
-        if parts is not None:
-            try:
-                output = ToolOutput(parts)
-                output._validate()
-            except (TypeError, ValueError):
-                output = None
+        try:
+            output = ToolOutput(_native_tool_output_parts(item.get("output")))
+            output._validate()
+        except (TypeError, ValueError):
+            output = None
         self._observe_function_finished(started, "completed", output)
 
     def _drain_terminal_observations(self, state: _CallbackState) -> None:
@@ -10651,6 +10705,7 @@ class Session(Generic[ContextT, OutputT]):
             "raw_response_completed",
             "hosted_tool_call_progress",
             "raw_response_item",
+            "sdk_raw_provider_event",
         }:
             turn_id = turn_id or event["id"]
         if not turn_id and kind == "elicitation_request":
@@ -10695,6 +10750,7 @@ class Session(Generic[ContextT, OutputT]):
             "hosted_tool_call_progress",
             "raw_response_item",
             "raw_response_completed",
+            "sdk_raw_provider_event",
         }:
             # Passive progress must not create a never-settling owner without
             # native admission.
@@ -10704,6 +10760,18 @@ class Session(Generic[ContextT, OutputT]):
             state = current
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
+        if kind == "sdk_raw_provider_event":
+            if (
+                state.stopping
+                or state.completion.done()
+                or (
+                    state.native_instance is not None
+                    and state.native_instance != event.get("subagent_instance_id")
+                )
+            ):
+                return
+            self._observe_progress(event, state.handle, event["subagent_id"])
+            return
         if state.completion.done():
             if kind == "item_completed":
                 self._observe_execution(
@@ -11428,19 +11496,22 @@ class Session(Generic[ContextT, OutputT]):
                 return False
             return True
 
+        def continuation(decision: Any, name: str) -> dict[str, Any]:
+            if decision is None:
+                return {"action": "continue", "feedback": None}
+            if isinstance(decision, StopTurn):
+                return {"action": "stop"}
+            if not isinstance(decision, ContinueTurn):
+                allowed = "FinishToolBatch, " if name == "tool_batch_completion" else ""
+                raise TypeError(f"{name} must return {allowed}ContinueTurn, StopTurn or None")
+            if not isinstance(decision.instructions, str) or not decision.instructions.strip():
+                raise ValueError("ContinueTurn instructions must be a nonempty string")
+            return {"action": "continue", "feedback": decision.instructions}
+
         async def convert(_: object) -> dict[str, Any]:
             nonlocal proposal
             await self._await_input_guardrails(state)
-            catalog = self._catalog_for_message(message, message["generation"])
             source_agent = self._agent_for_message(message)
-            entry = catalog.tools[message["slot"]]
-            declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
-            if (
-                not declared.finish_turn
-                or entry.name != message["name"]
-                or (entry.namespace or "functions") != (message.get("namespace") or "functions")
-            ):
-                raise NativeError("Invalid captured terminal tool identity")
             child = isinstance(state, _ChildCallbacks)
             assert state.handle is not None
             if (
@@ -11450,9 +11521,6 @@ class Session(Generic[ContextT, OutputT]):
                 != (state.handle.instance_id if isinstance(state, _ChildCallbacks) else None)
             ):
                 raise NativeError("Invalid terminal tool owner")
-            text = message["text"]
-            if not isinstance(text, str):
-                raise OutputValidationError("")
             if (
                 self._profiles
                 and isinstance(state, _Submission)
@@ -11461,23 +11529,81 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 state.output = self._source_profile_runtime(message["profile_id"]).output
             output = _prepare_spec(None) if isinstance(state, _ChildCallbacks) else state.output
-            value, wire = output.terminal_value(text)
+            child_id = message["thread"] if child else None
+            child_instance = message["instance"] if child else None
+
+            def tool_call(receipt: Mapping[str, Any]) -> ToolCallInfo:
+                return ToolCallInfo(
+                    tool=ToolRef(receipt["name"], receipt.get("namespace")),
+                    session_id=self.id,
+                    turn_id=message["turn_id"],
+                    call_id=receipt["call_id"],
+                    child_id=child_id,
+                    child_incarnation=child_instance,
+                    role=None,
+                    model=message["model"],
+                    route="direct",
+                )
+
+            batch_call_ids: tuple[str, ...] = ()
+            raw_output = ""
+            if message["type"] == "_sdk_tool_batch_completion":
+                batch_callback = source_agent.tool_batch_completion
+                if batch_callback is None:
+                    raise NativeError("Captured tool batch callback unavailable")
+                results: list[ToolBatchResult] = []
+                for receipt in message["results"]:
+                    body = receipt["output"]
+                    tool_output = (
+                        ToolOutput.text(body)
+                        if isinstance(body, str)
+                        else ToolOutput(_native_tool_output_parts(body))
+                    )
+                    tool_output.success = receipt["succeeded"]
+                    results.append(
+                        ToolBatchResult(tool_call(receipt), receipt["arguments"], tool_output)
+                    )
+                if not results:
+                    raise NativeError("Captured tool batch is empty")
+                batch_call_ids = tuple(cast(str, result.call.call_id) for result in results)
+                call = results[0].call
+                decision = await self._call_decision_callback(
+                    state,
+                    message,
+                    batch_callback,
+                    admitted,
+                    ToolBatchCompletionContext(
+                        context=self._context,
+                        results=tuple(results),
+                        session_id=self.id,
+                        turn_id=message["turn_id"],
+                        subagent_id=child_id,
+                        model=message["model"],
+                    ),
+                )
+                if not isinstance(decision, FinishToolBatch):
+                    return continuation(decision, "tool_batch_completion")
+                value, wire = output.terminal_application_value(decision.output)
+            else:
+                catalog = self._catalog_for_message(message, message["generation"])
+                entry = catalog.tools[message["slot"]]
+                declared = entry.declaration if isinstance(entry, _CapturedManual) else entry
+                if (
+                    not declared.finish_turn
+                    or entry.name != message["name"]
+                    or (entry.namespace or "functions") != (message.get("namespace") or "functions")
+                ):
+                    raise NativeError("Invalid captured terminal tool identity")
+                raw_output = message["text"]
+                if not isinstance(raw_output, str):
+                    raise OutputValidationError("")
+                value, wire = output.terminal_value(raw_output)
+                call = tool_call({**message, "namespace": entry.namespace})
             # JSON persistence must never silently accept NaN or Infinity.
             try:
                 json.dumps(wire, allow_nan=False)
             except (TypeError, ValueError):
-                raise OutputValidationError(text) from None
-            call = ToolCallInfo(
-                tool=ToolRef(entry.name, entry.namespace),
-                session_id=self.id,
-                turn_id=message["turn_id"],
-                call_id=message["call_id"],
-                child_id=message["thread"] if child else None,
-                child_incarnation=message["instance"] if child else None,
-                role=None,
-                model=message["model"],
-                route="direct",
-            )
+                raise OutputValidationError(raw_output) from None
             callback = source_agent.before_complete
             if callback is not None and message.get("guard_only") is not True:
                 decision = await self._call_decision_callback(
@@ -11493,23 +11619,13 @@ class Session(Generic[ContextT, OutputT]):
                         subagent_id=call.child_id,
                         model=message["model"],
                         continuation_count=state.completion_continuations,
-                        tool_call=call,
+                        tool_call=None if batch_call_ids else call,
+                        tool_batch_call_ids=batch_call_ids,
                         final_output=deepcopy(value),
                     ),
                 )
-                if isinstance(decision, StopTurn):
-                    return {"action": "stop"}
                 if decision is not None:
-                    if not isinstance(decision, ContinueTurn):
-                        raise TypeError(
-                            "before_complete must return ContinueTurn, StopTurn or None"
-                        )
-                    if (
-                        not isinstance(decision.instructions, str)
-                        or not decision.instructions.strip()
-                    ):
-                        raise ValueError("ContinueTurn instructions must be a nonempty string")
-                    return {"action": "continue", "feedback": decision.instructions}
+                    return continuation(decision, "before_complete")
             await self._check_output_guardrails(
                 state,
                 message,
@@ -11522,11 +11638,14 @@ class Session(Generic[ContextT, OutputT]):
                     subagent_id=call.child_id,
                     model=message["model"],
                     continuation_count=state.completion_continuations,
-                    tool_call=call,
+                    tool_call=None if batch_call_ids else call,
+                    tool_batch_call_ids=batch_call_ids,
                     final_output=value,
                 ),
             )
-            proposal = _ToolCompletionProposal(message["step_id"], call, wire, value)
+            proposal = _ToolCompletionProposal(
+                message["step_id"], call, wire, value, batch_call_ids
+            )
             return {"action": "accept", "final_output": wire}
 
         def prepare() -> tuple[Callable[..., Any], object]:
@@ -11549,7 +11668,7 @@ class Session(Generic[ContextT, OutputT]):
             )
             if decision["action"] == "accept":
                 state.tool_completion = None if message.get("guard_only") else proposal
-            else:
+            elif decision.get("feedback") is not None:
                 state.completion_continuations += 1
 
         def reject() -> None:
@@ -12079,6 +12198,7 @@ class Session(Generic[ContextT, OutputT]):
             "_sdk_before_compact": self._before_compact,
             "_sdk_before_complete": self._before_complete,
             "_sdk_tool_completion": self._propose_tool_completion,
+            "_sdk_tool_batch_completion": self._propose_tool_completion,
         }
         reader_failure: BaseException | None = None
         pending_callback: dict[str, Any] | None = None
@@ -12486,7 +12606,12 @@ class Session(Generic[ContextT, OutputT]):
                         # Unknown-phase blank tails keep the previous final answer.
                         if not blank or item.get("phase") == "final_answer":
                             state.last_assistant_had_blank_final = blank
-                elif kind in {"agent_message_content_delta", "item_completed", "response_fact"}:
+                elif kind in {
+                    "agent_message_content_delta",
+                    "item_completed",
+                    "response_fact",
+                    "sdk_raw_provider_event",
+                }:
                     if not projected:
                         self._observe_progress(event, handle, self.id)
                 elif kind == "dynamic_tool_call_request" and not state.stopping:
