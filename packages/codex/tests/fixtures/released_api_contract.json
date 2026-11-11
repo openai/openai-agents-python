@@ -128,7 +128,7 @@
         "declarations": [
           "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SessionStoreCleanup:\n\n    def __init__(self, owner: Any) -> None:\n        pass\n\n    async def aclose(self) -> None:\n        pass",
-          "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
+          "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput | ShellOutput) -> None:\n        pass",
           "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    @staticmethod\n    async def read_legacy_history(path: Path, session_id: str, *, messages_table: str='agent_messages', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
           "class SQLAlchemySessionStore(SQLiteSessionStore):\n\n    def __init__(self, engine: Any) -> None:\n        pass",
           "async def read_dapr_legacy_history(dapr_client: Any, session_id: str, *, state_store_name: str, consistency: Literal['eventual', 'strong']='eventual', max_items: int=10000, max_bytes: int=16 * 1024 * 1024) -> list[dict[str, Any]]:\n    pass"
@@ -150,6 +150,7 @@
           "from .canonical_storage_mongodb import MongoDBSessionStore as MongoDBSessionStore",
           "from .canonical_storage_redis import RedisSessionStore as RedisSessionStore",
           "from .canonical_storage_sqlalchemy_async import AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore",
+          "from .shell import ShellOutput as ShellOutput",
           "from .tools import ToolOutput as ToolOutput"
         ],
         "references": {
@@ -158,6 +159,7 @@
           "EncryptedSessionStore": "_agents_codex.canonical_storage_encrypt.EncryptedSessionStore",
           "MongoDBSessionStore": "_agents_codex.canonical_storage_mongodb.MongoDBSessionStore",
           "RedisSessionStore": "_agents_codex.canonical_storage_redis.RedisSessionStore",
+          "ShellOutput": "agents.shell.ShellOutput",
           "ToolOutput": "agents.tools.ToolOutput"
         }
       },
@@ -1148,8 +1150,8 @@
       },
       "agents.recovery": {
         "declarations": [
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str) -> ReconciledCall:\n        pass",
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str = field(repr=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str | ShellOutput) -> ReconciledCall:\n        pass",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str | ShellOutput = field(repr=False)",
           "class LocalRecoveryRequired(RuntimeError):\n\n    def __init__(self, calls: tuple[UncertainCall, ...], turns: tuple[RecordedTurn, ...], items: tuple[SessionItem, ...]) -> None:\n        pass"
         ],
         "exports": {
@@ -1159,14 +1161,16 @@
         },
         "imports": [
           "from dataclasses import dataclass as dataclass, field as field",
-          "from typing import Literal as Literal",
+          "from typing import Literal",
           "from pydantic import JsonValue as JsonValue",
           "from ._events import SessionItem as SessionItem",
-          "from .history import RecordedTurn as RecordedTurn"
+          "from .history import RecordedTurn as RecordedTurn",
+          "from .shell import ShellOutput as ShellOutput"
         ],
         "references": {
           "RecordedTurn": "agents.history.RecordedTurn",
-          "SessionItem": "agents._events.SessionItem"
+          "SessionItem": "agents._events.SessionItem",
+          "ShellOutput": "agents.shell.ShellOutput"
         }
       },
       "agents.repl": {
@@ -1500,6 +1504,47 @@
           "_PrepareRequest": "agents.prepared_request._PrepareRequest",
           "_PreparedOutput": "agents.schema._PreparedOutput",
           "_ToolCatalog": "agents.tools._ToolCatalog"
+        }
+      },
+      "agents.shell": {
+        "declarations": [
+          "_ContextT = TypeVar('_ContextT')",
+          "class ShellSkill(TypedDict):\n    description: str\n    name: str\n    path: str",
+          "class ShellAction(BaseModel):\n    model_config = ConfigDict(extra='allow')\n    commands: list[str]\n    timeout_ms: int | None = None\n    max_output_length: int | None = None",
+          "class ShellCall(BaseModel):\n    model_config = ConfigDict(extra='allow')\n    type: Literal['shell_call']\n    call_id: str\n    action: ShellAction\n    id: str | None = None\n    status: str | None = None",
+          "class ShellExit(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['exit'] = 'exit'\n    exit_code: int",
+          "class ShellTimeout(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    type: Literal['timeout'] = 'timeout'",
+          "class ShellCommandOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    stdout: str\n    stderr: str\n    outcome: ShellExit | ShellTimeout = Field(discriminator='type')",
+          "class ShellOutput(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    output: list[ShellCommandOutput]\n    max_output_length: int | None = Field(default=None, ge=0)",
+          "_ShellBinder: TypeAlias = Callable[[_ContextT, object, FunctionTool[Any, Any, Any]], _CapturedFunction]",
+          "def shell_tool(executor: Callable[[ToolContext[_ContextT], ShellCall], ShellOutput | Awaitable[ShellOutput]], *, skills: Sequence[ShellSkill]=(), needs_approval: bool | Callable[[ToolContext[Any]], bool | Awaitable[bool]]=False, before: Callable[[ToolContext[_ContextT]], Allow | Deny | Awaitable[Allow | Deny]] | None=None, callback_timeout: float | None=None, error_function: _BodyErrorFormatter[_ContextT] | None=None) -> FunctionTool[ShellCall, ShellOutput, _ShellBinder[_ContextT]]:\n    pass"
+        ],
+        "exports": {
+          "ShellAction": "agents.shell.ShellAction",
+          "ShellCall": "agents.shell.ShellCall",
+          "ShellCommandOutput": "agents.shell.ShellCommandOutput",
+          "ShellExit": "agents.shell.ShellExit",
+          "ShellOutput": "agents.shell.ShellOutput",
+          "ShellSkill": "agents.shell.ShellSkill",
+          "ShellTimeout": "agents.shell.ShellTimeout",
+          "shell_tool": "agents.shell.shell_tool"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Sequence",
+          "from typing import Any, Literal, TypeAlias, TypeVar",
+          "from pydantic import BaseModel, ConfigDict, Field",
+          "from typing_extensions import TypedDict",
+          "from ._function_tools import FunctionTool, ToolContext, _BodyErrorFormatter",
+          "from .native_interception import Allow, Deny",
+          "from .tools import _CapturedFunction"
+        ],
+        "references": {
+          "Allow": "agents.native_interception.Allow",
+          "Deny": "agents.native_interception.Deny",
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "_BodyErrorFormatter": "agents._function_tools._BodyErrorFormatter",
+          "_CapturedFunction": "agents.tools._CapturedFunction"
         }
       },
       "agents.state": {
@@ -2062,6 +2107,13 @@
       "SessionState": "agents.state.SessionState",
       "SessionStore": "agents.canonical_storage.SessionStore",
       "SessionStoreCleanup": "agents.canonical_storage.SessionStoreCleanup",
+      "ShellAction": "agents.shell.ShellAction",
+      "ShellCall": "agents.shell.ShellCall",
+      "ShellCommandOutput": "agents.shell.ShellCommandOutput",
+      "ShellExit": "agents.shell.ShellExit",
+      "ShellOutput": "agents.shell.ShellOutput",
+      "ShellSkill": "agents.shell.ShellSkill",
+      "ShellTimeout": "agents.shell.ShellTimeout",
       "SignInWithChatGPT": "agents.agent.SignInWithChatGPT",
       "SignInWithChatGPTCredentials": "agents.agent.SignInWithChatGPTCredentials",
       "StaleTurnError": "agents.session.StaleTurnError",
@@ -2101,7 +2153,8 @@
       "computer_tool": "agents.computer.computer_tool",
       "function_tool": "agents._function_tools.function_tool",
       "get_cleanup": "agents.session.get_cleanup",
-      "run_demo_loop": "agents.repl.run_demo_loop"
+      "run_demo_loop": "agents.repl.run_demo_loop",
+      "shell_tool": "agents.shell.shell_tool"
     },
     "root_declarations": [],
     "root_definitions": {
@@ -4895,6 +4948,13 @@
       "SessionState",
       "SessionStore",
       "SessionStoreCleanup",
+      "ShellAction",
+      "ShellCall",
+      "ShellCommandOutput",
+      "ShellExit",
+      "ShellOutput",
+      "ShellSkill",
+      "ShellTimeout",
       "SignInWithChatGPT",
       "SignInWithChatGPTCredentials",
       "StaleTurnError",
@@ -4934,7 +4994,8 @@
       "computer_tool",
       "function_tool",
       "get_cleanup",
-      "run_demo_loop"
+      "run_demo_loop",
+      "shell_tool"
     ],
     "root_imports": [
       "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, ToolInputErrorContext as ToolInputErrorContext, ToolTimeoutBehavior as ToolTimeoutBehavior, ToolTimeoutError as ToolTimeoutError, function_tool as function_tool",
@@ -4961,6 +5022,7 @@
       "from .repl import run_demo_loop as run_demo_loop",
       "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, OutputValidationIssue as OutputValidationIssue, PromptedOutput as PromptedOutput",
       "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ProducedItem as ProducedItem, ResponseIntegrityReason as ResponseIntegrityReason, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError, get_cleanup as get_cleanup",
+      "from .shell import ShellAction as ShellAction, ShellCall as ShellCall, ShellCommandOutput as ShellCommandOutput, ShellExit as ShellExit, ShellOutput as ShellOutput, ShellSkill as ShellSkill, ShellTimeout as ShellTimeout, shell_tool as shell_tool",
       "from .state import ApplicationToolOutput as ApplicationToolOutput, ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
       "from .tools import Checklist as Checklist, CodeInterpreter as CodeInterpreter, FileSearch as FileSearch, HostedShell as HostedShell, ImageGeneration as ImageGeneration, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputFile as ToolOutputFile, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, ToolSearch as ToolSearch, ToolSearchResult as ToolSearchResult, WebSearch as WebSearch",

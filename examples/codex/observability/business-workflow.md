@@ -38,6 +38,21 @@ Custom metadata has been appearing under `sdk.metadata.*` in processor attribute
 
 The payload sentinel `SYNTHETIC_PRIVATE_ORDER_4821` has been traveling through synthetic prompts, tool results, and model outputs. The example has been scanning the full artifact, including both processor receipts and received OTLP batches, for that sentinel before writing the file. This check has been testing those payloads in this run; it has not been establishing general removal of arbitrary metadata, paths, credentials, exception text, or third-party telemetry. Application attribute values have been requiring their own allowlist regardless of the metadata-only policy.
 
+## Privacy ownership beyond exported spans
+
+The sentinel check has been covering this fixture's exported records. The application has been managing these other data copies and policies separately:
+
+| Data | Control and ownership |
+| --- | --- |
+| Trace scopes and children | An ancestor's disabled or metadata-only restriction has been constraining child scopes, including detached children. Each service has been applying its own [trace policy](../../../docs/sdk/observability.md#group-work-in-a-local-trace) and [content switches](../../../docs/sdk/observability.md#configure-telemetry). Application names and metadata have still been requiring allowlists. |
+| Observations and raw provider frames | [Observation readers](../../../docs/sdk/sessions.md#read-observations-safely) have been receiving application data independently of export policy. Opted-in raw frames have been retaining decoded provider payloads, as exercised by the [raw-frame tests](../../../packages/codex/tests/test_native_raw_provider_events.py). The application has been controlling reader access, retention, and publication. |
+| Application logs and journals | The application has been choosing what its own logs and durable receipts retain. The [A2A host-policy guidance](../a2a/README.md#credential-rotation-and-host-validation) has been assigning validation before journal writes and saved-result reuse to the host. Trace content switches have not been sanitizing those stores. |
+| Headers and wire payloads | [W3C headers](../../../docs/sdk/observability.md#continue-a-trace-across-workers) have been carrying ancestry only. Each receiving service has been selecting its own privacy policy. Service authentication and request or response payload handling have been remaining application-owned. |
+| History and checkpoints | [Portable checkpoints](../../../docs/sdk/state.md#save-and-restore-a-portable-checkpoint) have been retaining native history, including absolute paths. The application has been protecting stored content and checking checkpoint integrity and accepted settings before restore. Trace restrictions have not been removing conversation content. |
+| Export destinations and credentials | The application has been configuring approved collectors and private export headers through [telemetry configuration](../../../docs/sdk/observability.md#configure-telemetry). W3C carriers have not been transferring exporter credentials. Route replacement has been changing telemetry destinations separately from history, journals, and application logs. |
+
+This local fixture has not been diagnosing missing exports in a production backend or measuring filtering and buffering overhead.
+
 ## Export routes, failure, and receipt
 
 `telemetry.add_trace_processor(receipts)` has been adding a Python route while preserving the configured native OTLP exporter. After the workflow's flush, `telemetry.set_trace_processors([replacement])` has been replacing future routes, including native OTLP. A separate `replacement probe` trace has been reaching the replacement processor while remaining absent from the native receiver. The artifact has been retaining both receipt sets for that comparison.
