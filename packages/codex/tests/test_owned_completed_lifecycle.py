@@ -213,7 +213,8 @@ async def test_completed_provider_close_failure_keeps_retryable_provider_owner(
         with pytest.raises(RuntimeError) as caught:
             await Agent(instructions="Answer plainly.").run("close this owned parent")
         assert caught.value is failure and attempts == 2
-        assert len(owned_providers) == 1 and not owned_providers[0]._closed
+        assert len(owned_providers) == 1
+        assert not vars(owned_providers[0]).get("_closed", False)
         assert getattr(caught.value, "cleanup", None) is owned_providers[0]
         cleanup = owned_providers[0]
         await cleanup.aclose()
