@@ -1,0 +1,33 @@
+name: Diagnose stock Darwin bootstrap subset
+
+on:
+  push:
+    branches: [diag/python-stock-bootstrap-subset-5787-alpha10]
+    paths: [.github/workflows/diagnose-stock-bootstrap-subset.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  stock-subset-availability:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.deleted
+    runs-on: macos-15
+    timeout-minutes: 4
+    steps:
+      - name: Check out the exact probe source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/diagnostics/probe_bootstrap_subset.py
+          sparse-checkout-cone-mode: false
+      - name: Check stock subset availability
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          probe=.github/diagnostics/probe_bootstrap_subset.py
+          printf '%s  %s\n' 99296382c34e3ca079ec8cde53d902b2b6b3fb968ddf2663f1ef46d9aa67a8bc "$probe" | shasum -a 256 -c -
+          printf 'Diagnostic commit %s\n' "$GITHUB_SHA"
+          probe_python="$(command -v python3)"
+          test -x "$probe_python"
+          env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$probe_python" -I -B -S "$probe"
