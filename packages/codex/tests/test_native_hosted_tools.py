@@ -27,6 +27,7 @@ from agents.observation import (
     ModelOutputItemCompleted,
     OutputTextDelta,
     TurnFinished,
+    TurnStarted,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -50,6 +51,59 @@ def completed(item: dict[str, Any]) -> dict[str, Any]:
 
 def provider(peer: ResponsesFixture) -> NativeProvider:
     return NativeProvider(base_url=peer.url, api_key="synthetic-hosted-tools-key")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_items", [False, True])
+async def test_native_model_output_items_are_opt_in_scoped_and_detached(
+    responses: ResponsesFixture,
+    include_items: bool,
+) -> None:
+    responses.respond(*text_response("previous_message", "Previous turn."))
+    responses.respond(
+        completed(
+            {
+                "id": "reasoning_current",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Provider summary."}],
+                "encrypted_content": "private-reasoning-fixture",
+            }
+        ),
+        *text_response("current_message", "Current ", "turn."),
+    )
+    async with (
+        timeout(30),
+        provider(responses) as native_provider,
+        Agent(instructions="Respond.", provider=native_provider).session(
+            include_model_output_items=include_items
+        ) as session,
+    ):
+        previous = await session.submit("Earlier")
+        await previous.get_result()
+        turn = await session.submit("Current")
+        events = [event async for event in turn.events()]
+        output = [event.item for event in events if isinstance(event, ModelOutputItemCompleted)]
+        if not include_items:
+            assert output == []
+            sequences = [event.sequence for event in events]
+            assert sequences == list(range(sequences[0], sequences[0] + len(sequences)))
+            return
+        assert [item["type"] for item in output] == ["reasoning", "message"]
+        summary, message = output
+        assert summary["type"] == "reasoning"
+        assert message["type"] == "message"
+        assert summary["summary"] == [{"type": "summary_text", "text": "Provider summary."}]
+        assert message["content"][0]["text"] == "Current turn."
+        turn_id = next(event.turn_id for event in events if isinstance(event, TurnStarted))
+        assert summary["turn_id"] == message["turn_id"] == turn_id
+        assert "private-reasoning-fixture" not in str(output)
+        summary["summary"].clear()
+        replay = [
+            event.item
+            async for event in turn.events()
+            if isinstance(event, ModelOutputItemCompleted)
+        ]
+        assert replay[0]["summary"] == [{"type": "summary_text", "text": "Provider summary."}]
 
 
 # Deliberately include unknown provider fields to detect lossy normalization.

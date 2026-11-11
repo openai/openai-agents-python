@@ -34,6 +34,7 @@ from ._events import (
     FunctionCallStatus as FunctionCallStatus,
     ImageGenerationCallItem,
     MessageItem,
+    ReasoningItem,
     WebSearchCallItem,
 )
 from ._mcp_errors import _protect_mcp_methods
@@ -155,7 +156,10 @@ class HostedToolCallSummary:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelOutputItemCompleted(_SubmissionEvent):
-    """A completed hosted tool call or an assistant message with annotations.
+    """A completed assistant message, provider reasoning summary, or hosted call.
+
+    Open the Session with include_model_output_items=True to record ordinary
+    assistant messages and provider reasoning summaries.
 
     FileSearch, CodeInterpreter, and ImageGeneration calls default to
     HostedToolCallSummary. Read with
@@ -166,6 +170,7 @@ class ModelOutputItemCompleted(_SubmissionEvent):
 
     item: (
         MessageItem
+        | ReasoningItem
         | WebSearchCallItem
         | FileSearchCallItem
         | CodeInterpreterCallItem
@@ -363,9 +368,14 @@ class _ObservationBuffer:
     """One retained event log; publishing never awaits or invokes application code."""
 
     def __init__(
-        self, session_id: str, *, retention: Literal["bounded", "all"] = "bounded"
+        self,
+        session_id: str,
+        *,
+        retention: Literal["bounded", "all"] = "bounded",
+        include_model_output_items: bool = False,
     ) -> None:
         self.retention: Literal["bounded", "all"] = retention
+        self.include_model_output_items = include_model_output_items
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
         self.records: (
