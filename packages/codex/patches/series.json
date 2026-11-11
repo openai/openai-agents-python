@@ -527,7 +527,11 @@
     {
       "path": "0158-sdk-private-disposable-run.patch",
       "sha256": "7798a788f8c67eca899ec42f5d72bc8432a9817ed1a3549a468a29fd075311bc"
+    },
+    {
+      "path": "0159-sdk-residual-text-guards.patch",
+      "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     }
   ],
-  "result_tree": "11f8f5830af2b1278ea9f85193e99ae9f1a38313"
+  "result_tree": "e72c36a08849f7c9cf0fa2941f719ed003fe3208"
 }

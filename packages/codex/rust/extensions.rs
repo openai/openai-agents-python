@@ -251,10 +251,6 @@ pub fn build(
     ));
     let mut skills_registry = ExtensionRegistryBuilder::with_event_sink(builder.event_sink());
     let skills_metrics = codex_otel::global();
-    // Skip shadow ranking only when SDK telemetry has no active consumer.
-    let shadow_selection_enabled = skills_metrics.is_some()
-        || !crate::telemetry::is_initialized()
-        || crate::telemetry::exports_enabled();
     codex_skills_extension::install_with_providers_and_metrics(
         &mut skills_registry,
         skills,
@@ -264,8 +260,8 @@ pub fn build(
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
-            shadow_selection_enabled: config.features.enabled(Feature::SkillSearch)
-                && (shadow_selection_enabled || crate::telemetry::export_requested(config)),
+            // SDK providers are executor-only; shadow ranking admits Host/Cloud skills.
+            shadow_selection_enabled: false,
         },
     );
     install_audited_extensions(
