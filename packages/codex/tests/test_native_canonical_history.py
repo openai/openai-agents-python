@@ -17,6 +17,45 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.native_storage_fixtures import MemorySessionStore
 
 
+async def test_provider_item_references_survive_native_history_restore(responses):
+    references = [
+        {"type": "item_reference", "id": "msg_remote_first"},
+        {"type": "item_reference", "id": "msg_remote_second"},
+        {"type": "item_reference", "id": "msg_remote_first"},
+    ]
+    storage = CustomStorage(MemorySessionStore())
+    responses.respond(assistant_output("continued"))
+    async with NativeProvider(base_url=responses.url, api_key="synthetic-history") as provider:
+        agent = Agent(instructions="Answer briefly.", provider=provider)
+        async with agent.session(storage=storage) as session:
+            session_id = session.id
+            snapshot = await session.history_snapshot()
+            for invalid in [
+                {"type": "item_reference"},
+                {"type": "item_reference", "id": 17},
+            ]:
+                with pytest.raises(RuntimeError, match="Invalid canonical history item"):
+                    await session.transact_history(
+                        expected_revision=snapshot.revision, keep=0, items=[invalid]
+                    )
+                assert (await session.history_snapshot()).revision == snapshot.revision
+            await session.transact_history(
+                expected_revision=snapshot.revision, keep=0, items=references
+            )
+            assert (await session.history_snapshot()).items == tuple(references)
+        async with agent.session(storage=storage, resume=session_id) as restored:
+            restored_items = (await restored.history_snapshot()).items
+            assert [
+                item for item in restored_items if item["type"] == "item_reference"
+            ] == references
+            assert responses.requests == []
+            result = await (await restored.submit("continue")).get_result()
+    assert result.final_output == "continued"
+    assert len(responses.requests) == 1
+    wire = responses.requests[0]["input"]
+    assert [item for item in wire if item["type"] == "item_reference"] == references
+
+
 async def test_replay_capture_rejects_oversized_original_tool_output(responses):
     effects = []
 
