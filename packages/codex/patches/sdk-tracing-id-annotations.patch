@@ -1,0 +1,170 @@
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -14,6 +14,8 @@
+ use opentelemetry_sdk::trace::ShouldSample;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
++
++pub(crate) const MAX_COMPLETION_DATA_BYTES: usize = 32 * 1024;
+ 
+ #[derive(Debug)]
+ pub struct ScopePolicy {
+@@ -116,6 +118,23 @@
+     entries.insert(identity, Arc::downgrade(&owner));
+     owner
+ }
++// Explicit IDs must never attach a new span to another live owner's policy.
++fn reserve_policy(
++    identity: Identity,
++    policy: Arc<ScopePolicy>,
++) -> Result<Arc<PolicyRegistration>, String> {
++    let mut entries = policies().lock().unwrap_or_else(|e| e.into_inner());
++    if entries
++        .get(&identity)
++        .is_some_and(|owner| owner.strong_count() > 0)
++    {
++        return Err("Native tracing span identity is already active".into());
++    }
++    let owner = Arc::new(PolicyRegistration { identity, policy });
++    entries.insert(identity, Arc::downgrade(&owner));
++    Ok(owner)
++}
++
+ pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
+     policy_registration(span).map(|registration| registration.policy.clone())
+ }
+@@ -281,6 +300,7 @@
+     #[serde(default)]
+     detached: bool,
+     trace_id: Option<String>,
++    span_id: Option<String>,
+     group_id: Option<String>,
+     metadata: Option<Box<serde_json::value::RawValue>>,
+     disabled: Option<bool>,
+@@ -323,12 +343,25 @@
+     }
+     Ok(id)
+ }
++fn parse_span_id(value: &str) -> Result<SpanId, String> {
++    let value = value.strip_prefix("span_").unwrap_or(value);
++    if value.len() != 16 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return Err("span_id must contain 16 nonzero hexadecimal digits".into());
++    }
++    let id = SpanId::from_hex(value).map_err(|_| "Invalid span_id")?;
++    if id == SpanId::INVALID {
++        return Err("span_id must be nonzero".into());
++    }
++    Ok(id)
++}
+ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+     if depth > 8 {
+         return Err("Tracing metadata exceeds maximum depth of 8".into());
+     }
+     match value {
+-        Value::String(s) if s.len() > 4096 => Err("Tracing string exceeds 4096 UTF-8 bytes".into()),
++        Value::String(s) if s.len() > MAX_COMPLETION_DATA_BYTES => {
++            Err("Tracing outcome string exceeds 32 KiB".into())
++        }
+         Value::Array(values) => {
+             if values.len() > 64 {
+                 return Err("Tracing arrays may contain at most 64 entries".into());
+@@ -510,7 +543,7 @@
+             .unwrap_or_default()
+     };
+     let parent_span = parent_context.span().span_context().clone();
+-    let trace_id = options
++    let mut trace_id = options
+         .trace_id
+         .as_deref()
+         .map(parse_trace_id)
+@@ -518,10 +551,27 @@
+     if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
+         return Err("trace_id does not match the selected parent".into());
+     }
++    let span_id = options.span_id.as_deref().map(parse_span_id).transpose()?;
++    let _identity_reservation = if let Some(span_id) = span_id {
++        use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
++        let selected_trace = if parent_span.is_valid() {
++            parent_span.trace_id()
++        } else {
++            trace_id.unwrap_or_else(|| RandomIdGenerator::default().new_trace_id())
++        };
++        trace_id = Some(selected_trace);
++        Some(reserve_policy(
++            (selected_trace, span_id),
++            Arc::clone(&policy),
++        )?)
++    } else {
++        None
++    };
+     let context = parent_context.with_value(policy);
+     let mut builder =
+         opentelemetry::trace::SpanBuilder::from_name(options.name).with_attributes(attributes);
+     builder.trace_id = trace_id;
++    builder.span_id = span_id;
+     let span = build_span("codex_agents_sdk", builder, &context);
+     let context = context.with_span(span);
+     let handle = Arc::new(Handle {
+@@ -584,8 +634,8 @@
+     }
+     if let Some(data) = &outcome.data {
+         bounded_value(data, 0)?;
+-        if data.to_string().len() > 4096 {
+-            return Err("Encoded tracing outcome data exceeds 4096 UTF-8 bytes".into());
++        if data.to_string().len() > MAX_COMPLETION_DATA_BYTES {
++            return Err("Encoded tracing outcome data exceeds 32 KiB".into());
+         }
+     }
+     let handle = resolve(key)?;
+@@ -739,13 +789,26 @@
+     #[test]
+     fn bounds_actual_metadata_attribute_encoding() {
+         assert_eq!(
+-            metadata_attribute_value(&serde_json::value::to_raw_value(&json!("x".repeat(4096))).unwrap())
+-                .unwrap()
+-                .len(),
++            metadata_attribute_value(
++                &serde_json::value::to_raw_value(&json!("x".repeat(4096))).unwrap()
++            )
++            .unwrap()
++            .len(),
+             4096
+         );
+-        assert!(metadata_attribute_value(&serde_json::value::to_raw_value(&json!(["x".repeat(3000), "y".repeat(3000)])).unwrap()).is_err());
+-        assert!(metadata_attribute_value(&serde_json::value::to_raw_value(&json!({"key":[1,2]})).unwrap()).is_ok());
++        assert!(
++            metadata_attribute_value(
++                &serde_json::value::to_raw_value(&json!(["x".repeat(3000), "y".repeat(3000)]))
++                    .unwrap()
++            )
++            .is_err()
++        );
++        assert!(
++            metadata_attribute_value(
++                &serde_json::value::to_raw_value(&json!({"key":[1,2]})).unwrap()
++            )
++            .is_ok()
++        );
+     }
+     #[test]
+     fn disabled_sampling_has_no_recording() {
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+--- a/codex-rs/otel/src/sdk_trace_routes.rs
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -184,7 +184,14 @@
+             opentelemetry::Value::Bool(v) => json!(v),
+             opentelemetry::Value::I64(v) => json!(v),
+             opentelemetry::Value::F64(v) => json!(v),
+-            other => json!(truncate(&other.to_string(), 4096)),
++            other => json!(truncate(
++                &other.to_string(),
++                if key == "sdk.outcome.data" {
++                    crate::sdk_trace::MAX_COMPLETION_DATA_BYTES
++                } else {
++                    4096
++                },
++            )),
+         };
+         attrs.insert(key, val);
+     }
