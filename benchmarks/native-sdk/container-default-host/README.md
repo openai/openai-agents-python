@@ -23,7 +23,7 @@ BENCH="$PWD/benchmarks/native-sdk"
 WHEEL="/absolute/path/to/exact-native-wheel.whl"
 CPYTHON_DIR="/absolute/path/to/cpython-3.13.16-linux-x86_64-gnu"
 LAB="$(mktemp -d /tmp/agents-default-host.XXXXXX)"
-RUN_ID="${LAB##*.}"
+RUN_ID="$(cat /proc/sys/kernel/random/uuid)"
 CTX="$LAB/context"
 mkdir "$CTX" "$LAB/output" "$LAB/docker-config"
 export DOCKER_CONFIG="$LAB/docker-config"
@@ -56,7 +56,7 @@ timeout --signal=TERM --kill-after=15s 600s \
 docker image inspect "$IMAGE" > "$LAB/image.json"
 ```
 
-The image's package inventories have been recording the full installed versions. The suffix from `LAB` has been giving each run its own image tag and container name. A task-local `DOCKER_CONFIG` has been keeping Docker configuration writes in `LAB`. Container mount: the results directory only.
+The image's package inventories have been recording the full installed versions. The UUID has been keeping the image tag and container name independent of the temporary directory. A task-local `DOCKER_CONFIG` has been keeping Docker configuration writes in `LAB`. Container mount: the results directory only.
 
 ## Run one offline functional smoke
 
