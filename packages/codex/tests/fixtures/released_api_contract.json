@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.7",
-  "baseline_commit": "59beff94c1a3328b9a637c989aff1d4802688bfd",
+  "baseline_commit": "42146af0c1f47066dff5bcb1a17d008f276b021b",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -927,9 +927,9 @@
           "@dataclass(frozen=True)\nclass RealtimePlaybackInterrupted:\n    response_id: str | None\n    playback: RealtimePlaybackPosition | None = None\n    retired_response_ids: tuple[str, ...] = ()\n    cancelled_response_id: str | None = None",
           "@dataclass(frozen=True)\nclass RealtimeText:\n    role: Literal['user', 'assistant']\n    text: str\n    final: bool\n    response_id: str | None = None\n    item_id: str | None = None\n    content_index: int | None = None\n    output_index: int | None = None\n    output_kind: Literal['text', 'audio_transcript'] | None = None",
           "@dataclass(frozen=True)\nclass RealtimeLifecycle:\n    status: Literal['started', 'updated', 'speech_started', 'closed']\n    session_id: str | None = None\n    reason: str | None = None",
-          "@dataclass(frozen=True)\nclass RealtimeResponse:\n    status: Literal['created', 'done', 'cancelled']\n    response_id: str | None\n    usage: RealtimeUsage | None = None\n    cumulative_usage: RealtimeUsage | None = None\n    out_of_band: bool = False",
+          "@dataclass(frozen=True)\nclass RealtimeResponse:\n    status: Literal['created', 'done', 'cancelled']\n    response_id: str | None\n    usage: RealtimeUsage | None = None\n    cumulative_usage: RealtimeUsage | None = None\n    out_of_band: bool = False\n    run_context: RealtimePolicyContext | None = None",
           "@dataclass(frozen=True)\nclass RealtimeDelegation:\n    handoff_id: str\n    status: Literal['started', 'completed', 'failed']\n    error: Exception | None = None",
-          "@dataclass(frozen=True)\nclass RealtimeToolCall:\n    call_id: str\n    name: str\n    status: Literal['started', 'completed', 'failed']\n    error: Exception | None = None",
+          "@dataclass(frozen=True)\nclass RealtimeToolCall:\n    call_id: str\n    name: str\n    status: Literal['started', 'executing', 'completed', 'failed']\n    error: Exception | None = None\n    arguments: str | None = None\n    item_id: str | None = None\n    namespace: str | None = None\n    response_id: str | None = None\n    tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)\n    output: str | None = None\n    run_context: RealtimePolicyContext | None = None",
           "@dataclass(frozen=True)\nclass RealtimeDetachedFunctionCall:\n    response_id: str\n    item_id: str\n    call_id: str\n    name: str\n    arguments: str",
           "@dataclass(frozen=True)\nclass RealtimeToolBatchError:\n    response_id: str\n    call_ids: tuple[str, ...]\n    error: Exception",
           "@dataclass(frozen=True, eq=False)\nclass RealtimeHostedMcpApprovalRequested:\n    request_id: str\n    server_label: str\n    tool_name: str\n    arguments: str\n    response_id: str\n    profile_id: str | None = None\n    profile_epoch: int | None = None",

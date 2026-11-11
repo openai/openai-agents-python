@@ -625,6 +625,14 @@
       "sha256": "511f7f5fcad8dbc71f3c9a914e6529a7c5233b3b4a630dc7299903a5d76516ff"
     },
     {
+      "path": "0160-sdk-realtime-event-context.patch",
+      "sha256": "1c8909ef7718231b9b1fc54154617565751b6b7f67d2e3bd0211a8f1c7ced112"
+    },
+    {
+      "path": "0161-sdk-realtime-call-metadata.patch",
+      "sha256": "fa87c499a02627ab02b834e07014a1e0c594adcf72833a3a0722f798d6dde80c"
+    },
+    {
       "path": "sdk-trace-credential-destination.patch",
       "sha256": "68668e758695b7f95164852c62a310cf0fd9bc78d310145ebe81b17fa8aa1eb9"
     },
@@ -669,5 +677,5 @@
       "sha256": "c9e982a6a38610e0eb7a0299052eb07df4c8511d4f8ef478200b63890bd79783"
     }
   ],
-  "result_tree": "318e87e55053a339a80df58864d9e2210a439d19"
+  "result_tree": "b27efd422bc85d067bd721e645ca4bce33bdce58"
 }

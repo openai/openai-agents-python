@@ -3787,6 +3787,7 @@ impl PythonTools {
             true,
             profile.as_ref(),
             None,
+            None,
         )
         .map(|(_, _, receiver)| receiver)
     }
@@ -4125,7 +4126,7 @@ impl PythonTools {
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         self.enqueue_profile(
             thread, generation, slot, turn, call, arguments, None, source, model, reentry, None,
-            media,
+            media, None,
         )
     }
 
@@ -4143,6 +4144,7 @@ impl PythonTools {
         reentry: bool,
         profile: Option<&codex_extension_api::AgentProfileReceipt>,
         media: Option<NativeMediaContext>,
+        realtime_tool_call: Option<Value>,
     ) -> Result<(PendingKey, u64, oneshot::Receiver<ToolReply>)> {
         let entry = &generation.entries[slot];
         let key = PendingKey {
@@ -4185,6 +4187,8 @@ impl PythonTools {
                 "arguments": arguments, "_sdk_python_tool": key.reply,
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
                 "_sdk_code_origin": code_origin, "_sdk_model": model,
+                "_sdk_realtime_tool_call": realtime_tool_call,
+                "_sdk_realtime_tool_name": codex_extension_api::realtime_tool_wire_name(&entry.name),
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
@@ -6147,6 +6151,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                         model_info: Arc::clone(&call.model_info),
                         profile: call.provider_reference_profile,
                     }),
+                    call.conversation_history.realtime_tool_call().cloned(),
                 )
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
             // A rejected enqueue never reaches application code. Keep Core's
