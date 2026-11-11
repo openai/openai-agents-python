@@ -135,7 +135,8 @@ jobs:
             }
             printf("{\"command\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"timed_out\":%s,\"messages\":%d}\n",command,mode==0?"host":mode==1?"cleared":"capture-deny",WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,timed_out?"true":"false",received);
             if (mode==2) {
-              mach_port_destroy(task,sink);
+              mach_port_mod_refs(task,sink,MACH_PORT_RIGHT_RECEIVE,-1);
+              mach_port_deallocate(task,sink);
               for (mach_msg_type_number_t i=0;i<old_count;i++) if(old[i]) mach_port_deallocate(task,old[i]);
               if(old) vm_deallocate(task,(vm_address_t)old,old_count*sizeof(mach_port_t));
             }
