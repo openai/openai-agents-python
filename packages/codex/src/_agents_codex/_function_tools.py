@@ -67,6 +67,7 @@ from .tools import (
     Checklist as Checklist,
     CodeInterpreter as CodeInterpreter,
     FileSearch as FileSearch,
+    HostedShell as HostedShell,
     ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
     ToolCallInfo as ToolCallInfo,
@@ -685,6 +686,7 @@ Tool: TypeAlias = (
     | WebSearch
     | FileSearch
     | CodeInterpreter
+    | HostedShell
     | ImageGeneration
     | ToolSearch
     | NativeAgents[ToolContextT]

@@ -137,9 +137,26 @@ These programs use the current SDK and model credentials:
 | Task | Example | Prerequisites |
 | --- | --- | --- |
 | Run commands on an existing executor | [remote_executor.py](remote_executor.py) | Current SDK, an authenticated WSS exec-server, an assigned workspace, and model credentials. |
+| Push a reviewed Git commit from a macOS application | [Host Git](#push-a-reviewed-git-commit-from-macos) | Git, a trusted checkout, and existing HTTPS credentials for a scratch repository. |
 | Search project paths and text | [project_search.py](project_search.py) | Current SDK, a Linux or macOS project directory, and model credentials. Uses structured glob and grep tools. |
 | Use Unix sockets inside an offline job | [offline_unix_sockets.py](offline_unix_sockets.py) | Current SDK, an isolated Linux or macOS executor, gateway credentials, and a local synthetic Responses peer. |
 | Provision an offline Docker job | [offline_docker.py](offline_docker.py) | Docker and a prepared image. This standard-library helper expects the application to supply the gateway and executor configuration. |
+
+### Push a reviewed Git commit from macOS
+
+The [host Git example](host_git.py) has been using a Python function tool for an authenticated push. The function runs in the application process and uses its Git credential helper. The example uses scripted model responses and requires only Git credentials.
+
+Use a trusted checkout whose `origin` has one credential-free HTTPS GitHub URL for fetch and push. Review the commit, Git configuration, hooks, and credential helper before authorizing the push. Keep the checkout's Git configuration and hooks under application control throughout the operation. Run the example from the repository root with a matching SDK wheel installed.
+
+```sh
+PYTHONPATH=. python -m examples.codex.host_git \
+  --checkout /absolute/path/to/trusted-checkout \
+  --remote-url https://github.com/OWNER/SCRATCH-REPOSITORY.git \
+  --commit FULL_REVIEWED_COMMIT_SHA \
+  --branch sdk-host-git-UNIQUE_TEST_ID
+```
+
+The application selects the checkout, repository, commit, and new branch before opening the Session. The tool accepts no model arguments. It verifies the exact remote branch SHA and prints a `verified` result. A repeat with the same commit verifies the existing branch. A branch pointing to another commit causes the operation to fail. After a timeout or cancellation, check the remote branch before retrying because the push can finish before the application receives the result.
 
 ### Allow public hosts with exceptions
 

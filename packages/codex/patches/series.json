@@ -727,7 +727,11 @@
     {
       "path": "sdk-provider-hosted-replay-fence.patch",
       "sha256": "cc46a7a1c697e833784f9f5ffa7245b0e2354e5bbc5a0a8bb892fae7ae55c53e"
+    },
+    {
+      "path": "sdk-provider-hosted-shell.patch",
+      "sha256": "347831fd574228651709dbc3f0bbb161bcd3b9afdd80fec6489b475f61050ef6"
     }
   ],
-  "result_tree": "4dc503e23fb7c16625918734085afaec940163da"
+  "result_tree": "f9a16efe9c38e7d577a97a87786ab674a0042c85"
 }
