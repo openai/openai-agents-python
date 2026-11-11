@@ -293,7 +293,7 @@ class Environment(Generic[ContextT_contra]):
     sequence keeps only that directory writable. Strict write enforcement is the
     default and requires a Linux or macOS executor. To retain remote approval
     behavior, explicitly select ``write_policy="legacy"`` without writable roots.
-    Linux local executors also support ``write_policy="trusted_workspace_write"``.
+    Linux and macOS local executors also accept ``write_policy="trusted_workspace_write"``.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -419,7 +419,7 @@ class Environment(Generic[ContextT_contra]):
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
 
-        Set ``write_policy="trusted_workspace_write"`` for trusted local Linux jobs.
+        Set ``write_policy="trusted_workspace_write"`` for trusted local jobs on Linux or macOS.
         Commands can read files accessible to the application user and inherit
         the application process environment, including ambient credentials,
         subject to native sandbox and network rules. Both inherited values and
@@ -483,8 +483,10 @@ class Environment(Generic[ContextT_contra]):
         if self.write_policy == "trusted_workspace_write":
             if not self._is_local:
                 raise ValueError("Trusted workspace-write requires Environment.local")
-            if sys.platform != "linux":
-                raise ValueError("Trusted workspace-write requires Environment.local on Linux")
+            if sys.platform not in ("linux", "darwin"):
+                raise ValueError(
+                    "Trusted workspace-write requires Environment.local on Linux or macOS"
+                )
         if self.temp_dir is not None:
             if self.write_policy != "trusted_workspace_write":
                 raise ValueError("temp_dir requires trusted workspace-write")

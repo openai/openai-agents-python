@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import pytest
@@ -90,11 +90,16 @@ def test_local_declaration_has_no_transport_and_normalizes_additional_roots() ->
     assert host._config(local)["env_vars"] == env_vars
 
 
-def test_trusted_workspace_write_is_linux_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    with pytest.raises(ValueError, match="requires Environment.local on Linux"):
-        Environment.local(cwd="/job/worktree", write_policy="trusted_workspace_write")
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_trusted_workspace_write_on_supported_local_platforms(
+    monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     assert Environment.local(cwd="/job/worktree").write_policy == "strict"
+    assert (
+        Environment.local(cwd="/job/worktree", write_policy="trusted_workspace_write").write_policy
+        == "trusted_workspace_write"
+    )
 
 
 def test_trusted_workspace_write_requires_a_local_opt_in() -> None:
@@ -142,17 +147,7 @@ async def test_missing_local_root_refuses_session_before_model(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize(
-    "trusted",
-    [
-        pytest.param(False, id="strict"),
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
-            id="trusted",
-        ),
-    ],
-)
+@pytest.mark.parametrize("trusted", [False, True], ids=["strict", "trusted"])
 async def test_local_write_roots_cannot_include_the_native_helper_installation(
     responses: ResponsesFixture, tmp_path: Path, trusted: bool
 ) -> None:
@@ -737,7 +732,63 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
-@pytest.mark.requires_native_linux_sandbox
+def _macos_identity_probe(directory: Path) -> str:
+    source = directory / "identity-probe.c"
+    probe = directory / "identity-probe"
+    source.write_text(
+        r"""
+#include <mach/mach.h>
+#include <mach/task_special_ports.h>
+#include <stdio.h>
+#include <unistd.h>
+
+// Match the no-report global-name query in the pinned Seatbelt tests.
+extern const int SANDBOX_CHECK_NO_REPORT;
+extern int sandbox_check(pid_t, const char *, int, ...);
+
+int main(void) {
+    const int global_name_filter = 2;
+    const char *services[] = {
+        "com.apple.system.opendirectoryd.libinfo",
+        "com.apple.system.DirectoryService.libinfo_v1",
+        "com.apple.system.opendirectoryd.membership",
+    };
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t status = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &port);
+    int present = status == KERN_SUCCESS && MACH_PORT_VALID(port);
+    printf("bootstrap port status=%d present=%d\n", status, present);
+    if (present) {
+        mach_port_deallocate(mach_task_self(), port);
+    }
+    for (size_t i = 0; i < sizeof(services) / sizeof(services[0]); ++i) {
+        int result = sandbox_check(
+            getpid(), "mach-lookup", global_name_filter | SANDBOX_CHECK_NO_REPORT, services[i]
+        );
+        printf("mach-lookup %s=%d\n", services[i], result);
+    }
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-o", str(probe), str(source)],
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"printf 'identity probe build unavailable (%s)\\n' {type(error).__name__}"
+    return f"{shlex.quote(str(probe))} || printf 'identity probe exit=%s\\n' \"$?\""
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 @pytest.mark.usefixtures("isolated_github_cli")
 async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_writes(
     responses: ResponsesFixture,
@@ -819,6 +870,30 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
             "DYLD_SYNTHETIC_MARKER": "synthetic-explicit-loader-value",
         },
     )
+    # Darwin's id -F fails when getpwuid cannot resolve the real UID.
+    macos_uid_lookup = ("/usr/bin/id", "-F")
+    ssh = "/usr/bin/ssh" if sys.platform == "darwin" else "ssh"
+    ssh_command = f"{ssh} -G -T -F /dev/null credential.example.invalid"
+    if sys.platform == "darwin":
+        identity_probe = _macos_identity_probe(linked)
+        ssh_probe = (
+            f"ssh_config=$({ssh_command} & ssh_pid=$!; "
+            'if ! wait "$ssh_pid"; then '
+            'printf "trusted SSH pid=%s, UID lookup exit=%s\\n" "$ssh_pid" "$uid_status" >&2; '
+            "exit 1; fi) && printf '%s\\n' \"$ssh_config\" | grep -q '^user '; "
+        )
+        # Keep checking Git and write grants after recording the real SSH exit.
+        ssh_probe = (
+            f"{identity_probe}; "
+            f"uid_status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || uid_status=$?; "
+            'printf "trusted UID lookup exit=%s\\n" "$uid_status"; '
+            f"ssh_status=0; ({ssh_probe}) || ssh_status=$?; "
+            'printf "trusted SSH config exit=%s\\n" "$ssh_status"; '
+        )
+    else:
+        ssh_probe = (
+            f'ssh_config=$({ssh_command}); printf "%s\\n" "$ssh_config" | grep -q "^user "; '
+        )
     command = (
         'set -eu; test "$(fixture-tool)" = "fixture tool"; '
         f'test "$HOME" = {shlex.quote(str(home))}; '
@@ -827,8 +902,7 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         f'test "$TMPDIR" = {shlex.quote(str(job_temp))}; '
         'test -z "${OPENAI_API_KEY+x}${openai_api_key+x}${CODEX_API_KEY+x}${LD_LIBRARY_PATH+x}"; '
         'test -z "${ld_synthetic_marker+x}${DYLD_SYNTHETIC_MARKER+x}"; '
-        "ssh_config=$(ssh -G -T -F /dev/null credential.example.invalid); "
-        'printf "%s\\n" "$ssh_config" | grep -q "^user "; '
+        f"{ssh_probe}"
         "printf 'protocol=https\\nhost=credential.example.invalid\\n\\n' "
         "| git credential fill | grep -qx password=synthetic-git-password; "
         'scratch=$(mktemp -d "$TMPDIR/sdk-job.XXXXXX"); printf job > "$scratch/result"; '
@@ -887,7 +961,68 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
         turn = await session.submit("Create and commit the artifact.")
         assert (await turn.get_result()).final_output == "done"
     output = "\n".join(command_outputs)
-    assert "Process exited with code 0" in output, output
+    failure = output
+    if sys.platform == "darwin" and (
+        probe := re.search(r"^trusted SSH pid=([0-9]+), UID lookup exit=[0-9]+\r?$", output, re.M)
+    ):
+        pid = probe[1]
+        denial = "no matching Mach lookup denial visible"
+        try:
+            log = subprocess.run(
+                [
+                    "/usr/bin/log",
+                    "show",
+                    "--last",
+                    "1m",
+                    "--predicate",
+                    f'eventMessage CONTAINS "ssh({pid}) deny(" '
+                    'AND eventMessage CONTAINS " mach-lookup "',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if match := re.search(rf"ssh\({pid}\) deny\([0-9]+\) mach-lookup [\w.-]+", log.stdout):
+                denial = match[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        control = (
+            f"status=0; {shlex.join(macos_uid_lookup)} >/dev/null 2>&1 || status=$?; "
+            'printf "UID lookup exit=%s\\n" "$status"; '
+            f"status=0; {ssh_command} >/dev/null 2>&1 || status=$?; "
+            'printf "SSH config exit=%s\\n" "$status"; '
+            f"{identity_probe}"
+        )
+        host_lookup = "identity probe unavailable"
+        try:
+            host_lookup = subprocess.run(
+                ["/bin/sh", "-c", control],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": control, "login": False, "yield_time_ms": 5000},
+                "strict-identity",
+            )
+        )
+        responses.respond(assistant_output("done"))
+        strict_environment = Environment.local(cwd=linked, tools=["exec_command"])
+        try:
+            async with timeout(20), agent.session(environment=strict_environment) as session:
+                turn = await session.submit("Check account lookup.")
+                await turn.get_result()
+            strict_lookup = tool_output(responses.requests[-1], "strict-identity")
+        except (AssertionError, TimeoutError, NativeError) as error:
+            strict_lookup = f"identity probe unavailable ({type(error).__name__})"
+        failure = f"{output}\nHost {host_lookup}\nStrict {strict_lookup}\n{denial}"
+    assert "Process exited with code 0" in output, failure
     advertised = json.dumps(responses.requests[0])
     assert "Fixture for selected-skill" in advertised
     assert "Fixture for hidden-skill" not in advertised
@@ -898,9 +1033,62 @@ async def test_trusted_local_shell_uses_host_context_and_fences_linked_worktree_
     assert (linked / ".agents" / "marker").read_text() == "protected"
     (job_result,) = job_temp.glob("sdk-job.*/result")
     assert job_result.read_text() == "job"
+    if sys.platform == "darwin":
+        assert "trusted SSH config exit=0" in output.splitlines(), (
+            f"{failure}\nTrusted Git, job temp, and write-fence assertions passed."
+        )
+        assert "trusted UID lookup exit=0" in output.splitlines(), failure
 
 
-@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Xcode and Homebrew")
+@pytest.mark.requires_native_macos_sandbox
+@pytest.mark.usefixtures("isolated_github_cli")
+async def test_trusted_local_runs_xcode_shims_and_homebrew(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("brew") is None:
+        pytest.skip("Homebrew is required")
+    monkeypatch.setenv("HOMEBREW_NO_AUTO_UPDATE", "1")
+    monkeypatch.setenv("HOMEBREW_NO_ANALYTICS", "1")
+    prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+    command = (
+        "set -e; /usr/bin/xcrun --no-cache --find git; /usr/bin/git --version; "
+        "/usr/bin/make --version; brew --version; brew --prefix"
+    )
+    bash = Path(prefix) / "bin" / "bash"
+    if bash.is_file():
+        command += f"; {shlex.quote(str(bash))} -c 'printf homebrew-bash'"
+    responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "dev-tools"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    selected = Environment.local(
+        cwd=tmp_path,
+        tools=["exec_command"],
+        write_policy="trusted_workspace_write",
+        temp_dir=tmp_path,
+    )
+    async with timeout(40), agent.session(environment=selected) as session:
+        turn = await session.submit("Run the developer tools.")
+        assert (await turn.get_result()).final_output == "done"
+    output = tool_output(responses.requests[-1], "dev-tools")
+    assert "Process exited with code 0" in output
+    assert "git version" in output
+    assert "GNU Make" in output
+    assert "Homebrew " in output
+    assert prefix in output.splitlines()
+    if bash.is_file():
+        assert "homebrew-bash" in output
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 @pytest.mark.usefixtures("isolated_github_cli")
 @pytest.mark.parametrize("explicit_network", [False, True], ids=["default-deny", "explicit-allow"])
 async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
@@ -974,17 +1162,7 @@ async def test_trusted_local_shell_verifies_tls_using_an_inherited_ca(
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
-@pytest.mark.parametrize(
-    "trusted",
-    [
-        pytest.param(False, id="strict"),
-        pytest.param(
-            True,
-            marks=pytest.mark.skipif(sys.platform != "linux", reason="trusted mode requires Linux"),
-            id="trusted",
-        ),
-    ],
-)
+@pytest.mark.parametrize("trusted", [False, True], ids=["strict", "trusted"])
 @pytest.mark.usefixtures("isolated_github_cli")
 async def test_local_write_root_replacement_survives_portable_resume(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool
@@ -1442,8 +1620,11 @@ async def test_cancel_joins_local_process_before_its_result_is_accepted(
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
 @pytest.mark.requires_native_macos_sandbox
+@pytest.mark.parametrize("write_policy", ["strict", "trusted_workspace_write"])
 async def test_macos_session_close_stops_child_after_command_exit(
-    responses: ResponsesFixture, tmp_path: Path
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    write_policy: Literal["strict", "trusted_workspace_write"],
 ) -> None:
     cwd, extra = tmp_path / "cwd", tmp_path / "extra"
     cwd.mkdir()
@@ -1478,7 +1659,9 @@ async def test_macos_session_close_stops_child_after_command_exit(
     responses.respond(assistant_output("parent exited"))
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     agent = Agent(instructions="Use the selected tools.", provider=provider)
-    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+    environment = Environment.local(
+        cwd=cwd, writable_roots=[extra], tools=["exec_command"], write_policy=write_policy
+    )
     # The fixture's 30-second self-exit must never satisfy this test.
     async with timeout(25), provider:
         try:
