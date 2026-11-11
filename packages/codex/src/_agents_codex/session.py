@@ -3356,8 +3356,6 @@ class Session(Generic[ContextT, OutputT]):
                     model_settings=model_settings,
                     tool_selection=tool_selection,
                 )
-            if not isinstance(include_model_output_items, bool):
-                raise TypeError("include_model_output_items must be a boolean")
             if observation_retention not in ("bounded", "all"):
                 raise ValueError('observation_retention must be "bounded" or "all"')
             profiles = (
