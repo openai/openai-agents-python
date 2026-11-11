@@ -523,12 +523,19 @@ class RealtimeLifecycle:
 
 @dataclass(frozen=True)
 class RealtimeResponse:
+    """Response lifecycle and retained issuing-Agent/application context.
+
+    Terminal context: the original issuing source, including after voice Agent
+    replacement. No application Agent on a bare native Session: no context.
+    """
+
     status: Literal["created", "done", "cancelled"]
     response_id: str | None
     usage: RealtimeUsage | None = None
     # Connection total at this event, including this accepted response.
     cumulative_usage: RealtimeUsage | None = None
     out_of_band: bool = False
+    run_context: RealtimePolicyContext | None = None
 
 
 @dataclass(frozen=True)
@@ -540,10 +547,26 @@ class RealtimeDelegation:
 
 @dataclass(frozen=True)
 class RealtimeToolCall:
+    """Native call lifecycle and original application identity.
+
+    Started: batch submission. Executing: callable entry after required approval
+    and input policies, without an assertion of completed application effects.
+    Arguments: original provider JSON. Output: exact Core-accepted model-visible
+    text, including selected fallbacks. Tool: original application declaration,
+    or None without body admission.
+    """
+
     call_id: str
     name: str
-    status: Literal["started", "completed", "failed"]
+    status: Literal["started", "executing", "completed", "failed"]
     error: Exception | None = None
+    arguments: str | None = None
+    item_id: str | None = None
+    namespace: str | None = None
+    response_id: str | None = None
+    tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
+    output: str | None = None
+    run_context: RealtimePolicyContext | None = None
 
 
 @dataclass(frozen=True)
@@ -770,6 +793,11 @@ class _FunctionIdentity:
     name: str
     source_profile: dict[str, Any] | None
     unavailable: bool = False
+    arguments: str | None = None
+    item_id: str | None = None
+    namespace: str | None = None
+    response_id: str | None = None
+    tool: FunctionTool[Any, Any, Any] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -1123,6 +1151,61 @@ class RealtimeSession:
         self._response_id: str | None = None
         self._context: Context | None = None
         self._session_shutdown = False
+
+    def _event_context(self, receipt: Mapping[str, Any] | None) -> RealtimePolicyContext | None:
+        if receipt is None and self._session._agent is None:
+            return None
+        return RealtimePolicyContext(
+            self._session._original_agent_for_profile(receipt), self._session._context, self.usage
+        )
+
+    def _function_event(
+        self,
+        call_id: str,
+        name: str,
+        status: Literal["started", "executing", "completed", "failed"],
+        error: Exception | None = None,
+        output: str | None = None,
+    ) -> RealtimeToolCall:
+        captured = self._function_names.get(call_id)
+        if captured is None:
+            return RealtimeToolCall(call_id, name, status, error, output=output)
+        return RealtimeToolCall(
+            call_id,
+            name,
+            status,
+            error,
+            arguments=captured.arguments,
+            item_id=captured.item_id,
+            namespace=captured.namespace,
+            response_id=captured.response_id,
+            tool=captured.tool,
+            output=output,
+            run_context=self._event_context(captured.source_profile),
+        )
+
+    def _tool_body_started(
+        self, source: Any, wire_name: str, tool: FunctionTool[Any, Any, Any]
+    ) -> None:
+        if not isinstance(source, dict) or source.get("generation") != self._generation:
+            return
+        call_id = source.get("provider_call_id")
+        if not isinstance(call_id, str):
+            return
+        captured = self._function_names.get(call_id)
+        owned = self._functions.get(call_id)
+        if (
+            captured is None
+            or owned is None
+            or owned.retired
+            or captured.tool is not None
+            or captured.name != wire_name
+            or captured.item_id != source.get("provider_item_id")
+            or captured.response_id != source.get("provider_response_id")
+        ):
+            return
+        captured.tool = tool
+        self._emit(self._function_event(call_id, captured.name, "executing"))
 
     @property
     def usage(self) -> RealtimeUsage | None:
@@ -1971,6 +2054,12 @@ class RealtimeSession:
             if isinstance(event, RealtimeResponse)
             else 0
         )
+        if (
+            isinstance(event, (RealtimeResponse, RealtimeToolCall))
+            and event.run_context is not None
+            and event.run_context.realtime_usage is not None
+        ):
+            usage_bytes += 4 * len(json.dumps(vars(event.run_context.realtime_usage)))
         values = list(vars(event).values())
         for value in tuple(values):
             if isinstance(
@@ -3000,7 +3089,7 @@ class RealtimeSession:
         for call_id, name in names.items():
             del self._pending_functions[call_id]
             self._functions[call_id] = owned
-            self._emit(RealtimeToolCall(call_id, name, "started"))
+            self._emit(self._function_event(call_id, name, "started"))
         if self._live:
             assert self._context is not None
             owned.task = self._context.copy().run(asyncio.create_task, self._run_functions(owned))
@@ -3337,7 +3426,14 @@ class RealtimeSession:
             # eventual completion dedup entry, so terminal publication cannot
             # exhaust the identity budget after native work has completed.
             self._reserve_request(
-                call_id, call_id, call_id, value["name"], value.get("response_id") or ""
+                call_id,
+                call_id,
+                call_id,
+                value["name"],
+                value.get("response_id") or "",
+                value["arguments"],
+                value["item_id"],
+                value.get("namespace") or "",
             )
             self._pending_functions[call_id] = (value["name"], value.get("response_id"))
             receipt = value.get("source_profile")
@@ -3346,7 +3442,14 @@ class RealtimeSession:
                 if not isinstance(epoch, str) or not epoch.isascii() or not epoch.isdecimal():
                     raise RuntimeError("Invalid native Realtime source profile")
                 receipt = {"profile_id": receipt.get("profile_id"), "epoch": int(epoch)}
-            self._function_names[call_id] = _FunctionIdentity(value["name"], receipt)
+            self._function_names[call_id] = _FunctionIdentity(
+                value["name"],
+                receipt,
+                arguments=value["arguments"],
+                item_id=value["item_id"],
+                namespace=value.get("namespace"),
+                response_id=value.get("response_id"),
+            )
         elif name == "FunctionCallRejected":
             call_id, function_name = value.get("call_id"), value.get("name")
             if not isinstance(call_id, str) or not isinstance(function_name, str):
@@ -3370,13 +3473,14 @@ class RealtimeSession:
             if call_id not in self._functions and call_id not in self._pending_functions:
                 self._finish_request(call_id)
             self._emit(
-                RealtimeToolCall(
+                self._function_event(
                     call_id,
                     identity.name,
                     "completed" if value["succeeded"] else "failed",
                     RuntimeError(f"Tool {identity.name} not found")
                     if identity.unavailable
                     else None,
+                    output=value.get("output"),
                 )
             )
         elif name == "Error":
@@ -3468,7 +3572,12 @@ class RealtimeSession:
                 self._usage_totals = totals
             self._emit(
                 RealtimeResponse(
-                    status, value.get("response_id"), reported_usage, self.usage, out_of_band
+                    status,
+                    value.get("response_id"),
+                    reported_usage,
+                    self.usage,
+                    out_of_band,
+                    run_context=self._event_context(value.get("profile_receipt")),
                 )
             )
             if name == "ResponseDone" and not out_of_band:

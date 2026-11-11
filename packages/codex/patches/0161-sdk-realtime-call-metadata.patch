@@ -1,0 +1,116 @@
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index c9a79134..8bb98c3c 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -197,6 +197,19 @@ impl TurnItemEmitter for CoreTurnItemEmitter {
+     }
+ }
+ 
++fn realtime_tool_call_metadata(
++    history: &[ResponseItemEnvelope],
++    invocation_call_id: &str,
++) -> Option<serde_json::Value> {
++    // Stop at the exact latest call even when it has no native annotation.
++    // An older or unrelated restored row cannot donate a correlation.
++    history.iter().rev().find(|envelope| {
++        matches!(&envelope.item, codex_protocol::models::ResponseItem::FunctionCall { call_id, .. }
++            if call_id == invocation_call_id)
++    }).and_then(|envelope| envelope.metadata.as_ref())
++      .and_then(|metadata| metadata.realtime_tool_call.clone())
++}
++
+ async fn to_extension_call<'a>(
+     invocation: &ToolInvocation,
+     environments: Vec<ToolEnvironment<'a>>,
+@@ -206,12 +219,14 @@ async fn to_extension_call<'a>(
+         .clone_history()
+         .await
+         .into_shared_annotated_items();
++    let realtime_tool_call = realtime_tool_call_metadata(&history, &invocation.call_id);
+     let conversation_history = ConversationHistory::new_deferred(move || {
+         Arc::unwrap_or_clone(history)
+             .into_iter()
+             .map(ResponseItemEnvelope::into_item)
+             .collect()
+-    });
++    })
++    .with_realtime_tool_call(realtime_tool_call);
+     let settings = &invocation.step_context.settings;
+     let codex_turn_metadata = invocation
+         .turn
+@@ -249,6 +264,42 @@ async fn to_extension_call<'a>(
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn realtime_source_requires_the_exact_latest_native_call_annotation() {
++        let row = |call_id: &str, source: Option<serde_json::Value>| {
++            codex_history::ResponseItemEnvelope {
++                item: serde_json::from_value(serde_json::json!({
++                    "type": "function_call", "call_id": call_id,
++                    "name": "tool", "arguments": "{}"
++                }))
++                .unwrap(),
++                metadata: Some(codex_history::CodexHarnessMetadata {
++                    realtime_tool_call: source,
++                    ..Default::default()
++                }),
++            }
++        };
++        let source = serde_json::json!({"generation":"live", "provider_call_id":"provider"});
++        assert_eq!(
++            super::realtime_tool_call_metadata(&[row("foreign", Some(source.clone()))], "live"),
++            None
++        );
++        assert_eq!(
++            super::realtime_tool_call_metadata(
++                &[row("live", Some(source.clone())), row("live", None)],
++                "live"
++            ),
++            None
++        );
++        assert_eq!(
++            super::realtime_tool_call_metadata(
++                &[row("foreign", None), row("live", Some(source.clone()))],
++                "live"
++            ),
++            Some(source)
++        );
++    }
++
+     use std::sync::Arc;
+ 
+     use codex_extension_items::ExtensionItem;
+diff --git a/codex-rs/tools/src/tool_call.rs b/codex-rs/tools/src/tool_call.rs
+index db5b10a3..254fa9ee 100644
+--- a/codex-rs/tools/src/tool_call.rs
++++ b/codex-rs/tools/src/tool_call.rs
+@@ -18,6 +18,7 @@ use std::sync::LazyLock;
+ #[derive(Clone)]
+ pub struct ConversationHistory {
+     items: Arc<LazyLock<Box<[ResponseItem]>, HistoryLoader>>,
++    realtime_tool_call: Option<serde_json::Value>,
+ }
+ 
+ type HistoryLoader = Box<dyn FnOnce() -> Box<[ResponseItem]> + Send + Sync>;
+@@ -32,9 +33,20 @@ impl ConversationHistory {
+     pub fn new_deferred(load: impl FnOnce() -> Vec<ResponseItem> + Send + Sync + 'static) -> Self {
+         Self {
+             items: Arc::new(LazyLock::new(Box::new(move || load().into_boxed_slice()))),
++            realtime_tool_call: None,
+         }
+     }
+ 
++    /// Exact native-issued Realtime source identity for this invocation, when present.
++    pub fn realtime_tool_call(&self) -> Option<&serde_json::Value> {
++        self.realtime_tool_call.as_ref()
++    }
++
++    pub fn with_realtime_tool_call(mut self, value: Option<serde_json::Value>) -> Self {
++        self.realtime_tool_call = value;
++        self
++    }
++
+     pub fn items(&self) -> &[ResponseItem] {
+         &self.items
+     }
