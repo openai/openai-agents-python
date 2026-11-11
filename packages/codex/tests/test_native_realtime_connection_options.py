@@ -206,6 +206,9 @@ async def test_existing_call_accepts_exact_url_and_replacement_headers(call_peer
         "ws://example.test/voice#",
         "ws://example.test:invalid/voice",
         "ws://example.test:65536/voice",
+        "ws://bad host/voice",
+        "ws://bad%20host/voice",
+        "ws://256.256.0.1/voice",
     ],
 )
 async def test_invalid_url_rejects_before_resolving_credentials(
@@ -218,9 +221,11 @@ async def test_invalid_url_rejects_before_resolving_credentials(
         NativeProvider(base_url=realtime_peer.responses.url, api_key="session-key") as provider,
         Agent(instructions="Listen.", provider=provider).session() as session,
     ):
-        with pytest.raises(ValueError, match="ws or wss"):
+        with pytest.raises(ValueError, match="ws or wss") as error:
             async with session.realtime(config=RealtimeConfig(url=url, api_key=credential)):
                 pytest.fail("Invalid URL must reject before transport I/O")
+        assert url not in str(error.value)
+        assert error.value.__context__ is None
         assert not realtime_peer.upgrades
 
 

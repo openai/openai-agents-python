@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
 from ._lifecycle import _close_after_error, _join, _retain_cleanup_error
@@ -970,11 +971,14 @@ class RealtimeSession:
                     and "#" not in config.url
                     and (port is None or 0 <= port <= 65535)
                 )
+                if valid_url:
+                    # Validate host syntax with the Rust URL parser used at activation.
+                    AnyUrl(config.url)
             except ValueError:
                 valid_url = False
             if not valid_url:
                 raise ValueError(
-                    "url requires ws or wss, a valid port, and no credentials or fragments"
+                    "url requires ws or wss, a valid host and port, and no credentials or fragments"
                 )
         if config.headers is not None:
             if not isinstance(config.headers, Mapping):
