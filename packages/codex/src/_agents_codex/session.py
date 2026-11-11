@@ -13230,9 +13230,6 @@ class Session(Generic[ContextT, OutputT]):
             approved_kwargs = (
                 _snapshot_function_arguments(kwargs, ref) if approved is not None else None
             )
-            raw_arguments = message["arguments"]
-            if isinstance(raw_arguments, str):
-                raw_arguments = json.loads(raw_arguments)
             call = ToolCallInfo(
                 tool=ref,
                 session_id=self.id,
@@ -13248,10 +13245,36 @@ class Session(Generic[ContextT, OutputT]):
                 cell_id=code_origin["cell_id"] if code_origin is not None else None,
                 nested_call_id=(code_origin["nested_call_id"] if code_origin is not None else None),
             )
+
+            def make_context(
+                effective_arguments: Mapping[str, Any],
+            ) -> ToolContext[ContextT | None]:
+                raw_arguments = message["arguments"]
+                original_arguments = (
+                    json.loads(raw_arguments)
+                    if isinstance(raw_arguments, str)
+                    else deepcopy(raw_arguments)
+                )
+                tool_context = ToolContext(
+                    entry.context,
+                    state.handle,
+                    message["callId"],
+                    MappingProxyType(original_arguments),
+                    effective_arguments,
+                    trace_context=_native_trace_context(message.get("_sdk_trace")),
+                    realtime_usage=self.realtime_usage,
+                    call=call,
+                )
+                object.__setattr__(
+                    tool_context,
+                    "_usage_reporter",
+                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
+                )
+                return tool_context
+
             context = None
             if (
                 entry.context_parameter is not None
-                or entry.error_function is not None
                 or entry.before is not None
                 or entry.after is not None
                 or (
@@ -13260,22 +13283,7 @@ class Session(Generic[ContextT, OutputT]):
                     and entry.timeout_error_function is not None
                 )
             ):
-                context = ToolContext(
-                    entry.context,
-                    state.handle,
-                    message["callId"],
-                    MappingProxyType(deepcopy(raw_arguments)),
-                    _snapshot_function_arguments(kwargs, ref),
-                    trace_context=_native_trace_context(message.get("_sdk_trace")),
-                    realtime_usage=self.realtime_usage,
-                    call=call,
-                )
-            if context is not None:
-                object.__setattr__(
-                    context,
-                    "_usage_reporter",
-                    self._tool_usage_reporter(state, lambda: self._admit_tool(state, request)),
-                )
+                context = make_context(_snapshot_function_arguments(kwargs, ref))
             arguments_replaced = False
             if entry.before is not None:
                 assert context is not None
@@ -13357,6 +13365,13 @@ class Session(Generic[ContextT, OutputT]):
                                 return
             if not self._admit_tool(state, request):
                 return
+            # The body can mutate validated arguments before raising. The original
+            # wire arguments are already isolated from validation and callback code.
+            formatter_arguments = (
+                _snapshot_function_arguments(kwargs, ref)
+                if entry.error_function is not None and context is None
+                else None
+            )
             failure_output: ToolOutput | None = None
             duration = entry.callback_timeout
             callback = (
@@ -13556,7 +13571,9 @@ class Session(Generic[ContextT, OutputT]):
                         lambda: self._admit_tool(state, request),
                     )
                 else:
-                    assert context is not None
+                    if context is None:
+                        assert formatter_arguments is not None
+                        context = make_context(formatter_arguments)
                     text = await self._call_decision_callback(
                         state,
                         message,
@@ -13600,7 +13617,7 @@ class Session(Generic[ContextT, OutputT]):
                 if output is None:
                     # End ownership of the original admission request and every
                     # invocation data reference without altering caller-owned objects.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             if entry.after is not None and failure_output is None:
                 assert context is not None
@@ -13633,7 +13650,7 @@ class Session(Generic[ContextT, OutputT]):
                     output = None
                 if output is None:
                     # The hook may have mutated the original callback result.
-                    del request, message, raw_arguments, parsed, kwargs, context, args, value
+                    del request, message, formatter_arguments, parsed, kwargs, context, args, value
                     raise ValueError("Tool result failed validation")
             assert output is not None
             response_output = deepcopy(output.to_native())

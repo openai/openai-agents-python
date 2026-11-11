@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from _agents_codex import session as native_session
 from agents import Agent, ToolContext, function_tool
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_agent import provider
@@ -45,6 +46,47 @@ async def test_body_failure_recovery_is_nonterminal_and_keeps_context(responses,
     if text:
         assert text in str(responses.requests[1]["input"])
     assert not responses.replies
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_formatter_only_context_preserves_arguments_and_is_lazy(
+    responses, monkeypatch, fails
+):
+    contexts = []
+    formatted = []
+    initialize_context = native_session.ToolContext.__init__
+    original_error = ValueError("body failed")
+
+    def observe_context(context, *args, **kwargs):
+        initialize_context(context, *args, **kwargs)
+        if context.call_id == "formatter-only":
+            contexts.append(context)
+
+    monkeypatch.setattr(native_session.ToolContext, "__init__", observe_context)
+
+    def recover(context: ToolContext[None], error: Exception) -> str:
+        assert error is original_error
+        assert context.original_arguments == {"keys": ["original"]}
+        assert context.effective_arguments == {"keys": ["original"]}
+        formatted.append(context)
+        return "recovered"
+
+    @function_tool(error_function=recover)
+    async def lookup(keys: list[str]) -> str:
+        keys.append("body mutation")
+        if fails:
+            raise original_error
+        return "success"
+
+    responses.respond(function_call("lookup", {"keys": ["original"]}, "formatter-only"))
+    responses.respond(assistant_output("done"))
+    agent = Agent(instructions="Use lookup.", tools=[lookup], provider=provider(responses))
+    async with agent.session() as session:
+        result = await (await session.submit("begin")).get_result()
+
+    assert result.final_output == "done"
+    assert contexts == formatted
+    assert len(contexts) == int(fails)
 
 
 @pytest.mark.parametrize(
