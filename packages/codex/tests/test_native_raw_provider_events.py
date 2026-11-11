@@ -95,7 +95,11 @@ async def test_raw_child_frames_follow_the_admitted_child_turn(
 
 
 @pytest.mark.parametrize("transport", ["sse", "websocket"])
-async def test_raw_frames_keep_provider_order_and_stay_in_the_observation_stream(transport):
+async def test_raw_frames_keep_provider_order_and_stay_in_the_observation_stream(
+    transport, monkeypatch
+):
+    from _agents_codex import observation
+
     first = {
         "type": "response.sdk_fixture.opaque",
         "extension": {"private": PRIVATE_MARKER, "parts": [None, False, 0]},
@@ -161,6 +165,24 @@ async def test_raw_frames_keep_provider_order_and_stay_in_the_observation_stream
             ]
             assert following_raw[1] == second
             assert first not in following_raw
+
+            original_deepcopy = observation.deepcopy
+            copied_later_payloads = []
+
+            def track_copy(value):
+                if isinstance(value, dict) and value.get("type") == second["type"]:
+                    copied_later_payloads.append(value)
+                return original_deepcopy(value)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(observation, "deepcopy", track_copy)
+                earlier_raw = [
+                    event.payload
+                    async for event in turn.events(include_execution_details=True)
+                    if isinstance(event, RawProviderEvent)
+                ]
+            assert earlier_raw[1] == first
+            assert not copied_later_payloads
             assert PRIVATE_MARKER not in (await session.save_state()).to_json()
             assert PRIVATE_MARKER not in json.dumps([row async for row in session.turns()])
         async with agent.session() as quiet_session:

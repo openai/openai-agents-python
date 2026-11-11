@@ -611,6 +611,25 @@ class EventStream(AsyncIterator[Observation]):
                     event, _, _, details_lost = records[index]
                     if event.sequence > self._after:
                         self._after = event.sequence
+                        if (
+                            isinstance(event, RawProviderEvent)
+                            and not self._include_execution_details
+                        ):
+                            continue
+                        if self._turn is not None and not isinstance(event, EventGap):
+                            owners = {step.submission_id for step in self._turn._steps()}
+                            own_turn = getattr(event, "submission_id", None) in owners
+                            if (
+                                not own_turn
+                                and getattr(event, "parent_submission_id", None) not in owners
+                            ):
+                                continue
+                            if (
+                                own_turn
+                                and isinstance(event, TurnFinished)
+                                and self._turn.child_id is not None
+                            ):
+                                self._closed = True
                         if isinstance(event, ResponseFactReceived):
                             event = replace(
                                 event,
@@ -619,8 +638,6 @@ class EventStream(AsyncIterator[Observation]):
                                 else _summarize_response_fact(event.record),
                             )
                         elif isinstance(event, RawProviderEvent):
-                            if not self._include_execution_details:
-                                continue
                             event = replace(event, payload=deepcopy(event.payload))
                         elif isinstance(event, ModelOutputItemCompleted):
                             model_item = event.item
@@ -684,7 +701,7 @@ class EventStream(AsyncIterator[Observation]):
                                     "native_status": item.get("native_status"),
                                 }
                             event = replace(event, item=item)
-                        projected = (
+                        return (
                             EventGap(
                                 session_id=event.session_id,
                                 sequence=event.sequence,
@@ -693,15 +710,6 @@ class EventStream(AsyncIterator[Observation]):
                             if details_lost and self._include_execution_details
                             else event
                         )
-                        if self._turn is None or isinstance(event, EventGap):
-                            return projected
-                        owners = {step.submission_id for step in self._turn._steps()}
-                        if getattr(event, "submission_id", None) in owners:
-                            if isinstance(event, TurnFinished) and self._turn.child_id is not None:
-                                self._closed = True
-                            return projected
-                        if getattr(event, "parent_submission_id", None) in owners:
-                            return projected
                 if self._buffer.closed:
                     break
                 if self._turn is not None:
