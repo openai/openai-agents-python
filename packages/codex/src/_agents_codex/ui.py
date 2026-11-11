@@ -234,7 +234,9 @@ async def _tool_frames(
         size += len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
         if size > 1_048_576:
             raise ValueError("UI tool projection exceeds its bound")
-        call_id = item.get("call_id", item["id"])
+        call_id = item.get("call_id") or item["id"]
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError("Missing retained tool call ID")
         if item["type"] == "function_call_output":
             if call_id in outputs:
                 raise ValueError("Ambiguous retained tool result")

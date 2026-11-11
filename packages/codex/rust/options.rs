@@ -82,6 +82,8 @@ pub struct ThreadOptions {
     pub(crate) post_turn_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
+    #[serde(rename = "_tool_batch_completion")]
+    pub(crate) tool_batch_completion: bool,
     #[serde(rename = "_buffered_responses")]
     buffered_responses: bool,
     // The public native-agent declaration; the same owner guards root and children.

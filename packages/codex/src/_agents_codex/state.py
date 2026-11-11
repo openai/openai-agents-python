@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel as BaseModel,
     ConfigDict as ConfigDict,
     Field as Field,
+    JsonValue,
     TypeAdapter as TypeAdapter,
     model_validator as model_validator,
 )
@@ -193,6 +194,19 @@ class _ManualContinuation(BaseModel):
     output_schema: dict[str, Any] | None = None
 
 
+class ApplicationToolOutput(BaseModel):
+    """Application data from one accepted native tool result."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+
+    submission_id: str
+    turn_id: str
+    call_id: str
+    name: str
+    namespace: str | None = None
+    application_data: dict[str, JsonValue] = Field(repr=False)
+
+
 class _GuardrailCheckpointRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
     kind: Literal["input", "output"]
@@ -260,6 +274,7 @@ class SessionState(BaseModel):
     # enter native history, model context, or continuation authority.
     repair_turns: list[RecordedTurn] = Field(default_factory=list)
     repair_items: list[SessionItem] = Field(default_factory=list)
+    application_tool_outputs: list[ApplicationToolOutput] = Field(default_factory=list, repr=False)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     executor_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Additive SDK overlay. Older writable checkpoints omit it.

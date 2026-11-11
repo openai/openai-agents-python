@@ -745,6 +745,7 @@ impl EngineState {
         let before_compact = options.before_compact;
         let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let resume = options.sdk_resume_thread_id;
         let sdk_history = options.take_sdk_history(history.is_some(), python_specs.is_some())?;
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
@@ -839,6 +840,7 @@ impl EngineState {
                 transform_context,
                 before_compact,
                 before_complete,
+                tool_batch_completion,
                 post_turn_compact,
             )?;
         }
@@ -1084,6 +1086,7 @@ impl EngineState {
         let before_compact = options.before_compact;
         let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
         let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
         let (mut startup, instructions) = self.build_startup(options, None).await?;
@@ -1115,6 +1118,7 @@ impl EngineState {
             transform_context,
             before_compact,
             before_complete,
+            tool_batch_completion,
             post_turn_compact,
         )?;
         // Compare and publish under the same retained writer, including the
@@ -1355,6 +1359,7 @@ impl EngineState {
         let before_compact = options.before_compact;
         let post_turn_compact = options.post_turn_compact;
         let before_complete = options.before_complete;
+        let tool_batch_completion = options.tool_batch_completion;
         let agent_profiles = options.agent_profiles.take();
         let profile_files = options.sdk_instruction_files.clone().unwrap_or_default();
         ensure!(
@@ -1494,6 +1499,7 @@ impl EngineState {
                 transform_context,
                 before_compact,
                 before_complete,
+                tool_batch_completion,
                 post_turn_compact,
             )?;
         }
@@ -2365,7 +2371,7 @@ fn native_event(
     {
         event.msg = retained;
     }
-    let mut value = serde_json::to_value(&event)?;
+    let mut value = event.sdk_json()?;
     if session_reader
         && let EventMsg::RealtimeConversationRealtime(realtime) = &event.msg
         && let codex_protocol::protocol::RealtimeEvent::HandoffRequested(handoff) =
@@ -3200,6 +3206,8 @@ mod rebuild_consumer_tests {
             async move {
                 for (call_id, verified) in [("failure-call", Some(false)), ("legacy-call", None)] {
                     let specs = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                        strict: false,
+                        output_schema: None,
                         name: "reserve".into(),
                         description: "Record the known reservation outcome".into(),
                         input_schema: json!({
@@ -3244,6 +3252,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     let earlier_output = ResponseItem::FunctionCallOutput {
                         id: None,
@@ -3273,6 +3283,8 @@ mod rebuild_consumer_tests {
                                 ..Default::default()
                             },
                         ),
+                        asynchronous: None,
+                        status: None,
                     };
                     // Use Core's public history entry point, which records,
                     // checkpoints and flushes through the real local writer.

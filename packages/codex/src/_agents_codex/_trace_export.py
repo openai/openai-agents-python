@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
-import random
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import Any, TextIO, cast
 from urllib.parse import urlsplit
 
 from ._public import preserve_module_identity as _preserve_module_identity
-from ._trace_delivery import _trace_credential_route, _trace_export_cancellation
+from ._trace_delivery import _trace_credential_route
 
 
 def _plain(value: Any) -> Any:
@@ -99,8 +96,6 @@ class OpenAITraceExporter:
         project: str | None = None,
         timeout_ms: int = 750,
         max_retries: int = 0,
-        retry_delay_ms: int = 0,
-        max_retry_delay_ms: int = 30_000,
     ) -> None:
         value = None
         address = None
@@ -126,23 +121,15 @@ class OpenAITraceExporter:
             if (
                 isinstance(timeout_ms, bool)
                 or not isinstance(timeout_ms, int)
-                or not 1 <= timeout_ms <= 60_000
+                or not 1 <= timeout_ms <= 900
             ):
-                raise ValueError("timeout_ms must be an integer from 1 through 60000")
-            if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
-                raise ValueError("max_retries must be a non-negative integer")
-            for name, delay in (
-                ("retry_delay_ms", retry_delay_ms),
-                ("max_retry_delay_ms", max_retry_delay_ms),
+                raise ValueError("timeout_ms must be an integer from 1 through 900")
+            if (
+                isinstance(max_retries, bool)
+                or not isinstance(max_retries, int)
+                or not 0 <= max_retries <= 3
             ):
-                if (
-                    isinstance(delay, bool)
-                    or not isinstance(delay, int)
-                    or not 0 <= delay <= 60_000
-                ):
-                    raise ValueError(f"{name} must be an integer from 0 through 60000")
-            if max_retry_delay_ms < retry_delay_ms:
-                raise ValueError("max_retry_delay_ms must be at least retry_delay_ms")
+                raise ValueError("max_retries must be an integer from 0 through 3")
             try:
                 import httpx2
             except ImportError:
@@ -159,8 +146,6 @@ class OpenAITraceExporter:
             self._address = address
             self._timeout = timeout_ms / 1000
             self._max_retries = max_retries
-            self._retry_delay = retry_delay_ms / 1000
-            self._max_retry_delay = max_retry_delay_ms / 1000
             self._credentials = (object(), headers)
             self.set_api_key(api_key)
             self._traces: OrderedDict[str, _TraceState] = OrderedDict()
@@ -334,8 +319,10 @@ class OpenAITraceExporter:
                         continue
                     try:
                         payload = json.dumps({"data": records}, allow_nan=False).encode()
-                        delivery = self._send(
-                            payload, dict(group_headers), credential_events=group_events
+                        delivery = (
+                            self._send(payload, dict(group_headers), credential_events=group_events)
+                            if identity
+                            else self._send(payload, dict(group_headers))
                         )
                         await asyncio.wait_for(delivery, timeout=max(0.0, deadline - monotonic()))
                         if monotonic() > deadline:
@@ -383,74 +370,28 @@ class OpenAITraceExporter:
         try:
             # Keep the client inside the delivery's timeout and cancellation scope.
             # Streaming reads only headers; remote response bodies are never retained.
-            async with (
-                _trace_export_cancellation(),
-                self._httpx.AsyncClient(
-                    timeout=self._timeout, follow_redirects=False, trust_env=False
-                ) as client,
-            ):
-                delay = self._retry_delay
+            async with self._httpx.AsyncClient(
+                timeout=self._timeout, follow_redirects=False, trust_env=False
+            ) as client:
                 for attempt in range(self._max_retries + 1):
                     retry = False
-                    retry_after = 0.0
-                    received = False
                     try:
                         for event in credential_events:
                             _trace_credential_route(event)
                         async with client.stream(
                             "POST", self._address.geturl(), content=payload, headers=headers
                         ) as response:
-                            received = True
                             if 200 <= response.status_code < 300:
                                 return
-                            retry = (
-                                response.status_code in (408, 409, 429)
-                                or response.status_code >= 500
-                            ) and response.headers.get(
-                                "x-should-retry", ""
-                            ).strip().lower() != "false"
-                            if retry:
-                                retry_after = _retry_after_seconds(response.headers)
+                            retry = response.status_code >= 500
                     except self._httpx.HTTPError:
-                        # Closing a received response cannot override its retry decision.
-                        if not received:
-                            retry = True
+                        retry = True
                     if not retry or attempt == self._max_retries:
                         break
-                    wait = min(
-                        self._max_retry_delay,
-                        max(delay + random.uniform(0, delay * 0.1), retry_after),
-                    )
-                    # The existing deadline owns backoff too. Yield even when
-                    # immediate retries encounter an immediately failing client.
-                    await asyncio.sleep(wait)
-                    delay = min(delay * 2, self._max_retry_delay)
             # Avoid exposing endpoints, request bodies, response bodies or credentials.
             raise RuntimeError("Native OpenAI trace export failed") from None
         finally:
             del self, payload, headers, client, response, credential_events, event
-
-
-def _retry_after_seconds(headers: Mapping[str, str]) -> float:
-    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
-        value = headers.get(name)
-        if value is None or len(value) > 128:
-            continue
-        try:
-            delay = float(value) * scale
-        except ValueError:
-            if name != "retry-after":
-                continue
-            try:
-                at = parsedate_to_datetime(value)
-                if at.tzinfo is None:
-                    at = at.replace(tzinfo=timezone.utc)
-                delay = max(0.0, (at - datetime.now(timezone.utc)).total_seconds())
-            except (TypeError, ValueError, OverflowError):
-                continue
-        if math.isfinite(delay) and delay >= 0:
-            return delay
-    return 0.0
 
 
 class ConsoleTraceProcessor:

@@ -13,6 +13,10 @@ if TYPE_CHECKING:
         ToolTimeoutError as ToolTimeoutError,
         function_tool as function_tool,
     )
+    from ._tool_errors import (
+        ToolErrorContext as ToolErrorContext,
+        ToolErrorFormatter as ToolErrorFormatter,
+    )
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
@@ -24,7 +28,9 @@ if TYPE_CHECKING:
         SignInWithChatGPTCredentials as SignInWithChatGPTCredentials,
     )
     from .canonical_storage import (
+        AsyncSQLAlchemySessionStore as AsyncSQLAlchemySessionStore,
         CustomStorage as CustomStorage,
+        DaprSessionStore as DaprSessionStore,
         EncryptedSessionStore as EncryptedSessionStore,
         MongoDBSessionStore as MongoDBSessionStore,
         RedisSessionStore as RedisSessionStore,
@@ -38,7 +44,13 @@ if TYPE_CHECKING:
         ResponsesCompaction as ResponsesCompaction,
         ResponsesCompactionContext as ResponsesCompactionContext,
     )
-    from .completion import CompletionContext as CompletionContext, ContinueTurn as ContinueTurn
+    from .completion import (
+        CompletionContext as CompletionContext,
+        ContinueTurn as ContinueTurn,
+        FinishToolBatch as FinishToolBatch,
+        ToolBatchCompletionContext as ToolBatchCompletionContext,
+        ToolBatchResult as ToolBatchResult,
+    )
     from .computer import (
         Computer as Computer,
         ComputerProvider as ComputerProvider,
@@ -136,6 +148,7 @@ if TYPE_CHECKING:
         ModelResponse as ModelResponse,
         ModelRetryAdviceRequest as ModelRetryAdviceRequest,
         NativeModel as NativeModel,
+        NativeStreamingModel as NativeStreamingModel,
         ResponsesModel as ResponsesModel,
     )
     from .native_agents import (
@@ -196,6 +209,7 @@ if TYPE_CHECKING:
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
         NativeError as NativeError,
+        ProducedItem as ProducedItem,
         ResponseIntegrityReason as ResponseIntegrityReason,
         Session as Session,
         SessionBusyError as SessionBusyError,
@@ -204,6 +218,7 @@ if TYPE_CHECKING:
         get_cleanup as get_cleanup,
     )
     from .state import (
+        ApplicationToolOutput as ApplicationToolOutput,
         ChecklistState as ChecklistState,
         ChecklistStep as ChecklistStep,
         CheckpointStatus as CheckpointStatus,
@@ -254,6 +269,7 @@ _MODULES = {
     "ModelRequestOptionsFactory": ".models",
     "ModelResponse": ".models",
     "NativeModel": ".models",
+    "NativeStreamingModel": ".models",
     "DecisionError": ".decisions",
     "DecisionInput": ".decisions",
     "DecisionProvider": ".decisions",
@@ -270,6 +286,9 @@ _MODULES = {
     "OutputGuardrail": ".guardrails",
     "CompletionContext": ".completion",
     "ContinueTurn": ".completion",
+    "FinishToolBatch": ".completion",
+    "ToolBatchCompletionContext": ".completion",
+    "ToolBatchResult": ".completion",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "HostedPromptReference": ".model_context",
@@ -301,6 +320,7 @@ _MODULES = {
     "CodeInterpreter": ".tools",
     "ImageGeneration": ".tools",
     "SessionState": ".state",
+    "ApplicationToolOutput": ".state",
     "ChecklistState": ".state",
     "ChecklistStep": ".state",
     "ActionReply": ".manual",
@@ -337,7 +357,9 @@ _MODULES = {
     "OutputValidationIssue": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "AsyncSQLAlchemySessionStore": ".canonical_storage",
     "CustomStorage": ".canonical_storage",
+    "DaprSessionStore": ".canonical_storage",
     "EncryptedSessionStore": ".canonical_storage",
     "MongoDBSessionStore": ".canonical_storage",
     "RedisSessionStore": ".canonical_storage",
@@ -400,6 +422,8 @@ _MODULES = {
     "ToolOutputFile": ".tools",
     "ToolContext": "._function_tools",
     "ToolInputErrorContext": "._function_tools",
+    "ToolErrorContext": "._tool_errors",
+    "ToolErrorFormatter": "._tool_errors",
     "ToolTimeoutBehavior": "._function_tools",
     "ToolTimeoutError": "._function_tools",
     "ToolCallInfo": ".tools",
@@ -417,6 +441,7 @@ _MODULES = {
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
     "NativeError": ".session",
+    "ProducedItem": ".session",
     "ResponseIntegrityReason": ".session",
     "Session": ".session",
     "SessionBusyError": ".session",

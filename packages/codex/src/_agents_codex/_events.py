@@ -638,6 +638,26 @@ class FunctionCallOutputItem(TypedDict):
     reconciliation: NotRequired[Literal["applied", "not_applied"]]
 
 
+class ToolSearchCallItem(TypedDict):
+    type: Literal["tool_search_call"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    execution: str
+    arguments: JsonValue
+    status: FunctionCallStatus
+
+
+class ToolSearchOutputItem(TypedDict):
+    type: Literal["tool_search_output"]
+    id: str
+    turn_id: str
+    call_id: str | None
+    execution: str
+    tools: list[JsonValue]
+    status: FunctionCallStatus
+
+
 class McpCallItem(TypedDict):
     type: Literal["mcp_call"]
     id: str
@@ -761,7 +781,12 @@ class UserMessageItem(TypedDict):
 
 
 SessionItem = _PublicTypeAliasType(
-    "SessionItem", OutputItem | FunctionCallOutputItem | UserMessageItem
+    "SessionItem",
+    OutputItem
+    | FunctionCallOutputItem
+    | ToolSearchCallItem
+    | ToolSearchOutputItem
+    | UserMessageItem,
 )
 
 

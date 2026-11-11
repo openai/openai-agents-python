@@ -10,6 +10,7 @@ from ._events import FunctionCallItem as FunctionCallItem, SessionItem as Sessio
 from ._projection import (
     EventProjector as EventProjector,
     _execution_item as _execution_item,
+    _function_output_fields as _function_output_fields,
     _usage as _usage,
     project_execution_completion as project_execution_completion,
     project_hosted_response_item,
@@ -38,6 +39,10 @@ class _HistoryItem:
 
 
 _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
+_CALL_TYPES_BY_OUTPUT = {
+    "function_call_output": "function_call",
+    "tool_search_output": "tool_search_call",
+}
 
 
 def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
@@ -78,12 +83,19 @@ def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] |
     return item
 
 
-def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
+def _response_item(
+    raw: dict[str, Any], turn_id: str, tool_success: bool | None = None
+) -> dict[str, Any] | None:
     kind = raw["type"]
     item_id = raw.get("id")
-    if kind in {"function_call", "custom_tool_call", "computer_call"}:
+    if kind in {"function_call", "custom_tool_call", "computer_call", "tool_search_call"}:
         item_id = item_id or raw.get("call_id")
-    elif kind in {"function_call_output", "custom_tool_call_output", "computer_call_output"}:
+    elif kind in {
+        "function_call_output",
+        "custom_tool_call_output",
+        "computer_call_output",
+        "tool_search_output",
+    }:
         item_id = item_id or (f"{raw['call_id']}:output" if raw.get("call_id") else None)
     if not item_id:
         return None
@@ -105,6 +117,25 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
         }
     if kind == "reasoning":
         return {**common, "summary": raw["summary"], "status": None}
+    if kind in {"tool_search_call", "tool_search_output"}:
+        execution = raw.get("execution")
+        if not isinstance(execution, str):
+            return None
+        call_id = raw.get("call_id")
+        status = raw.get("status")
+        is_output = kind == "tool_search_output"
+        if status not in ("in_progress", "completed", "failed", "incomplete"):
+            status = "completed" if is_output else "in_progress"
+        search_item = {
+            **common,
+            "call_id": call_id if isinstance(call_id, str) else None,
+            "execution": execution,
+            "status": status,
+        }
+        if is_output:
+            tools = raw.get("tools")
+            return {**search_item, "tools": tools if isinstance(tools, list) else []}
+        return {**search_item, "arguments": raw.get("arguments")}
     if kind in {"function_call", "custom_tool_call", "computer_call"}:
         name = "computer" if kind == "computer_call" else raw["name"]
         if kind != "computer_call" and raw.get("namespace"):
@@ -126,19 +157,21 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
             **common,
             "type": "function_call_output",
             "call_id": raw["call_id"],
-            "status": "completed",
-            "output": (
-                json.dumps(
-                    {
-                        "output": raw["output"],
-                        "acknowledged_safety_checks": raw.get("acknowledged_safety_checks", []),
-                    },
-                    allow_nan=False,
-                )
-                if kind == "computer_call_output"
-                else raw["output"]
+            **_function_output_fields(
+                (
+                    json.dumps(
+                        {
+                            "output": raw["output"],
+                            "acknowledged_safety_checks": raw.get("acknowledged_safety_checks", []),
+                        },
+                        allow_nan=False,
+                    )
+                    if kind == "computer_call_output"
+                    else raw["output"]
+                ),
+                status="completed",
+                success=tool_success,
             ),
-            "error": None,
         }
     if kind == "web_search_call":
         return project_web_search_item({**raw, "type": "WebSearch"}, True, turn_id)
@@ -174,13 +207,15 @@ def project_history(
     subagent_id: str | None = None,
     *,
     uncertain_calls: list[UncertainCall] | None = None,
+    item_record_indexes: dict[int, int] | None = None,
+    tool_success_by_record: dict[int, bool] | None = None,
 ) -> tuple[list[RecordedTurn], list[SessionItem]]:
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
     turns: dict[str, RecordedTurn] = {}
     items: list[_HistoryItem] = []
     identities: dict[tuple[str, str, str], _HistoryItem] = {}
-    latest_calls: dict[tuple[str, str], _HistoryItem] = {}
+    latest_calls: dict[tuple[str, str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
     model_owners: dict[str, dict[str | None, _UsageCollector]] = {}
     legacy_usage: dict[str, _UsageCollector] = {}
@@ -199,7 +234,9 @@ def project_history(
         original_input: JsonValue | None = None,
     ) -> _HistoryItem:
         kind = item["type"]
-        is_output = kind == "function_call_output"
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("Invalid canonical history item type")
+        is_output = kind in _CALL_TYPES_BY_OUTPUT
         is_execution = kind in _EXECUTION_TYPES
         # Execution records describe what ran. Keep them separate from the model's call and output.
         identity = (
@@ -208,8 +245,9 @@ def project_history(
             item["id"],
         )
         occurrence = identities.get(identity)
-        call_key = (item["turn_id"], item.get("call_id", item["id"]))
-        call = None if is_execution else latest_calls.get(call_key)
+        call_kind = _CALL_TYPES_BY_OUTPUT.get(kind, kind)
+        call_key = (item["turn_id"], call_kind, item.get("call_id") or item["id"])
+        call = latest_calls.get(call_key)
         if is_output and call is not None:
             if call.output is None:
                 occurrence = None
@@ -233,15 +271,15 @@ def project_history(
             occurrence.native = native
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
-        if kind == "function_call":
-            if not native:
+        if kind in {"function_call", "tool_search_call"}:
+            if kind == "function_call" and not native:
                 occurrence.original_input = original_input
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
         return occurrence
 
-    for record in history:
+    for record_index, record in enumerate(history):
         kind, payload = record["type"], record["payload"]
         if kind in {"compacted", "session_meta"}:
             pending_user = None
@@ -329,18 +367,22 @@ def project_history(
                     elif kinds == ["sdk_reconciliation.not_applied"]:
                         reconciliation = "not_applied"
                     if reconciliation is not None:
-                        if (original_turn, call_id) not in latest_calls:
+                        if (original_turn, "function_call", call_id) not in latest_calls:
                             continue
                         turn_id = original_turn
                     elif (
                         turn_id is None
                         and aborted_turn is not None
                         and original_turn == aborted_turn
-                        and (aborted_turn, call_id) in latest_calls
+                        and (aborted_turn, "function_call", call_id) in latest_calls
                     ):
                         turn_id = aborted_turn
             if turn_id:
-                item = _response_item(payload, turn_id)
+                item = _response_item(
+                    payload,
+                    turn_id,
+                    tool_success_by_record.get(record_index) if tool_success_by_record else None,
+                )
                 if item is not None:
                     if reconciliation is not None:
                         item["reconciliation"] = reconciliation
@@ -358,6 +400,8 @@ def project_history(
                             else None
                         ),
                     )
+                    if item_record_indexes is not None:
+                        item_record_indexes[id(item)] = record_index
                     metadata = payload.get("internal_chat_message_metadata_passthrough")
                     recorded_metadata = record.get("metadata")
                     input_order = (
@@ -567,8 +611,10 @@ def project_history(
                 item_id = f"{item_id}:{index}"
             item["id"] = item_id
             cursor_ids.add(item_id)
+        output = occurrence.output
+        if item["type"] == "tool_search_call" and item["status"] == "in_progress" and output:
+            item["status"] = output.value["status"]
         if item["type"] == "function_call":
-            output = occurrence.output
             computer_call = (
                 isinstance(occurrence.original_input, dict)
                 and occurrence.original_input.get("type") == "computer_call"

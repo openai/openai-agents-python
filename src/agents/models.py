@@ -11,5 +11,6 @@ from _agents_codex.models import (
     ModelResponse as ModelResponse,
     ModelRetryAdviceRequest as ModelRetryAdviceRequest,
     NativeModel as NativeModel,
+    NativeStreamingModel as NativeStreamingModel,
     ResponsesModel as ResponsesModel,
 )

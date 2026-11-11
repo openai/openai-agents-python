@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import inspect as inspect
 import json as json
-from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
+from collections.abc import (
+    Awaitable as Awaitable,
+    Callable as Callable,
+    Mapping,
+    Sequence as Sequence,
+)
 from copy import deepcopy as deepcopy
 from dataclasses import dataclass as dataclass, field as field
 from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal, cast
@@ -12,6 +17,7 @@ from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Litera
 from pydantic import (
     BaseModel as BaseModel,
     ConfigDict as ConfigDict,
+    JsonValue as JsonValue,
     TypeAdapter as TypeAdapter,
     create_model as create_model,
 )
@@ -368,7 +374,7 @@ class ToolOutputFile:
 
 @dataclass
 class ToolOutput:
-    """A mutable native response of content items, with optional explicit failure."""
+    """A native tool response with optional SDK-only application data."""
 
     content_items: (
         list[dict[str, Any] | ToolOutputText | ToolOutputImage | ToolOutputFile]
@@ -376,6 +382,8 @@ class ToolOutput:
         | list[dict[str, Any]]
     )
     success: bool = True
+    application_data: dict[str, JsonValue] | None = field(default=None, repr=False)
+    """An optional JSON object retained with the accepted result for the application."""
 
     @classmethod
     def text(cls, value: str) -> ToolOutput:
@@ -461,6 +469,21 @@ class ToolOutput:
         _TOOL_RESPONSE.validate_python(self.to_native(), strict=True)
 
 
+def _capture_application_data(
+    value: Mapping[str, JsonValue] | None,
+) -> dict[str, JsonValue] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise TypeError("Tool application data must be a mapping with string keys")
+    if not value:
+        return None
+    try:
+        return cast(dict[str, JsonValue], json.loads(json.dumps(dict(value), allow_nan=False)))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Tool application data must be JSON-compatible") from error
+
+
 @dataclass(frozen=True)
 class _CapturedFunction:
     """One immutable snapshot for schema publication and callback execution."""
@@ -499,6 +522,13 @@ class _CapturedFunction:
     ) = field(default=None, repr=False)
     namespace: str | None = None
     finish_turn: bool = False
+
+    error_function: Callable[[ToolContext[Any], Exception], str | Awaitable[str]] | None = field(
+        default=None, repr=False
+    )
+
+    _allow_run_error_formatter: bool = field(default=False, repr=False)
+    _reparse_error_arguments: bool = field(default=False, repr=False)
 
     @property
     def _requires_live_manual_session(self) -> bool:

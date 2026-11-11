@@ -1,0 +1,560 @@
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -231,6 +231,8 @@
+         call_id: call_id.to_string(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -987,6 +987,8 @@
+                 call_id: "call_1".to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             },
+             ResponseItem::Compaction {
+                 id: None,
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -60,6 +60,8 @@
+             encrypted_function_args: None,
+             call_id: call_id.clone(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         });
+         let mut output = ResponseItem::FunctionCallOutput {
+             id: None,
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1194,6 +1194,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1292,6 +1294,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1523,6 +1527,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1557,6 +1563,8 @@
+             call_id: "call-2".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+     ];
+     let mut h = create_history_with_items(items);
+@@ -2396,6 +2404,8 @@
+             call_id: "c1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         // Orphan output that should be removed
+         ResponseItem::FunctionCallOutput {
+@@ -2446,6 +2456,8 @@
+                 call_id: "c1".to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             },
+             ResponseItem::FunctionCallOutput {
+                 id: None,
+@@ -2506,6 +2518,8 @@
+         call_id: "call-x".to_string(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }];
+     let mut h = create_history_with_items(items);
+     h.normalize_history(&default_input_modalities());
+@@ -2520,6 +2534,8 @@
+                 call_id: "call-x".to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             },
+             ResponseItem::FunctionCallOutput {
+                 id: None,
+@@ -2559,6 +2575,8 @@
+             call_id: "call-x".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::Message {
+             id: Some(ResponseItemId::with_suffix("msg", "later")),
+@@ -2772,6 +2790,8 @@
+             call_id: "c1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -270,6 +270,8 @@
+                     call_id: "call-1".to_string(),
+                     encrypted_function_args: None,
+                     internal_chat_message_metadata_passthrough: None,
++                    asynchronous: None,
++                    status: None,
+                 },
+                 ResponseItem::FunctionCallOutput {
+                     id: None,
+@@ -1092,6 +1094,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1794,6 +1798,8 @@
+         call_id: format!("call-{index}"),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }));
+ 
+     let entries = collect_guardian_transcript_entries(&items, GUARDIAN_MAX_TOOL_ENTRY_TOKENS);
+@@ -1852,6 +1858,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+diff --git a/codex-rs/core/src/realtime_conversation/tool_task.rs b/codex-rs/core/src/realtime_conversation/tool_task.rs
+--- a/codex-rs/core/src/realtime_conversation/tool_task.rs
++++ b/codex-rs/core/src/realtime_conversation/tool_task.rs
+@@ -803,6 +803,8 @@
+             encrypted_function_args: None,
+             call_id: native_call_id.clone(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         };
+         let admission = crate::model_request::tool_admission_for_step(
+             session.thread_id.to_string(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -13194,6 +13194,8 @@
+         call_id: "call-1".to_string(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     };
+     let mut ctx = HandleOutputCtx {
+         sess: Arc::clone(&sess),
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -119,6 +119,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -704,6 +704,8 @@
+             arguments: "{}".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         assistant_msg("a4"),
+     ];
+diff --git a/codex-rs/core/src/thread_rollout_truncation_tests.rs b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+--- a/codex-rs/core/src/thread_rollout_truncation_tests.rs
++++ b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+@@ -288,6 +288,8 @@
+             arguments: "{}".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         assistant_msg("a4"),
+     ];
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -219,6 +219,8 @@
+         encrypted_function_args: Some(Vec::new()),
+         call_id: "call-namespace".to_string(),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     })?
+     .expect("function_call should produce a tool call");
+ 
+@@ -280,6 +282,8 @@
+             encrypted_function_args: None,
+             call_id: "call-function".to_string(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         })?
+         .expect("function_call should produce a tool call");
+         let custom_call = ToolRouter::build_tool_call(ResponseItem::CustomToolCall {
+@@ -587,6 +591,8 @@
+         call_id: "call-extension".to_string(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     })?
+     .expect("function_call should produce a tool call");
+     let result = router
+diff --git a/codex-rs/core/src/turn_timing_tests.rs b/codex-rs/core/src/turn_timing_tests.rs
+--- a/codex-rs/core/src/turn_timing_tests.rs
++++ b/codex-rs/core/src/turn_timing_tests.rs
+@@ -158,6 +158,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         }
+     ));
+     assert!(response_item_records_turn_ttft(
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -642,6 +642,8 @@
+                 call_id: function_call_id.to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             }),
+         },
+     ];
+@@ -1287,6 +1289,8 @@
+                 call_id: function_call_id.to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             }),
+         },
+         RolloutLine {
+@@ -3241,6 +3245,8 @@
+         call_id: "function-call-id".into(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     });
+     prompt.input.push(ResponseItem::FunctionCallOutput {
+         id: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+@@ -1440,6 +1440,8 @@
+             encrypted_function_args: None,
+             call_id: "previous-call".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1770,6 +1772,8 @@
+             encrypted_function_args: None,
+             call_id: "previous-call".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1879,6 +1883,8 @@
+             encrypted_function_args: None,
+             call_id: "previous-call".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+     ];
+     let arguments = json!({"body": "x".repeat(/*n*/ 128)}).to_string();
+@@ -1997,6 +2003,8 @@
+             encrypted_function_args: None,
+             call_id: "previous-call".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -2014,6 +2022,8 @@
+             encrypted_function_args: None,
+             call_id: "call-1".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+     ];
+     let (request, test, registry) = sample_configured_conversation_history(
+@@ -2896,6 +2906,8 @@
+         encrypted_function_args: None,
+         call_id: format!("call-{index}"),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }));
+     let configuration = "[features.guardianv2]\nenabled = true\n\n[features.guardianv2.transcript]\nmax_recent_non_user_entries = 4\n";
+ 
+@@ -2956,6 +2968,8 @@
+                 encrypted_function_args: None,
+                 call_id: call_id.clone(),
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             },
+             ResponseItem::FunctionCallOutput {
+                 id: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+@@ -73,6 +73,8 @@
+             encrypted_function_args: None,
+             call_id: "call-1".to_string(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -345,6 +347,8 @@
+         encrypted_function_args: None,
+         call_id: "call-1".to_string(),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     });
+ 
+     let transcript = TranscriptConfig {
+@@ -400,6 +404,8 @@
+             encrypted_function_args: None,
+             call_id: call_id.clone(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         });
+         items.push(ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -583,6 +589,8 @@
+         encrypted_function_args: None,
+         call_id: format!("call-{index}"),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }));
+ 
+     let transcript = TranscriptConfig {
+@@ -658,6 +666,8 @@
+             encrypted_function_args: None,
+             call_id: "call-1".to_string(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+     ];
+ 
+@@ -710,6 +720,8 @@
+         encrypted_function_args: None,
+         call_id: format!("call-{index}"),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }));
+ 
+     let transcript = TranscriptConfig::default()
+@@ -774,6 +786,8 @@
+         encrypted_function_args: None,
+         call_id: "call-12".to_string(),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     });
+     let next_transcript = TranscriptConfig::default()
+         .build_context(ContextInput {
+@@ -883,6 +897,8 @@
+         encrypted_function_args: None,
+         call_id: format!("call-{index}"),
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     }));
+     items.push(ResponseItem::Message {
+         id: None,
+@@ -949,6 +965,8 @@
+                 encrypted_function_args: None,
+                 call_id: format!("call-{index}"),
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             }),
+         );
+         config
+@@ -1014,6 +1032,8 @@
+             encrypted_function_args: None,
+             call_id: "call-1".to_owned(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -1231,6 +1251,8 @@
+             encrypted_function_args: Some(vec!["encrypted-function-arguments".to_string()]),
+             call_id: "call-1".to_string(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::CustomToolCallOutput {
+             id: None,
+diff --git a/codex-rs/ext/image-generation/src/tests.rs b/codex-rs/ext/image-generation/src/tests.rs
+--- a/codex-rs/ext/image-generation/src/tests.rs
++++ b/codex-rs/ext/image-generation/src/tests.rs
+@@ -105,6 +105,8 @@
+             call_id: "mcp-call".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+diff --git a/codex-rs/ext/web-search/src/history.rs b/codex-rs/ext/web-search/src/history.rs
+--- a/codex-rs/ext/web-search/src/history.rs
++++ b/codex-rs/ext/web-search/src/history.rs
+@@ -135,6 +135,8 @@
+                 call_id: "call-1".to_string(),
+                 encrypted_function_args: None,
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             },
+             previous_assistant,
+             message("developer", "developer"),
+diff --git a/codex-rs/external-agent-migration/src/sessions/append_tests.rs b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+--- a/codex-rs/external-agent-migration/src/sessions/append_tests.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+@@ -96,6 +96,8 @@
+             encrypted_function_args: None,
+             call_id: "native-call".to_string(),
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         }
+         .into(),
+     ));
+diff --git a/codex-rs/guardian-context/src/transcript_tests.rs b/codex-rs/guardian-context/src/transcript_tests.rs
+--- a/codex-rs/guardian-context/src/transcript_tests.rs
++++ b/codex-rs/guardian-context/src/transcript_tests.rs
+@@ -149,6 +149,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -224,6 +226,8 @@
+             call_id: "call-1".to_string(),
+             encrypted_function_args: None,
+             internal_chat_message_metadata_passthrough: None,
++            asynchronous: None,
++            status: None,
+         },
+         ResponseItem::FunctionCallOutput {
+             id: None,
+@@ -447,6 +451,8 @@
+         call_id: "call-1".to_string(),
+         encrypted_function_args: None,
+         internal_chat_message_metadata_passthrough: None,
++        asynchronous: None,
++        status: None,
+     });
+     config.entry_limits.message_tokens = 60;
+     config.entry_limits.tool_tokens = 30;
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1120,6 +1120,13 @@
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         encrypted_function_args: Option<Vec<String>>,
++        /// Provider-owned async marker retained when replaying a function call.
++        #[serde(default, rename = "async", skip_serializing_if = "Option::is_none")]
++        #[ts(optional, rename = "async")]
++        asynchronous: Option<bool>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        status: Option<String>,
+         call_id: String,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+@@ -3378,6 +3385,8 @@
+                 encrypted_function_args: None,
+                 call_id: "call-1".to_string(),
+                 internal_chat_message_metadata_passthrough: None,
++                asynchronous: None,
++                status: None,
+             }
+         );
+     }

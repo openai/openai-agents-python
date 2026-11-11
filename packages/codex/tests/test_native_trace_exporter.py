@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socketserver import TCPServer
 from threading import Thread
-from time import monotonic
 from typing import Any
 
 import pytest
@@ -25,11 +24,7 @@ from tests._asyncio import capture_cancellation
 
 @contextmanager
 def collector(
-    statuses: list[int] | None = None,
-    *,
-    delay: float = 0,
-    response_headers: dict[str, str] | None = None,
-    request_times: list[float] | None = None,
+    statuses: list[int] | None = None, *, delay: float = 0
 ) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     received = []
     replies = list(statuses or [])
@@ -44,8 +39,6 @@ def collector(
             pass
 
         def do_POST(self):
-            if request_times is not None:
-                request_times.append(monotonic())
             received.append(
                 {
                     "headers": dict(self.headers),
@@ -58,8 +51,6 @@ def collector(
                 time.sleep(delay)
             self.send_response(replies.pop(0) if replies else 200)
             self.send_header("Content-Length", "0")
-            for name, value in (response_headers or {}).items():
-                self.send_header(name, value)
             self.end_headers()
 
     server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
@@ -130,7 +121,7 @@ async def test_exporter_retries_bounded_http_failure_and_preserves_wire_identity
     assert span["error"]["data"]["outcome"] == "error"
 
 
-@pytest.mark.parametrize("status", [302, 403])
+@pytest.mark.parametrize("status", [302, 403, 429])
 async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_diagnostics(status):
     with collector([status]) as (endpoint, received):
         exporter = telemetry.OpenAITraceExporter(
@@ -141,124 +132,6 @@ async def test_exporter_rejects_redirects_and_terminal_failure_without_secret_di
         assert str(failure.value) == "Native OpenAI trace export failed"
         assert_sanitized_failure(failure.value, "synthetic-private-key")
         assert len(received) == 1
-
-
-@pytest.mark.parametrize("status", [408, 409, 429, 503])
-async def test_exporter_honors_transient_status_and_server_retry_delay(status):
-    times: list[float] = []
-    response_headers = (
-        {"retry-after-ms": "NaN", "retry-after": "0.035"}
-        if status == 409
-        else {"retry-after": "Thu, 01 Jan 2099 00:00:00 GMT"}
-        if status == 503
-        else {"retry-after-ms": "35"}
-    )
-    with collector(
-        [status, 200],
-        response_headers=response_headers,
-        request_times=times,
-    ) as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(
-            api_key="synthetic-key",
-            endpoint=endpoint,
-            max_retries=5,
-            timeout_ms=1500,
-            retry_delay_ms=5,
-            max_retry_delay_ms=50,
-        )
-        await exporter.on_trace_event(completed_event())
-    assert len(received) == 2
-    assert times[1] - times[0] >= 0.03
-
-
-@pytest.mark.parametrize("status", [429, 503])
-async def test_exporter_honors_server_retry_veto(status):
-    with collector([status], response_headers={"x-should-retry": " false "}) as (
-        endpoint,
-        received,
-    ):
-        exporter = telemetry.OpenAITraceExporter(
-            api_key="synthetic-key", endpoint=endpoint, max_retries=5
-        )
-        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
-            await exporter.on_trace_event(completed_event())
-    assert len(received) == 1
-
-
-@pytest.mark.parametrize("status", [200, 403, 429, 503])
-async def test_exporter_preserves_response_retry_decision_after_close_failure(status, monkeypatch):
-    import httpx2
-
-    attempts: list[float] = []
-
-    class FailedBody(httpx2.AsyncByteStream):
-        async def __aiter__(self):
-            yield b""
-
-        async def aclose(self):
-            raise httpx2.ReadError("Synthetic response close failure")
-
-    def respond(request):
-        attempts.append(monotonic())
-        if len(attempts) > 1:
-            return httpx2.Response(200, request=request)
-        return httpx2.Response(
-            status,
-            headers={
-                "x-should-retry": "false" if status == 429 else "true",
-                "retry-after-ms": "15",
-            },
-            stream=FailedBody(),
-            request=request,
-        )
-
-    original_client = httpx2.AsyncClient
-
-    def client(**options):
-        return original_client(**options, transport=httpx2.MockTransport(respond))
-
-    monkeypatch.setattr(httpx2, "AsyncClient", client)
-    exporter = telemetry.OpenAITraceExporter(api_key="synthetic-key", max_retries=2)
-    if status == 503:
-        await exporter.on_trace_event(completed_event())
-        assert len(attempts) == 2
-        assert attempts[1] - attempts[0] >= 0.01
-    else:
-        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
-            await exporter.on_trace_event(completed_event())
-        assert len(attempts) == 1
-
-
-async def test_exporter_caps_exponential_backoff_within_the_delivery_budget():
-    times: list[float] = []
-    with collector([503] * 10 + [200], request_times=times) as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(
-            api_key="synthetic-key",
-            endpoint=endpoint,
-            max_retries=10,
-            retry_delay_ms=5,
-            max_retry_delay_ms=5,
-        )
-        await exporter.on_trace_event(completed_event())
-    assert len(received) == 11
-    assert times[-1] - times[0] >= 0.045
-
-
-async def test_exporter_backoff_cannot_extend_the_delivery_deadline():
-    with collector([503, 200]) as (endpoint, received):
-        exporter = telemetry.OpenAITraceExporter(
-            api_key="synthetic-key",
-            endpoint=endpoint,
-            max_retries=5,
-            timeout_ms=100,
-            retry_delay_ms=1000,
-            max_retry_delay_ms=1000,
-        )
-        started = monotonic()
-        with pytest.raises(RuntimeError, match="Native OpenAI trace export failed"):
-            await exporter.on_trace_event(completed_event())
-        assert monotonic() - started < 1
-    assert len(received) == 1
 
 
 def native_trace_child_env() -> dict[str, str]:
@@ -273,6 +146,7 @@ def native_trace_child_env() -> dict[str, str]:
     [
         "native_case",
         "native_deadline_case",
+        "native_deadline_reset_case",
         "native_outcome_privacy_case",
         "native_auth_case",
         "native_auth_destination_case",
@@ -498,6 +372,7 @@ async def native_deadline_case():
         handler = asyncio.current_task()
         handlers.add(handler)
         eof = None
+        trickling = False
         try:
             header = await reader.readuntil(b"\r\n\r\n")
             length = next(
@@ -507,7 +382,8 @@ async def native_deadline_case():
             )
             requests.append(json.loads(await reader.readexactly(length)))
             writer.write(b"HTTP/1.1 200 OK\r\n")
-            if len(requests) == 2:
+            trickling = len(requests) == 2
+            if trickling:
                 eof = asyncio.create_task(reader.read())
                 for _ in range(30):
                     done, _ = await asyncio.wait((eof,), timeout=0.02)
@@ -519,16 +395,25 @@ async def native_deadline_case():
                     await writer.drain()
             writer.write(b"Content-Length: 0\r\n\r\n")
             await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            if not trickling:
+                raise
+            first_closed.set()
         finally:
             if eof is not None and not eof.done():
                 eof.cancel()
                 await asyncio.gather(eof, return_exceptions=True)
             writer.close()
-            await writer.wait_closed()
-            handlers.discard(handler)
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                if not trickling:
+                    raise
+                first_closed.set()
 
     server = await asyncio.start_server(receive, "127.0.0.1", 0)
     endpoint = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1/traces/ingest"
+    configured = False
     try:
         # Warm the lazy HTTP transport before the bounded native request.
         warmup = telemetry.OpenAITraceExporter(api_key="synthetic-key", endpoint=endpoint)
@@ -538,6 +423,7 @@ async def native_deadline_case():
             api_key="synthetic-key", endpoint=endpoint, timeout_ms=200
         )
         await telemetry.configure(processors=[exporter])
+        configured = True
         with telemetry.trace("deadline-first"):
             pass
         flushed = await telemetry.force_flush()
@@ -552,12 +438,31 @@ async def native_deadline_case():
             record.get("span_data", {}).get("name") == "recovered-after-deadline"
             for record in records
         )
-        await telemetry.shutdown()
     finally:
-        server.close()
-        await server.wait_closed()
-        if handlers:
-            await asyncio.wait_for(asyncio.gather(*handlers), 1)
+        try:
+            if configured:
+                await telemetry.shutdown()
+        finally:
+            server.close()
+            await server.wait_closed()
+            if handlers:
+                await asyncio.wait_for(asyncio.gather(*handlers), 1)
+
+
+async def native_deadline_reset_case():
+    import asyncio
+
+    read = asyncio.StreamReader.read
+
+    async def reset_on_eof(reader, n=-1):
+        data = await read(reader, n)
+        if data == b"":
+            raise ConnectionResetError("synthetic Windows peer close")
+        return data
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(asyncio.StreamReader, "read", reset_on_eof)
+        await native_deadline_case()
 
 
 async def test_failed_root_descriptor_metadata_and_rotation_survive_delivery():

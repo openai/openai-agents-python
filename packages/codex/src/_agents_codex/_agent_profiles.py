@@ -90,6 +90,7 @@ def _capture_agent_graph(
             before_compact=source.before_compact,
             compaction=source.compaction,
             before_complete=source.before_complete,
+            tool_batch_completion=source.tool_batch_completion,
             input_guardrails=source.input_guardrails,
             output_guardrails=source.output_guardrails,
         )

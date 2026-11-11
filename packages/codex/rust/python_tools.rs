@@ -69,6 +69,7 @@ pub(crate) struct ProfileCatalog {
     pub(crate) before_compact: bool,
     pub(crate) post_turn_compact: bool,
     pub(crate) before_complete: bool,
+    pub(crate) tool_batch_completion: bool,
 }
 
 impl ProfileCatalog {
@@ -226,6 +227,7 @@ pub struct PythonTools {
     before_compact_enabled: bool,
     post_turn_compact_enabled: bool,
     before_complete_enabled: bool,
+    pub(crate) tool_batch_completion_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
@@ -268,7 +270,7 @@ enum PreparationReply {
     },
     ModelProducer {
         ticket: Arc<model_producer::Ticket>,
-        reply: oneshot::Sender<model_producer::Reply>,
+        reply: model_producer::Delivery,
     },
     ToolCompletion {
         reply: oneshot::Sender<std::result::Result<ToolCompletionReply, ()>>,
@@ -663,6 +665,7 @@ enum Phase {
 pub(crate) struct ToolReply {
     pub(crate) response: DynamicToolResponse,
     pub(crate) start_response: bool,
+    pub(crate) acceptance: Option<oneshot::Sender<()>>,
 }
 
 impl From<DynamicToolResponse> for ToolReply {
@@ -670,6 +673,7 @@ impl From<DynamicToolResponse> for ToolReply {
         Self {
             response,
             start_response: true,
+            acceptance: None,
         }
     }
 }
@@ -1332,7 +1336,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
         _reuse_initial: bool,
     ) -> Result<ProfileCatalog> {
         self.allocate_profile_catalog(
@@ -1353,7 +1357,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
     ) -> Result<ProfileCatalog> {
         self.allocate_profile_catalog(
             specs,
@@ -1373,7 +1377,7 @@ impl PythonTools {
         terminal_slots: &[usize],
         input_error_slots: &[usize],
         defaults: Option<&[usize]>,
-        flags: [bool; 5],
+        flags: [bool; 6],
         managed: bool,
     ) -> Result<ProfileCatalog> {
         // Graph profiles always allocate a fresh identity, including the root.
@@ -1408,13 +1412,14 @@ impl PythonTools {
             transform_context: flags[1],
             before_compact: flags[2],
             before_complete: flags[3],
-            post_turn_compact: flags[4],
+            tool_batch_completion: flags[4],
+            post_turn_compact: flags[5],
         })
     }
 
     pub(crate) fn startup_profile_catalog(
         &self,
-        flags: [bool; 5],
+        flags: [bool; 6],
         defaults: Option<&[usize]>,
     ) -> Result<ProfileCatalog> {
         let generation = self.snapshot();
@@ -2057,6 +2062,7 @@ impl PythonTools {
         transform_context: bool,
         before_compact: bool,
         before_complete: bool,
+        tool_batch_completion: bool,
         post_turn_compact: bool,
     ) -> Result<()> {
         Self::install_manual(
@@ -2066,6 +2072,7 @@ impl PythonTools {
             transform_context,
             before_compact,
             before_complete,
+            tool_batch_completion,
             post_turn_compact,
         )
     }
@@ -2077,6 +2084,7 @@ impl PythonTools {
         transform_context: bool,
         before_compact: bool,
         before_complete: bool,
+        tool_batch_completion: bool,
         post_turn_compact: bool,
     ) -> Result<()> {
         // Core resolves absent source options from resumed metadata at startup.
@@ -2141,7 +2149,7 @@ impl PythonTools {
         let before_compact = before_compact || profile_capabilities.is_some_and(|flags| flags[2]);
         let before_complete = before_complete || profile_capabilities.is_some_and(|flags| flags[3]);
         let post_turn_compact =
-            post_turn_compact || profile_capabilities.is_some_and(|flags| flags[4]);
+            post_turn_compact || profile_capabilities.is_some_and(|flags| flags[5]);
         let tools = Self {
             current: RwLock::new(Arc::new(Generation {
                 id: 0,
@@ -2171,6 +2179,7 @@ impl PythonTools {
             before_compact_enabled: before_compact,
             post_turn_compact_enabled: post_turn_compact,
             before_complete_enabled: before_complete,
+            tool_batch_completion_enabled: tool_batch_completion,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             preparations_stopped: AtomicBool::new(false),
@@ -2317,6 +2326,7 @@ impl PythonTools {
             before_compact_enabled: parent.before_compact_enabled,
             post_turn_compact_enabled: parent.post_turn_compact_enabled,
             before_complete_enabled: parent.before_complete_enabled,
+            tool_batch_completion_enabled: parent.tool_batch_completion_enabled,
             step_defaults: RwLock::new(
                 parent
                     .step_defaults
@@ -3657,6 +3667,7 @@ impl PythonTools {
             .send(ToolReply {
                 response,
                 start_response,
+                acceptance: None,
             })
             .is_ok();
         if accepted {
@@ -4579,11 +4590,12 @@ impl FreshTerminalReceipts {
         generation: Arc<Generation>,
         key: &PendingKey,
         invocation: u64,
+        batch_completion: bool,
     ) {
         if !generation
             .entries
             .get(key.reply.slot)
-            .is_some_and(|entry| entry.finish_turn)
+            .is_some_and(|entry| entry.finish_turn || batch_completion)
         {
             return;
         }
@@ -4796,6 +4808,12 @@ impl TurnLifecycleContributor for PythonContributor {
                             .is_some_and(|entry| entry.name == qualified_name)
                 })
                 .map(|(key, invocation)| (key.clone(), *invocation));
+            if receipt
+                .as_ref()
+                .is_some_and(|(key, _)| !step.generation.entries[key.reply.slot].finish_turn)
+            {
+                return Ok(None);
+            }
             let held = input
                 .turn_store
                 .get::<codex_extension_api::HeldToolCompletionResults>();
@@ -4920,6 +4938,122 @@ impl TurnLifecycleContributor for PythonContributor {
             if guard_only && matches!(decision, ToolCompletionReply::Accept { .. }) {
                 // Checked ordinary-history admission, never finish-turn authority.
                 return Ok(None);
+            }
+            Ok(Some(match decision {
+                ToolCompletionReply::Accept { final_output } => {
+                    owner
+                        .tool_completion_proposed
+                        .store(true, Ordering::Release);
+                    codex_extension_api::ToolCompletionDecision::Accept { final_output }
+                }
+                ToolCompletionReply::Continue { feedback } => {
+                    codex_extension_api::ToolCompletionDecision::Continue { feedback }
+                }
+            }))
+        })
+    }
+
+    fn tool_batch_completion_enabled(
+        &self,
+        thread_store: &ExtensionData,
+        step_store: &ExtensionData,
+    ) -> bool {
+        if let Some(catalog) = step_store.get::<ProfileCatalog>() {
+            return catalog.tool_batch_completion;
+        }
+        thread_store
+            .get::<PythonTools>()
+            .is_some_and(|tools| tools.tool_batch_completion_enabled)
+    }
+
+    fn propose_tool_batch_completion<'a>(
+        &'a self,
+        input: codex_extension_api::ToolBatchCompletionInput<'a>,
+    ) -> ExtensionFuture<
+        'a,
+        std::result::Result<Option<codex_extension_api::ToolCompletionDecision>, String>,
+    > {
+        Box::pin(async move {
+            let Some(tools) = input.thread_store.get::<PythonTools>() else {
+                return Ok(None);
+            };
+            let source = tools
+                .source_metadata(Some(input.step_store))
+                .map_err(|error| error.to_string())?;
+            let owner = tools
+                .admission_ready(input.turn_id)
+                .map_err(|error| error.to_string())?;
+            let stop =
+                crate::native_interception::capture_step_stop(input.thread_store, input.turn_store)
+                    .ok_or("Tool batch completion owner unavailable")?;
+            let mut results = Vec::with_capacity(input.results.len());
+            for result in input.results {
+                let (
+                    ResponseItem::FunctionCall {
+                        call_id,
+                        name,
+                        namespace,
+                        arguments,
+                        ..
+                    },
+                    ResponseItem::FunctionCallOutput { output, .. },
+                ) = (result.call, result.output)
+                else {
+                    return Err("Invalid settled tool batch".into());
+                };
+                results.push(json!({
+                    "call_id": call_id,
+                    "name": name,
+                    "namespace": namespace,
+                    "arguments": arguments,
+                    "output": output.body,
+                    "succeeded": result.succeeded,
+                }));
+            }
+            let decision = tools
+                .exchange_preparation(
+                    owner.clone(),
+                    input
+                        .step_store
+                        .get::<codex_extension_api::CapturedModelAttempt>()
+                        .map(|captured| captured.0.clone()),
+                    input
+                        .step_store
+                        .get::<codex_extension_api::ToolsOnlyWorkCancellation>()
+                        .map(|scope| scope.0.clone()),
+                    [
+                        "Expired tool batch completion owner",
+                        "Tool batch completion reader closed",
+                        "Tool batch completion cancelled",
+                    ],
+                    |reply| PreparationReply::ToolCompletion { reply, stop },
+                    |id| {
+                        let mut request = json!({"id": input.turn_id, "msg": {
+                            "type": "_sdk_tool_batch_completion",
+                            "turn_id": input.turn_id,
+                            "thread": input.thread_store.level_id(),
+                            "instance": tools.instance,
+                            "step_id": id,
+                            "model": input.model,
+                            "results": results,
+                        }});
+                        request["msg"]
+                            .as_object_mut()
+                            .expect("constructed callback object")
+                            .extend(source);
+                        request
+                    },
+                    |decision| {
+                        decision.map_err(|_| anyhow::anyhow!("Tool batch completion failed"))
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let current = tools
+                .admission_ready(input.turn_id)
+                .map_err(|error| error.to_string())?;
+            if !Arc::ptr_eq(&owner, &current) {
+                return Err("Expired tool batch completion owner".into());
             }
             Ok(Some(match decision {
                 ToolCompletionReply::Accept { final_output } => {
@@ -5573,6 +5707,7 @@ impl ToolContributor for PythonContributor {
                             before_compact: tools.before_compact_enabled,
                             post_turn_compact: tools.post_turn_compact_enabled,
                             before_complete: tools.before_complete_enabled,
+                            tool_batch_completion: tools.tool_batch_completion_enabled,
                         }
                     }
                 },
@@ -6296,6 +6431,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
             Ok(Box::new(ReplyOutput {
                 output: PythonOutput(response.response),
                 start_response: response.start_response,
+                acceptance: response.acceptance,
             }) as Box<dyn ToolOutput>)
         })
     }
@@ -6304,6 +6440,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
 struct ReplyOutput {
     output: PythonOutput,
     start_response: bool,
+    acceptance: Option<oneshot::Sender<()>>,
 }
 
 impl ToolOutput for ReplyOutput {
@@ -6318,6 +6455,11 @@ impl ToolOutput for ReplyOutput {
     }
     fn realtime_response_requested(&self) -> bool {
         self.start_response
+    }
+    fn mark_accepted(&mut self) {
+        if let Some(acceptance) = self.acceptance.take() {
+            let _ = acceptance.send(());
+        }
     }
 }
 
@@ -8720,6 +8862,7 @@ pub(crate) mod managed_tests {
             before_compact_enabled: false,
             post_turn_compact_enabled: false,
             before_complete_enabled: false,
+            tool_batch_completion_enabled: false,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             preparations_stopped: AtomicBool::new(false),
@@ -8731,6 +8874,8 @@ pub(crate) mod managed_tests {
 
     fn function(name: &str) -> DynamicToolFunctionSpec {
         DynamicToolFunctionSpec {
+            strict: false,
+            output_schema: None,
             name: name.into(),
             description: "test tool".into(),
             input_schema: json!({"type":"object","properties":{}}),
@@ -8824,6 +8969,8 @@ pub(crate) mod managed_tests {
             .to_string(),
             encrypted_function_args: None,
             internal_chat_message_metadata_passthrough: None,
+            asynchronous: None,
+            status: None,
         }
     }
 
@@ -9409,7 +9556,7 @@ pub(crate) mod managed_tests {
         *tools.current.write().unwrap() = Arc::new(tools.prepare(1, specs.clone()).unwrap());
         tools.generation_high_water.store(1, Ordering::Release);
         let narrowed = tools
-            .startup_profile_catalog([false; 5], Some(&[1]))
+            .startup_profile_catalog([false; 6], Some(&[1]))
             .unwrap();
         assert_eq!(
             narrowed.checkpoint_specs().unwrap(),
@@ -9418,7 +9565,7 @@ pub(crate) mod managed_tests {
         assert!(narrowed.default_names(Some(&[2])).is_err());
         assert!(narrowed.default_names(Some(&[0, 0])).is_err());
         let declared = tools
-            .profile_catalog(specs, &[], &[], &[], None, [false; 5], false)
+            .profile_catalog(specs, &[], &[], &[], None, [false; 6], false)
             .unwrap();
         let thread = ExtensionData::new("source");
         thread.insert(Arc::try_unwrap(tools).ok().expect("exclusive fixture"));
@@ -9445,7 +9592,7 @@ pub(crate) mod managed_tests {
         };
         assert_eq!(advertise(narrowed), vec!["b"]);
         let cleared = tools
-            .startup_profile_catalog([false; 5], Some(&[]))
+            .startup_profile_catalog([false; 6], Some(&[]))
             .unwrap();
         assert!(advertise(cleared).is_empty());
         // A later declaration activation retains its own complete defaults.
@@ -9512,7 +9659,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 true,
             )
             .unwrap();
@@ -9523,7 +9670,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 false,
             )
             .unwrap();
@@ -9602,7 +9749,7 @@ pub(crate) mod managed_tests {
                 &[],
                 &[],
                 None,
-                [false; 5],
+                [false; 6],
                 true,
             )
             .unwrap();
@@ -9773,6 +9920,7 @@ pub(crate) mod managed_tests {
         let background = ReplyOutput {
             output: PythonOutput(response),
             start_response: false,
+            acceptance: None,
         };
         assert!(!background.realtime_response_requested());
         assert_eq!(

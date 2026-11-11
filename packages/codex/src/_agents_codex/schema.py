@@ -124,15 +124,28 @@ class _PreparedOutput:
         """Validate once and serialize the same validated value for Core."""
         return self._validate(text, terminal=True)
 
-    def _validate(self, text: str, *, terminal: bool) -> tuple[Any, Any]:
+    def terminal_application_value(self, value: Any) -> tuple[Any, Any]:
+        """Validate an application-provided final value against this output type."""
+        if self.adapter is None and not isinstance(value, str):
+            raise OutputValidationError("")
+        return self._validate(value, terminal=True, application_value=True)
+
+    def _validate(
+        self, input_value: Any, *, terminal: bool, application_value: bool = False
+    ) -> tuple[Any, Any]:
         if self.adapter is None:
-            return text, text
+            return input_value, input_value
         try:
-            # The function supplies application JSON, without the native response wrapper.
-            source = (
-                json.dumps({"response": json.loads(text)}) if terminal and self.wrapped else text
-            )
-            decoded = self.adapter.validate_json(source)
+            if application_value:
+                source = {"response": input_value} if self.wrapped else input_value
+                decoded = self.adapter.validate_python(source)
+            else:
+                source = (
+                    json.dumps({"response": json.loads(input_value)})
+                    if terminal and self.wrapped
+                    else input_value
+                )
+                decoded = self.adapter.validate_json(source)
             value = decoded.response if self.wrapped else decoded
             wire = None
             if terminal:
@@ -155,7 +168,7 @@ class _PreparedOutput:
         except (TypeError, ValueError):
             issues = (OutputValidationIssue(code="validation_error", path=()),)
         # Do not attach the validator exception, which contains rejected inputs.
-        raise OutputValidationError(text, issues)
+        raise OutputValidationError("" if application_value else input_value, issues)
 
 
 def _prepare_spec(output: OutputSpec[Any] | None) -> _PreparedOutput:

@@ -199,6 +199,7 @@ pub(crate) struct Frame {
     tool_outcomes: Option<ToolOutcomes>,
     fresh: Option<crate::python_tools::FreshTerminalReceipts>,
     terminal_calls: HashSet<String>,
+    batch_completion: bool,
     pub turn: String,
     pub pending: Vec<ResponseItem>,
     pub order: VecDeque<String>,
@@ -334,6 +335,7 @@ pub(crate) fn validate_for_opening(
             .is_some_and(|(receipt, _)| receipt == &source),
         "Pending calls differ from the active Agent source"
     );
+    opening.validate_pending_source(&source)?;
     let accepted = crate::agent_profiles::validate_restored(opening, &history)?;
     let (specs, manual_slots) = opening.restore_catalog(&history, &state["managed_tool_specs"])?;
     let mut frame = validate_frame(state, &accepted.text, &specs, &manual_slots)?;
@@ -347,22 +349,22 @@ pub(crate) fn validate_for_opening(
             original == &handoff.source && graph == &opening.fingerprint,
             "Handoff differs from its original call source or admitted graph"
         );
-        opening.validate_restored_handoff(&name, &handoff)?;
         // A canonical target receipt proves that this handoff already applied.
         // Buffered sibling results have no later transition and stay pending.
-        if let Some(index) = result_indices.get(&handoff.call_id) {
-            if let Some((_, next, next_graph)) = transitions
+        let next_transition = result_indices.get(&handoff.call_id).and_then(|index| {
+            transitions
                 .iter()
                 .find(|(next_index, _, _)| next_index > index)
-            {
-                ensure!(
-                    next.profile_id == handoff.target_profile_id
-                        && handoff.source.epoch.checked_add(1) == Some(next.epoch)
-                        && *next_graph == opening.fingerprint,
-                    "Handoff does not match its next accepted Agent transition"
-                );
-                continue;
-            }
+        });
+        opening.validate_restored_handoff(&name, &handoff, next_transition.is_none())?;
+        if let Some((_, next, next_graph)) = next_transition {
+            ensure!(
+                next.profile_id == handoff.target_profile_id
+                    && handoff.source.epoch.checked_add(1) == Some(next.epoch)
+                    && *next_graph == opening.fingerprint,
+                "Handoff does not match its next accepted Agent transition"
+            );
+            continue;
         }
         ensure!(
             handoff.source == source,
@@ -754,6 +756,7 @@ fn validate_frame(
         tool_outcomes,
         fresh: None,
         terminal_calls: HashSet::new(),
+        batch_completion: false,
         turn,
         pending: admitted,
         order,
@@ -916,12 +919,13 @@ impl Frame {
             if let Some(outcomes) = &mut self.tool_outcomes {
                 outcomes.record(&key.call, value.success);
             }
-            if value.success {
+            if value.success || self.batch_completion {
                 crate::python_tools::FreshTerminalReceipts::record(
                     &mut self.fresh,
                     generation,
                     key,
                     invocation,
+                    self.batch_completion,
                 );
             }
             self.accepted.insert(
@@ -1021,6 +1025,17 @@ pub(crate) async fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) 
         &history,
         &frame.order.iter().cloned().collect(),
     )?;
+    frame.batch_completion = captured
+        .as_ref()
+        .and_then(|source| {
+            source
+                .profile
+                .data
+                .get::<crate::python_tools::ProfileCatalog>()
+        })
+        .map_or(tools.tool_batch_completion_enabled, |catalog| {
+            catalog.tool_batch_completion
+        });
     let source_id = serde_json::from_value(frame.state["source_session_id"].clone())?;
     let model = crate::checkpoint::managed_settings(&history, source_id)
         .map(|settings| settings.model.as_str());
@@ -1166,7 +1181,7 @@ pub(crate) async fn continue_if_ready(
     if !outputs.is_empty() {
         thread
             .thread
-            .inject_response_item_envelopes(outputs)
+            .inject_sdk_response_item_envelopes(outputs, Some(&frame.turn))
             .await?;
     }
     let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
@@ -1178,8 +1193,18 @@ pub(crate) async fn continue_if_ready(
     if let Some(source) = operation_declaration_source {
         recovery_options["operation_declaration_source"] = serde_json::to_value(source)?;
     }
+    let reset_tool_choice = thread
+        .thread
+        .thread_settings_snapshot()
+        .await
+        .request_controls
+        .reset_tool_choice
+        .flatten()
+        == Some(true);
     let terminal = match frame.tool_outcomes.take() {
-        Some(outcomes) if frame.fresh.is_some() || !held_outputs.is_empty() => {
+        Some(outcomes)
+            if frame.fresh.is_some() || !held_outputs.is_empty() || reset_tool_choice =>
+        {
             Some(crate::python_tools::RecoveredToolCompletionSeed::new(
                 frame.turn.clone(),
                 outcomes,

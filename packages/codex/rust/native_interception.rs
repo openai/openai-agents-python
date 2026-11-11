@@ -686,6 +686,7 @@ pub struct Control {
 // One bounded callback owner per explicit root. Native ThreadSpawn ancestry
 // may share it, but never the parent's turn or thread-stop lifetime.
 struct Channel {
+    observe_raw_provider_events: AtomicBool,
     state: Mutex<State>,
     // At most MAX_PENDING live requests. Cancellation messages must not be
     // dropped when that bound is full, hence the unbounded control channel.
@@ -793,6 +794,7 @@ impl Control {
             strict_executor_writes: OnceLock::new(),
             collaboration_namespace: std::sync::OnceLock::new(),
             channel: Arc::new(Channel {
+                observe_raw_provider_events: AtomicBool::new(false),
                 state: Mutex::new(State {
                     timeout: None,
                     scope: Scope::Root,
@@ -807,6 +809,12 @@ impl Control {
                 bytes: Arc::new(Semaphore::new(bytes)),
             }),
         }
+    }
+
+    pub(crate) fn enable_raw_provider_events(&self) {
+        self.channel
+            .observe_raw_provider_events
+            .store(true, Ordering::Release);
     }
 
     fn descendant(id: String, parent: &Control) -> Self {
@@ -2392,6 +2400,16 @@ impl TurnLifecycleContributor for Boundary {
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Some(control) = input.thread_store.get::<Control>() {
+                if !control.stopped.is_cancelled()
+                    && control
+                        .channel
+                        .observe_raw_provider_events
+                        .load(Ordering::Acquire)
+                {
+                    input
+                        .thread_store
+                        .insert(codex_core::ObserveRawProviderEvents);
+                }
                 let owner = input.turn_store.get_or_init(|| DirectTurn {
                     id: input.turn_id.to_owned(),
                     model: Mutex::new(None),
@@ -8055,15 +8073,16 @@ pub(crate) mod tests {
 
         let mut stopped_output = crate::mcp_result_control::withheld();
         let mut retained_output = crate::mcp_result_control::withheld();
-        let (mcp, stopped_assignment) =
+        let (mcp, stopped_ack, stopped_assignment) =
             crate::mcp_result_control::tests::resolved_edit(&thread, &turn, &mut stopped_output)
                 .await;
-        let (_, retained_assignment) = crate::mcp_result_control::tests::resolved_edit(
-            &thread,
-            &retained,
-            &mut retained_output,
-        )
-        .await;
+        let (_, retained_ack, retained_assignment) =
+            crate::mcp_result_control::tests::resolved_edit(
+                &thread,
+                &retained,
+                &mut retained_output,
+            )
+            .await;
         // Both edits are resolved, but neither native receiver has assigned.
         // Ordinary terminal must preserve a retained cell's result. Accept the
         // other owner's stop before letting either MCP receiver run.
@@ -8074,6 +8093,8 @@ pub(crate) mod tests {
 
         stopped_assignment.await;
         retained_assignment.await;
+        assert!(stopped_ack.await.is_err());
+        assert!(retained_ack.await.is_ok());
         assert_eq!(stopped_output, crate::mcp_result_control::withheld());
         assert_eq!(
             retained_output.content,

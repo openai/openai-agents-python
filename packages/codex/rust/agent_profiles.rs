@@ -59,6 +59,8 @@ pub(crate) struct ProfileSpec {
     post_turn_compact: bool,
     #[serde(default)]
     before_complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tool_batch_completion: bool,
     #[serde(default)]
     selecting_steps: bool,
     output_fingerprint: String,
@@ -114,10 +116,36 @@ fn handoff_defaults(
 struct OpeningFiles(Vec<InstructionFile>);
 
 impl OpeningProfiles {
+    /// A serialized pending source can only claim permissions the fresh graph
+    /// grants without running a callback.
+    pub(crate) fn validate_pending_source(&self, source: &AgentProfileReceipt) -> Result<()> {
+        let mut candidates = vec![self.root_id.as_str()];
+        let mut visited = HashSet::new();
+        while let Some(id) = candidates.pop() {
+            if id == source.profile_id {
+                return Ok(());
+            }
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(profile) = self.roster.iter().find(|profile| profile.id == id) {
+                candidates.extend(
+                    profile
+                        .handoffs
+                        .iter()
+                        .filter(|(name, _)| !profile.handoff_callbacks.contains_key(*name))
+                        .map(|(_, target)| target.as_str()),
+                );
+            }
+        }
+        anyhow::bail!("Restored pending Agent profile requires live callback acceptance")
+    }
+
     pub(crate) fn validate_restored_handoff(
         &self,
         tool_name: &ToolName,
         receipt: &codex_protocol::agent_profile::AgentProfileHandoff,
+        pending: bool,
     ) -> Result<()> {
         let source = self
             .roster
@@ -131,6 +159,11 @@ impl OpeningProfiles {
                     && target == &receipt.target_profile_id
             }),
             "Restored handoff is outside its source declaration"
+        );
+        // Checkpoints cannot authorize a callback for the current turn.
+        ensure!(
+            !pending || !source.handoff_callbacks.contains_key(&tool_name.name),
+            "Pending callback-backed Agent handoffs require live acceptance"
         );
         Ok(())
     }
@@ -182,12 +215,15 @@ impl OpeningProfiles {
         Ok((saved, slots))
     }
 
-    pub(crate) fn capabilities(&self) -> [bool; 5] {
+    pub(crate) fn capabilities(&self) -> [bool; 6] {
         [
             self.roster.iter().any(|profile| profile.selecting_steps),
             self.roster.iter().any(|profile| profile.transform_context),
             self.roster.iter().any(|profile| profile.before_compact),
             self.roster.iter().any(|profile| profile.before_complete),
+            self.roster
+                .iter()
+                .any(|profile| profile.tool_batch_completion),
             self.roster.iter().any(|profile| profile.post_turn_compact),
         ]
     }
@@ -217,6 +253,8 @@ fn validate(roster: &[ProfileSpec], root_id: &str) -> Result<()> {
                 continue;
             }
             all_declarations.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                strict: false,
+                output_schema: None,
                 name: name.clone(),
                 description: "Native handoff".into(),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -544,6 +582,7 @@ async fn prepare_profile(
         descriptor.transform_context,
         descriptor.before_compact,
         descriptor.before_complete,
+        descriptor.tool_batch_completion,
         descriptor.post_turn_compact,
     ];
     let catalog = if voice {
@@ -1036,6 +1075,7 @@ pub(crate) async fn configure(
                 prepared.catalog.transform_context,
                 prepared.catalog.before_compact,
                 prepared.catalog.before_complete,
+                prepared.catalog.tool_batch_completion,
                 prepared.catalog.post_turn_compact,
             ],
             default_slots,
@@ -1283,6 +1323,7 @@ pub(crate) async fn replace_tools(
             previous.transform_context,
             previous.before_compact,
             previous.before_complete,
+            previous.tool_batch_completion,
             previous.post_turn_compact,
         ],
         false,
@@ -1652,6 +1693,8 @@ pub(crate) fn wrap_handoff_callback(
 
 fn handoff_declaration(name: &str, target: &str) -> DynamicToolFunctionSpec {
     DynamicToolFunctionSpec {
+        strict: false,
+        output_schema: None,
         name: name.to_owned(),
         description: format!("Transfer this conversation to captured Agent {target}."),
         input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
@@ -1794,6 +1837,55 @@ mod tests {
         assert!(fingerprint(&callback.to_string(), "a").is_ok());
         callback[0]["handoff_callbacks"] = json!({"transfer_to_b":0});
         assert!(fingerprint(&callback.to_string(), "a").is_err());
+    }
+
+    #[test]
+    fn pending_handoff_restore_requires_live_callback_acceptance() {
+        let open = |raw: Value| {
+            let raw = raw.to_string();
+            OpeningProfiles {
+                root_id: "a".into(),
+                roster: serde_json::from_str(&raw).unwrap(),
+                fingerprint: fingerprint(&raw, "a").unwrap(),
+            }
+        };
+        let mut raw = roster();
+        let builtin = open(raw.clone());
+        raw[0]["tools"].as_array_mut().unwrap().push(json!({
+            "type":"function", "name":"transfer_to_b", "description":"Authorize transfer",
+            "inputSchema":{"type":"object","properties":{"reason":{"type":"string"}},
+                "required":["reason"],"additionalProperties":false},
+            "deferLoading":false,
+        }));
+        raw[0]["handoff_callbacks"] = json!({"transfer_to_b":1});
+        let callback = open(raw);
+        let destination = AgentProfileReceipt {
+            profile_id: "b".into(),
+            epoch: 1,
+        };
+        builtin.validate_pending_source(&destination).unwrap();
+        let error = callback.validate_pending_source(&destination).unwrap_err();
+        assert!(error.to_string().contains("live callback acceptance"));
+        let name = ToolName::new(None, "transfer_to_b");
+        let saved = codex_protocol::agent_profile::AgentProfileHandoff {
+            source: AgentProfileReceipt {
+                profile_id: "a".into(),
+                epoch: 0,
+            },
+            target_profile_id: "b".into(),
+            call_id: "saved-call".into(),
+        };
+        callback.validate_pending_source(&saved.source).unwrap();
+        builtin
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap();
+        callback
+            .validate_restored_handoff(&name, &saved, false)
+            .unwrap();
+        let error = callback
+            .validate_restored_handoff(&name, &saved, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("live acceptance"));
     }
 
     #[test]

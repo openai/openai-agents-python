@@ -90,14 +90,6 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
         "A Rust tracing subscriber is already installed; Codex telemetry cannot replace it"
     );
     let (config_json, diagnostics) = crate::console_diagnostics::extract(config_json)?;
-    let mut options: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&config_json)?;
-    let delivery = options
-        .remove("sdk.trace_delivery")
-        .map(codex_otel::sdk_trace_routes::HostTraceDeliverySettings::parse)
-        .transpose()
-        .map_err(|_| anyhow!("Invalid trace delivery options"))?;
-    let config_json = serde_json::to_string(&options)?;
     let runtime_json = config::prepare_runtime(runtime_json)?;
     let (mut config, _) = config::load(&config_json, &runtime_json, None).await?;
     if uses_http_mtls(&config.otel.exporter)
@@ -126,9 +118,6 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
         .context("Could not claim the process-wide Rust tracing subscriber")?;
     state.claimed = true;
-    if let Some(delivery) = delivery {
-        codex_otel::sdk_trace_routes::configure_host_trace_delivery(delivery);
-    }
 
     let provider = codex_core::otel_init::build_provider(
         &config,

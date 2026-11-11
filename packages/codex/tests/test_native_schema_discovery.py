@@ -98,6 +98,37 @@ async def test_only_current_schemas_and_effects_are_discoverable(responses, defe
             assert calls == ["A1"] and len(responses.requests) == 3
 
 
+async def test_one_shot_return_items_include_deferred_tool_search(responses):
+    @function_tool(description="Find the skylark invoice", defer_loading=True)
+    async def skylark_invoice(order_id: str) -> str:
+        return "paid:" + order_id
+
+    responses.respond(search("skylark invoice", "search-1"))
+    responses.respond(function_call("skylark_invoice", {"order_id": "A1"}, "use-1"))
+    responses.respond(assistant_output("settled"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-discovery-produced-items")
+    agent = Agent(instructions="Act.", model="gpt-5.5", tools=[skylark_invoice], provider=provider)
+    async with timeout(25), provider:
+        result = await agent.run("find", return_items=True)
+
+    assert result.final_output == "settled"
+    assert result.items is not None
+    assert [record.item["type"] for record in result.items] == [
+        "tool_search_call",
+        "tool_search_output",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert all(record.agent is agent for record in result.items)
+    call, output = (record.item for record in result.items[:2])
+    assert call["call_id"] == output["call_id"] == "search-1"
+    assert call["execution"] == output["execution"] == "client"
+    assert call["status"] == output["status"] == "completed"
+    assert call["arguments"] == {"query": "skylark invoice", "limit": 5}
+    assert output["tools"] == discovered(responses, "search-1")["tools"]
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 async def test_fork_retains_current_schema_and_opening_discovery_without_new_grants(
     responses, deferred

@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index ce0ff876..7bdb9df8 100644
+index ce0ff87681fcc7ae3577544fb59cd835feb0b772..200c0702046e6e67d4704edb3b66f2e82b5caffb 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -1,4 +1,6 @@
@@ -559,7 +559,7 @@ index ce0ff876..7bdb9df8 100644
 +    }
 +}
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 20b75494..5b57d1e6 100644
+index 48481a97e68377f92e62bd36dd044615cd44e380..8739b13145d4aca9cfd57eeb422fa0dfbd0d78d5 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -59,6 +59,7 @@ use codex_rollout_trace::InferenceTraceContext;
@@ -643,11 +643,11 @@ index 20b75494..5b57d1e6 100644
      .await?
      .is_some()
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 7305d816..ba7abe1e 100644
+index df4814cdd570c2defa809886a1b4726be630020a..99b2c5b48bde31eb05b550866df1da544e08e5d8 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -481,6 +481,9 @@ pub(crate) async fn run_turn(
-             &tools,
+@@ -486,6 +486,9 @@ pub(crate) async fn run_turn(
+             false,
              &cancellation_token,
              &mut stop_hook_active,
 +            &mut completion_continuations,
@@ -656,8 +656,8 @@ index 7305d816..ba7abe1e 100644
          )
          .await?
          {
-@@ -681,6 +684,9 @@ pub(crate) async fn run_turn(
-                     &settled_tools,
+@@ -692,6 +695,9 @@ pub(crate) async fn run_turn(
+                     pending_agent_handoff.is_some(),
                      &cancellation_token,
                      &mut stop_hook_active,
 +                    &mut completion_continuations,
@@ -666,7 +666,7 @@ index 7305d816..ba7abe1e 100644
                  )
                  .await?
                  {
-@@ -891,51 +897,15 @@ pub(crate) async fn run_turn(
+@@ -902,51 +908,15 @@ pub(crate) async fn run_turn(
                      {
                          return Ok(None);
                      }
@@ -727,7 +727,7 @@ index 7305d816..ba7abe1e 100644
                      break;
                  }
                  continue;
-@@ -1749,6 +1719,79 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1760,6 +1730,79 @@ async fn maybe_run_previous_model_inline_compact(
      Ok(())
  }
  
@@ -807,7 +807,7 @@ index 7305d816..ba7abe1e 100644
  /// `world_state` belongs to `replacement_step_context`, which may differ from the compactor.
  #[allow(clippy::too_many_arguments)]
  #[instrument(
-@@ -1830,6 +1873,7 @@ async fn run_auto_compact(
+@@ -1841,6 +1884,7 @@ async fn run_auto_compact(
                  world_state,
                  reason,
                  phase,
@@ -815,7 +815,7 @@ index 7305d816..ba7abe1e 100644
              )
              .await?;
          }
-@@ -2958,12 +3002,16 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
+@@ -3071,6 +3115,7 @@ async fn release_failed_tool_candidates(sess: &Session, step: &StepContext) {
      release_held_tool_results(sess, step, true).await;
  }
  
@@ -823,16 +823,17 @@ index 7305d816..ba7abe1e 100644
  async fn try_complete_tool_turn(
      sess: &Arc<Session>,
      step_context: &Arc<StepContext>,
-     tools: &SettledDirectTools,
+@@ -3078,6 +3123,9 @@ async fn try_complete_tool_turn(
+     handoff_accepted: bool,
      cancellation_token: &CancellationToken,
      stop_hook_active: &mut bool,
 +    completion_continuations: &mut usize,
 +    client_session: &mut ModelClientSession,
 +    world_state: &Arc<WorldState>,
  ) -> CodexResult<bool> {
-     let proposal = propose_tool_completion(sess, step_context, tools, cancellation_token).await;
-     release_held_tool_results(sess, step_context, proposal.is_err()).await;
-@@ -2982,20 +3030,33 @@ async fn try_complete_tool_turn(
+     let proposal = propose_tool_completion(
+         sess,
+@@ -3103,20 +3151,33 @@ async fn try_complete_tool_turn(
                  .await;
                  *stop_hook_active = true;
              }
@@ -879,7 +880,7 @@ index 7305d816..ba7abe1e 100644
      }
  
 diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
-index 0c1e19ff..f9ee1a26 100644
+index 0c1e19ff6196ef8cbb1ef70d252d1ce6bf59adb2..f9ee1a269bb6c80778128e99574569e248080a6f 100644
 --- a/codex-rs/core/src/tasks/compact.rs
 +++ b/codex-rs/core/src/tasks/compact.rs
 @@ -67,6 +67,7 @@ impl SessionTask for CompactTask {
@@ -891,10 +892,10 @@ index 0c1e19ff..f9ee1a26 100644
                  .await
              }
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 3c17eede..48f0a424 100644
+index ec3eb521d35047ade09d21e3e0a2da524af0fdf4..353055774e69dfb1fff7bd82196edd1f99c0fd07 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -144,6 +144,8 @@ pub use codex_api::ModelInvocationDeadlineState;
+@@ -146,6 +146,8 @@ pub use codex_api::ModelInvocationDeadlineState;
  mod model_request;
  pub use codex_api::completed_model_response;
  pub use model_request::CompactionInput;
@@ -904,10 +905,10 @@ index 3c17eede..48f0a424 100644
  pub use model_request::ModelRequestContributor;
  pub use model_request::ModelRequestInput;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index 4fc7b9d0..2b50f93e 100644
+index 729b6fb03faddaa861458e09cc7f774678bf16f0..2edda0a16095cd99e25696c6b71e0c98ec6d563b 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
-@@ -150,16 +150,38 @@ pub struct ModelContextInput<'a> {
+@@ -158,16 +158,38 @@ pub struct ModelContextInput<'a> {
  }
  
  /// Active conversation input before native summarization begins.
@@ -946,7 +947,7 @@ index 4fc7b9d0..2b50f93e 100644
  /// Cancellation for one tools-only batch's step preparation. Host contributors
  /// retain and join their exact dispatched callback before returning cancellation.
  #[derive(Clone, Debug)]
-@@ -221,6 +243,35 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+@@ -229,6 +251,35 @@ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
          Box::pin(async { Ok(None) })
      }
  
