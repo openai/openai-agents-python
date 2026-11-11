@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from contextlib import AsyncExitStack
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -66,7 +67,7 @@ async def test_async_sqlalchemy_restores_native_session(responses, database_url)
 async def test_async_sqlalchemy_imports_v0_items_and_restores_native_history(
     responses, database_url
 ):
-    from sqlalchemy import Column, Integer, MetaData, String, Table, Text
+    from sqlalchemy import TIMESTAMP, Column, Integer, MetaData, String, Table, Text
 
     metadata = MetaData()
     messages = Table(
@@ -75,11 +76,20 @@ async def test_async_sqlalchemy_imports_v0_items_and_restores_native_history(
         Column("id", Integer, primary_key=True),
         Column("session_id", String, nullable=False),
         Column("message_data", Text, nullable=False),
+        Column("created_at", TIMESTAMP(timezone=False), nullable=False),
     )
     items = [
         {"role": "user", "content": "legacy café"},
         {"type": "function_call", "name": "record", "call_id": "call_old", "arguments": "{}"},
         {"type": "function_call_output", "call_id": "call_old", "output": "legacy tool reply"},
+    ]
+    earlier = datetime(2026, 1, 1)
+    later = datetime(2026, 1, 2)
+    legacy_rows = [
+        (3, "v0", later, items[2]),
+        (1, "other", earlier, {}),
+        (2, "v0", later, items[1]),
+        (4, "v0", earlier, items[0]),
     ]
     canonical_table = f"native_messages_{uuid4().hex}"
     async with AsyncExitStack() as stack:
@@ -92,10 +102,13 @@ async def test_async_sqlalchemy_imports_v0_items_and_restores_native_history(
             await connection.execute(
                 messages.insert(),
                 [
-                    {"id": 4, "session_id": "v0", "message_data": json.dumps(items[2])},
-                    {"id": 1, "session_id": "other", "message_data": "{}"},
-                    {"id": 3, "session_id": "v0", "message_data": json.dumps(items[1])},
-                    {"id": 2, "session_id": "v0", "message_data": json.dumps(items[0])},
+                    {
+                        "id": row_id,
+                        "session_id": source_id,
+                        "created_at": created_at,
+                        "message_data": json.dumps(item),
+                    }
+                    for row_id, source_id, created_at, item in legacy_rows
                 ],
             )
         imported = await store.read_legacy_history("v0", messages_table=messages.name)
@@ -107,6 +120,9 @@ async def test_async_sqlalchemy_imports_v0_items_and_restores_native_history(
             },
             *items[1:],
         ]
+        assert await store.read_legacy_history(
+            "v0", messages_table=messages.name, order_by="id"
+        ) == [*imported[1:], imported[0]]
         assert await store.read_legacy_history("absent", messages_table=messages.name) == []
         async with NativeProvider(
             base_url=responses.url, api_key="synthetic-native-import"

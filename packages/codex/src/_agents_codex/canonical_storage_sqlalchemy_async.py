@@ -11,7 +11,7 @@ import uuid
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakKeyDictionary
 
 from ._lifecycle import _join
@@ -128,27 +128,36 @@ class AsyncSQLAlchemySessionStore:
         *,
         messages_table: str = "agent_messages",
         schema: str | None = None,
+        order_by: Literal["created_at", "id"] = "created_at",
     ) -> list[dict[str, Any]]:
-        """Read one v0 session's items in insertion order for native import.
+        """Read one v0 session's items in the order used by its source.
 
         Finish writes to the v0 session before reading. Use the returned items
         with an empty native Session's `transact_history` and its current revision.
         The application can retain the mapping from its v0 ID to the native ID.
+        By default, items follow Classic's timestamp order with ID as the tie
+        breaker. Pass `order_by="id"` if the source orders items by append ID.
         Plain v0 messages are converted to typed messages with text parts.
         """
         from sqlalchemy import column, select, table
 
+        if order_by not in ("created_at", "id"):
+            raise ValueError('order_by must be "created_at" or "id"')
         messages = table(
             messages_table,
             column("id"),
             column("session_id"),
             column("message_data"),
+            column("created_at"),
             schema=schema,
+        )
+        order_columns = (
+            (messages.c.created_at, messages.c.id) if order_by == "created_at" else (messages.c.id,)
         )
         query = (
             select(messages.c.message_data)
             .where(messages.c.session_id == session_id)
-            .order_by(messages.c.id)
+            .order_by(*order_columns)
         )
 
         async def fetch() -> list[dict[str, Any]]:
