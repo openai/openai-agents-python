@@ -1,0 +1,62 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index a515905cb9d3a03bdb0dcebbad9cea8f2f7c432e..0ea3b08444717fc7f0c959cdf60bb3281488a3ee 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1354,6 +1354,7 @@ impl ModelClient {
+                     tool,
+                     codex_tools::ToolSpec::CodeInterpreter(_)
+                         | codex_tools::ToolSpec::ImageGeneration(_)
++                        | codex_tools::ToolSpec::Shell(_)
+                 )
+             }) || (request.request_controls.prompt.is_some()
+                 && request.tools.is_none());
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 0fead70fc369a337d06f0532576d470b19a1ceb8..3c0edb7cf79c5faed15d1fb8e3182b356ab01e11 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -4011,14 +4011,30 @@ fn assign_missing_streamed_response_item_id(
+ 
+ // Provider actions have no local accepted-call deduplication owner. Unknown
+ // output has lost its raw type, so its replay safety cannot be established.
+-fn provider_event_may_have_effects(event: &ResponseEvent) -> bool {
++fn provider_event_may_have_effects(event: &ResponseEvent, tools: &[codex_tools::ToolSpec]) -> bool {
+     match event {
+-        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => matches!(
+-            item,
++        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => match item {
++            ResponseItem::ShellCall {
++                provider_fields, ..
++            } => {
++                match provider_fields
++                    .get("environment")
++                    .and_then(|environment| environment.get("type"))
++                    .and_then(serde_json::Value::as_str)
++                {
++                    Some("local") => false,
++                    Some(_) => true,
++                    None => tools
++                        .iter()
++                        .any(|tool| matches!(tool, codex_tools::ToolSpec::Shell(_))),
++                }
++            }
+             ResponseItem::CodeInterpreterCall { .. }
+-                | ResponseItem::ImageGenerationCall { .. }
+-                | ResponseItem::Other
+-        ),
++            | ResponseItem::ImageGenerationCall { .. }
++            | ResponseItem::ShellCallOutput { .. }
++            | ResponseItem::Other => true,
++            _ => false,
++        },
+         ResponseEvent::HostedToolCallProgress(progress) => progress
+             .event
+             .get("type")
+@@ -4272,7 +4288,7 @@ async fn try_run_sampling_request(
+             {
+                 break Err(CodexErr::TurnAborted);
+             }
+-            if provider_event_may_have_effects(&event) {
++            if provider_event_may_have_effects(&event, &prompt.tools) {
+                 if let Some(attempt) = &model_attempt {
+                     attempt.mark_provider_effect();
+                 }

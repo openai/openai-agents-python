@@ -731,7 +731,15 @@
     {
       "path": "sdk-provider-hosted-shell.patch",
       "sha256": "347831fd574228651709dbc3f0bbb161bcd3b9afdd80fec6489b475f61050ef6"
+    },
+    {
+      "path": "sdk-hosted-shell-replay-fence.patch",
+      "sha256": "a6732ddaadb5a8caab18e88c6c46fa3c4efebada534e32a7c0ed91b7bcf8b279"
+    },
+    {
+      "path": "sdk-raw-provider-usage.patch",
+      "sha256": "c0b0800e001dd18e9860d3ebc0f8219a75496189aeef2034e664ec248015d70a"
     }
   ],
-  "result_tree": "f9a16efe9c38e7d577a97a87786ab674a0042c85"
+  "result_tree": "9305e2386823880d38ceb4c886194409caaadfa9"
 }

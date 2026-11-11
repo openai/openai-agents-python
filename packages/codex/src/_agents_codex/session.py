@@ -3651,15 +3651,9 @@ def _prepare_opening_model_settings(
             else None
         )
         profile_controls = profile_model["request_controls"] if profile_model is not None else {}
-        invocation_timeout = (
-            profile_model["invocation_timeout_ms"]
-            if profile_model is not None
-            else settings.get("invocation_timeout_ms")
-        )
         attempt_controls = _current_attempt_controls(current_controls, profile_controls)
         model, settings = restored_model_settings
         settings.setdefault("request_controls", {}).update(attempt_controls)
-        settings["invocation_timeout_ms"] = invocation_timeout
     return model, settings
 
 
@@ -3715,6 +3709,8 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("Managed checkpoint requires a current managed sandbox source")
             captured_pair = managed_source.validate_resume(state)
             state = captured_pair.conversation
+        if state is not None:
+            state._check_prompt_references()
         lease = None
         pending_environment: _EnvironmentLease | None = None
         owned_provider = False
@@ -5274,11 +5270,9 @@ class Session(Generic[ContextT, OutputT]):
     ) -> None:
         thread = self._native
 
-        async def publish_attempt_controls(
-            controls: Mapping[str, Any], invocation: Mapping[str, Any]
-        ) -> None:
+        async def publish_attempt_controls(controls: Mapping[str, Any]) -> None:
+            # The accepted native state already owns the invocation deadline.
             reset = {
-                **invocation,
                 "request_controls": {
                     "attempt_timeout_ms": controls.get("attempt_timeout_ms"),
                     "retry": None,
@@ -5303,10 +5297,7 @@ class Session(Generic[ContextT, OutputT]):
         if validate_provider_model and (not fresh or "model" not in settings):
             await self._publish_startup(thread._validate_provider_model())
         if restored and (not profile_roster or manual_restore):
-            await publish_attempt_controls(
-                settings.get("request_controls", {}),
-                {"invocation_timeout_ms": settings.get("invocation_timeout_ms")},
-            )
+            await publish_attempt_controls(settings.get("request_controls", {}))
         if fresh and settings:
             if (
                 await self._publish_startup(thread._update_model_settings(json.dumps(settings)))
@@ -5349,9 +5340,7 @@ class Session(Generic[ContextT, OutputT]):
                 controls = _current_attempt_controls(
                     settings.get("request_controls", {}), model["request_controls"]
                 )
-                await publish_attempt_controls(
-                    controls, {"invocation_timeout_ms": model["invocation_timeout_ms"]}
-                )
+                await publish_attempt_controls(controls)
                 await self._refresh_profile_bindings(preserve_current=True)
 
     async def _prepare_realtime_mcp(self) -> None:
