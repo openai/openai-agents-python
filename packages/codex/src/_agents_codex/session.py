@@ -10491,6 +10491,8 @@ class Session(Generic[ContextT, OutputT]):
         if message.get("thread_id") != self.id:
             return
         agent = self._agent_for_message(message)
+        previous_id = message.get("previous_profile_id")
+        previous = self._profiles.get(previous_id) if isinstance(previous_id, str) else None
         self._observations.append(
             AgentProfileChanged(
                 session_id=self.id,
@@ -10499,6 +10501,10 @@ class Session(Generic[ContextT, OutputT]):
                 profile_id=message["profile_id"],
                 profile_epoch=message["profile_epoch"],
                 agent_name=agent.name,
+                previous_profile_id=previous.profile.id if previous is not None else None,
+                previous_agent_name=previous.profile.declaration.name
+                if previous is not None
+                else None,
             )
         )
 

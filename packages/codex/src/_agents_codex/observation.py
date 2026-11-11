@@ -229,6 +229,8 @@ class AgentProfileChanged(_Event):
     Initial/restored bindings and same-profile configuration refreshes are silent.
     Idle updates have no submission or turn. Names come from the admitted graph,
     independently of later mutations to the original public Agent objects.
+    The previous profile identifies the committed source, including unnamed Agents.
+    Older native events can omit that identity.
     """
 
     profile_id: str
@@ -236,6 +238,8 @@ class AgentProfileChanged(_Event):
     agent_name: str | None
     submission_id: str | None = None
     turn_id: str | None = None
+    previous_profile_id: str | None = None
+    previous_agent_name: str | None = None
     type: Literal["agent_profile_changed"] = field(default="agent_profile_changed", init=False)
 
 
